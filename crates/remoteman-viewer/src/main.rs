@@ -346,10 +346,22 @@ impl Ui {
 
     /// Once per frame of this window: show the newest picture, and notice the session ending.
     fn tick(&self) {
-        let (picture, closed) = match self.session.borrow().as_ref() {
-            Some(s) => (s.shared.picture.lock().unwrap().take(), s.shared.closed.lock().unwrap().clone()),
+        let (picture, closed, cursor) = match self.session.borrow().as_ref() {
+            Some(s) => (s.shared.picture.lock().unwrap().take(), s.shared.closed.lock().unwrap().clone(), s.shared.cursor.lock().unwrap().take()),
             None => return,
         };
+        if let Some(c) = cursor {
+            // The other computer's cursor becomes this window's own pointer, so it moves with
+            // the hand and not a pipeline's delay later. Its image is in the other display's
+            // pixels; GDK counts in this one's, so it is scaled to match.
+            let pointer = if c.width == 0 {
+                gdk::Cursor::from_name("none", None)
+            } else {
+                let texture = gdk::MemoryTexture::new(c.width as i32, c.height as i32, gdk::MemoryFormat::R8g8b8a8Premultiplied, &glib::Bytes::from_owned(c.rgba), c.width as usize * 4);
+                Some(gdk::Cursor::from_texture(&texture, c.hot_x, c.hot_y, None))
+            };
+            self.video_stack.set_cursor(pointer.as_ref());
+        }
         if let Some(p) = picture {
             self.video.set((p.width, p.height));
             let shown = match &p.pixels {

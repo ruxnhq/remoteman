@@ -25,8 +25,9 @@ pub struct VirtualDisplay {
 
 impl VirtualDisplay {
     /// Make a virtual monitor. Its size and refresh rate come from the PipeWire stream format
-    /// the caller then asks for on `node`.
-    pub async fn create() -> Result<Self> {
+    /// the caller then asks for on `node`. With `cursor_apart` the cursor is left out of the
+    /// picture and comes as metadata on the stream; otherwise it is drawn into the picture.
+    pub async fn create(cursor_apart: bool) -> Result<Self> {
         let conn = Connection::session().await.context("session bus")?;
         let version: i32 = Proxy::new(&conn, SCREENCAST, "/org/gnome/Mutter/ScreenCast", SCREENCAST)
             .await?
@@ -48,8 +49,8 @@ impl VirtualDisplay {
         let cast = Proxy::new(&conn, SCREENCAST, cast_path, "org.gnome.Mutter.ScreenCast.Session").await?;
 
         let mut props = HashMap::new();
-        // The cursor is drawn into the picture for now (protocol version 0 has no cursor channel).
-        props.insert("cursor-mode", Value::from(1u32));
+        // 1: drawn into the picture. 2: as metadata.
+        props.insert("cursor-mode", Value::from(if cursor_apart { 2u32 } else { 1u32 }));
         // A real monitor to the desktop, not "the screen is being shared".
         props.insert("is-platform", Value::from(true));
         let stream_path: OwnedObjectPath = cast.call("RecordVirtual", &(props,)).await?;
@@ -67,10 +68,14 @@ impl VirtualDisplay {
         Ok(Self { remote, stream_path: stream_path.to_string(), node })
     }
 
-    /// Put one input event into the desktop. `size` is the virtual monitor's size in pixels.
-    pub async fn inject(&self, event: &Event, size: (u32, u32)) -> Result<()> {
+    /// Put one input event into the desktop. `size` is the virtual monitor's size in pixels and
+    /// `scale` the scale Mutter draws it at: Mutter places pointers and touches in the desktop's
+    /// scaled units, so in pixels divided by the scale.
+    pub async fn inject(&self, event: &Event, size: (u32, u32), scale: f32) -> Result<()> {
         let r = &self.remote;
-        let at = |x: f32, y: f32| ((x.clamp(0.0, 1.0) * size.0 as f32) as f64, (y.clamp(0.0, 1.0) * size.1 as f32) as f64);
+        let scale = if scale > 0.0 { scale as f64 } else { 1.0 };
+        let logical = (size.0 as f64 / scale, size.1 as f64 / scale);
+        let at = |x: f32, y: f32| (x.clamp(0.0, 1.0) as f64 * logical.0, y.clamp(0.0, 1.0) as f64 * logical.1);
         match event {
             Event::PointerTo { x, y } => {
                 let (x, y) = at(*x, *y);

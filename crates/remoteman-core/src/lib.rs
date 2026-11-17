@@ -15,7 +15,7 @@ pub use remoteman_proto::control::{Chroma, Codec, Display, Mode};
 use remoteman_proto::control::Message;
 pub use remoteman_proto::input::{Button, Event, TouchPhase};
 pub use remoteman_proto::keys;
-use remoteman_proto::video::Reassembler;
+use remoteman_proto::video::{CursorAt, KIND_CURSOR, Reassembler};
 pub use remoteman_proto::video::Frame;
 use remoteman_transport::{Connection, Endpoint, Expect, Identity, connect, read_message, write_message};
 
@@ -31,6 +31,19 @@ pub struct Options {
     pub display: Display,
     /// What this device decodes in hardware, most preferred first.
     pub decoders: Vec<Mode>,
+    /// This app draws the cursor itself: the host leaves it out of the picture and reports its
+    /// shape and position through [`Handler::cursor_shape`] and [`Handler::cursor_at`].
+    pub cursor: bool,
+}
+
+/// The host's cursor image: premultiplied RGBA, rows top to bottom. Zero size: no cursor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CursorShape {
+    pub width: u32,
+    pub height: u32,
+    pub hot_x: i32,
+    pub hot_y: i32,
+    pub rgba: Vec<u8>,
 }
 
 /// What the video datagrams carry, from the host's `stream` message.
@@ -53,8 +66,19 @@ pub trait Handler: Send + 'static {
     /// frame handed over is decodable. `age_us` is how long ago the host captured it, once the
     /// clocks have been compared.
     fn frame(&mut self, frame: &Frame, age_us: Option<i64>);
+    /// The host's cursor changed shape (only with [`Options::cursor`]).
+    fn cursor_shape(&mut self, _shape: &CursorShape) {}
+    /// Where the host's cursor is, as fractions of the display; `visible` false when it has
+    /// left this display. The host reports every move, the app's own included, so an app that
+    /// draws the cursor at its own pointer uses this only when it hasn't moved it itself.
+    fn cursor_at(&mut self, _x: f32, _y: f32, _visible: bool) {}
     /// The connection is over.
     fn closed(&mut self, reason: &str);
+}
+
+enum FromHost {
+    Stream(StreamInfo),
+    Cursor(CursorShape),
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -115,7 +139,7 @@ impl Client {
         let clock = Instant::now();
         let now_us = move || clock.elapsed().as_micros() as u64;
         let (mut send, mut recv) = conn.open_bi().await?;
-        write_message(&mut send, &Message::ClientHello { proto: remoteman_proto::PROTO, name: o.name, display: o.display, decoders: o.decoders }).await?;
+        write_message(&mut send, &Message::ClientHello { proto: remoteman_proto::PROTO, name: o.name, display: o.display, decoders: o.decoders, cursor: o.cursor }).await?;
         let (host_name, host_os, host_features) = loop {
             match read_message(&mut recv).await?.context("the host closed the connection")? {
                 Message::HostHello { name, os, features, .. } => break (name, os, features),
@@ -126,7 +150,7 @@ impl Client {
 
         let counters = Arc::new(Counters::default());
         let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::channel::<Message>(16);
-        let (epoch_tx, mut epoch_rx) = tokio::sync::mpsc::unbounded_channel::<StreamInfo>();
+        let (epoch_tx, mut epoch_rx) = tokio::sync::mpsc::unbounded_channel::<FromHost>();
         let (offset_tx, offset_rx) = tokio::sync::watch::channel(None::<i64>);
 
         // Control out: pings and keyframe requests.
@@ -155,7 +179,14 @@ impl Client {
             while let Ok(Some(m)) = read_message(&mut recv).await {
                 match m {
                     Message::Stream { epoch, mode, width, height, refresh, colour } => {
-                        let _ = epoch_tx.send(StreamInfo { epoch, mode, width, height, refresh, colour });
+                        let _ = epoch_tx.send(FromHost::Stream(StreamInfo { epoch, mode, width, height, refresh, colour }));
+                    }
+                    Message::Cursor { width, height, hot_x, hot_y, rgba } => {
+                        let rgba = remoteman_proto::control::decode_bytes(&rgba).unwrap_or_default();
+                        // An image that isn't the size it claims is shown as no cursor.
+                        let ok = rgba.len() == width as usize * height as usize * 4;
+                        let shape = if ok { CursorShape { width, height, hot_x, hot_y, rgba } } else { CursorShape { width: 0, height: 0, hot_x: 0, hot_y: 0, rgba: Vec::new() } };
+                        let _ = epoch_tx.send(FromHost::Cursor(shape));
                     }
                     Message::Pong { client_us, host_us, .. } => {
                         // The answer with the shortest round trip gives the best clock estimate.
@@ -202,17 +233,26 @@ impl Client {
                 tokio::select! {
                     biased;
                     Some(reason) = closed_rx.recv() => break reason,
-                    Some(info) = epoch_rx.recv() => {
-                        r.reset(info.epoch);
-                        (started, waiting_key) = (true, true);
-                        handler.stream(&info);
-                    }
+                    Some(m) = epoch_rx.recv() => match m {
+                        FromHost::Stream(info) => {
+                            r.reset(info.epoch);
+                            (started, waiting_key) = (true, true);
+                            handler.stream(&info);
+                        }
+                        FromHost::Cursor(shape) => handler.cursor_shape(&shape),
+                    },
                     d = video.read_datagram() => {
                         let d = match d {
                             Ok(d) => d,
                             Err(e) => break e.to_string(),
                         };
                         if !started {
+                            continue;
+                        }
+                        if d.first() == Some(&KIND_CURSOR) {
+                            if let Ok(c) = CursorAt::parse(&d) {
+                                handler.cursor_at(c.x, c.y, c.visible);
+                            }
                             continue;
                         }
                         let frame = match r.push(&d) {

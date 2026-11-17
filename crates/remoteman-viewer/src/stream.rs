@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::Result;
-use remoteman_core::{Client, Display, Frame, Handler, Mode, Options, StreamInfo};
+use remoteman_core::{Client, CursorShape, Display, Frame, Handler, Mode, Options, StreamInfo};
 
 use crate::decode::{Decoder, Picture};
 
@@ -15,6 +15,8 @@ use crate::decode::{Decoder, Picture};
 pub struct Shared {
     /// The newest decoded picture, until the window takes it.
     pub picture: Mutex<Option<Picture>>,
+    /// The host's newest cursor shape, until the window takes it.
+    pub cursor: Mutex<Option<CursorShape>>,
     /// Why the session ended, once it has.
     pub closed: Mutex<Option<String>>,
     /// What is decoding, e.g. "av1 (cuda) 2752×2064".
@@ -49,6 +51,10 @@ impl Handler for Feed {
         // Every frame leans on the one before, so none may be skipped here: if the decoder
         // falls behind, this waits, and the loss shows up upstream as a keyframe request.
         let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us));
+    }
+
+    fn cursor_shape(&mut self, shape: &CursorShape) {
+        *self.shared.cursor.lock().unwrap() = Some(shape.clone());
     }
 
     fn closed(&mut self, reason: &str) {
@@ -118,7 +124,7 @@ impl Session {
             }
         })?;
         let hostname = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "Linux".into());
-        let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders };
+        let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, cursor: true };
         let client = Client::connect(options, Feed { tx, shared: shared.clone() })?;
         Ok(Self { client, shared })
     }

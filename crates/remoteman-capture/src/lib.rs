@@ -18,20 +18,126 @@ pub struct RawFrame {
     pub height: u32,
 }
 
+/// The cursor, as the compositor reports it alongside the picture.
+pub struct Cursor {
+    /// False: it isn't on this screen.
+    pub on_screen: bool,
+    /// In the picture's pixels.
+    pub x: i32,
+    pub y: i32,
+    /// Set when the shape changed.
+    pub shape: Option<CursorShape>,
+}
+
+/// A cursor image: premultiplied RGBA, rows top to bottom. Zero size: no cursor is shown.
+pub struct CursorShape {
+    pub width: u32,
+    pub height: u32,
+    pub hot_x: i32,
+    pub hot_y: i32,
+    pub rgba: Vec<u8>,
+}
+
+#[repr(transparent)]
+struct CursorMeta(spa::sys::spa_meta_cursor);
+
+impl spa::buffer::meta::Metadata for CursorMeta {
+    const META_TYPE: u32 = spa::sys::SPA_META_Cursor;
+}
+
+/// The largest cursor image asked for, as Mutter offers it.
+const CURSOR_MAX: usize = 384;
+
+fn cursor_meta_size() -> usize {
+    std::mem::size_of::<spa::sys::spa_meta_cursor>() + std::mem::size_of::<spa::sys::spa_meta_bitmap>() + CURSOR_MAX * CURSOR_MAX * 4
+}
+
+/// Read the cursor metadata of a buffer, if it carries any.
+fn read_cursor(meta: &CursorMeta) -> Cursor {
+    let m = &meta.0;
+    if m.id == 0 {
+        return Cursor { on_screen: false, x: 0, y: 0, shape: None };
+    }
+    let mut shape = None;
+    if m.bitmap_offset as usize >= std::mem::size_of::<spa::sys::spa_meta_cursor>() {
+        // SAFETY: the metadata area is `cursor_meta_size()` bytes, as negotiated; the bitmap
+        // header sits at `bitmap_offset` and its pixels at its own `offset`, both inside it
+        // (checked against the size below before reading).
+        unsafe {
+            let base = meta as *const CursorMeta as *const u8;
+            let bitmap = &*(base.add(m.bitmap_offset as usize) as *const spa::sys::spa_meta_bitmap);
+            let (w, h, stride) = (bitmap.size.width as usize, bitmap.size.height as usize, bitmap.stride as usize);
+            let start = m.bitmap_offset as usize + bitmap.offset as usize;
+            if w == 0 || h == 0 {
+                shape = Some(CursorShape { width: 0, height: 0, hot_x: 0, hot_y: 0, rgba: Vec::new() });
+            } else if w <= CURSOR_MAX && h <= CURSOR_MAX && stride >= w * 4 && start + stride * (h - 1) + w * 4 <= cursor_meta_size() {
+                let mut rgba = Vec::with_capacity(w * h * 4);
+                for row in 0..h {
+                    rgba.extend_from_slice(std::slice::from_raw_parts(base.add(start + row * stride), w * 4));
+                }
+                shape = Some(CursorShape { width: w as u32, height: h as u32, hot_x: m.hotspot.x, hot_y: m.hotspot.y, rgba });
+            }
+        }
+    }
+    Cursor { on_screen: true, x: m.position.x, y: m.position.y, shape }
+}
+
+/// The Meta param asking for cursor metadata on every buffer.
+fn cursor_meta_param() -> Result<Vec<u8>> {
+    use spa::pod::{Property, PropertyFlags, Value};
+    serialize(spa::pod::Object {
+        type_: spa::sys::SPA_TYPE_OBJECT_ParamMeta,
+        id: spa::sys::SPA_PARAM_Meta,
+        properties: vec![
+            Property { key: spa::sys::SPA_PARAM_META_type, flags: PropertyFlags::empty(), value: Value::Id(spa::utils::Id(spa::sys::SPA_META_Cursor)) },
+            Property { key: spa::sys::SPA_PARAM_META_size, flags: PropertyFlags::empty(), value: Value::Int(cursor_meta_size() as i32) },
+        ],
+    })
+}
+
+/// The key and value pairs of a Tag param.
+fn read_tags(param: &spa::pod::Pod) -> Vec<(String, String)> {
+    use spa::pod::Value;
+    let mut out = Vec::new();
+    let Ok((_, Value::Object(object))) = spa::pod::deserialize::PodDeserializer::deserialize_any_from(param.as_bytes()) else { return out };
+    for p in object.properties {
+        if p.key != spa::sys::SPA_PARAM_TAG_info {
+            continue;
+        }
+        if let Value::Struct(items) = p.value {
+            // An item count, then keys and values in turn.
+            let mut strings = items.into_iter().skip(1).filter_map(|v| if let Value::String(s) = v { Some(s) } else { None });
+            while let (Some(k), Some(v)) = (strings.next(), strings.next()) {
+                out.push((k, v));
+            }
+        }
+    }
+    out
+}
+
 pub enum Event<'a> {
+    /// The scale the compositor draws this screen at (Mutter says so for virtual monitors).
+    /// Pointer and touch positions are in pixels divided by it.
+    Scale(f32),
+    /// The cursor moved or changed (only when cursor metadata was asked for). It can come with
+    /// or without a new picture.
+    Cursor(Cursor),
     /// The stream (re)negotiated: earlier buffers are gone.
     Format { width: u32, height: u32, modifier: u64 },
     Frame(&'a RawFrame),
 }
 
 struct State {
+    cursor: bool,
     format: spa::param::video::VideoInfoRaw,
     on_event: Box<dyn FnMut(Event)>,
 }
 
 /// Run the stream on this thread until `quit` fires. `scale` is the HiDPI scale wanted for a
 /// virtual monitor (Mutter reads it from a stream tag); `None` leaves it to the compositor.
-pub fn run(node: u32, want: (u32, u32), fps: u32, scale: Option<f32>, modifiers: &[u64], on_event: Box<dyn FnMut(Event)>, quit: pw::channel::Receiver<()>) -> Result<()> {
+/// With `cursor`, the cursor comes as [`Event::Cursor`] (the stream must have been made with
+/// the cursor as metadata).
+pub fn run(node: u32, want: (u32, u32), fps: u32, scale: Option<f32>, cursor: bool, modifiers: &[u64], on_event: Box<dyn FnMut(Event)>, quit: pw::channel::Receiver<()>) -> Result<()> {
     use spa::param::video::VideoFormat as V;
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
@@ -47,20 +153,43 @@ pub fn run(node: u32, want: (u32, u32), fps: u32, scale: Option<f32>, modifiers:
         },
     )?;
     let _listener = stream
-        .add_local_listener_with_user_data(State { format: Default::default(), on_event })
+        .add_local_listener_with_user_data(State { cursor, format: Default::default(), on_event })
         .param_changed(|stream, st, id, param| {
             let Some(param) = param else { return };
+            if id == spa::sys::SPA_PARAM_Tag {
+                for (key, value) in read_tags(param) {
+                    if key == "org.gnome.scale" {
+                        if let Ok(scale) = value.parse::<f32>() {
+                            (st.on_event)(Event::Scale(scale));
+                        }
+                    }
+                }
+                return;
+            }
             if id != spa::param::ParamType::Format.as_raw() || st.format.parse(param).is_err() {
                 return;
             }
             let s = st.format.size();
             (st.on_event)(Event::Format { width: s.width, height: s.height, modifier: st.format.modifier() });
+            let mut params = Vec::new();
             if let Ok(b) = buffers_param(true) {
-                update_params(stream, &[b]);
+                params.push(b);
             }
+            if st.cursor {
+                if let Ok(m) = cursor_meta_param() {
+                    params.push(m);
+                }
+            }
+            update_params(stream, &params);
         })
         .process(|stream, st| {
             let Some(mut buffer) = stream.dequeue_buffer() else { return };
+            if st.cursor {
+                if let Some(meta) = buffer.find_meta::<CursorMeta>() {
+                    let cursor = read_cursor(meta);
+                    (st.on_event)(Event::Cursor(cursor));
+                }
+            }
             let size = st.format.size();
             let modifier = st.format.modifier();
             let datas = buffer.datas_mut();

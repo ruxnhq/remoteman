@@ -4,7 +4,7 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
 
-use crate::{Button, Chroma, Client, Codec, Display, Event, Frame, Handler, Mode, Options, StreamInfo, TouchPhase};
+use crate::{Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Mode, Options, StreamInfo, TouchPhase};
 
 /// The app's callbacks. They are called from the core's threads, one at a time, with `ctx`.
 #[repr(C)]
@@ -17,6 +17,12 @@ pub struct RmCallbacks {
     pub on_frame: Option<extern "C" fn(ctx: *mut c_void, data: *const u8, len: usize, key: u8, number: u32, capture_us: u64, age_us: i64)>,
     /// `reason` is valid only during the call. Nothing is called after this.
     pub on_closed: Option<extern "C" fn(ctx: *mut c_void, reason: *const c_char)>,
+    /// The host's cursor image: `width * height * 4` bytes of premultiplied RGBA, rows top to
+    /// bottom, valid only during the call. `width` 0: no cursor. Setting this callback is what
+    /// asks the host to leave the cursor out of the picture.
+    pub on_cursor_shape: Option<extern "C" fn(ctx: *mut c_void, rgba: *const u8, width: u32, height: u32, hot_x: i32, hot_y: i32)>,
+    /// Where the host's cursor is, as fractions of the display; `visible` 0 when it has left it.
+    pub on_cursor_at: Option<extern "C" fn(ctx: *mut c_void, x: f32, y: f32, visible: u8)>,
 }
 
 // SAFETY: the app promises its context may be used from another thread, one call at a time.
@@ -33,6 +39,18 @@ impl Handler for RmCallbacks {
     fn frame(&mut self, frame: &Frame, age_us: Option<i64>) {
         if let Some(f) = self.on_frame {
             f(self.ctx, frame.data.as_ptr(), frame.data.len(), frame.key as u8, frame.number, frame.capture_us, age_us.unwrap_or(-1));
+        }
+    }
+
+    fn cursor_shape(&mut self, s: &CursorShape) {
+        if let Some(f) = self.on_cursor_shape {
+            f(self.ctx, s.rgba.as_ptr(), s.width, s.height, s.hot_x, s.hot_y);
+        }
+    }
+
+    fn cursor_at(&mut self, x: f32, y: f32, visible: bool) {
+        if let Some(f) = self.on_cursor_at {
+            f(self.ctx, x, y, visible as u8);
         }
     }
 
@@ -96,7 +114,7 @@ pub unsafe extern "C" fn rm_client_connect(
             }
         });
     }
-    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh }, decoders: modes };
+    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh }, decoders: modes, cursor: callbacks.on_cursor_shape.is_some() };
     match Client::connect(options, callbacks) {
         Ok(c) => Box::into_raw(Box::new(c)),
         Err(e) => {
