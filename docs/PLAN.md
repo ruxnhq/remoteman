@@ -322,6 +322,15 @@ All runs: a throwaway headless Mutter 51.1 on a private D-Bus session, with a GP
 - **Mac mini M4, macOS 26.5.2:** a hardware-only decoder session opens for all three streams at 2752×2064 10-bit: HEVC Main10 4:2:0, HEVC 4:4:4 and AV1. This is session creation only. No frame was decoded, so it says nothing yet about 120 fps or about 4:4:4 at frame time.
 - **iPad Pro 13-inch (M5), iPadOS 27.2: all three open in hardware** (HEVC Main10 4:2:0, HEVC 4:4:4 10-bit, AV1 10-bit), after the Mac was upgraded to macOS 27.2.1 and Xcode 27.2; Xcode 26.6 could not pair with iPadOS 27 at all. Same limit as on the Mac: decoder creation only, no frame decoded, so 120 fps and 4:4:4 under load are still unproven. The iPhone 18 Pro Max (iOS 27.2) gave the same three results.
 - **So the plan's iPad assumption holds:** 2752×2064 at 120 Hz, and both 4:4:4 and AV1 stay on the table for it.
+- **Decode timing on the Mac mini M4** (the Mac session's run, not re-checked here): the three recorded streams, 2752×2064 10-bit, fed at 120 fps, hardware decode only, every frame decoded:
+
+  | Mode | Median, ms | p95 | p99 | Max |
+  |---|---|---|---|---|
+  | AV1 4:2:0 | 1.51 | 2.95 | 6.64 | 11.13 |
+  | HEVC 4:2:0 | 1.92 | 2.26 | 2.41 | 2.99 |
+  | HEVC 4:4:4 | 3.44 | 3.64 | 4.02 | 9.83 |
+
+  One run each over about 2 s of content, so the p99 and maximum rest on two or three frames. AV1 has the fastest median and the widest tail. The iPad and iPhone are still unmeasured (they need the app).
 - **Signing:** team R82PLAJ45H is a paid team and is the one to use.
 - **Getting files to the Mac:** espalier's file transfer works today (files land in `~/Downloads/Espalier`). The Mac reaches GitHub as xnixy, so a private repository works for code. The Mac can't reach the PC over SSH.
 
