@@ -308,9 +308,10 @@ All runs: a throwaway headless Mutter 51.1 on a private D-Bus session, with a GP
 
 **The first attempt, kept for the record.** espalier's capture and FFmpeg NVENC, adapted to a Mutter stream, reached only about 115 fps: its DMA-BUF → Vulkan → CUDA copies average 3.2 ms and stall for up to 20 ms on about 1 frame in 12. Its 8-bit encodes took 3.1 ms (HEVC) and 1.3 ms (AV1) at iPad size. The new path replaces those copies with the 0.23 ms pass, so nothing of that importer is carried forward. It is still in the spike (modes `none`, `hevc`, `av1`) for comparison.
 
-**S3, device decode: the Mac half is done, the iPad and iPhone are blocked** (the Mac session's report, not re-checked here).
+**S3, device decode: decoders open on the Mac and the iPad; timing and the iPhone are still to do** (the Mac session's report, not re-checked here).
 - **Mac mini M4, macOS 26.5.2:** a hardware-only decoder session opens for all three streams at 2752×2064 10-bit: HEVC Main10 4:2:0, HEVC 4:4:4 and AV1. This is session creation only. No frame was decoded, so it says nothing yet about 120 fps or about 4:4:4 at frame time.
-- **iPad and iPhone: not tested.** No device is paired with the Mac for development, and Xcode's iOS platform isn't installed there. The probe app is built and waiting in `~/Developer/remoteman-spikes/s3` on the Mac. Needed from the user: install the iOS platform in Xcode, connect each device by cable, unlock it, tap Trust and turn on Developer Mode.
+- **iPad Pro 13-inch (M5), iPadOS 27.2: all three open in hardware** (HEVC Main10 4:2:0, HEVC 4:4:4 10-bit, AV1 10-bit), after the Mac was upgraded to macOS 27.2.1 and Xcode 27.2; Xcode 26.6 could not pair with iPadOS 27 at all. Same limit as on the Mac: decoder creation only, no frame decoded, so 120 fps and 4:4:4 under load are still unproven. The iPhone hasn't been tested.
+- **So the plan's iPad assumption holds:** 2752×2064 at 120 Hz, and both 4:4:4 and AV1 stay on the table for it.
 - **Signing:** team R82PLAJ45H is a paid team and is the one to use.
 - **Getting files to the Mac:** espalier's file transfer works today (files land in `~/Downloads/Espalier`). The Mac reaches GitHub as xnixy, so a private repository works for code. The Mac can't reach the PC over SSH.
 
