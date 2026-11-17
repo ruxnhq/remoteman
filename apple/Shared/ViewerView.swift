@@ -76,7 +76,7 @@ import SwiftUI
         private func flushPointer() {
             guard let p = pendingPointer else { return }
             pendingPointer = nil
-            session.client?.pointerTo(x: p.0, y: p.1)
+            session.input?.pointerTo(x: p.0, y: p.1)
         }
 
         /// Pointer moves are kept to one per refresh, and sent ahead of any click or key.
@@ -93,7 +93,7 @@ import SwiftUI
         private func button(_ e: NSEvent, _ b: UInt8, down: Bool) {
             moved(e)
             flushPointer()
-            session.client?.button(b, down: down)
+            session.input?.button(b, down: down)
         }
 
         override func mouseMoved(with e: NSEvent) { moved(e) }
@@ -116,7 +116,7 @@ import SwiftUI
             // View points to display pixels; a wheel click without precise deltas is a few lines.
             let k = (rect.width > 0 ? v.width / rect.width : 1) * (e.hasPreciseScrollingDeltas ? 1 : 10)
             flushPointer()
-            session.client?.scroll(dx: Float(-e.scrollingDeltaX * k), dy: Float(-e.scrollingDeltaY * k))
+            session.input?.scroll(dx: Float(-e.scrollingDeltaX * k), dy: Float(-e.scrollingDeltaY * k))
         }
 
         // MARK: Keys
@@ -124,7 +124,7 @@ import SwiftUI
         private func key(_ e: NSEvent, down: Bool) {
             guard let usage = hidUsage(forMacKeyCode: e.keyCode) else { return }
             flushPointer()
-            session.client?.key(usage: usage, down: down)
+            session.input?.key(usage: usage, down: down)
         }
 
         override func keyDown(with e: NSEvent) { if !e.isARepeat { key(e, down: true) } }
@@ -132,7 +132,7 @@ import SwiftUI
 
         /// ⌘ shortcuts go to the host too, except ⌘Q, which stays with this app.
         override func performKeyEquivalent(with e: NSEvent) -> Bool {
-            guard session.client != nil, window?.firstResponder === self, e.type == .keyDown else { return false }
+            guard session.input != nil, window?.firstResponder === self, e.type == .keyDown else { return false }
             if e.modifierFlags.contains(.command), e.charactersIgnoringModifiers == "q" { return false }
             if !e.isARepeat { key(e, down: true) }
             return true
@@ -142,8 +142,8 @@ import SwiftUI
             guard let usage = hidUsage(forMacKeyCode: e.keyCode) else { return }
             flushPointer()
             if e.keyCode == 57 {  // caps lock reports a change of state, not a press
-                session.client?.key(usage: usage, down: true)
-                session.client?.key(usage: usage, down: false)
+                session.input?.key(usage: usage, down: true)
+                session.input?.key(usage: usage, down: false)
                 return
             }
             let masks: [UInt16: UInt] = [
@@ -153,13 +153,13 @@ import SwiftUI
             let down = e.modifierFlags.rawValue & mask != 0
             if down == modifiersDown.contains(e.keyCode) { return }
             if down { modifiersDown.insert(e.keyCode) } else { modifiersDown.remove(e.keyCode) }
-            session.client?.key(usage: usage, down: down)
+            session.input?.key(usage: usage, down: down)
         }
 
         /// Let go of anything still held when the window loses the keyboard.
         override func resignFirstResponder() -> Bool {
             for code in modifiersDown {
-                if let u = hidUsage(forMacKeyCode: code) { session.client?.key(usage: u, down: false) }
+                if let u = hidUsage(forMacKeyCode: code) { session.input?.key(usage: u, down: false) }
             }
             modifiersDown.removeAll()
             return super.resignFirstResponder()
@@ -235,7 +235,7 @@ import SwiftUI
                 let p = t.location(in: self)
                 let x = min(max((p.x - rect.minX) / rect.width, 0), 1)
                 let y = min(max((p.y - rect.minY) / rect.height, 0), 1)
-                session.client?.touch(phase: phase, slot: slot, x: Float(x), y: Float(y))
+                session.input?.touch(phase: phase, slot: slot, x: Float(x), y: Float(y))
                 if phase == 2 { slots[t] = nil }
             }
         }
@@ -251,7 +251,7 @@ import SwiftUI
             var handled = false
             for p in presses {
                 guard let k = p.key else { continue }
-                session.client?.key(usage: UInt16(k.keyCode.rawValue), down: down)
+                session.input?.key(usage: UInt16(k.keyCode.rawValue), down: down)
                 handled = true
             }
             return handled

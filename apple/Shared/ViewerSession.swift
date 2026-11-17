@@ -23,9 +23,15 @@ final class ViewerSession: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var statsText = ""
     @Published var showStats = true
+    /// A text report filling the window instead of the stream (the decode benchmark).
+    @Published var report: String?
 
     let renderer = VideoRenderer()
     private(set) var client: CoreClient?
+    /// Look, don't touch: with this on, no pointer, key or touch event leaves the app.
+    @Published var viewOnly = false
+    /// Where input goes: the client, unless the session is view-only.
+    var input: CoreClient? { viewOnly ? nil : client }
 
     private let pipeLock = NSLock()
     private var decoder: VideoDecoder?

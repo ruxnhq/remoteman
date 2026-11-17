@@ -5,6 +5,7 @@
 //   --host name[:port]  connect at launch        --pair yes        accept a host not seen before
 //   --play file.rmrec   play a recording          --seconds N       stop after N seconds and quit
 //   --snapshot out.png  save the picture at the end
+//   --view-only yes     send no input            --bench dir       time decode of the .rmrec files there (--exit yes to quit after)
 //   --size WxH --scale S --refresh HZ --decoders av1,hevc444,hevc   override what the hello says
 // Every option takes a value: AppKit reads the arguments too, as "-key value" pairs, and takes
 // a word left over for a document to open, which keeps the window from appearing.
@@ -55,7 +56,12 @@ struct ContentView: View {
         GeometryReader { geo in
             ZStack {
                 Color.black
-                if session.isActive {
+                if let report = session.report {
+                    ScrollView {
+                        Text(report).font(.system(size: 12, design: .monospaced)).foregroundStyle(.white)
+                            .textSelection(.enabled).padding(24).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                } else if session.isActive {
                     ViewerRepresentable(session: session)
                     overlay
                 } else {
@@ -77,10 +83,17 @@ struct ContentView: View {
         #else
             let refresh = UIScreen.main.maximumFramesPerSecond
         #endif
+        // The panel's real pixels: with "More Space" an iPad lays out at a scale that isn't its
+        // panel's, and SwiftUI's displayScale would ask for more pixels than exist.
+        #if os(macOS)
+            let scale = displayScale
+        #else
+            let scale = UIScreen.main.nativeScale
+        #endif
         // Encoders want even sizes.
-        let w = Int((size.width * displayScale).rounded()) & ~1
-        let h = Int((size.height * displayScale).rounded()) & ~1
-        return ViewerSession.Display(width: max(w, 320), height: max(h, 240), scale: Float(displayScale), refresh: refresh)
+        let w = Int((size.width * scale).rounded()) & ~1
+        let h = Int((size.height * scale).rounded()) & ~1
+        return ViewerSession.Display(width: max(w, 320), height: max(h, 240), scale: Float(scale), refresh: refresh)
     }
 
     private var deviceName: String {
@@ -173,6 +186,8 @@ enum Automation {
         var pair = false
         var display = display
         var decoders = ViewerSession.decoders
+        var bench: String?
+        var exitAfter = false
         while !args.isEmpty {
             let a = args.removeFirst()
             func value() -> String { args.isEmpty ? "" : args.removeFirst() }
@@ -188,6 +203,9 @@ enum Automation {
             case "--scale": display.scale = Float(value()) ?? display.scale
             case "--refresh": display.refresh = Int(value()) ?? display.refresh
             case "--decoders": decoders = value()
+            case "--view-only": session.viewOnly = ["yes", "1", "true"].contains(value())
+            case "--bench": bench = value()
+            case "--exit": exitAfter = ["yes", "1", "true"].contains(value())
             default: break
             }
         }
@@ -196,8 +214,12 @@ enum Automation {
         #else
             let name = UIDevice.current.name
         #endif
+        if let bench {
+            runBenchmarks(in: resolve(bench), session: session, exitAfter: exitAfter)
+            return
+        }
         if let play {
-            session.play(recording: URL(fileURLWithPath: play))
+            session.play(recording: resolve(play))
         } else if let host {
             print("remoteman: hello \(display.width)x\(display.height) scale \(display.scale) @\(display.refresh), decoders \(decoders)")
             session.connect(host: host, pair: pair, name: name, display: display, decoders: decoders)
@@ -218,7 +240,7 @@ enum Automation {
             t.invalidate()
             if let snapshot {
                 if let image = session.renderer?.snapshot() {
-                    let ok = writePNG(image, to: URL(fileURLWithPath: snapshot))
+                    let ok = writePNG(image, to: resolve(snapshot))
                     print("remoteman: snapshot \(image.width)x\(image.height) \(ok ? "saved to" : "NOT saved to") \(snapshot)")
                 } else {
                     print("remoteman: no picture to snapshot")
@@ -232,6 +254,48 @@ enum Automation {
             // Give the goodbye a moment to leave.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
         }
+    }
+
+    /// A path as given if absolute, otherwise inside the app's Documents folder (where files can
+    /// be put on and taken off a device).
+    static func resolve(_ path: String) -> URL {
+        if path.hasPrefix("/") { return URL(fileURLWithPath: path) }
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return path == "." || path == "Documents" ? docs : docs.appendingPathComponent(path)
+    }
+
+    /// Time hardware decode of every recording in `dir`, paced at the stream's rate, and leave
+    /// the report on screen, on stdout and in bench-result.txt beside the recordings.
+    static func runBenchmarks(in dir: URL, session: ViewerSession, exitAfter: Bool = false) {
+        session.report = "Timing decode…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let files = ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "rmrec" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+            var out = "remoteman decode timing · \(deviceModel()) · \(ProcessInfo.processInfo.operatingSystemVersionString)\n\n"
+            if files.isEmpty { out += "no .rmrec files in \(dir.path)\n" }
+            for f in files {
+                out += runBench(f, paced: true, loops: 3) + "\n"
+                let sofar = out
+                DispatchQueue.main.async { session.report = sofar }
+            }
+            out += "done\n"
+            try? out.write(to: dir.appendingPathComponent("bench-result.txt"), atomically: true, encoding: .utf8)
+            print(out)
+            let done = out
+            DispatchQueue.main.async {
+                session.report = done
+                if exitAfter { exit(0) }
+            }
+        }
+    }
+
+    static func deviceModel() -> String {
+        var size = 0
+        let key = ProcessInfo.processInfo.isiOSAppOnMac ? "hw.model" : "hw.machine"
+        sysctlbyname(key, nil, &size, nil, 0)
+        var buf = [CChar](repeating: 0, count: max(size, 1))
+        sysctlbyname(key, &buf, &size, nil, 0)
+        return String(cString: buf)
     }
 
     static func writePNG(_ image: CGImage, to url: URL) -> Bool {
