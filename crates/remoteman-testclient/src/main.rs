@@ -10,6 +10,7 @@
 //!     --out FILE         save the video stream, bare (playable by FFmpeg)
 //!     --record FILE      save what the app would be handed, frame by frame (format below)
 //!     --input-demo       move the pointer, click, type and touch while running
+//!     --cursor           draw the cursor ourselves: ask for its shape and position apart
 
 //!
 //! A recording (`--record`) is for testing decoders without a host. It is:
@@ -26,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use remoteman_core::{Button, Chroma, Client, Codec, Display, Event, Frame, Handler, Mode, Options, StreamInfo, TouchPhase};
+use remoteman_core::{Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Mode, Options, StreamInfo, TouchPhase};
 
 fn pct(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() { 0.0 } else { sorted[((sorted.len() - 1) as f64 * p) as usize] }
@@ -38,6 +39,10 @@ struct Seen {
     ages: Vec<f64>,
     bytes: usize,
     keys: u32,
+    /// Cursor shapes and positions reported, and the last of each.
+    shapes: Vec<(u32, u32, i32, i32)>,
+    positions: u32,
+    last_at: Option<(f32, f32, bool)>,
     closed: Option<String>,
 }
 
@@ -86,6 +91,16 @@ impl Handler for Watcher {
         }
     }
 
+    fn cursor_shape(&mut self, s: &CursorShape) {
+        self.seen.lock().unwrap().shapes.push((s.width, s.height, s.hot_x, s.hot_y));
+    }
+
+    fn cursor_at(&mut self, x: f32, y: f32, visible: bool) {
+        let mut s = self.seen.lock().unwrap();
+        s.positions += 1;
+        s.last_at = Some((x, y, visible));
+    }
+
     fn closed(&mut self, reason: &str) {
         self.seen.lock().unwrap().closed = Some(reason.to_owned());
     }
@@ -96,7 +111,7 @@ fn main() -> Result<()> {
     let host = args.next().context("usage: remoteman-testclient HOST:PORT [options]")?;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let (mut state, mut pair, mut size, mut scale, mut refresh, mut secs) = (home.join(".local/state/remoteman"), false, (2752u32, 2064u32), 2.0f32, 120u32, 10u64);
-    let (mut out, mut record, mut demo, mut decoders) = (None::<PathBuf>, None::<PathBuf>, false, "av1,hevc444,hevc".to_owned());
+    let (mut out, mut record, mut demo, mut cursor, mut decoders) = (None::<PathBuf>, None::<PathBuf>, false, false, "av1,hevc444,hevc".to_owned());
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -114,6 +129,7 @@ fn main() -> Result<()> {
             "--out" => out = Some(value()?.into()),
             "--record" => record = Some(value()?.into()),
             "--input-demo" => demo = true,
+            "--cursor" => cursor = true,
             other => bail!("unknown option {other}"),
         }
     }
@@ -140,7 +156,7 @@ fn main() -> Result<()> {
         None => None,
     };
     let watcher = Watcher { seen: seen.clone(), file, record, warm: Instant::now() + Duration::from_secs(2) };
-    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh }, decoders };
+    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh }, decoders, cursor };
     let client = Client::connect(options, watcher)?;
     println!("host: {} ({}), features {:?}, fingerprint {}", client.host_name, client.host_os, client.host_features, &client.host_fingerprint[..12]);
 
@@ -184,6 +200,9 @@ fn main() -> Result<()> {
     let mut s = seen.lock().unwrap();
     if let Some(reason) = s.closed.as_deref().filter(|r| !r.contains("done") && *r != "closed") {
         println!("the host ended the session: {reason}");
+    }
+    if cursor {
+        println!("cursor: {} shapes {:?}, {} positions, last {:?}", s.shapes.len(), s.shapes, s.positions, s.last_at);
     }
     let n = s.arrivals.len();
     println!("frames {n}, lost {}, keyframes {}, keyframe requests {}", stats.lost, s.keys, stats.keyframe_requests);

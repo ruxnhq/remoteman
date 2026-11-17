@@ -1320,6 +1320,7 @@ dependencies = [
 name = "remoteman-proto"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
  "thiserror",
@@ -1354,6 +1355,7 @@ name = "remoteman-viewer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cc",
  "ffmpeg-next",
  "gtk4",
  "libadwaita",

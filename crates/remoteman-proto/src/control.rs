@@ -50,6 +50,10 @@ pub enum Message {
         display: Display,
         /// What the client decodes in hardware, most preferred first.
         decoders: Vec<Mode>,
+        /// The client draws the cursor itself: leave it out of the picture and send its shape
+        /// (`cursor`) and position (cursor datagrams) instead.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cursor: bool,
     },
     HostHello {
         proto: u32,
@@ -66,6 +70,17 @@ pub enum Message {
         height: u32,
         refresh: u32,
         colour: String,
+    },
+    /// The cursor's shape changed. `rgba` is base64 of `width * height * 4` bytes, premultiplied
+    /// RGBA, rows top to bottom; the hotspot is in the image's pixels. `width` 0: no cursor
+    /// (hidden, or it left this display).
+    Cursor {
+        width: u32,
+        height: u32,
+        hot_x: i32,
+        hot_y: i32,
+        #[serde(default)]
+        rgba: String,
     },
     /// The client needs a keyframe.
     Keyframe,
@@ -103,6 +118,17 @@ impl Message {
     }
 }
 
+/// Base64, as `cursor` carries its image.
+pub fn encode_bytes(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+pub fn decode_bytes(text: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(text).ok()
+}
+
 /// Check a length prefix before reading the body.
 pub fn body_len(prefix: [u8; 4]) -> Result<usize, Error> {
     let n = u32::from_le_bytes(prefix) as usize;
@@ -117,7 +143,8 @@ mod tests {
     fn hello_matches_the_spec() {
         let json = r#"{"t":"client_hello","proto":0,"name":"Anna's iPad","display":{"width":2752,"height":2064,"scale":2.0,"refresh":120},"decoders":[{"codec":"av1","chroma":"420","depth":10},{"codec":"hevc","chroma":"444","depth":10}]}"#;
         let m = Message::parse(json.as_bytes()).unwrap();
-        let Message::ClientHello { display, decoders, .. } = &m else { panic!("{m:?}") };
+        let Message::ClientHello { display, decoders, cursor, .. } = &m else { panic!("{m:?}") };
+        assert!(!cursor);
         assert_eq!((display.width, display.refresh), (2752, 120));
         assert_eq!(decoders[1], Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 });
         assert_eq!(serde_json::to_string(&m).unwrap(), json);

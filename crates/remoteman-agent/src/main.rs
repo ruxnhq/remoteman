@@ -25,7 +25,8 @@ fn state_dir() -> PathBuf {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_max_level(tracing::Level::INFO).init();
+    let level = if std::env::var_os("REMOTEMAN_DEBUG").is_some() { tracing::Level::DEBUG } else { tracing::Level::INFO };
+    tracing_subscriber::fmt().with_max_level(level).init();
     let mut addr: SocketAddr = format!("0.0.0.0:{}", remoteman_proto::PORT).parse()?;
     let (mut pair, mut state, mut bitrate) = (false, state_dir(), 40u32);
     let mut args = std::env::args().skip(1);

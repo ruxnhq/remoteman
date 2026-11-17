@@ -378,7 +378,9 @@ Known gaps, found by these runs:
 - **Running on the real desktop since 2026-11-17** as a temporary user service (`systemctl --user stop remoteman-agent` ends it; it doesn't survive a reboot). A local connection showed the wallpaper on a new virtual monitor, which went away when the client left. The firewall (ufw) is on, so UDP 7791 may need opening for other machines.
 - **The Mac viewer has shown the real desktop (2026-11-17, the Mac session's report, confirmed in the host's log).** Mac mini to the PC over the tailnet: paired, asked for 2752×1436 at 144 Hz, got AV1 10-bit, decoded in hardware and drawn with Metal. The desktop was still, so only a few frames arrived: frame age at presentation 15 to 35 ms, round trip 0.9 ms, nothing lost. Playing the 4:4:4 recording through the same app showed 118 to 120 fps. The core built for macOS and iOS with no changes. No input has been sent to the real desktop yet; the user allowed it the same day.
 - **The iPad has shown the real desktop too** (the Mac session's report, and the host's trust list has its key): iPad Pro 13-inch (M5) over the tailnet, AV1 10-bit decoded in hardware, picture correct, frame age 17 ms on a still desktop, nothing lost. It asked for 3200×2400 by mistake (the iPad's "More Space" setting); the app now sends the panel's real 2752×2064. The iPhone hasn't connected.
-- **Not built yet from this phase's list:** the cursor channel (the cursor is drawn into the picture), QR pairing (pairing is "first unknown device while `--pair` is on"), the stats overlay, and the iPad app.
+- **Pointer and touch landed in the wrong place once the scale was on (found 2026-11-17, fixed the same day).** Mutter places them in the desktop's scaled units, not pixels. At scale 2 every move hit the bottom-right corner, which is why the Mac's first pointer test showed no cursor; at the iPad's 1.72 the host's cursor sat away from the finger. The host now reads the scale Mutter chose from the stream and divides by it. Tested at 2 and 1.72: a move to the middle lands in the middle.
+- **Cursor channel: built on the PC side (2026-11-17).** A client that asks gets the cursor left out of the picture, its shape on the control stream and its position as datagrams (`docs/PROTOCOL.md`, Cursor). The core passes both to the app (`on_cursor_shape`, `on_cursor_at` in the C interface, which grew by two callbacks), and the Linux viewer uses the shape as its own pointer. In the test the shape arrived once and all 32 positions followed. The Apple apps haven't switched to it yet.
+- **Not built yet from this phase's list:** QR pairing (pairing is "first unknown device while `--pair` is on"), and on the Apple side the cursor channel. The stats overlay and the apps exist.
 
 ### 2. Mac host
 A Mac host app from espalier's `Screen.swift`, `ScreenEncoder.swift`, `Input.swift`, `Cursor.swift` and the virtual display shim, with the Rust core's host role in place of the bridge's TCP records. The same iPad app connects to it with nothing Mac-specific in it. Built by the Mac session; the Linux session supplies the core's host interface for Swift.
@@ -388,10 +390,20 @@ A Mac host app from espalier's `Screen.swift`, `ScreenEncoder.swift`, `Input.swi
 A GTK 4 and libadwaita app in Rust on the shared core: a list of paired hosts, pairing, and the stream in a window or full screen with hardware decode and no copy to the CPU. Mouse, keyboard and touch go back. It reaches the Linux host and the Mac host alike.
 **Done when:** from another Linux machine, or this one, the viewer controls the PC and the Mac at the window's size and the monitor's refresh rate.
 
-**Status (2026-11-17): it runs, but it is too slow to call done.** `crates/remoteman-viewer` (binary `remoteman`): a connect page, the stream in a window, F11 for full screen, a figures overlay, and mouse, scroll and keys (by position) sent back. Tested with `scripts/e2e-viewer.sh`, the viewer in one throwaway headless Mutter and the host in another:
-- Decoding is on the GPU (NVDEC through FFmpeg): 120 frames a second for AV1 at 2752×2064, none lost, and the saved picture is right.
-- **Showing them is the problem.** Each picture is copied down from the GPU and handed to GTK as planes in memory, which GTK then converts. Only 35 pictures a second get shown with GTK's Vulkan renderer and about 60 with its GL one; 4:4:4 falls behind altogether (89 decoded a second, over a second late).
-- **The first fix tried doesn't work on NVIDIA.** The viewer can now take a Vulkan or VA-API surface as a DMA-BUF and give it to GTK with no copy, which is the path for AMD and Intel (untested: no such machine here). But on NVIDIA (driver 620) FFmpeg's Vulkan decoder exports buffers with no modifier and no plane layout, and GTK refuses them, so NVIDIA stays on NVDEC with the copy. The next thing to try there is what mpv does: share NVDEC's pictures with GTK's OpenGL through CUDA.
+**Status (2026-11-17): it runs at speed on NVIDIA with no picture in CPU memory.** `crates/remoteman-viewer` (binary `remoteman`): a connect page, the stream in a window, F11 for full screen, a figures overlay, and mouse, scroll and keys (by position) sent back. Tested with `scripts/e2e-viewer.sh`, the viewer in one throwaway headless Mutter and the host in another, at 2752×2064 and 120 Hz:
+
+| Mode | Decoded a second | Drawn a second | Picture age when decoded, ms | Lost |
+|---|---|---|---|---|
+| AV1 4:2:0 | 120 | 110 | 3.5 | 0 |
+| HEVC 4:4:4 | 120 | 107 to 109 | 7 | 0 |
+| HEVC 4:2:0 | 120 | 104 to 110 | 4.7 | 0 |
+
+- **How the picture gets to the screen, by GPU:**
+  - *NVIDIA:* NVDEC decodes into CUDA memory; each plane is transferred on the GPU into an OpenGL texture (CUDA's GL interop, as mpv does) and a shader converts and draws it in a GTK GL widget. No CPU copy; one GPU-to-GPU transfer. A snapshot read back from the widget is correct.
+  - *AMD and Intel:* a VA-API (or Vulkan) surface is handed to GTK as a DMA-BUF, with no transfer at all. Written, untested: no such machine here.
+  - *Last resort:* copying the picture down through CPU memory. The overlay then says so in capitals. Measured for comparison: 35 drawn a second.
+- **Why not the DMA-BUF route on NVIDIA:** on driver 620 FFmpeg's Vulkan decoder exports buffers with no modifier and no plane layout, and GTK refuses them.
+- **About 110 drawn, not 120:** in the test the viewer's window lives in a headless compositor; whether the shortfall is that compositor's pacing or the viewer isn't known until it runs on a real monitor.
 - Not tested: the viewer on the real desktop, against the Mac host (which doesn't exist yet), touch, and input beyond what the test client already proves.
 
 ### 4. Remote login

@@ -31,6 +31,18 @@ typedef struct rm_callbacks {
                      uint64_t capture_us, int64_t age_us);
     // The connection is over. `reason` is valid only during the call. Nothing follows.
     void (*on_closed)(void *ctx, const char *reason);
+    // The host's cursor changed shape: `width * height * 4` bytes of premultiplied RGBA, rows
+    // top to bottom, valid only during the call; the hotspot is in the image's pixels, which
+    // are the host display's pixels. `width` 0: no cursor (hidden, or it left this display).
+    // Setting this callback is what asks the host to leave the cursor out of the picture and
+    // report it here; leave it NULL to have the cursor drawn into the picture as before.
+    void (*on_cursor_shape)(void *ctx, const uint8_t *rgba, uint32_t width, uint32_t height,
+                            int32_t hot_x, int32_t hot_y);
+    // Where the host's cursor is, as fractions (0 to 1) of the display; `visible` 0 when it
+    // isn't on this display. The host reports every move, including the ones this client
+    // caused, a pipeline's delay later. An app that draws the cursor at its own pointer should
+    // use this only when it hasn't moved the pointer itself for a moment (the host warped it).
+    void (*on_cursor_at)(void *ctx, float x, float y, uint8_t visible);
 } rm_callbacks;
 
 // Connect to `host` ("name:port") and say hello. Blocks until the host answers, so call it off

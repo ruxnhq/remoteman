@@ -30,6 +30,8 @@ pub struct Settings {
     pub scale: f32,
     pub mode: control::Mode,
     pub bitrate: u32,
+    /// Where cursor changes go, when the client draws the cursor itself.
+    pub cursor: Option<tokio::sync::mpsc::UnboundedSender<capture::Cursor>>,
 }
 
 pub struct Pipeline {
@@ -37,6 +39,9 @@ pub struct Pipeline {
     keyframe: Arc<AtomicBool>,
     /// Frames the compositor made that were skipped because the encoder was still busy.
     pub skipped: Arc<AtomicU32>,
+    /// The scale the compositor draws the monitor at, as `f32` bits (what was asked for, until
+    /// the compositor says what it chose).
+    pub scale: Arc<AtomicU32>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -51,7 +56,7 @@ impl Pipeline {
     /// frame refers to the one before).
     pub fn start(settings: Settings, clock: Instant, out: tokio::sync::mpsc::Sender<Encoded>) -> Result<Self> {
         const SLOTS: usize = 4;
-        let Settings { node, width, height, fps, scale, mode, bitrate } = settings;
+        let Settings { node, width, height, fps, scale, mode, bitrate, cursor } = settings;
         let chroma = match mode.chroma {
             control::Chroma::C420 => Chroma::C420,
             control::Chroma::C444 => Chroma::C444,
@@ -112,11 +117,23 @@ impl Pipeline {
         let note = ready_rx.recv().context("encoder thread died")?.context("NVENC")?;
         tracing::info!(?codec, ?chroma, width, height, fps, bitrate, "encoder ready ({note})");
 
+        let actual_scale = Arc::new(AtomicU32::new(scale.to_bits()));
+        let scale_w = actual_scale.clone();
         let (quit, quit_rx) = capture::quit_channel();
         let skip = skipped.clone();
         let capture = std::thread::Builder::new().name("capture".into()).spawn(move || {
             let mut next = 0usize;
+            let cursor_meta = cursor.is_some();
             let on_event = Box::new(move |ev: Event| match ev {
+                Event::Scale(s) => {
+                    tracing::info!(scale = s, "the compositor draws the monitor at this scale");
+                    scale_w.store(s.to_bits(), Ordering::Relaxed);
+                }
+                Event::Cursor(c) => {
+                    if let Some(tx) = &cursor {
+                        let _ = tx.send(c);
+                    }
+                }
                 Event::Format { width, height, modifier } => {
                     tracing::info!(width, height, modifier = format!("{modifier:#x}"), "stream format");
                     conv.reset_images();
@@ -138,11 +155,11 @@ impl Pipeline {
                     }
                 }
             });
-            if let Err(e) = capture::run(node, (width, height), fps, Some(scale), &modifiers, on_event, quit_rx) {
+            if let Err(e) = capture::run(node, (width, height), fps, Some(scale), cursor_meta, &modifiers, on_event, quit_rx) {
                 tracing::error!("capture: {e:#}");
             }
         })?;
-        Ok(Self { quit: Some(quit), keyframe, skipped, threads: vec![capture, encoder] })
+        Ok(Self { quit: Some(quit), keyframe, skipped, scale: actual_scale, threads: vec![capture, encoder] })
     }
 
     /// Make the next frame a keyframe.

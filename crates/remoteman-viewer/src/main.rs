@@ -19,7 +19,16 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use remoteman_core::{Button, Chroma, Codec, Display, Event, Mode, keys};
 
-use decode::{Layout, Picture, Pixels};
+use decode::{Layout, Picture, Pixels, Surface};
+
+unsafe extern "C" {
+    fn rm_glview_new(cuda_ctx: *mut std::ffi::c_void, err: *mut std::ffi::c_char, errlen: i32) -> *mut std::ffi::c_void;
+    fn rm_glview_upload(v: *mut std::ffi::c_void, layout: i32, width: i32, height: i32, data: *const u64, pitch: *const i32) -> i32;
+    fn rm_glview_draw(v: *mut std::ffi::c_void, out_w: *mut i32, out_h: *mut i32);
+    fn rm_glview_read(w: i32, h: i32, out: *mut u8);
+    fn rm_glview_error(v: *const std::ffi::c_void) -> *const std::ffi::c_char;
+    fn rm_glview_free(v: *mut std::ffi::c_void);
+}
 use stream::{Request, Session};
 
 #[derive(Clone)]
@@ -78,6 +87,20 @@ struct Ui {
     toolbar: adw::ToolbarView,
     stack: gtk::Stack,
     picture: gtk::Picture,
+    /// Where NVDEC pictures are drawn, and the two of them stacked.
+    gl: gtk::GLArea,
+    video_stack: gtk::Stack,
+    /// The C helper's state for `gl` (null until the first picture).
+    gl_view: Cell<*mut std::ffi::c_void>,
+    /// An NVDEC picture waiting for `gl` to draw it.
+    gl_pending: RefCell<Option<Picture>>,
+    /// The surface last drawn; holding it keeps the decoder's GPU context alive under `gl_view`.
+    gl_last: RefCell<Option<Surface>>,
+    gl_dump: Cell<bool>,
+    /// Times the GL widget was drawn since the figures were last read.
+    drawn: Cell<u32>,
+    /// How pictures are reaching the screen, for the figures.
+    path: Cell<&'static str>,
     stats: gtk::Label,
     status: gtk::Label,
     connect: gtk::Button,
@@ -109,7 +132,7 @@ impl Ui {
     /// that keep its shape.
     fn fraction(&self, x: f64, y: f64) -> (f32, f32) {
         let (vw, vh) = self.video.get();
-        let (ww, wh) = (self.picture.width() as f64, self.picture.height() as f64);
+        let (ww, wh) = (self.video_stack.width() as f64, self.video_stack.height() as f64);
         if vw == 0 || vh == 0 || ww <= 0.0 || wh <= 0.0 {
             return (0.0, 0.0);
         }
@@ -163,6 +186,8 @@ impl Ui {
                 }
                 Some(b.set_bytes(Some(&glib::Bytes::from_owned(data))).build())
             }
+            // Drawn by `render`, never as a texture.
+            Pixels::Cuda { .. } => None,
             Pixels::Dmabuf { fourcc, modifier, planes, hold } => {
                 let mut b = gdk::DmabufTextureBuilder::new()
                     .set_display(&gtk::prelude::WidgetExt::display(&self.window))
@@ -191,6 +216,75 @@ impl Ui {
                 }
             }
         }
+    }
+
+    /// GTK asks for the GL widget's contents: move a waiting NVDEC picture into the textures
+    /// (on the GPU) and draw.
+    fn render(&self) {
+        let fail = |what: &str| {
+            if let Some(s) = self.session.borrow().as_ref() {
+                if !s.shared.no_dmabuf.swap(true, Ordering::Relaxed) {
+                    eprintln!("remoteman: can't draw the decoder's GPU pictures ({what}); copying them instead");
+                }
+            }
+        };
+        if let Some(p) = self.gl_pending.borrow_mut().take() {
+            if let Pixels::Cuda { layout, context, data, pitch, hold } = p.pixels {
+                // SAFETY: GTK has made the widget's GL context current for this call; the
+                // pointers are a live CUDA surface, kept by `hold`.
+                unsafe {
+                    if self.gl_view.get().is_null() {
+                        let mut err = [0 as std::ffi::c_char; 256];
+                        let v = rm_glview_new(context as *mut _, err.as_mut_ptr(), 256);
+                        if v.is_null() {
+                            fail(&std::ffi::CStr::from_ptr(err.as_ptr()).to_string_lossy());
+                        }
+                        self.gl_view.set(v);
+                    }
+                    let v = self.gl_view.get();
+                    if !v.is_null() && rm_glview_upload(v, layout, p.width as i32, p.height as i32, data.as_ptr(), pitch.as_ptr()) != 0 {
+                        fail(&std::ffi::CStr::from_ptr(rm_glview_error(v)).to_string_lossy());
+                    }
+                }
+                *self.gl_last.borrow_mut() = Some(hold);
+            }
+        }
+        let v = self.gl_view.get();
+        if v.is_null() {
+            return;
+        }
+        let (mut w, mut h) = (0, 0);
+        // SAFETY: as above.
+        unsafe { rm_glview_draw(v, &mut w, &mut h) };
+        self.drawn.set(self.drawn.get() + 1);
+        if self.gl_dump.replace(false) && w > 0 && h > 0 {
+            let mut rgba = vec![0u8; (w * h * 4) as usize];
+            // SAFETY: the buffer is exactly w * h * 4 bytes.
+            unsafe { rm_glview_read(w, h, rgba.as_mut_ptr()) };
+            // OpenGL's first row is the bottom one.
+            let row = (w * 4) as usize;
+            let flipped: Vec<u8> = rgba.chunks_exact(row).rev().flatten().copied().collect();
+            let texture = gdk::MemoryTexture::new(w, h, gdk::MemoryFormat::R8g8b8a8, &glib::Bytes::from_owned(flipped), row);
+            if let Some(path) = &self.args.dump {
+                match texture.save_to_png(path) {
+                    Ok(()) => println!("saved picture 200 to {}", path.display()),
+                    Err(e) => println!("couldn't save {}: {e}", path.display()),
+                }
+            }
+        }
+    }
+
+    /// Let go of the GL widget's textures and their tie to the decoder's GPU context.
+    fn free_gl(&self) {
+        let v = self.gl_view.replace(std::ptr::null_mut());
+        if !v.is_null() {
+            self.gl.make_current();
+            // SAFETY: the widget's context is current, and the CUDA context is still alive
+            // through `gl_last`.
+            unsafe { rm_glview_free(v) };
+        }
+        self.gl_pending.borrow_mut().take();
+        self.gl_last.borrow_mut().take();
     }
 
     fn start(self: &Rc<Self>, host: String, pair: bool) {
@@ -233,6 +327,7 @@ impl Ui {
     /// End the session and go back to the first page. `reason` is shown if there is one.
     fn stop(&self, reason: Option<&str>) {
         let Some(session) = self.session.borrow_mut().take() else { return };
+        self.free_gl();
         session.client.close();
         if let Some(top) = self.window.surface().and_downcast::<gdk::Toplevel>() {
             top.restore_system_shortcuts();
@@ -251,24 +346,68 @@ impl Ui {
 
     /// Once per frame of this window: show the newest picture, and notice the session ending.
     fn tick(&self) {
-        let (picture, closed) = match self.session.borrow().as_ref() {
-            Some(s) => (s.shared.picture.lock().unwrap().take(), s.shared.closed.lock().unwrap().clone()),
+        let (picture, closed, cursor) = match self.session.borrow().as_ref() {
+            Some(s) => (s.shared.picture.lock().unwrap().take(), s.shared.closed.lock().unwrap().clone(), s.shared.cursor.lock().unwrap().take()),
             None => return,
         };
+        if let Some(c) = cursor {
+            // The other computer's cursor becomes this window's own pointer, so it moves with
+            // the hand and not a pipeline's delay later. Its image is in the other display's
+            // pixels; GDK counts in this one's, so it is scaled to match.
+            let pointer = if c.width == 0 {
+                gdk::Cursor::from_name("none", None)
+            } else {
+                let texture = gdk::MemoryTexture::new(c.width as i32, c.height as i32, gdk::MemoryFormat::R8g8b8a8Premultiplied, &glib::Bytes::from_owned(c.rgba), c.width as usize * 4);
+                Some(gdk::Cursor::from_texture(&texture, c.hot_x, c.hot_y, None))
+            };
+            self.video_stack.set_cursor(pointer.as_ref());
+        }
         if let Some(p) = picture {
             self.video.set((p.width, p.height));
-            if let Some(texture) = self.texture(p) {
-                self.picture.set_paintable(Some(&texture));
-                self.shown.set(self.shown.get() + 1);
-                self.shown_total.set(self.shown_total.get() + 1);
-                if self.shown_total.get() == 200 {
-                    if let Some(path) = &self.args.dump {
-                        match texture.save_to_png(path) {
-                            Ok(()) => println!("saved picture 200 to {}", path.display()),
-                            Err(e) => println!("couldn't save {}: {e}", path.display()),
+            let shown = match &p.pixels {
+                Pixels::Cuda { .. } => {
+                    if let Some(e) = self.gl.error() {
+                        // No OpenGL here: tell the decoder to send the slow kind instead.
+                        if let Some(s) = self.session.borrow().as_ref() {
+                            if !s.shared.no_dmabuf.swap(true, Ordering::Relaxed) {
+                                eprintln!("remoteman: no OpenGL for the decoder's GPU pictures ({e}); copying them instead");
+                            }
                         }
+                        return;
+                    }
+                    self.path.set("GPU to GPU");
+                    self.video_stack.set_visible_child_name("gl");
+                    if self.shown_total.get() + 1 == 200 && self.args.dump.is_some() {
+                        self.gl_dump.set(true);
+                    }
+                    *self.gl_pending.borrow_mut() = Some(p);
+                    self.gl.queue_render();
+                    true
+                }
+                other => {
+                    self.path.set(if matches!(other, Pixels::Dmabuf { .. }) { "no copy" } else { "COPIED THROUGH CPU MEMORY (slow)" });
+                    self.video_stack.set_visible_child_name("picture");
+                    match self.texture(p) {
+                        Some(texture) => {
+                            self.picture.set_paintable(Some(&texture));
+                            self.drawn.set(self.drawn.get() + 1);
+                            if self.shown_total.get() + 1 == 200 {
+                                if let Some(path) = &self.args.dump {
+                                    match texture.save_to_png(path) {
+                                        Ok(()) => println!("saved picture 200 to {}", path.display()),
+                                        Err(e) => println!("couldn't save {}: {e}", path.display()),
+                                    }
+                                }
+                            }
+                            true
+                        }
+                        None => false,
                     }
                 }
+            };
+            if shown {
+                self.shown.set(self.shown.get() + 1);
+                self.shown_total.set(self.shown_total.get() + 1);
             }
         }
         if let Some(reason) = closed {
@@ -283,8 +422,9 @@ impl Ui {
         let stats = s.client.stats();
         let shown = self.shown.replace(0);
         let line = format!(
-            "{}\n{} shown, {} decoded a second · {:.1} ms old · decode up to {:.1} ms\n{} lost, {} replaced unseen · round trip {:.1} ms",
+            "{} · {}\n{} shown, {} decoded a second · {:.1} ms old · decode up to {:.1} ms\n{} lost, {} replaced unseen · round trip {:.1} ms",
             s.shared.decoder.lock().unwrap(),
+            self.path.get(),
             shown,
             s.shared.decoded.swap(0, Ordering::Relaxed),
             s.shared.age_us.load(Ordering::Relaxed) as f64 / 1000.0,
@@ -295,7 +435,7 @@ impl Ui {
         );
         self.stats.set_text(&line);
         if self.args.quit_after.is_some() {
-            println!("{}", line.replace('\n', " | "));
+            println!("{} | drawn {}", line.replace('\n', " | "), self.drawn.replace(0));
         }
     }
 }
@@ -335,7 +475,12 @@ fn build(app: &adw::Application, args: Args) {
     // Lets the compositor show the decoder's surface itself where it can, with no pass through GTK.
     let offload = gtk::GraphicsOffload::new(Some(&picture));
     offload.set_black_background(true);
-    let overlay = gtk::Overlay::builder().child(&offload).build();
+    // NVDEC pictures are drawn here instead, through OpenGL.
+    let gl = gtk::GLArea::builder().hexpand(true).vexpand(true).auto_render(false).build();
+    let video_stack = gtk::Stack::new();
+    video_stack.add_named(&offload, Some("picture"));
+    video_stack.add_named(&gl, Some("gl"));
+    let overlay = gtk::Overlay::builder().child(&video_stack).build();
     overlay.add_overlay(&stats);
     overlay.add_css_class("view");
 
@@ -358,6 +503,14 @@ fn build(app: &adw::Application, args: Args) {
         toolbar,
         stack,
         picture: picture.clone(),
+        gl: gl.clone(),
+        video_stack: video_stack.clone(),
+        gl_view: Cell::new(std::ptr::null_mut()),
+        gl_pending: RefCell::new(None),
+        gl_last: RefCell::new(None),
+        gl_dump: Cell::new(false),
+        drawn: Cell::new(0),
+        path: Cell::new(""),
         stats,
         status,
         connect: connect.clone(),
@@ -448,7 +601,7 @@ fn build(app: &adw::Application, args: Args) {
             ui.send(Event::PointerTo { x, y });
         }
     });
-    picture.add_controller(motion);
+    video_stack.add_controller(motion);
 
     let click = gtk::GestureClick::builder().button(0).build();
     let button = |g: &gtk::GestureClick| match g.current_button() {
@@ -469,7 +622,7 @@ fn build(app: &adw::Application, args: Args) {
         let ui = ui.clone();
         move |g, _, _, _| ui.send(Event::Button { button: button(g), down: false })
     });
-    picture.add_controller(click);
+    video_stack.add_controller(click);
 
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
     scroll.connect_scroll({
@@ -481,14 +634,25 @@ fn build(app: &adw::Application, args: Args) {
             glib::Propagation::Stop
         }
     });
-    picture.add_controller(scroll);
+    video_stack.add_controller(scroll);
 
-    picture.add_tick_callback({
+    window.add_tick_callback({
         let ui = ui.clone();
         move |_, _| {
             ui.tick();
             glib::ControlFlow::Continue
         }
+    });
+    gl.connect_render({
+        let ui = ui.clone();
+        move |_, _| {
+            ui.render();
+            glib::Propagation::Stop
+        }
+    });
+    gl.connect_unrealize({
+        let ui = ui.clone();
+        move |_| ui.free_gl()
     });
     glib::timeout_add_seconds_local(1, {
         let ui = ui.clone();

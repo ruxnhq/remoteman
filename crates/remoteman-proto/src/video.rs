@@ -6,6 +6,45 @@ use std::collections::BTreeMap;
 use crate::Error;
 
 pub const KIND_VIDEO: u8 = 1;
+pub const KIND_CURSOR: u8 = 2;
+
+/// Where the host's cursor is: a datagram of its own, sent when it moves (only to clients that
+/// draw the cursor themselves).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorAt {
+    pub epoch: u16,
+    /// False: the cursor isn't on this display.
+    pub visible: bool,
+    /// Fractions (0 to 1) of the display from its top left.
+    pub x: f32,
+    pub y: f32,
+}
+
+impl CursorAt {
+    pub const LEN: usize = 12;
+
+    pub fn write(&self) -> Vec<u8> {
+        let mut d = Vec::with_capacity(Self::LEN);
+        d.push(KIND_CURSOR);
+        d.push(self.visible as u8);
+        d.extend_from_slice(&self.epoch.to_le_bytes());
+        d.extend_from_slice(&self.x.to_le_bytes());
+        d.extend_from_slice(&self.y.to_le_bytes());
+        d
+    }
+
+    pub fn parse(d: &[u8]) -> Result<Self, Error> {
+        if d.len() < Self::LEN || d[0] != KIND_CURSOR {
+            return Err(Error::Truncated("cursor datagram"));
+        }
+        Ok(Self {
+            visible: d[1] & 1 != 0,
+            epoch: u16::from_le_bytes([d[2], d[3]]),
+            x: f32::from_le_bytes(d[4..8].try_into().unwrap()),
+            y: f32::from_le_bytes(d[8..12].try_into().unwrap()),
+        })
+    }
+}
 pub const HEADER: usize = 20;
 const FLAG_KEY: u8 = 1;
 
@@ -151,6 +190,15 @@ mod tests {
 
     fn bytes(n: usize, seed: u8) -> Vec<u8> {
         (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+    }
+
+    #[test]
+    fn cursor_datagram() {
+        let c = CursorAt { epoch: 3, visible: true, x: 0.25, y: 0.5 };
+        let d = c.write();
+        assert_eq!(d, [2, 1, 3, 0, 0, 0, 0x80, 0x3e, 0, 0, 0, 0x3f]);
+        assert_eq!(CursorAt::parse(&d).unwrap(), c);
+        assert!(CursorAt::parse(&d[..5]).is_err());
     }
 
     #[test]

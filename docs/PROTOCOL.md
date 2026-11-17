@@ -17,7 +17,7 @@ Nothing here names an operating system. A host describes what it can do, a clien
 |---|---|---|---|
 | Control | The first bidirectional stream, opened by the client | both | Framed JSON messages |
 | Input | A unidirectional stream opened by the client | client → host | Binary events |
-| Media | Datagrams | host → client | Video fragments |
+| Media | Datagrams | host → client | Video fragments, cursor positions |
 
 All integers are little-endian.
 
@@ -28,7 +28,7 @@ Each message is a `u32` length followed by that many bytes of UTF-8 JSON, an obj
 **Client → host**
 
 - `{"t":"client_hello","proto":0,"name":"Anna's iPad","display":{"width":2752,"height":2064,"scale":2.0,"refresh":120},"decoders":[{"codec":"av1","chroma":"420","depth":10},{"codec":"hevc","chroma":"444","depth":10},{"codec":"hevc","chroma":"420","depth":10}]}`
-  The first message. `display` is the client's screen in pixels, with the scale it wants the desktop drawn at and its refresh rate in Hz. `decoders` lists what it decodes in hardware, most preferred first.
+  The first message. `display` is the client's screen in pixels, with the scale it wants the desktop drawn at and its refresh rate in Hz. `decoders` lists what it decodes in hardware, most preferred first. An optional `"cursor":true` says the client draws the cursor itself (see Cursor).
 - `{"t":"keyframe"}`: the client lost a frame it can't do without; the next frame should be a keyframe.
 - `{"t":"ping","id":7,"client_us":123456}`: answered at once with `pong`. `client_us` is the client's clock in microseconds.
 
@@ -60,6 +60,22 @@ The header is 20 bytes. The host sizes fragments to fit the connection's datagra
 
 There are no B-frames and no periodic keyframes: every frame refers only to earlier ones. In version 0 the client asks for a keyframe (`keyframe`) when a frame is incomplete at the time a later one completes, and shows nothing until it arrives. Datagrams of an older epoch are dropped.
 
+## Cursor
+
+By default the host draws the cursor into the picture, so it trails the hand by the whole pipeline. A client that sends `"cursor":true` in its hello (to a host listing `cursor` in its features) gets the cursor apart instead, and draws it at its own pointer with no delay:
+
+- Control, host → client: `{"t":"cursor","width":64,"height":64,"hot_x":10,"hot_y":10,"rgba":"<base64>"}` whenever the shape changes. `rgba` is `width*height*4` bytes of premultiplied RGBA, rows top to bottom, in the host display's pixels; the hotspot is in the same pixels. `width` 0 means no cursor: it is hidden (as when typing or touching) or has left this display.
+- Datagram, host → client, whenever the cursor moves:
+
+```
+u8   kind     2 = cursor position
+u8   flags    bit 0: the cursor is on this display
+u16  epoch
+f32  x, y     fractions (0 to 1) of the display from its top left
+```
+
+The host reports every move, the client's own included, a pipeline's delay later. A client drawing the cursor at its own pointer uses these only when it hasn't moved the pointer itself for a moment, which is how it notices the host moving it.
+
 ## Input
 
 A sequence of events on the input stream, each a `u8` type and then its fields:
@@ -82,4 +98,4 @@ The client sends `ping` now and then and takes the answer with the shortest roun
 
 ## Not in version 0
 
-Sound, clipboard, files, a separate cursor channel (the cursor is drawn into the picture for now), re-requesting lost fragments, parity, reference invalidation on loss, bitrate following the network, resume tokens, QR pairing, more than one display, HDR.
+Sound, clipboard, files, re-requesting lost fragments, parity, reference invalidation on loss, bitrate following the network, resume tokens, QR pairing, more than one display, HDR.
