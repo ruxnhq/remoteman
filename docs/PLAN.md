@@ -12,13 +12,23 @@ Every claim carries a mark:
 
 ## Decided (2026-11-17)
 
-- **HDR:** option (a). SDR virtual displays on a 10-bit, PQ-capable pipeline; HDR by mirroring for now; the Mutter patch in Phase 6.
+- **HDR:** option (a). SDR virtual displays on a 10-bit, PQ-capable pipeline; HDR by mirroring for now; the Mutter patch in Phase 7.
 - **Sessions:** option (a). Remote login and attach, picked automatically.
 - **Login:** the login screen first, Face ID as the daily default, key only as a setting.
 - **Signing:** the Apple developer account on the Mac. The Mac session ("Mac session") builds and signs.
 - **Two apps.** A **client** app and a **host** app, each its own product, sharing only the Rust core and the wire spec. Today that is one client (iPad and iPhone) and one host (Linux, GNOME). Any client must work with any host, so more of either (Mac, Windows, Android clients; KDE, Mac, Windows hosts) are additions and never rewrites. Nothing platform-specific goes into the protocol: it carries display descriptions, HID usages and MIME types, not GNOME or iOS notions.
 
 - **The Mac is a host from the start (2026-11-17).** The iPad and iPhone app controls the Mac as well as the PC. The Mac host is its own phase right after the walking skeleton (Phase 2 below), built from espalier's Mac screen code and speaking this protocol.
+
+- **The apps (2026-11-17).** Two hosts and three viewers, every viewer working with every host:
+
+  | App | Role | Runs on | Made of | Phase |
+  |---|---|---|---|---|
+  | remoteman for iPad and iPhone | Viewer | iPadOS, iOS | Swift, VideoToolbox, Metal, the shared core | 1 |
+  | remoteman for Mac | Viewer | macOS | The same Swift code as the iPad app, in a window, with mouse and keyboard | 1 |
+  | remoteman for Linux | Viewer | Linux (GTK 4) | Rust, GTK 4 and libadwaita, hardware decode, the shared core | 3 |
+  | Linux host | Host | Linux, GNOME | `remoteman-agent`, later with `remotemand` for remote login | 1, 4 |
+  | Mac host | Host | macOS | Swift, from espalier's Mac screen code, the shared core's host role | 2 |
 
 Still to hear: which iPad and iPhone, and how the Mac session gets the code (suggested: a private GitHub repository).
 
@@ -28,7 +38,7 @@ Still to hear: which iPad and iPhone, and how the Mac session gets the code (sug
 
 **[V]** Mutter 51.1 offers HDR screencasts (10-bit, BT.2020 with PQ) only for physical monitors. A virtual monitor has no colour mode at all, and a remote-login session has nothing but virtual monitors.
 
-- **(a) Recommended.** Virtual displays are SDR for now. The pipeline is still built 10-bit and PQ-capable from end to end. HDR works when the iPad mirrors one of your physical HDR monitors. HDR on virtual displays arrives through a Mutter patch we write in Phase 6 and send upstream.
+- **(a) Recommended.** Virtual displays are SDR for now. The pipeline is still built 10-bit and PQ-capable from end to end. HDR works when the iPad mirrors one of your physical HDR monitors. HDR on virtual displays arrives through a Mutter patch we write in Phase 7 and send upstream.
 - **(b)** Patch Mutter before anything else. HDR from day one, but a patched compositor on your daily machine from the start, rebuilt at every Mutter update.
 - **(c)** Never patch. HDR in mirror mode only.
 
@@ -233,7 +243,7 @@ Latency targets on a good LAN, to be measured and not yet claims: convert and en
 | Bridge TCP record transport | Not reused. One lost packet stalls everything behind it, which is wrong for 120 fps over Wi-Fi. |
 | `mac-bridge` `Screen.swift`, `ScreenEncoder.swift`, `Input.swift`, `VirtualDisplayShim` | The future Mac host. They already play the Linux agent's parts (virtual display, capture, encode, input, cursor shapes) and would speak this protocol instead. |
 | `espalier-discovery` | Advertising the PC. |
-| Mac screen drag in and out (`ScreenDrag.swift`, Linux `drop.rs`) | The model for files and drag and drop in Phase 7: offer, fetch on demand, drop at the pointer. |
+| Mac screen drag in and out (`ScreenDrag.swift`, Linux `drop.rs`) | The model for files and drag and drop in Phase 8: offer, fetch on demand, drop at the pointer. |
 | Low-latency findings (espalier `539a27b`, measured) | Lessons that carry over. On an M4, VideoToolbox's low-latency rate control and its "real time" flag each slow the encoder; the ordinary rate control with reordering off is about twice as fast (3840×2160 H.265: 10.5 ms against 18.7). That matters for the Mac host, and the decode side gets the same scrutiny in S3. Pointer moves are merged to one per frame and sent ahead of any click or key. The stream asks for the display's real rate. A slightly longer frame queue saves a keyframe after a hiccup. |
 
 remoteman is its own repository. Code is copied from espalier and adapted, not linked to it.
@@ -347,34 +357,39 @@ Known gaps, found by these runs:
 - **The virtual monitor's HiDPI scale isn't set yet.** Mutter takes it as a PipeWire stream tag, which the capture code doesn't send, so the desktop is drawn at scale 1.
 - **One frame gap of 25 to 60 ms per run** shows up around the input demo; not yet explained.
 - **Only the loopback has been measured.** Nothing has crossed a real network, and nothing has been decoded on a device.
+- **Running on the real desktop since 2026-11-17** as a temporary user service (`systemctl --user stop remoteman-agent` ends it; it doesn't survive a reboot). A local connection showed the wallpaper on a new virtual monitor, which went away when the client left. The firewall (ufw) is on, so UDP 7791 may need opening for other machines.
 - **Not built yet from this phase's list:** the cursor channel (the cursor is drawn into the picture), QR pairing (pairing is "first unknown device while `--pair` is on"), the stats overlay, and the iPad app.
 
 ### 2. Mac host
 A Mac host app from espalier's `Screen.swift`, `ScreenEncoder.swift`, `Input.swift`, `Cursor.swift` and the virtual display shim, with the Rust core's host role in place of the bridge's TCP records. The same iPad app connects to it with nothing Mac-specific in it. Built by the Mac session; the Linux session supplies the core's host interface for Swift.
 **Done when:** the iPad app lists both the PC and the Mac and controls either at native resolution and 120 fps, and the Linux test client can control the Mac too (which proves any client works with any host).
 
-### 3. Remote login
+### 3. Linux viewer
+A GTK 4 and libadwaita app in Rust on the shared core: a list of paired hosts, pairing, and the stream in a window or full screen with hardware decode (NVDEC, VA-API or Vulkan through FFmpeg, as espalier's Linux mirror windows do) and no copy to the CPU. Mouse, keyboard and touch go back. It reaches the Linux host and the Mac host alike.
+**Done when:** from another Linux machine, or this one, the viewer controls the PC and the Mac at the window's size and the monitor's refresh rate.
+
+### 4. Remote login
 `remotemand`, the GDM broker, login screen to session inside one connection, the resume token, unlock and re-lock for attach, the Arch package.
 **Done when:** from a PC sitting at its login screen you reach a desktop on the iPad; a dropped connection lands back in the same session in under 1 s; attaching to a locked local session works and re-locks when you leave.
 
-### 4. Picture and resilience
+### 5. Picture and resilience
 Our own Vulkan conversion, direct NVENC, re-requests and parity, the rate controller, static refinement, 4:4:4 if S2 and S3 passed, rotation and resizing.
 **Done when:** 2% random loss shows no stall and puts no keyframe on the wire; the bitrate follows a throttled link within 1 s; an idle desktop sends under 100 kbit/s.
 
-### 5. The rest of daily use
+### 6. The rest of daily use
 Sound, clipboard, soft keyboard and text input, the key bar and remaps, iPhone trackpad mode and zoom, Wake-on-LAN.
 
-### 6. HDR
+### 7. HDR
 End to end in mirror mode first: PQ in, EDR out. Then the Mutter patch: virtual outputs that offer BT.2100 with the device's luminance, and virtual streams that offer the 10-bit PQ formats. Run it as a local package and send it upstream.
 
-### 7. More displays and devices
+### 8. More displays and devices
 A second virtual monitor on a display plugged into the iPad, Pencil as far as libei allows, files and drag and drop, microphone. **[R]** An app can fill a connected display with a scene of its own and pick its mode. Whether it can pick the refresh rate and HDR there wasn't found.
 
 ### Later
 - **KDE.** Attach mode through the desktop portals first (ScreenCast with a virtual source, RemoteDesktop, libei), then KWin's own protocol (`stream_virtual_output`) for unattended use. **[R]** As of Plasma 6.8.3: virtual outputs exist and follow the stream's size; they start at 60 Hz and take custom modes; the HiDPI scale tag comes in 6.9; no HDR on them and screencasts are 8-bit (HDR screencast is open for 6.9); unattended access works by pre-authorising the app or a restore token. Remote login isn't there in 6.8 and is planned for 6.9 with Plasma Login Manager.
 - **How others stand** **[R]**: Sunshine has no virtual displays on Linux (the request was closed as not planned) and uses FFmpeg for NVENC there. Nothing found combines virtual displays, a desktop session and HDR on Linux.
 - **Outside the LAN** without Tailscale: a rendezvous and relay of our own.
-- **More hosts and clients:** Windows host; Mac, Linux, Windows and Android clients. Each is a new shell around the same core.
+- **More hosts and clients:** Windows host; Windows and Android viewers. Each is a new shell around the same core.
 
 ## Risks
 
