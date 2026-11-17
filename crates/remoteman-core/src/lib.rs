@@ -264,6 +264,10 @@ impl Client {
     fn shutdown(&mut self) {
         self.conn.close(0u32.into(), b"done");
         if let Some(rt) = self.runtime.take() {
+            // Let the goodbye reach the host before the runtime goes; otherwise the host only
+            // notices after its idle timeout, and the virtual monitor lingers until then.
+            let endpoint = self._endpoint.clone();
+            let _ = rt.block_on(async { tokio::time::timeout(Duration::from_millis(500), endpoint.wait_idle()).await });
             rt.shutdown_timeout(Duration::from_secs(1));
         }
     }

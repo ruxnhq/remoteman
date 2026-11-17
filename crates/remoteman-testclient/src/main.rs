@@ -182,7 +182,7 @@ fn main() -> Result<()> {
     client.close();
 
     let mut s = seen.lock().unwrap();
-    if let Some(reason) = s.closed.as_deref().filter(|r| !r.contains("done")) {
+    if let Some(reason) = s.closed.as_deref().filter(|r| !r.contains("done") && *r != "closed") {
         println!("the host ended the session: {reason}");
     }
     let n = s.arrivals.len();
