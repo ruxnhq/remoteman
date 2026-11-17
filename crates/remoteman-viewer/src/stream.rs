@@ -26,6 +26,8 @@ pub struct Shared {
     pub age_us: AtomicU64,
     /// The longest decode (with the copy from the GPU) since it was last read, in microseconds.
     pub decode_us_max: AtomicU32,
+    /// Set by the window when GTK refuses a DMA-BUF picture: copy them down from now on.
+    pub no_dmabuf: std::sync::atomic::AtomicBool,
 }
 
 enum Msg {
@@ -89,6 +91,9 @@ impl Session {
                     },
                     Msg::Frame(data, age) => {
                         let Some(d) = decoder.as_mut() else { continue };
+                        if s.no_dmabuf.load(Ordering::Relaxed) {
+                            d.stop_exporting();
+                        }
                         let t = std::time::Instant::now();
                         match d.decode(&data) {
                             Ok(Some(picture)) => {

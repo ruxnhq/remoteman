@@ -19,7 +19,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use remoteman_core::{Button, Chroma, Codec, Display, Event, Mode, keys};
 
-use decode::{Layout, Picture};
+use decode::{Layout, Picture, Pixels};
 use stream::{Request, Session};
 
 #[derive(Clone)]
@@ -141,23 +141,56 @@ impl Ui {
         Display { width: w & !1, height: h & !1, scale: self.args.scale.unwrap_or(scale), refresh: self.args.refresh.unwrap_or(refresh) }
     }
 
-    fn texture(&self, p: Picture) -> gdk::Texture {
-        let format = match p.layout {
-            Layout::Nv12 => gdk::MemoryFormat::G8B8r8420,
-            Layout::P010 => gdk::MemoryFormat::G10x6B10x6r10x6420,
-            Layout::Yuv444High16 => gdk::MemoryFormat::G16B16R16444,
-            Layout::Yuv444Low10 => gdk::MemoryFormat::X6g10X6b10X6r10444,
-        };
-        let mut b = gdk::MemoryTextureBuilder::new()
-            .set_width(p.width as i32)
-            .set_height(p.height as i32)
-            .set_format(format)
-            .set_color_state(&self.colour)
-            .set_stride(p.planes[0].1);
-        for (i, (offset, stride)) in p.planes.iter().enumerate() {
-            b = b.set_offset(i as u32, *offset).set_stride_for_plane(i as u32, *stride);
+    /// The picture as something GTK can draw. `None`: GTK refused it, and the decoder has been
+    /// told to send the slower kind.
+    fn texture(&self, p: Picture) -> Option<gdk::Texture> {
+        match p.pixels {
+            Pixels::Memory { layout, data, planes } => {
+                let format = match layout {
+                    Layout::Nv12 => gdk::MemoryFormat::G8B8r8420,
+                    Layout::P010 => gdk::MemoryFormat::G10x6B10x6r10x6420,
+                    Layout::Yuv444High16 => gdk::MemoryFormat::G16B16R16444,
+                    Layout::Yuv444Low10 => gdk::MemoryFormat::X6g10X6b10X6r10444,
+                };
+                let mut b = gdk::MemoryTextureBuilder::new()
+                    .set_width(p.width as i32)
+                    .set_height(p.height as i32)
+                    .set_format(format)
+                    .set_color_state(&self.colour)
+                    .set_stride(planes[0].1);
+                for (i, (offset, stride)) in planes.iter().enumerate() {
+                    b = b.set_offset(i as u32, *offset).set_stride_for_plane(i as u32, *stride);
+                }
+                Some(b.set_bytes(Some(&glib::Bytes::from_owned(data))).build())
+            }
+            Pixels::Dmabuf { fourcc, modifier, planes, hold } => {
+                let mut b = gdk::DmabufTextureBuilder::new()
+                    .set_display(&gtk::prelude::WidgetExt::display(&self.window))
+                    .set_width(p.width)
+                    .set_height(p.height)
+                    .set_fourcc(fourcc)
+                    .set_modifier(modifier)
+                    .set_n_planes(planes.len() as u32)
+                    .set_color_state(Some(&self.colour));
+                for (i, (fd, offset, stride)) in planes.iter().enumerate() {
+                    // SAFETY: the descriptors belong to `hold`, which lives until GTK lets the
+                    // texture go.
+                    b = unsafe { b.set_fd(i as u32, *fd) }.set_offset(i as u32, *offset).set_stride(i as u32, *stride);
+                }
+                // SAFETY: as above; the release function is what keeps the surface alive.
+                match unsafe { b.build_with_release_func(move || drop(hold)) } {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        if let Some(s) = self.session.borrow().as_ref() {
+                            if !s.shared.no_dmabuf.swap(true, Ordering::Relaxed) {
+                                eprintln!("remoteman: GTK won't take the decoder's GPU pictures ({e}); copying them instead");
+                            }
+                        }
+                        None
+                    }
+                }
+            }
         }
-        b.set_bytes(Some(&glib::Bytes::from_owned(p.data))).build()
     }
 
     fn start(self: &Rc<Self>, host: String, pair: bool) {
@@ -224,15 +257,16 @@ impl Ui {
         };
         if let Some(p) = picture {
             self.video.set((p.width, p.height));
-            let texture = self.texture(p);
-            self.picture.set_paintable(Some(&texture));
-            self.shown.set(self.shown.get() + 1);
-            self.shown_total.set(self.shown_total.get() + 1);
-            if self.shown_total.get() == 200 {
-                if let Some(path) = &self.args.dump {
-                    match texture.save_to_png(path) {
-                        Ok(()) => println!("saved picture 200 to {}", path.display()),
-                        Err(e) => println!("couldn't save {}: {e}", path.display()),
+            if let Some(texture) = self.texture(p) {
+                self.picture.set_paintable(Some(&texture));
+                self.shown.set(self.shown.get() + 1);
+                self.shown_total.set(self.shown_total.get() + 1);
+                if self.shown_total.get() == 200 {
+                    if let Some(path) = &self.args.dump {
+                        match texture.save_to_png(path) {
+                            Ok(()) => println!("saved picture 200 to {}", path.display()),
+                            Err(e) => println!("couldn't save {}: {e}", path.display()),
+                        }
                     }
                 }
             }
@@ -298,7 +332,10 @@ fn build(app: &adw::Application, args: Args) {
     let stats = gtk::Label::builder().halign(gtk::Align::Start).valign(gtk::Align::Start).margin_start(12).margin_top(12).xalign(0.0).can_target(false).build();
     stats.add_css_class("osd");
     stats.add_css_class("numeric");
-    let overlay = gtk::Overlay::builder().child(&picture).build();
+    // Lets the compositor show the decoder's surface itself where it can, with no pass through GTK.
+    let offload = gtk::GraphicsOffload::new(Some(&picture));
+    offload.set_black_background(true);
+    let overlay = gtk::Overlay::builder().child(&offload).build();
     overlay.add_overlay(&stats);
     overlay.add_css_class("view");
 
