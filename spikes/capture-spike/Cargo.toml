@@ -1,0 +1,19 @@
+[package]
+name = "capture-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Phase 0 spikes S1 and S2: read a Mutter virtual monitor from PipeWire, zero-copy into NVENC.
+[dependencies]
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+ash = "0.38"
+libloading = "0.8"
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }
+pipewire = "0.10"
+libc = "0.2"
+
+[build-dependencies]
+cc = "1"
