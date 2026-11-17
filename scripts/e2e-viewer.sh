@@ -26,6 +26,6 @@ dbus-run-session -- sh -c '
   wait 2>/dev/null
   exit $rc
 ' 2>&1 | grep -vE "dbus-daemon|fusermount|Gdk-Message|A connection to the bus|portal|keyring|^$"
-kill $vpid 2>/dev/null
-wait $vpid 2>/dev/null
+# End the viewer's compositor (a child of that dbus-run-session), then the session itself.
+pkill -P $vpid 2>/dev/null; kill $vpid 2>/dev/null; wait $vpid 2>/dev/null
 echo "logs: $RM_LOGS"
