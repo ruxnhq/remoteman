@@ -49,7 +49,7 @@ pub async fn serve(conn: Connection, bitrate: u32) -> Result<()> {
         }
     };
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Encoded>(4);
-    let settings = Settings { node: desktop.node, width: screen.width, height: screen.height, fps: refresh, mode, bitrate };
+    let settings = Settings { node: desktop.node, width: screen.width, height: screen.height, fps: refresh, scale: screen.scale.clamp(1.0, 4.0), mode, bitrate };
     let pipeline = match tokio::task::spawn_blocking(move || Pipeline::start(settings, clock, tx)).await? {
         Ok(p) => p,
         Err(e) => {

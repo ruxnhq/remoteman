@@ -363,7 +363,7 @@ The received streams decode with FFmpeg. Input sent by the test client arrives i
 Known gaps, found by these runs:
 - **The first touch after connecting is lost.** Mutter makes its virtual touchscreen on the first event and drops it. The same happened to the first key, which the agent now works around by spending a do-nothing key at the start. Moving input to libei, as planned, should make both moot.
 - **Typed text outside the keyboard layout doesn't arrive** (é, emoji), because Mutter's keysym call needs a key for it in the current layout. Needs libei's text device once Mutter has it, or a temporary keymap.
-- **The virtual monitor's HiDPI scale isn't set yet.** Mutter takes it as a PipeWire stream tag, which the capture code doesn't send, so the desktop is drawn at scale 1.
+- **HiDPI scale: fixed.** The agent now passes the client's scale to Mutter as a stream tag (`org.gnome.preferred-scale`). At scale 2 a full-screen window on the 2752×2064 monitor is 1376×1032 points and is drawn at twice the size.
 - **One frame gap of 25 to 60 ms per run** shows up around the input demo; not yet explained.
 - **Only the loopback has been measured.** Nothing has crossed a real network, and nothing has been decoded on a device.
 - **Running on the real desktop since 2026-11-17** as a temporary user service (`systemctl --user stop remoteman-agent` ends it; it doesn't survive a reboot). A local connection showed the wallpaper on a new virtual monitor, which went away when the client left. The firewall (ufw) is on, so UDP 7791 may need opening for other machines.

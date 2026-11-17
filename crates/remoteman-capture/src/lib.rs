@@ -29,8 +29,9 @@ struct State {
     on_event: Box<dyn FnMut(Event)>,
 }
 
-/// Run the stream on this thread until `quit` fires.
-pub fn run(node: u32, want: (u32, u32), fps: u32, modifiers: &[u64], on_event: Box<dyn FnMut(Event)>, quit: pw::channel::Receiver<()>) -> Result<()> {
+/// Run the stream on this thread until `quit` fires. `scale` is the HiDPI scale wanted for a
+/// virtual monitor (Mutter reads it from a stream tag); `None` leaves it to the compositor.
+pub fn run(node: u32, want: (u32, u32), fps: u32, scale: Option<f32>, modifiers: &[u64], on_event: Box<dyn FnMut(Event)>, quit: pw::channel::Receiver<()>) -> Result<()> {
     use spa::param::video::VideoFormat as V;
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None)?;
@@ -81,7 +82,14 @@ pub fn run(node: u32, want: (u32, u32), fps: u32, modifiers: &[u64], on_event: B
         .register()?;
 
     let value = format_param(&[V::BGRx, V::BGRA], Some(modifiers), want, fps)?;
-    let mut params = [spa::pod::Pod::from_bytes(&value).context("format pod")?];
+    let tag = match scale {
+        Some(s) => Some(tag_param(&[("org.gnome.preferred-scale", &format!("{s}"))])?),
+        None => None,
+    };
+    let mut params = vec![spa::pod::Pod::from_bytes(&value).context("format pod")?];
+    if let Some(tag) = &tag {
+        params.push(spa::pod::Pod::from_bytes(tag).context("tag pod")?);
+    }
     // No MAP_BUFFERS: the pixels never come to the CPU.
     stream.connect(spa::utils::Direction::Input, Some(node), pw::stream::StreamFlags::AUTOCONNECT, &mut params)?;
     let ml = mainloop.clone();
@@ -185,4 +193,22 @@ fn update_params(stream: &pw::stream::Stream, params: &[Vec<u8>]) {
             eprintln!("update stream params: {e}");
         }
     }
+}
+
+/// A Tag param: key and value pairs from this (the consuming) side of the stream.
+fn tag_param(items: &[(&str, &str)]) -> Result<Vec<u8>> {
+    use spa::pod::{Property, PropertyFlags, Value};
+    let mut info = vec![Value::Int(items.len() as i32)];
+    for (k, v) in items {
+        info.push(Value::String((*k).to_owned()));
+        info.push(Value::String((*v).to_owned()));
+    }
+    serialize(spa::pod::Object {
+        type_: spa::sys::SPA_TYPE_OBJECT_ParamTag,
+        id: spa::sys::SPA_PARAM_Tag,
+        properties: vec![
+            Property { key: spa::sys::SPA_PARAM_TAG_direction, flags: PropertyFlags::empty(), value: Value::Id(spa::utils::Id(spa::sys::SPA_DIRECTION_INPUT)) },
+            Property { key: spa::sys::SPA_PARAM_TAG_info, flags: PropertyFlags::empty(), value: Value::Struct(info) },
+        ],
+    })
 }

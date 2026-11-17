@@ -37,6 +37,8 @@ class Anim(Gtk.Widget):
     def tick(self, widget, clock):
         self.n += 1; self.count += 1
         now = time.monotonic()
+        if self.n == 60:
+            print(f"window {self.get_width()}x{self.get_height()} points at scale {self.get_scale_factor()}", flush=True)
         if now - self.last >= 1:
             print(f"client drew {self.count} frames", flush=True)
             self.count = 0; self.last = now

@@ -26,6 +26,8 @@ pub struct Settings {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// The HiDPI scale the client wants the desktop drawn at.
+    pub scale: f32,
     pub mode: control::Mode,
     pub bitrate: u32,
 }
@@ -49,7 +51,7 @@ impl Pipeline {
     /// frame refers to the one before).
     pub fn start(settings: Settings, clock: Instant, out: tokio::sync::mpsc::Sender<Encoded>) -> Result<Self> {
         const SLOTS: usize = 4;
-        let Settings { node, width, height, fps, mode, bitrate } = settings;
+        let Settings { node, width, height, fps, scale, mode, bitrate } = settings;
         let chroma = match mode.chroma {
             control::Chroma::C420 => Chroma::C420,
             control::Chroma::C444 => Chroma::C444,
@@ -136,7 +138,7 @@ impl Pipeline {
                     }
                 }
             });
-            if let Err(e) = capture::run(node, (width, height), fps, &modifiers, on_event, quit_rx) {
+            if let Err(e) = capture::run(node, (width, height), fps, Some(scale), &modifiers, on_event, quit_rx) {
                 tracing::error!("capture: {e:#}");
             }
         })?;
