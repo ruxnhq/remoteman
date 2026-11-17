@@ -30,6 +30,9 @@ struct DecodedFrame {
     let captureUs: UInt64
     /// From handing the frame to VideoToolbox to getting the picture back.
     let decodeSeconds: Double
+    /// The frame's age when the core handed it over (-1 if unknown), and when that was (uptime ns).
+    let ageUs: Int64
+    let receivedNs: UInt64
 }
 
 final class VideoDecoder {
@@ -68,7 +71,8 @@ final class VideoDecoder {
     }
 
     /// Decode one frame. Call from one thread at a time, in stream order.
-    func decode(_ data: UnsafeRawBufferPointer, key: Bool, number: UInt32, captureUs: UInt64) throws {
+    func decode(_ data: UnsafeRawBufferPointer, key: Bool, number: UInt32, captureUs: UInt64, ageUs: Int64 = -1) throws {
+        let receivedNs = DispatchTime.now().uptimeNanoseconds
         let bytes = data.bindMemory(to: UInt8.self)
         var payload: [UInt8]
         switch info.codec {
@@ -145,7 +149,10 @@ final class VideoDecoder {
                 return
             }
             let took = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
-            onFrame(DecodedFrame(pixelBuffer: image, number: number, captureUs: captureUs, decodeSeconds: took))
+            onFrame(
+                DecodedFrame(
+                    pixelBuffer: image, number: number, captureUs: captureUs, decodeSeconds: took, ageUs: ageUs,
+                    receivedNs: receivedNs))
         }
         guard st == 0 else { throw BitstreamError("VTDecompressionSessionDecodeFrame(\(number)): \(st)") }
     }
