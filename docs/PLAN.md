@@ -330,7 +330,16 @@ All runs: a throwaway headless Mutter 51.1 on a private D-Bus session, with a GP
   | HEVC 4:2:0 | 1.92 | 2.26 | 2.41 | 2.99 |
   | HEVC 4:4:4 | 3.44 | 3.64 | 4.02 | 9.83 |
 
-  One run each over about 2 s of content, so the p99 and maximum rest on two or three frames. AV1 has the fastest median and the widest tail. The iPad and iPhone are still unmeasured (they need the app).
+  One run each over about 2 s of content, so the p99 and maximum rest on two or three frames. AV1 has the fastest median and the widest tail.
+- **Decode timing on the iPad Pro 13-inch (M5)** (the Mac session's run): the same recordings at 120 fps, three passes each, hardware only, every frame decoded:
+
+  | Mode | Median, ms | p95 | p99 | Max |
+  |---|---|---|---|---|
+  | AV1 4:2:0 | 1.79 | 2.18 | 3.62 | 8.39 |
+  | HEVC 4:2:0 | 1.71 | 1.88 | 3.18 | 6.79 |
+  | HEVC 4:4:4 | 2.82 | 2.96 | 4.40 | 10.05 |
+
+  The maximums include three cold starts. So the iPad decodes every mode, 4:4:4 included, in well under half a frame. The iPhone is still unmeasured.
 - **Signing:** team R82PLAJ45H is a paid team and is the one to use.
 - **Getting files to the Mac:** espalier's file transfer works today (files land in `~/Downloads/Espalier`). The Mac reaches GitHub as xnixy, so a private repository works for code. The Mac can't reach the PC over SSH.
 
@@ -363,10 +372,12 @@ The received streams decode with FFmpeg. Input sent by the test client arrives i
 Known gaps, found by these runs:
 - **The first touch after connecting is lost.** Mutter makes its virtual touchscreen on the first event and drops it. The same happened to the first key, which the agent now works around by spending a do-nothing key at the start. Moving input to libei, as planned, should make both moot.
 - **Typed text outside the keyboard layout doesn't arrive** (é, emoji), because Mutter's keysym call needs a key for it in the current layout. Needs libei's text device once Mutter has it, or a temporary keymap.
-- **The virtual monitor's HiDPI scale isn't set yet.** Mutter takes it as a PipeWire stream tag, which the capture code doesn't send, so the desktop is drawn at scale 1.
+- **HiDPI scale: fixed.** The agent now passes the client's scale to Mutter as a stream tag (`org.gnome.preferred-scale`). At scale 2 a full-screen window on the 2752×2064 monitor is 1376×1032 points and is drawn at twice the size.
 - **One frame gap of 25 to 60 ms per run** shows up around the input demo; not yet explained.
 - **Only the loopback has been measured.** Nothing has crossed a real network, and nothing has been decoded on a device.
 - **Running on the real desktop since 2026-11-17** as a temporary user service (`systemctl --user stop remoteman-agent` ends it; it doesn't survive a reboot). A local connection showed the wallpaper on a new virtual monitor, which went away when the client left. The firewall (ufw) is on, so UDP 7791 may need opening for other machines.
+- **The Mac viewer has shown the real desktop (2026-11-17, the Mac session's report, confirmed in the host's log).** Mac mini to the PC over the tailnet: paired, asked for 2752×1436 at 144 Hz, got AV1 10-bit, decoded in hardware and drawn with Metal. The desktop was still, so only a few frames arrived: frame age at presentation 15 to 35 ms, round trip 0.9 ms, nothing lost. Playing the 4:4:4 recording through the same app showed 118 to 120 fps. The core built for macOS and iOS with no changes. No input has been sent to the real desktop yet; the user allowed it the same day.
+- **The iPad has shown the real desktop too** (the Mac session's report, and the host's trust list has its key): iPad Pro 13-inch (M5) over the tailnet, AV1 10-bit decoded in hardware, picture correct, frame age 17 ms on a still desktop, nothing lost. It asked for 3200×2400 by mistake (the iPad's "More Space" setting); the app now sends the panel's real 2752×2064. The iPhone hasn't connected.
 - **Not built yet from this phase's list:** the cursor channel (the cursor is drawn into the picture), QR pairing (pairing is "first unknown device while `--pair` is on"), the stats overlay, and the iPad app.
 
 ### 2. Mac host
@@ -374,8 +385,14 @@ A Mac host app from espalier's `Screen.swift`, `ScreenEncoder.swift`, `Input.swi
 **Done when:** the iPad app lists both the PC and the Mac and controls either at native resolution and 120 fps, and the Linux test client can control the Mac too (which proves any client works with any host).
 
 ### 3. Linux viewer
-A GTK 4 and libadwaita app in Rust on the shared core: a list of paired hosts, pairing, and the stream in a window or full screen with hardware decode (NVDEC, VA-API or Vulkan through FFmpeg, as espalier's Linux mirror windows do) and no copy to the CPU. Mouse, keyboard and touch go back. It reaches the Linux host and the Mac host alike.
+A GTK 4 and libadwaita app in Rust on the shared core: a list of paired hosts, pairing, and the stream in a window or full screen with hardware decode and no copy to the CPU. Mouse, keyboard and touch go back. It reaches the Linux host and the Mac host alike.
 **Done when:** from another Linux machine, or this one, the viewer controls the PC and the Mac at the window's size and the monitor's refresh rate.
+
+**Status (2026-11-17): it runs, but it is too slow to call done.** `crates/remoteman-viewer` (binary `remoteman`): a connect page, the stream in a window, F11 for full screen, a figures overlay, and mouse, scroll and keys (by position) sent back. Tested with `scripts/e2e-viewer.sh`, the viewer in one throwaway headless Mutter and the host in another:
+- Decoding is on the GPU (NVDEC through FFmpeg): 120 frames a second for AV1 at 2752×2064, none lost, and the saved picture is right.
+- **Showing them is the problem.** Each picture is copied down from the GPU and handed to GTK as planes in memory, which GTK then converts. Only 35 pictures a second get shown with GTK's Vulkan renderer and about 60 with its GL one; 4:4:4 falls behind altogether (89 decoded a second, over a second late).
+- **The first fix tried doesn't work on NVIDIA.** The viewer can now take a Vulkan or VA-API surface as a DMA-BUF and give it to GTK with no copy, which is the path for AMD and Intel (untested: no such machine here). But on NVIDIA (driver 620) FFmpeg's Vulkan decoder exports buffers with no modifier and no plane layout, and GTK refuses them, so NVIDIA stays on NVDEC with the copy. The next thing to try there is what mpv does: share NVDEC's pictures with GTK's OpenGL through CUDA.
+- Not tested: the viewer on the real desktop, against the Mac host (which doesn't exist yet), touch, and input beyond what the test client already proves.
 
 ### 4. Remote login
 `remotemand`, the GDM broker, login screen to session inside one connection, the resume token, unlock and re-lock for attach, the Arch package.
