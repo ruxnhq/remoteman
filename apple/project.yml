@@ -54,6 +54,8 @@ targets:
         NSLocalNetworkUsageDescription: remoteman connects to your PC on the local network to show and control its desktop.
         # 120 Hz on iPhones with ProMotion; iPads need nothing.
         CADisableMinimumFrameDurationOnPhone: true
+        # Clicks and drags from a trackpad or mouse arrive as pointer events, not fake touches.
+        UIApplicationSupportsIndirectInputEvents: true
         UIRequiresFullScreen: true
         UIStatusBarHidden: true
         UIFileSharingEnabled: true

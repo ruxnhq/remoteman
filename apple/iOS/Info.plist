@@ -24,6 +24,8 @@
 	<string>1</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>remoteman connects to your PC on the local network to show and control its desktop.</string>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>UILaunchScreen</key>

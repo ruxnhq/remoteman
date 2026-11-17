@@ -168,16 +168,28 @@ import SwiftUI
 
     struct ViewerRepresentable: NSViewRepresentable {
         let session: ViewerSession
+        var keyboardShown = false
         func makeNSView(context: Context) -> ViewerView { ViewerView(session: session) }
         func updateNSView(_ v: ViewerView, context: Context) {}
     }
 #else
     import UIKit
 
-    final class ViewerView: UIView {
+    final class ViewerView: UIView, UIKeyInput {
         let session: ViewerSession
         private var link: CADisplayLink?
         private var slots: [UITouch: UInt8] = [:]
+        private var pendingPointer: (Float, Float)?
+        private var buttonsDown: [UITouch: UInt8] = [:]
+        private var lastScroll = CGPoint.zero
+
+        /// Whether the on-screen keyboard is up. The view is always first responder (for a
+        /// hardware keyboard); an empty input view stands in for the keyboard while it is hidden.
+        var keyboardShown = false {
+            didSet { if keyboardShown != oldValue { reloadInputViews() } }
+        }
+        private let noKeyboard = UIView()
+        override var inputView: UIView? { keyboardShown ? nil : noKeyboard }
 
         init(session: ViewerSession) {
             self.session = session
@@ -185,6 +197,12 @@ import SwiftUI
             isMultipleTouchEnabled = true
             backgroundColor = .black
             if let l = session.renderer?.layer { layer.addSublayer(l) }
+            // A trackpad or mouse: the pointer hovering, and two-finger or wheel scrolling.
+            addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hover)))
+            let scroll = UIPanGestureRecognizer(target: self, action: #selector(scrolled))
+            scroll.allowedScrollTypesMask = .all
+            scroll.allowedTouchTypes = []
+            addGestureRecognizer(scroll)
         }
 
         required init?(coder: NSCoder) { fatalError() }
@@ -217,15 +235,71 @@ import SwiftUI
             r.setNeedsRedraw()
         }
 
-        @objc private func tick() { session.renderer?.draw() }
+        @objc private func tick() {
+            flushPointer()
+            session.renderer?.draw()
+        }
+
+        // MARK: Pointer (trackpad or mouse)
+
+        private func fraction(_ p: CGPoint) -> (Float, Float)? {
+            guard let r = session.renderer else { return nil }
+            let rect = r.videoRect(in: bounds.size)
+            guard rect.width > 0, rect.height > 0 else { return nil }
+            return (
+                Float(min(max((p.x - rect.minX) / rect.width, 0), 1)),
+                Float(min(max((p.y - rect.minY) / rect.height, 0), 1))
+            )
+        }
+
+        /// Pointer moves are kept to one per refresh, and sent ahead of any click or key.
+        private func flushPointer() {
+            guard let p = pendingPointer else { return }
+            pendingPointer = nil
+            session.input?.pointerTo(x: p.0, y: p.1)
+        }
+
+        @objc private func hover(_ g: UIHoverGestureRecognizer) {
+            if let f = fraction(g.location(in: self)) { pendingPointer = f }
+        }
+
+        @objc private func scrolled(_ g: UIPanGestureRecognizer) {
+            let t = g.translation(in: self)
+            if g.state == .began { lastScroll = .zero }
+            guard g.state == .began || g.state == .changed, let r = session.renderer, let v = r.videoSize else { return }
+            let rect = r.videoRect(in: bounds.size)
+            let k = rect.width > 0 ? v.width / rect.width : 1
+            flushPointer()
+            session.input?.scroll(dx: Float(-(t.x - lastScroll.x) * k), dy: Float(-(t.y - lastScroll.y) * k))
+            lastScroll = t
+        }
+
+        /// A click or drag with a trackpad or mouse arrives as a touch of its own kind.
+        private func pointer(_ t: UITouch, _ event: UIEvent?, phase: UInt8) {
+            if let f = fraction(t.location(in: self)) { pendingPointer = f }
+            flushPointer()
+            switch phase {
+            case 0:
+                let b: UInt8 = event?.buttonMask.contains(.secondary) == true ? 1 : 0
+                buttonsDown[t] = b
+                session.input?.button(b, down: true)
+            case 2:
+                if let b = buttonsDown.removeValue(forKey: t) { session.input?.button(b, down: false) }
+            default: break
+            }
+        }
 
         // MARK: Touch
 
-        private func send(_ touches: Set<UITouch>, phase: UInt8) {
+        private func send(_ touches: Set<UITouch>, _ event: UIEvent?, phase: UInt8) {
             guard let r = session.renderer else { return }
             let rect = r.videoRect(in: bounds.size)
             guard rect.width > 0, rect.height > 0 else { return }
             for t in touches {
+                if t.type == .indirectPointer {
+                    pointer(t, event, phase: phase)
+                    continue
+                }
                 var slot = slots[t]
                 if slot == nil, phase == 0 {
                     slot = (0..<10).first { s in !slots.values.contains(s) }
@@ -240,10 +314,49 @@ import SwiftUI
             }
         }
 
-        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { send(touches, phase: 0) }
-        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { send(touches, phase: 1) }
-        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { send(touches, phase: 2) }
-        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { send(touches, phase: 2) }
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { send(touches, event, phase: 0) }
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { send(touches, event, phase: 1) }
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { send(touches, event, phase: 2) }
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { send(touches, event, phase: 2) }
+
+        // MARK: On-screen keyboard (text goes in as typed; Return and Delete as keys)
+
+        var hasText: Bool { true }
+        var autocorrectionType: UITextAutocorrectionType { get { .no } set {} }
+        var autocapitalizationType: UITextAutocapitalizationType { get { .none } set {} }
+        var spellCheckingType: UITextSpellCheckingType { get { .no } set {} }
+        var smartQuotesType: UITextSmartQuotesType { get { .no } set {} }
+        var smartDashesType: UITextSmartDashesType { get { .no } set {} }
+        var smartInsertDeleteType: UITextSmartInsertDeleteType { get { .no } set {} }
+        var keyboardAppearance: UIKeyboardAppearance { get { .dark } set {} }
+
+        private func tap(_ usage: UInt16) {
+            session.input?.key(usage: usage, down: true)
+            session.input?.key(usage: usage, down: false)
+        }
+
+        func insertText(_ text: String) {
+            flushPointer()
+            // Send runs of plain text as text, and the keys an input method can't express as keys.
+            var run = ""
+            func flush() {
+                if !run.isEmpty { session.input?.text(run) }
+                run = ""
+            }
+            for ch in text {
+                switch ch {
+                case "\n", "\r": flush(); tap(0x28)
+                case "\t": flush(); tap(0x2B)
+                default: run.append(ch)
+                }
+            }
+            flush()
+        }
+
+        func deleteBackward() {
+            flushPointer()
+            tap(0x2A)
+        }
 
         // MARK: Hardware keyboard (a UIKey's code is already the USB HID usage)
 
@@ -251,6 +364,7 @@ import SwiftUI
             var handled = false
             for p in presses {
                 guard let k = p.key else { continue }
+                flushPointer()
                 session.input?.key(usage: UInt16(k.keyCode.rawValue), down: down)
                 handled = true
             }
@@ -270,7 +384,8 @@ import SwiftUI
 
     struct ViewerRepresentable: UIViewRepresentable {
         let session: ViewerSession
+        var keyboardShown = false
         func makeUIView(context: Context) -> ViewerView { ViewerView(session: session) }
-        func updateUIView(_ v: ViewerView, context: Context) {}
+        func updateUIView(_ v: ViewerView, context: Context) { v.keyboardShown = keyboardShown }
     }
 #endif

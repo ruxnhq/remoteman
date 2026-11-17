@@ -5,6 +5,7 @@
 //   --host name[:port]  connect at launch        --pair yes        accept a host not seen before
 //   --play file.rmrec   play a recording          --seconds N       stop after N seconds and quit
 //   --snapshot out.png  save the picture at the end
+//   --script "move:.5,.5;wait:1;shot:a.png"   drive input and take pictures (see runScript)
 //   --view-only yes     send no input            --bench dir       time decode of the .rmrec files there (--exit yes to quit after)
 //   --size WxH --scale S --refresh HZ --decoders av1,hevc444,hevc   override what the hello says
 // Every option takes a value: AppKit reads the arguments too, as "-key value" pairs, and takes
@@ -50,6 +51,7 @@ struct ContentView: View {
     @AppStorage("host") private var host = ""
     @State private var pair = false
     @State private var started = false
+    @State private var keyboardShown = false
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
@@ -62,7 +64,7 @@ struct ContentView: View {
                             .textSelection(.enabled).padding(24).frame(maxWidth: .infinity, alignment: .leading)
                     }
                 } else if session.isActive {
-                    ViewerRepresentable(session: session)
+                    ViewerRepresentable(session: session, keyboardShown: keyboardShown)
                     overlay
                 } else {
                     connectForm(size: geo.size)
@@ -162,7 +164,13 @@ struct ContentView: View {
                 Spacer()
                 HStack(spacing: 6) {
                     Button(session.showStats ? "Hide stats" : "Stats") { session.showStats.toggle() }
-                    Button("Disconnect") { session.disconnect() }
+                    #if os(iOS)
+                        Button(keyboardShown ? "Hide keyboard" : "Keyboard") { keyboardShown.toggle() }
+                    #endif
+                    Button("Disconnect") {
+                        keyboardShown = false
+                        session.disconnect()
+                    }
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -188,6 +196,7 @@ enum Automation {
         var decoders = ViewerSession.decoders
         var bench: String?
         var exitAfter = false
+        var script: String?
         while !args.isEmpty {
             let a = args.removeFirst()
             func value() -> String { args.isEmpty ? "" : args.removeFirst() }
@@ -204,6 +213,7 @@ enum Automation {
             case "--refresh": display.refresh = Int(value()) ?? display.refresh
             case "--decoders": decoders = value()
             case "--view-only": session.viewOnly = ["yes", "1", "true"].contains(value())
+            case "--script": script = value()
             case "--bench": bench = value()
             case "--exit": exitAfter = ["yes", "1", "true"].contains(value())
             default: break
@@ -224,6 +234,10 @@ enum Automation {
             print("remoteman: hello \(display.width)x\(display.height) scale \(display.scale) @\(display.refresh), decoders \(decoders)")
             session.connect(host: host, pair: pair, name: name, display: display, decoders: decoders)
         } else {
+            return
+        }
+        if let script {
+            runScript(script, session: session)
             return
         }
         guard let seconds else { return }
@@ -253,6 +267,66 @@ enum Automation {
             session.disconnect()
             // Give the goodbye a moment to leave.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
+        }
+    }
+
+    /// Drive a session from a script, for testing input against a live host, then leave and quit.
+    /// Steps are separated by ";": move:x,y  down:b  up:b  click:b  scroll:dx,dy  key:usage
+    /// keydown:usage  keyup:usage  text:words  touch:phase,slot,x,y  wait:seconds  shot:file.png
+    static func runScript(_ script: String, session: ViewerSession) {
+        DispatchQueue.global().async {
+            // Wait for the stream and its first picture.
+            for _ in 0..<150 {
+                if session.renderer?.videoSize != nil { break }
+                usleep(100_000)
+            }
+            guard let c = session.client, session.renderer?.videoSize != nil else {
+                print("remoteman: script: no picture, state \(DispatchQueue.main.sync { session.state })")
+                DispatchQueue.main.async {
+                    session.disconnect()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(1) }
+                }
+                return
+            }
+            for step in script.split(separator: ";") {
+                let parts = step.split(separator: ":", maxSplits: 1).map(String.init)
+                let op = parts[0].trimmingCharacters(in: .whitespaces)
+                let arg = parts.count > 1 ? parts[1] : ""
+                let n = arg.split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
+                func usage() -> UInt16 { UInt16(arg.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "0x", with: ""), radix: arg.contains("0x") ? 16 : 10) ?? 0 }
+                switch op {
+                case "move" where n.count == 2: c.pointerTo(x: n[0], y: n[1])
+                case "down" where n.count == 1: c.button(UInt8(n[0]), down: true)
+                case "up" where n.count == 1: c.button(UInt8(n[0]), down: false)
+                case "click" where n.count == 1:
+                    c.button(UInt8(n[0]), down: true)
+                    usleep(60_000)
+                    c.button(UInt8(n[0]), down: false)
+                case "scroll" where n.count == 2: c.scroll(dx: n[0], dy: n[1])
+                case "key":
+                    c.key(usage: usage(), down: true)
+                    usleep(40_000)
+                    c.key(usage: usage(), down: false)
+                case "keydown": c.key(usage: usage(), down: true)
+                case "keyup": c.key(usage: usage(), down: false)
+                case "text": c.text(arg)
+                case "touch" where n.count == 4: c.touch(phase: UInt8(n[0]), slot: UInt8(n[1]), x: n[2], y: n[3])
+                case "wait" where n.count == 1: usleep(UInt32(n[0] * 1_000_000))
+                case "shot":
+                    if let image = session.renderer?.snapshot() {
+                        let ok = writePNG(image, to: resolve(arg))
+                        print("remoteman: shot \(image.width)x\(image.height) \(ok ? "saved to" : "NOT saved to") \(arg)")
+                    } else {
+                        print("remoteman: shot: no picture")
+                    }
+                default: print("remoteman: script: bad step \(step)")
+                }
+            }
+            DispatchQueue.main.async {
+                print("remoteman: script done\n\(session.takeStats().text)")
+                session.disconnect()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
+            }
         }
     }
 
