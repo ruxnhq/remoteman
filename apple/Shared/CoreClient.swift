@@ -1,5 +1,6 @@
 // The Rust client core behind a Swift face. The core owns the connection; this passes its
 // callbacks on and its input calls through.
+import CoreGraphics
 import Foundation
 import RemotemanCore
 
@@ -26,6 +27,11 @@ final class CoreClient {
     var onStream: ((StreamInfo) -> Void)?
     var onFrame: ((UnsafeRawBufferPointer, _ key: Bool, _ number: UInt32, _ captureUs: UInt64, _ ageUs: Int64) -> Void)?
     var onClosed: ((String) -> Void)?
+    /// The host's cursor image (nil: no cursor) and its hotspot, in the host display's pixels.
+    /// Setting this before connecting is what makes the host leave the cursor out of the picture.
+    var onCursorShape: ((CGImage?, _ hotX: Int, _ hotY: Int) -> Void)?
+    /// Where the host's cursor is, as fractions of the display, and whether it is on it.
+    var onCursorAt: ((Float, Float, Bool) -> Void)?
 
     private var handle: OpaquePointer?
     private let lock = NSLock()
@@ -62,7 +68,30 @@ final class CoreClient {
                 guard first else { return }
                 me.onClosed?(reason.map { String(cString: $0) } ?? "closed")
                 Unmanaged<CoreClient>.fromOpaque(ctx!).release()
-            })
+            },
+            on_cursor_shape: client.onCursorShape == nil
+                ? nil
+                : { ctx, rgba, width, height, hotX, hotY in
+                    let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
+                    var image: CGImage?
+                    if let rgba, width > 0, height > 0 {
+                        let data = Data(bytes: rgba, count: Int(width) * Int(height) * 4)
+                        if let provider = CGDataProvider(data: data as CFData) {
+                            image = CGImage(
+                                width: Int(width), height: Int(height), bitsPerComponent: 8, bitsPerPixel: 32,
+                                bytesPerRow: Int(width) * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                                provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+                        }
+                    }
+                    me.onCursorShape?(image, Int(hotX), Int(hotY))
+                },
+            on_cursor_at: client.onCursorAt == nil
+                ? nil
+                : { ctx, x, y, visible in
+                    let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
+                    me.onCursorAt?(x, y, visible != 0)
+                })
         var err = [CChar](repeating: 0, count: 512)
         let h = rm_client_connect(
             c.host, c.stateDir, c.name, c.pair ? 1 : 0, UInt32(c.width), UInt32(c.height), c.scale,

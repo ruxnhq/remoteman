@@ -33,6 +33,19 @@ final class ViewerSession: ObservableObject {
     /// Where input goes: the client, unless the session is view-only.
     var input: CoreClient? { viewOnly ? nil : client }
 
+    /// The host's cursor, sent apart from the picture so the view can draw it at the local
+    /// pointer with no delay. All on the main thread.
+    struct HostCursor {
+        let image: CGImage
+        let hotX: Int
+        let hotY: Int
+    }
+    /// nil until the host has sent a shape; `.some(nil)` when the host has no cursor to show.
+    private(set) var hostCursor: HostCursor??
+    private(set) var hostCursorAt: (x: Float, y: Float, visible: Bool)?
+    var cursorShapeChanged: (() -> Void)?
+    var cursorMoved: ((Float, Float, Bool) -> Void)?
+
     private let pipeLock = NSLock()
     private var decoder: VideoDecoder?
     private var info: StreamInfo?
@@ -90,6 +103,20 @@ final class ViewerSession: ObservableObject {
                     c.onStream = { [weak self] info in self?.streamStarted(info) }
                     c.onFrame = { [weak self] data, key, number, captureUs, ageUs in
                         self?.frame(data, key: key, number: number, captureUs: captureUs, ageUs: ageUs)
+                    }
+                    c.onCursorShape = { [weak self] image, hotX, hotY in
+                        DispatchQueue.main.async {
+                            guard let self, self.generation == gen else { return }
+                            self.hostCursor = .some(image.map { HostCursor(image: $0, hotX: hotX, hotY: hotY) })
+                            self.cursorShapeChanged?()
+                        }
+                    }
+                    c.onCursorAt = { [weak self] x, y, visible in
+                        DispatchQueue.main.async {
+                            guard let self, self.generation == gen else { return }
+                            self.hostCursorAt = (x, y, visible)
+                            self.cursorMoved?(x, y, visible)
+                        }
                     }
                     c.onClosed = { [weak self] reason in
                         DispatchQueue.main.async { self?.closed(reason, generation: gen) }
@@ -174,6 +201,9 @@ final class ViewerSession: ObservableObject {
         pipeLock.unlock()
         d?.invalidate()
         renderer?.clear()
+        hostCursor = nil
+        hostCursorAt = nil
+        cursorShapeChanged?()
     }
 
     // MARK: Pipeline (core or playback thread)

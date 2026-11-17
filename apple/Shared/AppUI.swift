@@ -272,7 +272,7 @@ enum Automation {
 
     /// Drive a session from a script, for testing input against a live host, then leave and quit.
     /// Steps are separated by ";": move:x,y  down:b  up:b  click:b  scroll:dx,dy  key:usage
-    /// keydown:usage  keyup:usage  text:words  touch:phase,slot,x,y  wait:seconds  shot:file.png
+    /// keydown:usage  keyup:usage  text:words  touch:phase,slot,x,y  wait:seconds  shot:file.png  cursor (print the host's)
     static func runScript(_ script: String, session: ViewerSession) {
         DispatchQueue.global().async {
             // Wait for the stream and its first picture.
@@ -312,6 +312,10 @@ enum Automation {
                 case "text": c.text(arg)
                 case "touch" where n.count == 4: c.touch(phase: UInt8(n[0]), slot: UInt8(n[1]), x: n[2], y: n[3])
                 case "wait" where n.count == 1: usleep(UInt32(n[0] * 1_000_000))
+                case "cursor":
+                    let (at, shape) = DispatchQueue.main.sync { (session.hostCursorAt, session.hostCursor) }
+                    let s = shape.map { $0.map { "\($0.image.width)x\($0.image.height) hot \($0.hotX),\($0.hotY)" } ?? "none" } ?? "not sent"
+                    print("remoteman: host cursor at \(at.map { String(format: "%.3f, %.3f visible %@", $0.x, $0.y, $0.visible ? "yes" : "no") } ?? "unknown"), shape \(s)")
                 case "shot":
                     if let image = session.renderer?.snapshot() {
                         let ok = writePNG(image, to: resolve(arg))

@@ -18,6 +18,36 @@ import SwiftUI
             super.init(frame: .zero)
             wantsLayer = true
             layerContentsRedrawPolicy = .never
+            session.cursorShapeChanged = { [weak self] in self?.updateCursor() }
+        }
+
+        // MARK: The host's cursor, as this window's cursor
+
+        private var hostCursor: NSCursor?
+        private static let noCursor: NSCursor = {
+            let image = NSImage(size: NSSize(width: 16, height: 16))
+            return NSCursor(image: image, hotSpot: .zero)
+        }()
+
+        private func updateCursor() {
+            hostCursor = nil
+            if let known = session.hostCursor {
+                if let c = known, let r = session.renderer, let v = r.videoSize, v.width > 0 {
+                    // The image is in the host display's pixels; draw it at the size it has there.
+                    let k = r.videoRect(in: bounds.size).width / v.width
+                    let size = NSSize(width: CGFloat(c.image.width) * k, height: CGFloat(c.image.height) * k)
+                    hostCursor = NSCursor(
+                        image: NSImage(cgImage: c.image, size: size),
+                        hotSpot: NSPoint(x: CGFloat(c.hotX) * k, y: CGFloat(c.hotY) * k))
+                } else {
+                    hostCursor = Self.noCursor
+                }
+            }
+            window?.invalidateCursorRects(for: self)
+        }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: hostCursor ?? .arrow)
         }
 
         required init?(coder: NSCoder) { fatalError() }
@@ -64,11 +94,20 @@ import SwiftUI
             r.layer.contentsScale = scale
             r.layer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
             r.setNeedsRedraw()
+            updateCursor()
         }
+
+        private var cursorVideoSize: CGSize?
 
         @objc private func tick() {
             flushPointer()
             session.renderer?.draw()
+            // The cursor's size follows the picture's, which is known once a frame is in.
+            let v = session.renderer?.videoSize
+            if v != cursorVideoSize {
+                cursorVideoSize = v
+                updateCursor()
+            }
         }
 
         // MARK: Pointer
@@ -203,9 +242,65 @@ import SwiftUI
             scroll.allowedScrollTypesMask = .all
             scroll.allowedTouchTypes = []
             addGestureRecognizer(scroll)
-            // The host draws its own cursor into the picture, so the iPad's pointer is hidden
-            // over the stream: one cursor, not two.
+            // The iPad's own pointer is hidden over the stream; the host's cursor is drawn in
+            // its place, at the pointer's position (see below).
             addInteraction(UIPointerInteraction(delegate: self))
+            cursorView.isHidden = true
+            cursorView.isUserInteractionEnabled = false
+            addSubview(cursorView)
+            session.cursorShapeChanged = { [weak self] in self?.updateCursorShape() }
+            session.cursorMoved = { [weak self] x, y, visible in self?.hostMovedCursor(x: x, y: y, visible: visible) }
+        }
+
+        // MARK: The host's cursor, drawn here at the local pointer
+
+        private let cursorView = UIImageView()
+        private var cursorHot = CGPoint.zero
+        private var pointerAt: CGPoint?
+        private var lastLocalMove: CFTimeInterval = 0
+
+        private func updateCursorShape() {
+            guard let known = session.hostCursor, let c = known, let r = session.renderer, let v = r.videoSize,
+                v.width > 0
+            else {
+                cursorView.image = nil
+                cursorView.isHidden = true
+                return
+            }
+            let k = r.videoRect(in: bounds.size).width / v.width
+            cursorView.image = UIImage(cgImage: c.image)
+            cursorView.bounds = CGRect(x: 0, y: 0, width: CGFloat(c.image.width) * k, height: CGFloat(c.image.height) * k)
+            cursorHot = CGPoint(x: CGFloat(c.hotX) * k, y: CGFloat(c.hotY) * k)
+            placeCursor()
+        }
+
+        private func placeCursor() {
+            guard let p = pointerAt, cursorView.image != nil else {
+                cursorView.isHidden = true
+                return
+            }
+            let size = cursorView.bounds.size
+            cursorView.center = CGPoint(x: p.x - cursorHot.x + size.width / 2, y: p.y - cursorHot.y + size.height / 2)
+            cursorView.isHidden = false
+        }
+
+        private func localPointer(at p: CGPoint?) {
+            pointerAt = p
+            lastLocalMove = CACurrentMediaTime()
+            placeCursor()
+        }
+
+        /// The host's own report of where its cursor is. It echoes our moves a pipeline's delay
+        /// later, so it only counts when the local pointer has been still (the host moved it).
+        private func hostMovedCursor(x: Float, y: Float, visible: Bool) {
+            guard CACurrentMediaTime() - lastLocalMove > 0.3, let r = session.renderer else { return }
+            if !visible {
+                pointerAt = nil
+            } else {
+                let rect = r.videoRect(in: bounds.size)
+                pointerAt = CGPoint(x: rect.minX + CGFloat(x) * rect.width, y: rect.minY + CGFloat(y) * rect.height)
+            }
+            placeCursor()
         }
 
         func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
@@ -240,11 +335,20 @@ import SwiftUI
             r.layer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
             CATransaction.commit()
             r.setNeedsRedraw()
+            updateCursorShape()
         }
+
+        private var cursorVideoSize: CGSize?
 
         @objc private func tick() {
             flushPointer()
             session.renderer?.draw()
+            // The cursor's size follows the picture's, which is known once a frame is in.
+            let v = session.renderer?.videoSize
+            if v != cursorVideoSize {
+                cursorVideoSize = v
+                updateCursorShape()
+            }
         }
 
         // MARK: Pointer (trackpad or mouse)
@@ -269,7 +373,13 @@ import SwiftUI
         /// Hover events already come at most once per refresh, so they go straight out; waiting
         /// for the next display tick would only add delay to the host's cursor.
         @objc private func hover(_ g: UIHoverGestureRecognizer) {
-            guard let f = fraction(g.location(in: self)) else { return }
+            let p = g.location(in: self)
+            if g.state == .ended || g.state == .cancelled {
+                localPointer(at: nil)
+                return
+            }
+            guard let f = fraction(p) else { return }
+            localPointer(at: p)
             pendingPointer = nil
             session.input?.pointerTo(x: f.0, y: f.1)
         }
@@ -287,6 +397,7 @@ import SwiftUI
 
         /// A click or drag with a trackpad or mouse arrives as a touch of its own kind.
         private func pointer(_ t: UITouch, _ event: UIEvent?, phase: UInt8) {
+            localPointer(at: t.location(in: self))
             if let f = fraction(t.location(in: self)) { pendingPointer = f }
             flushPointer()
             switch phase {
