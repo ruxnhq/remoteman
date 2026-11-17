@@ -388,10 +388,20 @@ A Mac host app from espalier's `Screen.swift`, `ScreenEncoder.swift`, `Input.swi
 A GTK 4 and libadwaita app in Rust on the shared core: a list of paired hosts, pairing, and the stream in a window or full screen with hardware decode and no copy to the CPU. Mouse, keyboard and touch go back. It reaches the Linux host and the Mac host alike.
 **Done when:** from another Linux machine, or this one, the viewer controls the PC and the Mac at the window's size and the monitor's refresh rate.
 
-**Status (2026-11-17): it runs, but it is too slow to call done.** `crates/remoteman-viewer` (binary `remoteman`): a connect page, the stream in a window, F11 for full screen, a figures overlay, and mouse, scroll and keys (by position) sent back. Tested with `scripts/e2e-viewer.sh`, the viewer in one throwaway headless Mutter and the host in another:
-- Decoding is on the GPU (NVDEC through FFmpeg): 120 frames a second for AV1 at 2752×2064, none lost, and the saved picture is right.
-- **Showing them is the problem.** Each picture is copied down from the GPU and handed to GTK as planes in memory, which GTK then converts. Only 35 pictures a second get shown with GTK's Vulkan renderer and about 60 with its GL one; 4:4:4 falls behind altogether (89 decoded a second, over a second late).
-- **The first fix tried doesn't work on NVIDIA.** The viewer can now take a Vulkan or VA-API surface as a DMA-BUF and give it to GTK with no copy, which is the path for AMD and Intel (untested: no such machine here). But on NVIDIA (driver 620) FFmpeg's Vulkan decoder exports buffers with no modifier and no plane layout, and GTK refuses them, so NVIDIA stays on NVDEC with the copy. The next thing to try there is what mpv does: share NVDEC's pictures with GTK's OpenGL through CUDA.
+**Status (2026-11-17): it runs at speed on NVIDIA with no picture in CPU memory.** `crates/remoteman-viewer` (binary `remoteman`): a connect page, the stream in a window, F11 for full screen, a figures overlay, and mouse, scroll and keys (by position) sent back. Tested with `scripts/e2e-viewer.sh`, the viewer in one throwaway headless Mutter and the host in another, at 2752×2064 and 120 Hz:
+
+| Mode | Decoded a second | Drawn a second | Picture age when decoded, ms | Lost |
+|---|---|---|---|---|
+| AV1 4:2:0 | 120 | 110 | 3.5 | 0 |
+| HEVC 4:4:4 | 120 | 107 to 109 | 7 | 0 |
+| HEVC 4:2:0 | 120 | 104 to 110 | 4.7 | 0 |
+
+- **How the picture gets to the screen, by GPU:**
+  - *NVIDIA:* NVDEC decodes into CUDA memory; each plane is transferred on the GPU into an OpenGL texture (CUDA's GL interop, as mpv does) and a shader converts and draws it in a GTK GL widget. No CPU copy; one GPU-to-GPU transfer. A snapshot read back from the widget is correct.
+  - *AMD and Intel:* a VA-API (or Vulkan) surface is handed to GTK as a DMA-BUF, with no transfer at all. Written, untested: no such machine here.
+  - *Last resort:* copying the picture down through CPU memory. The overlay then says so in capitals. Measured for comparison: 35 drawn a second.
+- **Why not the DMA-BUF route on NVIDIA:** on driver 620 FFmpeg's Vulkan decoder exports buffers with no modifier and no plane layout, and GTK refuses them.
+- **About 110 drawn, not 120:** in the test the viewer's window lives in a headless compositor; whether the shortfall is that compositor's pacing or the viewer isn't known until it runs on a real monitor.
 - Not tested: the viewer on the real desktop, against the Mac host (which doesn't exist yet), touch, and input beyond what the test client already proves.
 
 ### 4. Remote login

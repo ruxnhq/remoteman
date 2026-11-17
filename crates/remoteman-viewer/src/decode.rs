@@ -1,10 +1,13 @@
 //! Decoding with FFmpeg's libavcodec on the GPU (Vulkan Video, VA-API or NVDEC), falling back to
 //! the CPU.
 //!
-//! The fast path never brings a picture to CPU memory: a Vulkan or VA-API surface is handed out
-//! as a DMA-BUF, which GTK takes as a texture as it is. Where that isn't possible (NVDEC, the
-//! CPU, or a GTK that refuses the buffer), the picture is copied down into planes that GTK
-//! uploads and converts itself, which is much slower.
+//! A picture never comes to CPU memory unless there is no other way:
+//! - NVDEC pictures stay in CUDA memory; the window transfers them on the GPU into OpenGL
+//!   textures and draws them (`shim/glview.c`).
+//! - Vulkan and VA-API surfaces are handed out as DMA-BUFs, which GTK takes as textures as they
+//!   are.
+//! - Only when neither works (a software decoder, or the GPU path failing) is the picture copied
+//!   down into planes for GTK to upload, which is far slower and is reported as such.
 
 use std::ffi::CStr;
 use std::ptr;
@@ -45,6 +48,18 @@ pub enum Pixels {
         data: Vec<u8>,
         /// Where each plane starts in `data`, and its bytes per row.
         planes: Vec<(usize, usize)>,
+    },
+    /// Still on the GPU, in CUDA memory (NVDEC).
+    Cuda {
+        /// 0: NV12, 1: P010, 2: three 16-bit planes (4:4:4). As `shim/glview.c` numbers them.
+        layout: i32,
+        /// The decoder's CUDA context, as an address.
+        context: usize,
+        /// Each plane's CUDA pointer and bytes per row.
+        data: [u64; 3],
+        pitch: [i32; 3],
+        /// Keeps the surface (and the decoder's device) alive.
+        hold: Surface,
     },
     /// Still on the GPU, as a DMA-BUF.
     Dmabuf {
@@ -150,6 +165,8 @@ pub struct Decoder {
     download: Video,
     /// Hand surfaces out as DMA-BUFs (until that fails once).
     export: bool,
+    /// Leave NVDEC pictures in CUDA memory for the window to draw (until that fails once).
+    gpu: bool,
     /// e.g. "av1 (vulkan)".
     pub name: String,
 }
@@ -178,12 +195,44 @@ impl Decoder {
             None => format!("{} (cpu)", found.name()),
         };
         let decoder = ctx.decoder().video().context("open decoder")?;
-        Ok(Self { decoder, _hw: hw.map(|(d, _)| d), frame: Video::empty(), download: Video::empty(), export: std::env::var("REMOTEMAN_DMABUF").as_deref() != Ok("0"), name })
+        Ok(Self { decoder, _hw: hw.map(|(d, _)| d), frame: Video::empty(), download: Video::empty(), export: std::env::var("REMOTEMAN_DMABUF").as_deref() != Ok("0"), gpu: std::env::var("REMOTEMAN_GL").as_deref() != Ok("0"), name })
     }
 
-    /// Stop handing out DMA-BUFs (GTK refused one) and copy pictures down from now on.
+    /// Stop handing out GPU pictures (the window couldn't take one) and copy them down from now on.
     pub fn stop_exporting(&mut self) {
         self.export = false;
+        self.gpu = false;
+    }
+
+    /// The NVDEC picture in `self.frame`, left where it is.
+    fn cuda_surface(&self) -> Option<Pixels> {
+        // SAFETY: `self.frame` is a valid CUDA frame, so its frames and device contexts exist;
+        // a CUDA device context starts with its CUcontext.
+        unsafe {
+            let src = self.frame.as_ptr();
+            if (*src).hw_frames_ctx.is_null() {
+                return None;
+            }
+            let frames = (*(*src).hw_frames_ctx).data as *const ffi::AVHWFramesContext;
+            let layout = match (*frames).sw_format {
+                ffi::AVPixelFormat::AV_PIX_FMT_NV12 => 0,
+                ffi::AVPixelFormat::AV_PIX_FMT_P010LE => 1,
+                ffi::AVPixelFormat::AV_PIX_FMT_YUV444P16LE | ffi::AVPixelFormat::AV_PIX_FMT_YUV444P10MSBLE => 2,
+                _ => return None,
+            };
+            let context = *((*(*frames).device_ctx).hwctx as *const usize);
+            let hold = ffi::av_frame_clone(src);
+            if hold.is_null() {
+                return None;
+            }
+            let planes = if layout == 2 { 3 } else { 2 };
+            let (mut data, mut pitch) = ([0u64; 3], [0i32; 3]);
+            for i in 0..planes {
+                data[i] = (*src).data[i] as u64;
+                pitch[i] = (*src).linesize[i];
+            }
+            Some(Pixels::Cuda { layout, context, data, pitch, hold: Surface(hold) })
+        }
     }
 
     /// The surface in `self.frame` as a DMA-BUF, if this GPU and format allow it.
@@ -259,6 +308,12 @@ impl Decoder {
             match self.export_surface() {
                 Some(pixels) => return Ok(Some(Picture { width: frame.width(), height: frame.height(), pixels })),
                 None => self.export = false,
+            }
+        }
+        if self.gpu && frame.format() == Pixel::CUDA {
+            match self.cuda_surface() {
+                Some(pixels) => return Ok(Some(Picture { width: frame.width(), height: frame.height(), pixels })),
+                None => self.gpu = false,
             }
         }
         if matches!(frame.format(), Pixel::CUDA | Pixel::VAAPI | Pixel::VULKAN) {

@@ -1354,6 +1354,7 @@ name = "remoteman-viewer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cc",
  "ffmpeg-next",
  "gtk4",
  "libadwaita",
