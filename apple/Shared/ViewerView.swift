@@ -175,7 +175,7 @@ import SwiftUI
 #else
     import UIKit
 
-    final class ViewerView: UIView, UIKeyInput {
+    final class ViewerView: UIView, UIKeyInput, UIPointerInteractionDelegate {
         let session: ViewerSession
         private var link: CADisplayLink?
         private var slots: [UITouch: UInt8] = [:]
@@ -203,6 +203,13 @@ import SwiftUI
             scroll.allowedScrollTypesMask = .all
             scroll.allowedTouchTypes = []
             addGestureRecognizer(scroll)
+            // The host draws its own cursor into the picture, so the iPad's pointer is hidden
+            // over the stream: one cursor, not two.
+            addInteraction(UIPointerInteraction(delegate: self))
+        }
+
+        func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
+            .hidden()
         }
 
         required init?(coder: NSCoder) { fatalError() }
@@ -259,8 +266,12 @@ import SwiftUI
             session.input?.pointerTo(x: p.0, y: p.1)
         }
 
+        /// Hover events already come at most once per refresh, so they go straight out; waiting
+        /// for the next display tick would only add delay to the host's cursor.
         @objc private func hover(_ g: UIHoverGestureRecognizer) {
-            if let f = fraction(g.location(in: self)) { pendingPointer = f }
+            guard let f = fraction(g.location(in: self)) else { return }
+            pendingPointer = nil
+            session.input?.pointerTo(x: f.0, y: f.1)
         }
 
         @objc private func scrolled(_ g: UIPanGestureRecognizer) {
