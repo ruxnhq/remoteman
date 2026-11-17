@@ -1,0 +1,44 @@
+#version 450
+// RGB (as the compositor painted it, BT.709 primaries, gamma-encoded) to 10-bit limited-range
+// BT.709 Y'CbCr, written straight into the encoder's input buffer.
+//
+// One invocation handles a 2x2 block of pixels. The buffer holds 16-bit samples, 10 bits in the
+// high end, as NVENC wants them; two samples are packed into each 32-bit word so no 16-bit
+// storage extension is needed (widths are even).
+//   mode 0: P010. A Y plane, then one plane of interleaved Cb,Cr at half size.
+//   mode 1: 4:4:4. Y, Cb and Cr planes, all full size.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D src;
+layout(std430, set = 0, binding = 1) writeonly buffer Out { uint d[]; } o;
+layout(push_constant) uniform Params { uint width; uint height; uint pitch_words; uint mode; } pc;
+
+vec3 ycc(vec3 rgb) {
+    float y = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+    return vec3(y, (rgb.b - y) / 1.8556, (rgb.r - y) / 1.5748);
+}
+uint qy(float y) { return uint(clamp(64.0 + 876.0 * y + 0.5, 0.0, 1023.0)) << 6; }
+uint qc(float c) { return uint(clamp(512.0 + 896.0 * c + 0.5, 0.0, 1023.0)) << 6; }
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy) * 2;
+    if (uint(p.x) >= pc.width || uint(p.y) >= pc.height) return;
+    vec3 a = ycc(texelFetch(src, p, 0).rgb);
+    vec3 b = ycc(texelFetch(src, p + ivec2(1, 0), 0).rgb);
+    vec3 c = ycc(texelFetch(src, p + ivec2(0, 1), 0).rgb);
+    vec3 d = ycc(texelFetch(src, p + ivec2(1, 1), 0).rgb);
+    uint col = gl_GlobalInvocationID.x;
+    uint row0 = uint(p.y) * pc.pitch_words + col;
+    uint row1 = row0 + pc.pitch_words;
+    o.d[row0] = qy(a.x) | (qy(b.x) << 16);
+    o.d[row1] = qy(c.x) | (qy(d.x) << 16);
+    uint plane = pc.height * pc.pitch_words;
+    if (pc.mode == 0u) {
+        vec2 m = (a.yz + b.yz + c.yz + d.yz) * 0.25;
+        o.d[plane + gl_GlobalInvocationID.y * pc.pitch_words + col] = qc(m.x) | (qc(m.y) << 16);
+    } else {
+        o.d[plane + row0] = qc(a.y) | (qc(b.y) << 16);
+        o.d[plane + row1] = qc(c.y) | (qc(d.y) << 16);
+        o.d[2u * plane + row0] = qc(a.z) | (qc(b.z) << 16);
+        o.d[2u * plane + row1] = qc(c.z) | (qc(d.z) << 16);
+    }
+}

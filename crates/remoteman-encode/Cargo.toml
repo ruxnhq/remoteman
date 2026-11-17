@@ -1,0 +1,13 @@
+[package]
+name = "remoteman-encode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# NVENC through NVIDIA's own API, fed from memory Vulkan wrote.
+[dependencies]
+anyhow = "1"
+
+[build-dependencies]
+cc = "1"

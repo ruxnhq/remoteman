@@ -12,7 +12,7 @@ exec dbus-run-session -- sh -c '
   python3 "$RM_HERE/virtual_monitor.py" >"$fifo" &
   ppid=$!
   read node <"$fifo"; rm -f "$fifo"
-  ( sleep 1.5; exec env -u DISPLAY WAYLAND_DISPLAY=rm-spike GDK_BACKEND=wayland python3 "$RM_HERE/animate.py" >"${RM_CUBE_LOG:-/dev/null}" 2>&1 ) &
+  ( sleep 1.5; exec env -u DISPLAY WAYLAND_DISPLAY=rm-spike GDK_BACKEND=wayland python3 "$RM_HERE/../../scripts/animate.py" >"${RM_CUBE_LOG:-/dev/null}" 2>&1 ) &
   cpid=$!
   "$RM_HERE/../capture-spike/target/release/capture-spike" $node $RM_ARGS 2>&1
   rc=$?

@@ -1,0 +1,18 @@
+[package]
+name = "remoteman-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The client role of the shared core: connect to a host, hand over the stream frame by frame,
+# send input. A Rust API, and the same thing as a C interface (include/remoteman_core.h) for
+# Swift and other languages.
+[lib]
+crate-type = ["lib", "staticlib"]
+
+[dependencies]
+remoteman-proto = { path = "../remoteman-proto" }
+remoteman-transport = { path = "../remoteman-transport" }
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

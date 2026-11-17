@@ -1,0 +1,12 @@
+[package]
+name = "remoteman-testclient"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# A client with no screen, on the same core the apps use: connects to a host, takes the stream, measures it, and can save it
+# and send input. For testing hosts without an iPad in hand.
+[dependencies]
+remoteman-core = { path = "../remoteman-core" }
+anyhow = "1"

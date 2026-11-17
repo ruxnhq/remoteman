@@ -1,0 +1,21 @@
+[package]
+name = "remoteman-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The Linux host: runs in a graphical session, gives a client a virtual monitor, streams it and
+# takes the client's input. For now it also listens itself ("standalone"); the system daemon
+# that will own the port comes with remote login.
+[dependencies]
+remoteman-proto = { path = "../remoteman-proto" }
+remoteman-transport = { path = "../remoteman-transport" }
+remoteman-capture = { path = "../remoteman-capture" }
+remoteman-gpu = { path = "../remoteman-gpu" }
+remoteman-encode = { path = "../remoteman-encode" }
+remoteman-desktop = { path = "../remoteman-desktop" }
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"

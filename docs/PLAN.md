@@ -318,8 +318,36 @@ All runs: a throwaway headless Mutter 51.1 on a private D-Bus session, with a GP
 Stray effects of the runs: the stock `es2gears_wayland` and `eglgears_wayland` crash inside headless Mutter (two core dumps were left in the system journal), and `vkcube` stops animating after a few seconds there, so neither is usable as test content.
 
 ### 1. Walking skeleton (attach, standalone agent, LAN)
-A virtual monitor through Mutter's API, the spike's capture, Vulkan pass and direct NVENC (HEVC or AV1, 10-bit 4:2:0), QUIC with datagrams and nothing cleverer than a keyframe request, touch and hardware keyboard and pointer through libei, the cursor channel, QR pairing, the stats overlay. The Linux test client and the iPad app.
+A virtual monitor through Mutter's API, the spike's capture, Vulkan pass and direct NVENC (HEVC or AV1, 10-bit 4:2:0 or 4:4:4), QUIC with datagrams and nothing cleverer than a keyframe request, input, pairing, the stats overlay. The Linux test client and the iPad app.
 **Done when:** the desktop is usable from the iPad at native resolution and 120 fps, with capture-to-present at 25 ms or less (95th percentile) on the LAN.
+
+**Status (2026-11-17): the PC half runs end to end; the app isn't started.**
+
+Built, in `crates/`:
+- `remoteman-proto`, `remoteman-transport`: the wire format of `docs/PROTOCOL.md` and QUIC with both sides pinned by certificate fingerprint. 14 tests, including a loopback run where an unpaired device is refused.
+- `remoteman-capture`, `remoteman-gpu`, `remoteman-encode`: the spike's pipeline as crates.
+- `remoteman-desktop`: the GNOME backend (virtual monitor and input through Mutter's D-Bus).
+- `remoteman-agent`: the Linux host, standalone. One client at a time; a new one takes over.
+- `remoteman-core`: the client role of the shared core, as a Rust API and a C interface (`include/remoteman_core.h`, `libremoteman_core.a`) for Swift.
+- `remoteman-testclient`: a client with no screen, on that same core.
+
+Measured with `scripts/e2e.sh` (agent and test client on the loopback, inside a throwaway headless Mutter, 2752×2064 at 120 Hz, 10 s):
+
+| Mode | Rate | Lost frames | Capture to received, ms (median / p95) |
+|---|---|---|---|
+| AV1 4:2:0 | 119 to 120 fps | 0 | 2.0 / 2.1 |
+| HEVC 4:2:0 | 119.5 to 120 fps | 0 | 3.3 / 4.2 |
+| HEVC 4:4:4 | 119.7 to 120 fps | 0 | 5.1 / 6.8 |
+
+The received streams decode with FFmpeg. Input sent by the test client arrives in a window on the virtual monitor: pointer moves, a click, keys by position, plain typed text, scrolling and a touch.
+
+Known gaps, found by these runs:
+- **The first touch after connecting is lost.** Mutter makes its virtual touchscreen on the first event and drops it. The same happened to the first key, which the agent now works around by spending a do-nothing key at the start. Moving input to libei, as planned, should make both moot.
+- **Typed text outside the keyboard layout doesn't arrive** (é, emoji), because Mutter's keysym call needs a key for it in the current layout. Needs libei's text device once Mutter has it, or a temporary keymap.
+- **The virtual monitor's HiDPI scale isn't set yet.** Mutter takes it as a PipeWire stream tag, which the capture code doesn't send, so the desktop is drawn at scale 1.
+- **One frame gap of 25 to 60 ms per run** shows up around the input demo; not yet explained.
+- **Only the loopback has been measured.** Nothing has crossed a real network, and nothing has been decoded on a device.
+- **Not built yet from this phase's list:** the cursor channel (the cursor is drawn into the picture), QR pairing (pairing is "first unknown device while `--pair` is on"), the stats overlay, and the iPad app.
 
 ### 2. Mac host
 A Mac host app from espalier's `Screen.swift`, `ScreenEncoder.swift`, `Input.swift`, `Cursor.swift` and the virtual display shim, with the Rust core's host role in place of the bridge's TCP records. The same iPad app connects to it with nothing Mac-specific in it. Built by the Mac session; the Linux session supplies the core's host interface for Swift.
