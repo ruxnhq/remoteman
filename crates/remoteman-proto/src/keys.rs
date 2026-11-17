@@ -67,6 +67,12 @@ pub fn hid_to_linux(usage: u16) -> Option<u16> {
     })
 }
 
+/// The HID keyboard usage for a Linux `KEY_*` code, if there is one (for clients on Linux).
+pub fn linux_to_hid(code: u16) -> Option<u16> {
+    // 0x32 (non-US #) shares a Linux code with backslash; the search finds backslash first.
+    (0x04..=0xE7).find(|&usage| hid_to_linux(usage) == Some(code))
+}
+
 #[cfg(test)]
 mod tests {
     use super::hid_to_linux;
@@ -82,5 +88,9 @@ mod tests {
         assert_eq!(hid_to_linux(0x52), Some(103)); // Up
         assert_eq!(hid_to_linux(0xE3), Some(125)); // Super
         assert_eq!(hid_to_linux(0x00), None);
+        assert_eq!(super::linux_to_hid(30), Some(0x04));
+        assert_eq!(super::linux_to_hid(43), Some(0x31));
+        assert_eq!(super::linux_to_hid(125), Some(0xE3));
+        assert_eq!(super::linux_to_hid(0), None);
     }
 }

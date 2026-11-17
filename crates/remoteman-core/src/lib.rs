@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 pub use remoteman_proto::control::{Chroma, Codec, Display, Mode};
 use remoteman_proto::control::Message;
 pub use remoteman_proto::input::{Button, Event, TouchPhase};
+pub use remoteman_proto::keys;
 use remoteman_proto::video::Reassembler;
 pub use remoteman_proto::video::Frame;
 use remoteman_transport::{Connection, Endpoint, Expect, Identity, connect, read_message, write_message};
