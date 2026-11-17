@@ -2,10 +2,12 @@
 // with a stats overlay. The same code on both.
 //
 // For unattended runs the app also takes arguments:
-//   --host name[:port]  connect at launch        --pair            accept a host not seen before
+//   --host name[:port]  connect at launch        --pair yes        accept a host not seen before
 //   --play file.rmrec   play a recording          --seconds N       stop after N seconds and quit
 //   --snapshot out.png  save the picture at the end
 //   --size WxH --scale S --refresh HZ --decoders av1,hevc444,hevc   override what the hello says
+// Every option takes a value: AppKit reads the arguments too, as "-key value" pairs, and takes
+// a word left over for a document to open, which keeps the window from appearing.
 import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
@@ -19,6 +21,12 @@ import UniformTypeIdentifiers
 @main
 struct RemotemanApp: App {
     @StateObject private var session = ViewerSession()
+
+    init() {
+        // Unattended runs end with exit(); without this the next launch stops at "reopen windows?".
+        UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true, "NSQuitAlwaysKeepsWindows": false])
+        setvbuf(stdout, nil, _IOLBF, 0)
+    }
 
     var body: some Scene {
         #if os(macOS)
@@ -173,7 +181,7 @@ enum Automation {
             case "--play": play = value()
             case "--snapshot": snapshot = value()
             case "--seconds": seconds = Double(value())
-            case "--pair": pair = true
+            case "--pair": pair = ["yes", "1", "true"].contains(value())
             case "--size":
                 let p = value().lowercased().split(separator: "x").compactMap { Int($0) }
                 if p.count == 2 { display.width = p[0]; display.height = p[1] }
