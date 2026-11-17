@@ -7,8 +7,18 @@
 //!     --refresh HZ       its refresh rate (default 120)
 //!     --decoders LIST    in order of preference, from av1, hevc444, hevc (default av1,hevc444,hevc)
 //!     --seconds N        how long to run (default 10)
-//!     --out FILE         save the video stream
+//!     --out FILE         save the video stream, bare (playable by FFmpeg)
+//!     --record FILE      save what the app would be handed, frame by frame (format below)
 //!     --input-demo       move the pointer, click, type and touch while running
+
+//!
+//! A recording (`--record`) is for testing decoders without a host. It is:
+//!   the line `RMREC1`, then one line of JSON, the stream description:
+//!     {"codec":"av1"|"hevc","chroma":"420"|"444","depth":10,"width":W,"height":H,"refresh":HZ,"colour":"bt709"}
+//!   then, for every frame in order, little-endian:
+//!     u32 length of the data, u8 keyframe (1 or 0), u32 frame number, u64 capture time in
+//!     microseconds on the host's clock, and the data (HEVC Annex-B, or AV1 OBUs).
+//! The first frame is always a keyframe.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -34,17 +44,35 @@ struct Seen {
 struct Watcher {
     seen: Arc<Mutex<Seen>>,
     file: Option<std::fs::File>,
+    record: Option<std::fs::File>,
     warm: Instant,
 }
 
 impl Handler for Watcher {
     fn stream(&mut self, s: &StreamInfo) {
         println!("stream: {:?} {:?} {}-bit, {}x{} at {} Hz, {}", s.mode.codec, s.mode.chroma, s.mode.depth, s.width, s.height, s.refresh, s.colour);
+        if let Some(f) = self.record.as_mut() {
+            let codec = if s.mode.codec == Codec::Av1 { "av1" } else { "hevc" };
+            let chroma = if s.mode.chroma == Chroma::C444 { "444" } else { "420" };
+            let _ = writeln!(
+                f,
+                "RMREC1\n{{\"codec\":\"{codec}\",\"chroma\":\"{chroma}\",\"depth\":{},\"width\":{},\"height\":{},\"refresh\":{},\"colour\":\"{}\"}}",
+                s.mode.depth, s.width, s.height, s.refresh, s.colour
+            );
+        }
     }
 
     fn frame(&mut self, frame: &Frame, age_us: Option<i64>) {
         if let Some(f) = self.file.as_mut() {
             let _ = f.write_all(&frame.data);
+        }
+        if let Some(f) = self.record.as_mut() {
+            let mut head = Vec::with_capacity(17);
+            head.extend_from_slice(&(frame.data.len() as u32).to_le_bytes());
+            head.push(frame.key as u8);
+            head.extend_from_slice(&frame.number.to_le_bytes());
+            head.extend_from_slice(&frame.capture_us.to_le_bytes());
+            let _ = f.write_all(&head).and_then(|()| f.write_all(&frame.data));
         }
         if Instant::now() < self.warm {
             return;
@@ -68,7 +96,7 @@ fn main() -> Result<()> {
     let host = args.next().context("usage: remoteman-testclient HOST:PORT [options]")?;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let (mut state, mut pair, mut size, mut scale, mut refresh, mut secs) = (home.join(".local/state/remoteman"), false, (2752u32, 2064u32), 2.0f32, 120u32, 10u64);
-    let (mut out, mut demo, mut decoders) = (None::<PathBuf>, false, "av1,hevc444,hevc".to_owned());
+    let (mut out, mut record, mut demo, mut decoders) = (None::<PathBuf>, None::<PathBuf>, false, "av1,hevc444,hevc".to_owned());
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -84,6 +112,7 @@ fn main() -> Result<()> {
             "--seconds" => secs = value()?.parse()?,
             "--decoders" => decoders = value()?,
             "--out" => out = Some(value()?.into()),
+            "--record" => record = Some(value()?.into()),
             "--input-demo" => demo = true,
             other => bail!("unknown option {other}"),
         }
@@ -106,7 +135,11 @@ fn main() -> Result<()> {
         None => None,
     };
     let seen = Arc::new(Mutex::new(Seen::default()));
-    let watcher = Watcher { seen: seen.clone(), file, warm: Instant::now() + Duration::from_secs(2) };
+    let record = match &record {
+        Some(p) => Some(std::fs::File::create(p).with_context(|| format!("create {}", p.display()))?),
+        None => None,
+    };
+    let watcher = Watcher { seen: seen.clone(), file, record, warm: Instant::now() + Duration::from_secs(2) };
     let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh }, decoders };
     let client = Client::connect(options, watcher)?;
     println!("host: {} ({}), features {:?}, fingerprint {}", client.host_name, client.host_os, client.host_features, &client.host_fingerprint[..12]);
