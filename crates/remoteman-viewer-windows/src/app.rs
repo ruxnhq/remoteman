@@ -1,0 +1,1394 @@
+//! The app: what is on the window now, what each press does to that, and connecting.
+//!
+//! The window (`window.rs`) hands every event here, to the main thread's one `App`. A press on
+//! a control arrives as the [`Msg`] the control was described with, and [`App::update`] changes
+//! the state; after that the whole window is described again (`pages.rs` and `session.rs`
+//! do the describing) and handed to the draw thread. What only the window itself can do
+//! (minimise, full screen, close) goes back to it as an [`Effect`].
+
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
+
+use remoteman_core::{Client, Display, Event, Message, Mode, Options, Placement, keys};
+
+use crate::args::Args;
+use crate::features::FEATURES;
+use crate::gpu::Gpu;
+use crate::status::{self, Problem, Reach};
+use crate::store::{Quality, Store, host_part, short, with_port};
+use crate::stream::{Scene, Shared, unpack};
+use crate::ui::{self, Field, Fonts, Frame, Id, Input, Kind, Rect, Region, Ui, id, theme};
+
+/// A computer to connect to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Target {
+    /// `host:port`.
+    pub address: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Screen {
+    Computers,
+    Connecting,
+    Problem(Target, Problem),
+    Session,
+    Settings,
+    /// The settings of the computer at this address.
+    Computer(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dialog {
+    /// `waiting`: who is being waited for; `problem`: what came of the last try.
+    Pair { waiting: Option<String>, problem: Option<String> },
+    /// Both sides show a code. Nothing produces one yet (`Features::pairing_code`).
+    Code { name: String, code: String, left: u32 },
+    Paired { target: Target, key: String },
+    Forget(String),
+    Address { address: String, problem: Option<String> },
+    About,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MenuKind {
+    /// The "more" of one computer's card.
+    Card(String),
+    Keys,
+    Display,
+    Picture,
+    More,
+    Choice(Choice),
+}
+
+/// The lists behind the drop-downs.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Choice {
+    Controls,
+    DefaultQuality,
+    Placement(String),
+    Quality(String),
+    Bitrate(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Menu {
+    pub kind: MenuKind,
+    /// The control it hangs from.
+    pub anchor: Rect,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Msg {
+    Minimise,
+    Maximise,
+    Close,
+    Back,
+    OpenMenu(MenuKind, Rect),
+    CloseMenu,
+    /// Open the pairing dialog, with this address in it.
+    Pair(Option<String>),
+    /// The dialog's first button, and its other one.
+    DialogOk,
+    DialogCancel,
+    Connect(String),
+    CancelConnect,
+    OpenSettings,
+    OpenComputer(String),
+    EditAddress(String),
+    AskForget(String),
+    About,
+    Disconnect,
+    /// Press these keys (Linux key codes) on the other computer, in order, and let them go.
+    SendKeys(&'static [u16]),
+    Place(Placement),
+    Pick(Quality),
+    /// A slider was moved to this part of its length.
+    Slide(Id, f32),
+    ToggleFigures,
+    ToggleFullscreen,
+    /// The session's bar: `true` for one that only shows at the top edge.
+    BarMode(bool),
+    StartFullscreen,
+    Choose(Choice, usize),
+}
+
+/// What only the window can do.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Effect {
+    Minimise,
+    Maximise,
+    Close,
+    Fullscreen(bool),
+    Title(String),
+    /// Let go of every key the other computer was told is down.
+    ReleaseKeys,
+    /// The host's cursor is another session's now.
+    ForgetCursor,
+    /// Make the window's client area this large, in the design's pixels.
+    Size(f32, f32),
+    Quit,
+}
+
+/// What the pointer should look like.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pointer {
+    Arrow,
+    Text,
+    /// The other computer's.
+    Theirs,
+}
+
+/// What the window's title bar is at a point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Hit {
+    Client,
+    Caption,
+    Maximise,
+}
+
+pub struct Session {
+    /// `None` for a made-up session, for pictures of the window.
+    pub client: Option<Arc<Client>>,
+    pub shared: Arc<Shared>,
+    pub target: Target,
+    pub features: Vec<String>,
+    pub display: Display,
+    pub quality: Quality,
+    /// The most the picture may use, in megabits a second (0: the computer's choice).
+    pub bitrate: u32,
+    pub began: Instant,
+}
+
+impl Session {
+    pub fn offers(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
+}
+
+/// An attempt to connect that hasn't answered yet.
+pub struct Attempt {
+    pub target: Target,
+    pub shared: Arc<Shared>,
+    pub display: Display,
+    /// For the pairing dialog, which shows the wait itself.
+    pub pairing: bool,
+}
+
+/// The numbers over the picture, as they were a moment ago.
+#[derive(Clone, Debug, Default)]
+pub struct Figures {
+    pub shown: u32,
+    pub age_ms: f64,
+    pub round_trip_ms: f64,
+    pub megabits: f64,
+    pub lost: u32,
+    pub replaced: u32,
+    pub decoder: String,
+}
+
+/// What a session came to, for the line printed at the end.
+pub struct Summary {
+    pub seconds: f64,
+    pub decoded: u32,
+    pub shown: u32,
+    pub replaced: u32,
+    pub lost: u32,
+    pub keyframe_requests: u32,
+    pub round_trip_ms: f64,
+    pub decoder: String,
+    pub ended: Option<String>,
+}
+
+/// The steps of the bitrate limit, in megabits a second; the last is no limit.
+pub const BITRATES: [u32; 12] = [5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 0];
+/// The ones the drop-down of a computer's settings offers.
+pub const BITRATE_CHOICES: [u32; 6] = [0, 10, 20, 40, 60, 100];
+
+pub struct App {
+    pub args: Args,
+    pub gpu: Gpu,
+    pub scene: Arc<Scene>,
+    /// What this card decodes of what the command line allows, most preferred first.
+    pub decoders: Vec<Mode>,
+    pub fonts: Fonts,
+    pub store: Store,
+    pub dark: bool,
+    /// The window's client area in the design's pixels, and device pixels to one of those.
+    pub size: (f32, f32),
+    pub scale: f32,
+    pub maximised: bool,
+    pub fullscreen: bool,
+    pub screen: Screen,
+    pub dialog: Option<Dialog>,
+    pub menu: Option<Menu>,
+    pub fields: HashMap<Id, Field>,
+    pub scroll: f32,
+    /// How far the page can be scrolled, found while describing it.
+    pub scroll_room: Cell<f32>,
+    pub input: Input,
+    pub regions: Vec<Region>,
+    pub mouse: (f32, f32),
+    hot_since: Instant,
+    pub tip: Option<(String, Rect)>,
+    pub session: Option<Session>,
+    pub attempt: Option<Attempt>,
+    attempt_id: u32,
+    results: (mpsc::Sender<(u32, Result<Client, String>)>, mpsc::Receiver<(u32, Result<Client, String>)>),
+    pub reach: HashMap<String, Reach>,
+    /// The pointer is at the top edge or on the bar, so a hidden bar is out; when it is to go
+    /// in again; and how far out it is drawn (0 to 1).
+    pub bar_out: bool,
+    bar_until: Option<Instant>,
+    pub bar_slide: f32,
+    pub figures: Figures,
+    last_second: Instant,
+    pub effects: Vec<Effect>,
+    pub dirty: bool,
+    serial: u64,
+    started: Instant,
+    blink: Instant,
+    /// Nothing moves by itself: for pictures of the window.
+    pub still: bool,
+    /// The monitor's size in pixels and its refresh rate.
+    pub monitor: (u32, u32, u32),
+    /// The size the window had before a session made it larger.
+    front_size: Option<(f32, f32)>,
+    /// Go back to full screen when the session that is about to start has started.
+    refull: bool,
+    pub summary: Option<Summary>,
+    /// Set when a session named on the command line with `--seconds` is over, whichever way.
+    pub code: Option<i32>,
+}
+
+fn mode_word(mode: &Mode) -> &'static str {
+    match mode.codec {
+        remoteman_core::Codec::Av1 => "av1",
+        remoteman_core::Codec::Hevc => "hevc",
+    }
+}
+
+impl App {
+    pub fn new(args: Args, gpu: Gpu, scene: Arc<Scene>, decoders: Vec<Mode>, dark: bool) -> anyhow::Result<Self> {
+        let store = Store::load(&args.state);
+        let now = Instant::now();
+        Ok(Self {
+            fonts: Fonts::new()?,
+            store,
+            dark,
+            size: (984.0, 644.0),
+            scale: 1.0,
+            maximised: false,
+            fullscreen: false,
+            screen: Screen::Computers,
+            dialog: None,
+            menu: None,
+            fields: HashMap::new(),
+            scroll: 0.0,
+            scroll_room: Cell::new(0.0),
+            input: Input { caret: true, ..Input::default() },
+            regions: Vec::new(),
+            mouse: (-1.0, -1.0),
+            hot_since: now,
+            tip: None,
+            session: None,
+            attempt: None,
+            attempt_id: 0,
+            results: mpsc::channel(),
+            reach: HashMap::new(),
+            bar_out: false,
+            bar_until: None,
+            bar_slide: 0.0,
+            figures: Figures::default(),
+            last_second: now,
+            effects: Vec::new(),
+            dirty: true,
+            serial: 0,
+            started: now,
+            blink: now,
+            still: args.ui.is_some(),
+            monitor: (1920, 1080, 60),
+            front_size: None,
+            refull: false,
+            summary: None,
+            code: None,
+            args,
+            gpu,
+            scene,
+            decoders,
+        })
+    }
+
+    pub fn theme(&self) -> ui::Theme {
+        if self.dark { theme::DARK } else { theme::LIGHT }
+    }
+
+    /// Keys and the pointer go to the other computer: its picture is what the window shows,
+    /// with nothing of this app's own open over it.
+    pub fn forwarding(&self) -> bool {
+        self.screen == Screen::Session && self.session.is_some() && self.dialog.is_none() && self.menu.is_none()
+    }
+
+    pub fn client(&self) -> Option<&Arc<Client>> {
+        self.session.as_ref().and_then(|s| s.client.as_ref())
+    }
+
+    /// The session's bar is not part of the window but comes out over the picture.
+    pub fn bar_hidden(&self) -> bool {
+        self.fullscreen || self.store.settings.hover_bar
+    }
+
+    /// Where the screen behind the settings pages is.
+    fn home(&self) -> Screen {
+        if self.session.is_some() { Screen::Session } else { Screen::Computers }
+    }
+
+    pub fn name_of(&self, address: &str) -> String {
+        self.store.find(address).map_or_else(|| host_part(address).to_owned(), |c| c.name.clone())
+    }
+
+    pub fn target_of(&self, address: &str) -> Target {
+        Target { address: address.to_owned(), name: self.name_of(address) }
+    }
+
+    /// What is known of a computer before trying it, as far as this build may say.
+    pub fn reach_of(&self, address: &str) -> Option<Reach> {
+        self.reach.get(address).copied().filter(|r| FEATURES.presence || *r == Reach::Unreachable)
+    }
+
+    /// How this display is to sit among a computer's own, which stream to ask it for, and the
+    /// most that may use.
+    pub fn choices(&self, address: &str) -> (Placement, Quality, u32) {
+        match self.store.find(address) {
+            Some(c) => (c.placement, c.quality.unwrap_or(self.store.settings.quality), c.bitrate),
+            // Not in the list: a computer named on the command line gets the placement last
+            // used; one being paired starts as an extra display.
+            None => (if self.args.host.is_some() { self.store.settings.placement } else { Placement::Extend }, self.store.settings.quality, 0),
+        }
+    }
+
+    /// The display to ask the host for: this monitor's, unless the command line says otherwise.
+    pub fn display(&self, placement: Placement) -> Display {
+        let (w, h) = self.args.size.unwrap_or((self.monitor.0, self.monitor.1));
+        // A size from the command line is a test's: pixels as they are, as before.
+        let scale = if self.args.size.is_some() { 1.0 } else { self.scale };
+        Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(self.monitor.2), placement }
+    }
+
+    // Connecting.
+
+    /// Try to connect, off this thread. The answer comes to `poll`.
+    fn start_attempt(&mut self, target: Target, pair: bool, pairing: bool) {
+        self.give_up();
+        let (placement, quality, _) = self.choices(&target.address);
+        let display = self.display(placement);
+        let (shared, feed) = match crate::stream::start(&self.gpu, &self.scene) {
+            Ok(started) => started,
+            Err(e) => return self.failed(&target, &format!("{e:#}"), pairing),
+        };
+        let options = Options {
+            host: target.address.clone(),
+            state: self.args.state.clone(),
+            name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows".into()),
+            pair,
+            display,
+            decoders: quality.order(&self.decoders),
+            test_drop_one_in: None,
+            test_delay_lost_ms: None,
+            cursor: true,
+        };
+        say!("connecting to {} for {}x{} at {} Hz", target.address, display.width, display.height, display.refresh);
+        let (id, tx, scene) = (self.attempt_id, self.results.0.clone(), self.scene.clone());
+        let _ = std::thread::Builder::new().name("connect".into()).spawn(move || {
+            let result = Client::connect(options, feed).map_err(|e| format!("{e:#}"));
+            let _ = tx.send((id, result));
+            scene.wake_window();
+        });
+        self.attempt = Some(Attempt { target, shared, display, pairing });
+        self.dirty = true;
+    }
+
+    /// Stop waiting for the attempt under way; its answer will be thrown away.
+    fn give_up(&mut self) {
+        self.attempt_id = self.attempt_id.wrapping_add(1);
+        self.attempt = None;
+    }
+
+    /// Connect to a computer: the connecting page, then its session or what went wrong.
+    pub fn connect(&mut self, target: Target, pair: bool) {
+        if self.session.is_some() {
+            return;
+        }
+        self.dialog = None;
+        self.menu = None;
+        if self.reach_of(&target.address) == Some(Reach::Asleep) {
+            // Known to be asleep: offer to wake it rather than wait for no answer.
+            self.screen = Screen::Problem(target, Problem::Asleep);
+            return;
+        }
+        self.start_attempt(target, pair, false);
+        if self.attempt.is_some() {
+            self.screen = Screen::Connecting;
+        }
+    }
+
+    /// Look at what other threads have left: answers to attempts, and the session's end.
+    pub fn poll(&mut self) {
+        while let Ok((id, result)) = self.results.1.try_recv() {
+            let Some(attempt) = self.attempt.take().filter(|_| id == self.attempt_id) else {
+                // Nobody is waiting for this one any more.
+                if let Ok(client) = result {
+                    retire(Arc::new(client));
+                }
+                continue;
+            };
+            match result {
+                Ok(client) => {
+                    say!("host: {} ({}), features {:?}", client.host_name, client.host_os, client.host_features);
+                    if attempt.pairing {
+                        self.store.paired(&attempt.target.address, &client.host_name, &client.host_os);
+                        let target = self.target_of(&attempt.target.address);
+                        let key = crate::store::key_words(&client.host_fingerprint, 4);
+                        // The connection that paired them is kept, so Connect shows it at once.
+                        self.hold(client, attempt.shared, target.clone(), attempt.display);
+                        self.dialog = Some(Dialog::Paired { target, key });
+                    } else {
+                        self.hold(client, attempt.shared, attempt.target, attempt.display);
+                        self.enter();
+                    }
+                }
+                Err(e) => self.failed(&attempt.target, &e, attempt.pairing),
+            }
+            self.dirty = true;
+        }
+        if let Some(s) = &self.session {
+            if let Some(features) = s.shared.features.lock().unwrap().take() {
+                self.session.as_mut().unwrap().features = features;
+                self.dirty = true;
+            }
+        }
+        let closed = self.session.as_ref().and_then(|s| s.shared.closed.lock().unwrap().clone());
+        if let Some(reason) = closed {
+            if matches!(self.dialog, Some(Dialog::Paired { .. })) {
+                // The connection kept from pairing went before it was used: nothing to say.
+                self.end(false);
+            } else {
+                self.stop(Some(&reason));
+            }
+        }
+        if let Some(why) = self.scene.failed.lock().unwrap().take() {
+            say!("failed: {why}");
+            self.code = Some(2);
+            self.effects.push(Effect::Quit);
+        }
+    }
+
+    /// Keep a connection that has just answered.
+    fn hold(&mut self, client: Client, shared: Arc<Shared>, target: Target, display: Display) {
+        let (_, quality, bitrate) = self.choices(&target.address);
+        let features = client.host_features.clone();
+        self.session = Some(Session { client: Some(Arc::new(client)), shared, target, features, display, quality, bitrate, began: Instant::now() });
+    }
+
+    /// An attempt to connect came to nothing.
+    fn failed(&mut self, target: &Target, error: &str, pairing: bool) {
+        say!("failed: {error}");
+        let problem = status::classify(error);
+        if pairing {
+            let host = host_part(&target.address);
+            let text = match problem {
+                Problem::Unreachable(detail) => format!("{host} did not answer. {detail}."),
+                Problem::NotPaired => format!("{host} is not in pairing mode. Start pairing there and try again."),
+                Problem::Changed => format!("{host} is not the computer this PC was paired with at that address. Forget that one first."),
+                Problem::Refused(said) => format!("{host} said: {said}"),
+                _ => error.to_owned(),
+            };
+            self.dialog = Some(Dialog::Pair { waiting: None, problem: Some(text) });
+            self.input.focus = id("pair.address");
+            return;
+        }
+        if matches!(problem, Problem::Unreachable(_)) {
+            self.reach.insert(target.address.clone(), Reach::Unreachable);
+        }
+        if self.refull {
+            self.refull = false;
+            self.effects.push(Effect::Fullscreen(false));
+        }
+        self.screen = Screen::Problem(target.clone(), problem);
+        if self.args.host.is_some() && self.args.seconds.is_some() {
+            // A test's session: there is nobody to read the page.
+            self.code = Some(2);
+            self.effects.push(Effect::Quit);
+        }
+    }
+
+    /// The session that is held starts being shown.
+    pub fn enter(&mut self) {
+        let Some(s) = &self.session else { return };
+        let (address, display, quality) = (s.target.address.clone(), s.display, s.quality);
+        if let Some(client) = &s.client {
+            self.store.used(&address, &client.host_name, &client.host_os);
+            if s.bitrate > 0 && s.offers("configure") {
+                client.send_message(Message::Configure { display: None, bitrate: Some(s.bitrate * 1_000_000), decoders: None });
+            }
+        }
+        self.store.settings.placement = display.placement;
+        self.store.save_settings();
+        self.reach.remove(&address);
+        let name = self.name_of(&address);
+        let s = self.session.as_mut().unwrap();
+        s.target.name = name.clone();
+        s.quality = quality;
+        s.began = Instant::now();
+        *self.scene.session.lock().unwrap() = Some(s.shared.clone());
+        self.scene.poke();
+        self.effects.push(Effect::ForgetCursor);
+        self.effects.push(Effect::Title(format!("{name} - remoteman")));
+        // Room for the picture, if the list's window was small.
+        if !self.maximised && !self.fullscreen && self.args.host.is_none() && (self.size.0 < 1224.0 || self.size.1 < 744.0) && self.front_size.is_none() {
+            self.front_size = Some(self.size);
+            self.effects.push(Effect::Size(1224.0, 744.0));
+        }
+        self.dialog = None;
+        self.menu = None;
+        self.screen = Screen::Session;
+        self.figures = Figures::default();
+        self.last_second = Instant::now();
+        self.bar_out = false;
+        self.bar_slide = 0.0;
+        if (self.refull || self.store.settings.fullscreen || self.args.fullscreen) && !self.fullscreen {
+            self.effects.push(Effect::Fullscreen(true));
+        }
+        self.refull = false;
+        self.dirty = true;
+    }
+
+    /// End the session and go back to the list, or, with a reason, to the page that gives it.
+    pub fn stop(&mut self, reason: Option<&str>) {
+        let Some(s) = &self.session else { return };
+        let (target, shown) = (s.target.clone(), s.shared.presented_total.load(Ordering::Relaxed) > 0);
+        self.end(false);
+        self.summary.as_mut().unwrap().ended = reason.map(str::to_owned);
+        match reason {
+            Some(reason) => {
+                say!("the session ended: {reason}");
+                self.screen = Screen::Problem(target, status::ended(reason, shown));
+            }
+            None => self.screen = Screen::Computers,
+        }
+        if self.args.host.is_some() && self.args.seconds.is_some() {
+            self.code = Some(if shown { 0 } else { 1 });
+            self.effects.push(Effect::Quit);
+        }
+    }
+
+    /// End the session. `stay`: the window keeps its size and full screen, because another
+    /// session is about to start.
+    fn end(&mut self, stay: bool) {
+        let Some(s) = self.session.take() else { return };
+        *self.scene.session.lock().unwrap() = None;
+        self.scene.poke();
+        let stats = s.client.as_ref().map(|c| c.stats()).unwrap_or_default();
+        self.summary = Some(Summary {
+            seconds: s.began.elapsed().as_secs_f64(),
+            decoded: s.shared.decoded_total.load(Ordering::Relaxed),
+            shown: s.shared.presented_total.load(Ordering::Relaxed),
+            replaced: s.shared.replaced_total.load(Ordering::Relaxed),
+            lost: stats.lost,
+            keyframe_requests: stats.keyframe_requests,
+            round_trip_ms: stats.round_trip_us as f64 / 1000.0,
+            decoder: s.shared.decoder.lock().unwrap().clone(),
+            ended: None,
+        });
+        if let Some(client) = s.client {
+            retire(client);
+        }
+        self.effects.push(Effect::ReleaseKeys);
+        self.effects.push(Effect::Title("remoteman".into()));
+        if stay {
+            self.refull = self.fullscreen;
+        } else {
+            if self.fullscreen {
+                self.effects.push(Effect::Fullscreen(false));
+            }
+            if let Some((w, h)) = self.front_size.take() {
+                self.effects.push(Effect::Size(w, h));
+            }
+        }
+        self.menu = None;
+        self.bar_out = false;
+        if self.screen == Screen::Session {
+            self.screen = Screen::Computers;
+        }
+        self.dirty = true;
+    }
+
+    /// Start the session again, after a choice that the computer only takes at the start.
+    fn reconnect(&mut self) {
+        let Some(target) = self.session.as_ref().map(|s| s.target.clone()) else { return };
+        self.end(true);
+        self.connect(target, false);
+    }
+
+    /// Leaving: nothing may be left connected.
+    pub fn closing(&mut self) {
+        self.give_up();
+        if self.session.is_some() {
+            self.end(false);
+        }
+    }
+
+    // What presses do.
+
+    pub fn update(&mut self, msg: Msg) {
+        self.dirty = true;
+        self.tip = None;
+        match msg {
+            Msg::Minimise => self.effects.push(Effect::Minimise),
+            Msg::Maximise => self.effects.push(Effect::Maximise),
+            Msg::Close => self.effects.push(Effect::Close),
+            Msg::Back => self.back(),
+            Msg::OpenMenu(kind, anchor) => {
+                // The button that opened a menu closes it again.
+                self.menu = if self.menu.as_ref().is_some_and(|m| m.kind == kind) { None } else { Some(Menu { kind, anchor }) };
+                if self.menu.is_some() {
+                    self.effects.push(Effect::ReleaseKeys);
+                }
+            }
+            Msg::CloseMenu => self.menu = None,
+            Msg::Pair(address) => {
+                self.menu = None;
+                self.fields.insert(id("pair.address"), Field::with(address.as_deref().map(short).unwrap_or_default()));
+                self.dialog = Some(Dialog::Pair { waiting: None, problem: None });
+                self.focus(id("pair.address"), false);
+                if matches!(self.screen, Screen::Problem(..)) {
+                    self.screen = Screen::Computers;
+                }
+            }
+            Msg::DialogOk => self.dialog_ok(),
+            Msg::DialogCancel => self.dialog_cancel(),
+            Msg::Connect(address) => {
+                let target = self.target_of(&address);
+                self.connect(target, false);
+            }
+            Msg::CancelConnect => {
+                self.give_up();
+                self.screen = Screen::Computers;
+            }
+            Msg::OpenSettings => {
+                self.menu = None;
+                self.scroll = 0.0;
+                self.screen = Screen::Settings;
+            }
+            Msg::OpenComputer(address) => {
+                self.menu = None;
+                if let Some(c) = self.store.find(&address) {
+                    self.fields.insert(id("computer.name"), Field::with(&c.name));
+                    self.scroll = 0.0;
+                    self.screen = Screen::Computer(address);
+                }
+            }
+            Msg::EditAddress(address) => {
+                self.menu = None;
+                if self.store.find(&address).is_some() {
+                    if !matches!(self.screen, Screen::Computer(_)) {
+                        self.update(Msg::OpenComputer(address.clone()));
+                    }
+                    self.fields.insert(id("address.new"), Field::with(short(&address)));
+                    self.dialog = Some(Dialog::Address { address, problem: None });
+                    self.focus(id("address.new"), false);
+                }
+            }
+            Msg::AskForget(address) => {
+                self.menu = None;
+                self.dialog = Some(Dialog::Forget(address));
+            }
+            Msg::About => {
+                self.menu = None;
+                self.dialog = Some(Dialog::About);
+            }
+            Msg::Disconnect => self.stop(None),
+            Msg::SendKeys(codes) => {
+                self.menu = None;
+                if let Some(client) = self.client() {
+                    let usages: Vec<u16> = codes.iter().filter_map(|c| keys::linux_to_hid(*c)).collect();
+                    for usage in &usages {
+                        client.send(Event::Key { usage: *usage, down: true });
+                    }
+                    for usage in usages.iter().rev() {
+                        client.send(Event::Key { usage: *usage, down: false });
+                    }
+                    say!("sent keys: usages {usages:02x?}");
+                }
+            }
+            Msg::Place(placement) => {
+                self.menu = None;
+                let Some(s) = &self.session else { return };
+                if s.display.placement != placement {
+                    let address = s.target.address.clone();
+                    self.store.update(&address, |c| c.placement = placement);
+                    say!("placement: {} asked for, by connecting again", crate::store::placement_key(placement));
+                    self.reconnect();
+                }
+            }
+            Msg::Pick(quality) => {
+                self.menu = None;
+                let Some(s) = &self.session else { return };
+                if s.quality != quality {
+                    let address = s.target.address.clone();
+                    self.store.update(&address, |c| c.quality = Some(quality));
+                    say!("picture quality: {} asked for, by connecting again", quality.key());
+                    self.reconnect();
+                }
+            }
+            Msg::Slide(_, part) => {
+                let step = BITRATES[((part * (BITRATES.len() - 1) as f32).round() as usize).min(BITRATES.len() - 1)];
+                self.set_bitrate(step);
+            }
+            Msg::ToggleFigures => {
+                self.store.settings.figures = !self.store.settings.figures;
+                self.store.save_settings();
+            }
+            Msg::ToggleFullscreen => {
+                self.menu = None;
+                self.effects.push(Effect::Fullscreen(!self.fullscreen));
+            }
+            Msg::BarMode(hover) => {
+                self.menu = None;
+                self.store.settings.hover_bar = hover;
+                self.store.save_settings();
+                self.bar_out = false;
+                self.bar_slide = 0.0;
+            }
+            Msg::StartFullscreen => {
+                self.store.settings.fullscreen = !self.store.settings.fullscreen;
+                self.store.save_settings();
+            }
+            Msg::Choose(choice, n) => {
+                self.menu = None;
+                self.choose(choice, n);
+            }
+        }
+    }
+
+    fn set_bitrate(&mut self, megabits: u32) {
+        let Some(s) = self.session.as_mut() else { return };
+        if s.bitrate == megabits {
+            return;
+        }
+        s.bitrate = megabits;
+        if let (Some(client), true) = (&s.client, s.offers("configure")) {
+            // 0 gives the choice back to the computer.
+            client.send_message(Message::Configure { display: None, bitrate: Some(megabits * 1_000_000), decoders: None });
+            say!("bitrate limit: {megabits} Mb/s asked for");
+        }
+        let address = s.target.address.clone();
+        self.store.update(&address, |c| c.bitrate = megabits);
+    }
+
+    /// What a drop-down offers: each choice, whether it can be chosen, and which is chosen now.
+    pub fn options(&self, choice: &Choice) -> (Vec<(String, bool)>, usize) {
+        let decodes = |word: &str| self.decoders.iter().any(|m| mode_word(m) == word);
+        let qualities = [(Quality::Automatic, true), (Quality::Sharp, FEATURES.sharp_text), (Quality::Hevc, decodes("hevc")), (Quality::Av1, decodes("av1"))];
+        match choice {
+            Choice::Controls => (vec![("Title bar".into(), true), ("Show the bar on hover".into(), true)], self.store.settings.hover_bar as usize),
+            Choice::DefaultQuality => (qualities.iter().map(|(q, on)| (q.name().to_owned(), *on)).collect(), qualities.iter().position(|(q, _)| *q == self.store.settings.quality).unwrap_or(0)),
+            Choice::Placement(address) => {
+                let now = self.store.find(address).map_or(Placement::Extend, |c| c.placement);
+                (vec![("Extra display".into(), true), ("Main display".into(), true), ("Only display".into(), true)], [Placement::Extend, Placement::Main, Placement::Only].iter().position(|p| *p == now).unwrap_or(0))
+            }
+            Choice::Quality(address) => {
+                let now = self.store.find(address).and_then(|c| c.quality);
+                let mut list = vec![("Same as Settings".to_owned(), true)];
+                list.extend(qualities.iter().map(|(q, on)| (q.name().to_owned(), *on)));
+                (list, now.and_then(|n| qualities.iter().position(|(q, _)| *q == n)).map_or(0, |i| i + 1))
+            }
+            Choice::Bitrate(address) => {
+                let now = self.store.find(address).map_or(0, |c| c.bitrate);
+                let name = |m: &u32| if *m == 0 { "Automatic".to_owned() } else { format!("{m} Mb/s") };
+                // One set with the session's slider, which has more steps, is shown as it is.
+                let mut list: Vec<(String, bool)> = BITRATE_CHOICES.iter().map(|m| (name(m), true)).collect();
+                let at = BITRATE_CHOICES.iter().position(|m| *m == now).unwrap_or_else(|| {
+                    list.push((name(&now), true));
+                    list.len() - 1
+                });
+                (list, at)
+            }
+        }
+    }
+
+    fn choose(&mut self, choice: Choice, n: usize) {
+        const QUALITIES: [Quality; 4] = [Quality::Automatic, Quality::Sharp, Quality::Hevc, Quality::Av1];
+        match choice {
+            Choice::Controls => self.update(Msg::BarMode(n == 1)),
+            Choice::DefaultQuality => {
+                self.store.settings.quality = QUALITIES[n.min(3)];
+                self.store.save_settings();
+            }
+            Choice::Placement(address) => self.store.update(&address, |c| c.placement = [Placement::Extend, Placement::Main, Placement::Only][n.min(2)]),
+            Choice::Quality(address) => self.store.update(&address, |c| c.quality = n.checked_sub(1).map(|i| QUALITIES[i.min(3)])),
+            Choice::Bitrate(address) => {
+                if let Some(megabits) = BITRATE_CHOICES.get(n).copied() {
+                    if self.session.as_ref().is_some_and(|s| s.target.address == address) {
+                        self.set_bitrate(megabits);
+                    } else {
+                        self.store.update(&address, |c| c.bitrate = megabits);
+                    }
+                }
+            }
+        }
+    }
+
+    fn back(&mut self) {
+        if self.menu.take().is_some() {
+            return;
+        }
+        if self.dialog.is_some() {
+            return self.dialog_cancel();
+        }
+        match self.screen {
+            Screen::Computer(_) => {
+                self.save_name();
+                self.screen = self.home();
+            }
+            Screen::Settings => self.screen = self.home(),
+            Screen::Problem(..) => self.screen = Screen::Computers,
+            Screen::Connecting => self.update(Msg::CancelConnect),
+            Screen::Computers | Screen::Session => {}
+        }
+        self.scroll = 0.0;
+    }
+
+    fn dialog_ok(&mut self) {
+        match self.dialog.clone() {
+            Some(Dialog::Pair { waiting: None, .. }) => {
+                let typed = self.fields.get(&id("pair.address")).map(|f| f.string()).unwrap_or_default();
+                let typed = typed.trim();
+                if typed.is_empty() {
+                    self.dialog = Some(Dialog::Pair { waiting: None, problem: Some("Enter the computer's address first.".into()) });
+                    return;
+                }
+                let address = with_port(typed);
+                let target = self.target_of(&address);
+                self.dialog = Some(Dialog::Pair { waiting: Some(host_part(&address).to_owned()), problem: None });
+                self.start_attempt(target, true, true);
+            }
+            Some(Dialog::Pair { .. }) => {}
+            Some(Dialog::Code { .. }) => self.dialog = None,
+            Some(Dialog::Paired { .. }) => {
+                // If the connection has gone meanwhile, `poll` has already let it go.
+                self.dialog = None;
+                if self.session.is_some() {
+                    self.enter();
+                }
+            }
+            Some(Dialog::Forget(address)) => {
+                self.dialog = None;
+                if self.session.as_ref().is_some_and(|s| s.target.address == address) {
+                    self.stop(None);
+                }
+                self.store.forget(&address);
+                self.reach.remove(&address);
+                if matches!(self.screen, Screen::Computer(_) | Screen::Problem(..)) {
+                    self.screen = Screen::Computers;
+                }
+            }
+            Some(Dialog::Address { address, .. }) => {
+                let typed = self.fields.get(&id("address.new")).map(|f| f.string()).unwrap_or_default();
+                let new = with_port(&typed);
+                if host_part(&new).is_empty() {
+                    return;
+                }
+                match self.store.readdress(&address, &new) {
+                    Ok(()) => {
+                        // Nothing is known about the new address.
+                        self.reach.remove(&address);
+                        self.dialog = None;
+                        if matches!(self.screen, Screen::Computer(_)) {
+                            self.screen = Screen::Computer(new);
+                        }
+                    }
+                    Err(why) => self.dialog = Some(Dialog::Address { address, problem: Some(why) }),
+                }
+            }
+            Some(Dialog::About) => self.dialog = None,
+            None => {}
+        }
+    }
+
+    fn dialog_cancel(&mut self) {
+        match self.dialog.take() {
+            Some(Dialog::Pair { waiting: Some(_), .. }) => self.give_up(),
+            // The connection kept from pairing isn't wanted now.
+            Some(Dialog::Paired { .. }) => self.end(false),
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
+    /// The name typed in a computer's settings is kept when the field is left.
+    fn save_name(&mut self) {
+        let Screen::Computer(address) = &self.screen else { return };
+        let address = address.clone();
+        let new = self.fields.get(&id("computer.name")).map(|f| f.string().trim().to_owned()).unwrap_or_default();
+        if !new.is_empty() && self.store.find(&address).is_some_and(|c| c.name != new) {
+            self.store.update(&address, |c| c.name = new.clone());
+            if let Some(s) = self.session.as_mut().filter(|s| s.target.address == address) {
+                s.target.name = new;
+            }
+        }
+    }
+
+    // The pointer.
+
+    fn region_at(&self, x: f32, y: f32) -> Option<&Region> {
+        self.regions.iter().rev().find(|r| r.rect.contains(x, y))
+    }
+
+    pub fn over_interface(&self, x: f32, y: f32) -> bool {
+        self.region_at(x, y).is_some()
+    }
+
+    pub fn hit(&self, x: f32, y: f32) -> Hit {
+        match self.region_at(x, y).map(|r| r.kind) {
+            Some(Kind::Drag) => Hit::Caption,
+            Some(Kind::Maximise) => Hit::Maximise,
+            _ => Hit::Client,
+        }
+    }
+
+    pub fn pointer(&self, x: f32, y: f32) -> Pointer {
+        match self.region_at(x, y) {
+            Some(r) if r.kind == Kind::Field && r.enabled => Pointer::Text,
+            Some(_) => Pointer::Arrow,
+            None if self.forwarding() => Pointer::Theirs,
+            None => Pointer::Arrow,
+        }
+    }
+
+    fn focus(&mut self, to: Id, keys: bool) {
+        if self.input.focus != to {
+            if self.input.focus == id("computer.name") {
+                self.save_name();
+            }
+            self.input.focus = to;
+            self.blink = Instant::now();
+            self.input.caret = true;
+        }
+        self.input.keys = keys;
+        self.dirty = true;
+    }
+
+    /// The pointer moved; says whether the interface took it (if not it is the picture's).
+    pub fn mouse_move(&mut self, x: f32, y: f32) -> bool {
+        self.mouse = (x, y);
+        let over = self.region_at(x, y).map(|r| (r.id, r.kind, r.rect));
+        let hot = over.map_or(0, |o| o.0);
+        if hot != self.input.hot {
+            self.input.hot = hot;
+            self.hot_since = Instant::now();
+            self.tip = None;
+            self.dirty = true;
+        }
+        // A press that is held acts on what it went down on.
+        if self.input.down != 0 {
+            if let Some(r) = self.regions.iter().find(|r| r.id == self.input.down) {
+                let (kind, rect, rid) = (r.kind, r.rect, r.id);
+                match kind {
+                    Kind::Slider => self.update(Msg::Slide(rid, ((x - rect.x) / rect.w).clamp(0.0, 1.0))),
+                    Kind::Field => {
+                        let at = self.caret_at(rid, rect, x);
+                        if let Some(f) = self.fields.get_mut(&rid) {
+                            f.go(at, true);
+                            self.dirty = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return true;
+        }
+        if self.session.is_some() && self.screen == Screen::Session && self.bar_hidden() {
+            self.bar_watch(y, over.is_some());
+        }
+        over.is_some()
+    }
+
+    /// A hidden bar comes out when the pointer reaches the top edge and goes two seconds after
+    /// the pointer has left it.
+    fn bar_watch(&mut self, y: f32, over: bool) {
+        if !self.bar_out && y < 2.0 {
+            self.bar_out = true;
+            self.dirty = true;
+        }
+        if self.bar_out {
+            self.bar_until = if over || y < 2.0 || self.menu.is_some() { None } else { self.bar_until.or(Some(Instant::now() + Duration::from_secs(2))) };
+        }
+    }
+
+    pub fn mouse_leave(&mut self) {
+        self.mouse = (-1.0, -1.0);
+        if self.input.hot != 0 {
+            self.input.hot = 0;
+            self.tip = None;
+            self.dirty = true;
+        }
+        if self.bar_out && self.bar_until.is_none() && self.menu.is_none() {
+            self.bar_until = Some(Instant::now() + Duration::from_secs(2));
+        }
+    }
+
+    fn caret_at(&self, field: Id, r: Rect, x: f32) -> usize {
+        let Some(f) = self.fields.get(&field) else { return 0 };
+        let inner = r.w - 20.0;
+        let shift = (self.fonts.caret_x(&f.text, ui::Font::Body, f.caret) - inner + 2.0).max(0.0);
+        self.fonts.caret_at(&f.text, ui::Font::Body, x - r.x - 10.0 + shift)
+    }
+
+    /// The left button went down; says whether the interface took it.
+    pub fn mouse_down(&mut self, x: f32, y: f32) -> bool {
+        self.mouse_move(x, y);
+        self.tip = None;
+        let Some(r) = self.region_at(x, y) else {
+            self.focus(0, false);
+            return false;
+        };
+        let (rid, kind, rect, enabled, focusable, msg) = (r.id, r.kind, r.rect, r.enabled, r.focus, r.msg.clone());
+        self.dirty = true;
+        if !enabled {
+            return true;
+        }
+        self.focus(if focusable { rid } else { 0 }, false);
+        match kind {
+            Kind::Block => {
+                if let Some(msg) = msg {
+                    self.update(msg);
+                }
+            }
+            Kind::Slider => {
+                self.input.down = rid;
+                self.update(Msg::Slide(rid, ((x - rect.x) / rect.w).clamp(0.0, 1.0)));
+            }
+            Kind::Field => {
+                self.input.down = rid;
+                let at = self.caret_at(rid, rect, x);
+                if let Some(f) = self.fields.get_mut(&rid) {
+                    f.go(at, false);
+                }
+            }
+            Kind::Button | Kind::Maximise => self.input.down = rid,
+            Kind::Drag => {}
+        }
+        true
+    }
+
+    pub fn mouse_up(&mut self, x: f32, y: f32) {
+        let down = std::mem::take(&mut self.input.down);
+        if down == 0 {
+            return;
+        }
+        self.dirty = true;
+        let pressed = self.region_at(x, y).filter(|r| r.id == down && r.enabled && matches!(r.kind, Kind::Button | Kind::Maximise)).and_then(|r| r.msg.clone());
+        if let Some(msg) = pressed {
+            self.update(msg);
+        }
+        self.mouse_move(x, y);
+    }
+
+    /// The wheel turned by `notches` (away from the user positive) over the interface.
+    pub fn wheel(&mut self, notches: f32) {
+        if self.dialog.is_none() && self.menu.is_none() {
+            let to = (self.scroll - notches * 48.0).clamp(0.0, self.scroll_room.get());
+            if to != self.scroll {
+                self.scroll = to;
+                self.dirty = true;
+            }
+        }
+    }
+
+    // The keyboard, when it is this app's own.
+
+    /// A key went down, by its Windows virtual-key code; says whether it did anything.
+    pub fn key_down(&mut self, vk: u32, shift: bool, ctrl: bool) -> bool {
+        const TAB: u32 = 0x09;
+        const ENTER: u32 = 0x0D;
+        const ESCAPE: u32 = 0x1B;
+        const SPACE: u32 = 0x20;
+        let focus = self.input.focus;
+        let field = self.regions.iter().any(|r| r.id == focus && r.kind == Kind::Field);
+        if field && self.field_key(focus, vk, shift, ctrl) {
+            self.blink = Instant::now();
+            self.input.caret = true;
+            self.dirty = true;
+            return true;
+        }
+        match vk {
+            TAB | 0x26 | 0x28 if vk == TAB || self.menu.is_some() => {
+                // Only the top sheet's controls: what is under a dialog is out of reach.
+                let top = self.regions.iter().map(|r| r.layer).max().unwrap_or(0);
+                let stops: Vec<Id> = self.regions.iter().filter(|r| r.focus && r.layer == top).map(|r| r.id).collect();
+                if !stops.is_empty() {
+                    let back = (vk == TAB && shift) || vk == 0x26;
+                    let at = stops.iter().position(|s| *s == focus);
+                    let next = match (at, back) {
+                        (Some(i), false) => (i + 1) % stops.len(),
+                        (Some(i), true) => (i + stops.len() - 1) % stops.len(),
+                        (None, false) => 0,
+                        (None, true) => stops.len() - 1,
+                    };
+                    self.focus(stops[next], true);
+                }
+                true
+            }
+            ENTER | SPACE => {
+                if field && vk == ENTER {
+                    if focus == id("computer.name") {
+                        self.save_name();
+                        self.dirty = true;
+                    } else {
+                        self.update(Msg::DialogOk);
+                    }
+                    return true;
+                }
+                let msg = self.regions.iter().find(|r| r.id == focus && r.enabled && r.kind == Kind::Button).and_then(|r| r.msg.clone());
+                match msg {
+                    Some(msg) => {
+                        self.update(msg);
+                        self.input.keys = true;
+                    }
+                    None if vk == ENTER && self.dialog.is_some() => self.update(Msg::DialogOk),
+                    None => return false,
+                }
+                true
+            }
+            ESCAPE => {
+                self.update(Msg::Back);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn field_key(&mut self, field: Id, vk: u32, shift: bool, ctrl: bool) -> bool {
+        let Some(f) = self.fields.get_mut(&field) else { return false };
+        match vk {
+            0x25 => f.go(f.caret.saturating_sub(1), shift),
+            0x27 => f.go(f.caret + 1, shift),
+            0x24 => f.go(0, shift),
+            0x23 => f.go(usize::MAX, shift),
+            0x08 => f.erase(false),
+            0x2E => f.erase(true),
+            0x41 if ctrl => {
+                f.anchor = 0;
+                f.caret = f.text.len();
+            }
+            0x43 | 0x58 if ctrl => {
+                crate::window::clipboard_set(&f.selected());
+                if vk == 0x58 {
+                    f.insert(&[]);
+                }
+            }
+            0x56 if ctrl => {
+                if let Some(text) = crate::window::clipboard_get() {
+                    let line: Vec<u16> = text.encode_utf16().filter(|c| *c >= 0x20).collect();
+                    f.insert(&line);
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// A character was typed.
+    pub fn char(&mut self, c: u16) {
+        let focus = self.input.focus;
+        if c < 0x20 || c == 0x7F || !self.regions.iter().any(|r| r.id == focus && r.kind == Kind::Field) {
+            return;
+        }
+        if let Some(f) = self.fields.get_mut(&focus) {
+            f.insert(&[c]);
+            self.blink = Instant::now();
+            self.input.caret = true;
+            self.dirty = true;
+        }
+    }
+
+    /// The window lost the keyboard.
+    pub fn blur(&mut self) {
+        if self.input.keys {
+            self.input.keys = false;
+            self.dirty = true;
+        }
+    }
+
+    // Time.
+
+    /// Something on the window is moving, so `tick` wants to be called at every frame.
+    pub fn animating(&self) -> bool {
+        if self.still {
+            return false;
+        }
+        let ring = self.screen == Screen::Connecting || matches!(self.dialog, Some(Dialog::Pair { waiting: Some(_), .. }));
+        let target = if self.bar_out { 1.0 } else { 0.0 };
+        ring || self.bar_slide != target
+    }
+
+    pub fn tick(&mut self) {
+        let now = Instant::now();
+        if self.animating() {
+            let target = if self.bar_out { 1.0f32 } else { 0.0 };
+            if self.bar_slide != target {
+                // A sixth of a second from one end to the other.
+                let step = 0.1;
+                self.bar_slide = if target > self.bar_slide { (self.bar_slide + step).min(1.0) } else { (self.bar_slide - step).max(0.0) };
+            }
+            self.dirty = true;
+        }
+        if self.bar_out && self.menu.is_none() && self.bar_until.is_some_and(|t| now >= t) {
+            self.bar_out = false;
+            self.bar_until = None;
+            self.dirty = true;
+        }
+        // The caret blinks twice a second, only while a field is being typed in.
+        if !self.still && self.regions.iter().any(|r| r.id == self.input.focus && r.kind == Kind::Field) {
+            let shown = (now - self.blink).as_millis() % 1060 < 530;
+            if shown != self.input.caret {
+                self.input.caret = shown;
+                self.dirty = true;
+            }
+        }
+        // A control that has something to say says it once the pointer has rested on it.
+        if self.tip.is_none() && self.input.hot != 0 && self.input.down == 0 && now - self.hot_since > Duration::from_millis(600) {
+            self.show_tip();
+        }
+        if now - self.last_second >= Duration::from_secs(1) {
+            let seconds = (now - self.last_second).as_secs_f64();
+            self.last_second = now;
+            self.second(seconds);
+        }
+    }
+
+    /// Show what the control under the pointer has to say, if anything.
+    pub fn show_tip(&mut self) {
+        if let Some(r) = self.regions.iter().find(|r| r.id == self.input.hot && !r.tip.is_empty()) {
+            self.tip = Some((r.tip.clone(), r.rect));
+            self.dirty = true;
+        }
+    }
+
+    /// About once a second: the figures.
+    fn second(&mut self, seconds: f64) {
+        let Some(s) = &self.session else { return };
+        let stats = s.client.as_ref().map(|c| c.stats()).unwrap_or_default();
+        let ms = |us: u64| us as f64 / 1000.0;
+        let (decoded, shown, replaced) = (s.shared.decoded.swap(0, Ordering::Relaxed), s.shared.presented.swap(0, Ordering::Relaxed), s.shared.replaced.swap(0, Ordering::Relaxed));
+        let decode_max = s.shared.decode_us_max.swap(0, Ordering::Relaxed);
+        let megabits = s.shared.bytes.swap(0, Ordering::Relaxed) as f64 * 8.0 / 1e6 / seconds;
+        let figures = Figures {
+            shown: (shown as f64 / seconds).round() as u32,
+            age_ms: ms(s.shared.age_presented_us.load(Ordering::Relaxed)),
+            round_trip_ms: stats.round_trip_us as f64 / 1000.0,
+            megabits,
+            lost: stats.lost,
+            replaced: s.shared.replaced_total.load(Ordering::Relaxed),
+            decoder: s.shared.decoder.lock().unwrap().clone(),
+        };
+        if self.args.stats && s.client.is_some() {
+            let or = |v: f64| if v == 0.0 { "?".to_owned() } else { format!("{v:.1}") };
+            say!(
+                "stats: decoded {decoded}, presented {shown}, replaced unseen {replaced}, age {} ms when decoded and {} ms when handed to the display, decode {:.1} ms at most, {megabits:.1} Mb/s, lost {}, {}",
+                or(ms(s.shared.age_decoded_us.load(Ordering::Relaxed))),
+                or(figures.age_ms),
+                decode_max as f64 / 1000.0,
+                stats.lost,
+                figures.decoder,
+            );
+        }
+        self.figures = figures;
+        if self.screen == Screen::Session && (self.store.settings.figures || self.menu.as_ref().is_some_and(|m| m.kind == MenuKind::Picture)) {
+            self.dirty = true;
+        }
+    }
+
+    // Describing the window.
+
+    /// The stream's size and rate, once the computer has said.
+    pub fn format(&self) -> Option<(u32, u32, u32)> {
+        let s = self.session.as_ref()?;
+        let (w, h) = unpack(s.shared.stream_size.load(Ordering::Relaxed));
+        (w > 0).then(|| (w, h, s.shared.refresh.load(Ordering::Relaxed)))
+    }
+
+    /// Where the picture goes, in the design's pixels: under the bar, or the whole window.
+    pub fn video_area(&self) -> Option<Rect> {
+        if self.screen != Screen::Session || self.session.is_none() {
+            return None;
+        }
+        let top = if self.bar_hidden() { 0.0 } else { crate::session::BAR };
+        Some(ui::rect(0.0, top, self.size.0, (self.size.1 - top).max(1.0)))
+    }
+
+    /// The same in device pixels.
+    pub fn video_pixels(&self) -> Option<(i32, i32, i32, i32)> {
+        self.video_area().map(|r| {
+            let k = self.scale;
+            let (x, y) = ((r.x * k).round() as i32, (r.y * k).round() as i32);
+            let (cw, ch) = unpack(self.scene.client_size.load(Ordering::Relaxed));
+            (x, y, cw as i32 - x, ch as i32 - y)
+        })
+    }
+
+    /// Describe the window as it is now and hand that to the draw thread.
+    pub fn build(&mut self) -> u64 {
+        self.dirty = false;
+        let turn = if self.still { 0.0 } else { (self.started.elapsed().as_secs_f32() / 1.1).fract() };
+        let mut ui = Ui::new(self.theme(), &self.fonts, self.input, self.size.0, self.size.1, turn);
+        match &self.screen {
+            Screen::Session if self.session.is_some() => crate::session::view(self, &mut ui),
+            _ => crate::pages::view(self, &mut ui),
+        }
+        if let Some(dialog) = &self.dialog {
+            ui.t = self.theme();
+            ui.raise();
+            crate::pages::dialog(self, &mut ui, dialog);
+        }
+        if let Some((text, by)) = &self.tip {
+            ui.t = self.theme();
+            crate::pages::tip(&mut ui, text, *by);
+        }
+        let Ui { ops, regions, .. } = ui;
+        self.regions = regions;
+        // What is under the pointer may be something else now.
+        let hot = self.region_at(self.mouse.0, self.mouse.1).map_or(0, |r| r.id);
+        if hot != self.input.hot && self.input.down == 0 {
+            self.input.hot = hot;
+            self.hot_since = Instant::now();
+            self.dirty = true;
+        }
+        self.serial += 1;
+        let frame = Frame { ops, scale: self.scale, video: self.video_pixels(), serial: self.serial };
+        *self.scene.frame.lock().unwrap() = Some(Arc::new(frame));
+        self.scene.poke();
+        self.serial
+    }
+
+    /// After an event: describe the window again if anything changed, and hand back what the
+    /// window itself has to do.
+    pub fn finish(&mut self) -> Vec<Effect> {
+        // Twice at most: the second time for a control that turned out to be under the pointer.
+        for _ in 0..2 {
+            if self.dirty {
+                self.build();
+            }
+        }
+        std::mem::take(&mut self.effects)
+    }
+}
+
+/// Let a connection go without making the window wait: saying goodbye can take a second.
+fn retire(client: Arc<Client>) {
+    let _ = std::thread::Builder::new().name("goodbye".into()).spawn(move || drop(client));
+}

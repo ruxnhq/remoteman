@@ -1,47 +1,98 @@
-//! A running session: the core hands frames to a decode thread, which leaves the newest picture
-//! where the draw thread picks it up. As the Linux viewer's `stream.rs`.
+//! What the threads share. For as long as the program runs there is one window with its draw
+//! thread (`Scene`); a session comes and goes (`Shared`): the core hands its frames to a decode
+//! thread, which leaves the newest picture where the draw thread picks it up. As the Linux
+//! viewer's `stream.rs`.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use anyhow::Result;
-use remoteman_core::{Client, CursorShape, Frame, Handler, StreamInfo};
+use remoteman_core::{CursorShape, Frame, Handler, Message, Stage, StreamInfo};
 
 use crate::decode::{Decoder, Picture};
 use crate::gpu::Gpu;
 
-/// What the threads share.
+/// The window, as its threads see it.
 #[derive(Default)]
+pub struct Scene {
+    /// The interface as it was last described, for the draw thread to draw.
+    pub frame: Mutex<Option<Arc<crate::ui::Frame>>>,
+    /// The session whose picture is shown, if there is one.
+    pub session: Mutex<Option<Arc<Shared>>>,
+    /// Counts the reasons the draw thread has been given to look again.
+    pokes: Mutex<u64>,
+    poked: Condvar,
+    /// The window's client area in pixels: width in the high half.
+    pub client_size: AtomicU64,
+    /// The window, for waking it from other threads (0 until there is one).
+    pub hwnd: AtomicIsize,
+    /// Set when it is time to leave.
+    pub quit: AtomicBool,
+    /// A picture of the window to save once the frame numbered so has been drawn, and how
+    /// many have been saved.
+    pub shot: Mutex<Option<(PathBuf, u64)>>,
+    pub shots: AtomicU32,
+    /// Why drawing stopped, if it has: nothing can be shown then.
+    pub failed: Mutex<Option<String>>,
+}
+
+impl Scene {
+    /// Have the draw thread look again: there is a new picture or a new interface.
+    pub fn poke(&self) {
+        *self.pokes.lock().unwrap() += 1;
+        self.poked.notify_one();
+    }
+
+    /// Wait until poked since `seen` was last brought up to date, but not for ever.
+    pub fn wait(&self, seen: &mut u64, at_most: Duration) {
+        let mut pokes = self.pokes.lock().unwrap();
+        if *pokes == *seen {
+            pokes = self.poked.wait_timeout(pokes, at_most).unwrap().0;
+        }
+        *seen = *pokes;
+    }
+
+    /// Have the window (from any thread) look at what has changed.
+    pub fn wake_window(&self) {
+        crate::window::wake(self.hwnd.load(Ordering::Relaxed));
+    }
+}
+
+/// What the threads of one session share.
 pub struct Shared {
-    /// The newest decoded picture, until the draw thread takes it; `fresh` wakes that thread.
+    pub scene: Arc<Scene>,
+    /// The newest decoded picture, until the draw thread takes it.
     pub picture: Mutex<Option<Picture>>,
-    pub fresh: Condvar,
     /// The host's newest cursor shape, until the window takes it.
     pub cursor: Mutex<Option<CursorShape>>,
     /// Whether the host's cursor is on this display at all, and where it last was.
     pub cursor_gone: AtomicBool,
     pub cursor_at: Mutex<(f32, f32)>,
+    /// How far connecting has come: a `Stage` as a number.
+    pub stage: AtomicU8,
     /// Why the session ended, once it has.
     pub closed: Mutex<Option<String>>,
     /// What is decoding, e.g. "av1 (d3d11va) 1920x1080".
     pub decoder: Mutex<String>,
     /// The stream's size in pixels, once the host has said: 0 until then. Width in the high half.
     pub stream_size: AtomicU64,
-    /// The window's client area in pixels, the same way.
-    pub client_size: AtomicU64,
-    /// The window, for waking it from other threads (0 until there is one).
-    pub hwnd: AtomicIsize,
-    /// Set when it is time to leave.
-    pub quit: AtomicBool,
+    pub refresh: AtomicU32,
+    /// What the host says it can do, when that changes during the session.
+    pub features: Mutex<Option<Vec<String>>>,
+    /// What the host says the picture is being encoded at, in bits a second (0: it hasn't said).
+    pub bitrate: AtomicU32,
 
-    // Since the figures were last printed:
+    // Since the figures were last read:
     pub decoded: AtomicU32,
     pub presented: AtomicU32,
     /// Pictures never shown because a newer one arrived first.
     pub replaced: AtomicU32,
     /// The longest decode, in microseconds.
     pub decode_us_max: AtomicU32,
+    /// The bytes of video that arrived.
+    pub bytes: AtomicU64,
     // The newest frame's age when it was decoded and when it had been handed to the swap
     // chain (it is on the glass a refresh or so later), in microseconds (0: not known yet).
     pub age_decoded_us: AtomicU64,
@@ -50,6 +101,35 @@ pub struct Shared {
     pub decoded_total: AtomicU32,
     pub presented_total: AtomicU32,
     pub replaced_total: AtomicU32,
+}
+
+impl Shared {
+    fn new(scene: Arc<Scene>) -> Self {
+        Self {
+            scene,
+            picture: Mutex::default(),
+            cursor: Mutex::default(),
+            cursor_gone: AtomicBool::default(),
+            cursor_at: Mutex::default(),
+            stage: AtomicU8::default(),
+            closed: Mutex::default(),
+            decoder: Mutex::default(),
+            stream_size: AtomicU64::default(),
+            refresh: AtomicU32::default(),
+            features: Mutex::default(),
+            bitrate: AtomicU32::default(),
+            decoded: AtomicU32::default(),
+            presented: AtomicU32::default(),
+            replaced: AtomicU32::default(),
+            decode_us_max: AtomicU32::default(),
+            bytes: AtomicU64::default(),
+            age_decoded_us: AtomicU64::default(),
+            age_presented_us: AtomicU64::default(),
+            decoded_total: AtomicU32::default(),
+            presented_total: AtomicU32::default(),
+            replaced_total: AtomicU32::default(),
+        }
+    }
 }
 
 pub fn pack(width: u32, height: u32) -> u64 {
@@ -73,7 +153,7 @@ pub struct Feed {
 impl Feed {
     /// Has the window look at the cursor again; it owns the cursor, so only it may change it.
     fn wake_window(&self) {
-        crate::window::wake(self.shared.hwnd.load(Ordering::Relaxed));
+        self.shared.scene.wake_window();
     }
 }
 
@@ -81,13 +161,32 @@ impl Handler for Feed {
     fn stream(&mut self, info: &StreamInfo) {
         say!("stream: {:?} {}x{} at {} Hz, {}", info.mode, info.width, info.height, info.refresh, info.colour);
         self.shared.stream_size.store(pack(info.width, info.height), Ordering::Relaxed);
+        self.shared.refresh.store(info.refresh, Ordering::Relaxed);
+        self.wake_window();
         let _ = self.tx.send(Msg::Stream(info.clone()));
     }
 
     fn frame(&mut self, frame: &Frame, age_us: Option<i64>) {
         // Every frame leans on the one before, so none may be skipped here: if the decoder
         // falls behind, this waits, and the loss shows up upstream as a keyframe request.
+        self.shared.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
         let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us));
+    }
+
+    fn stage(&mut self, stage: Stage) {
+        self.shared.stage.store(stage as u8, Ordering::Relaxed);
+        self.wake_window();
+    }
+
+    fn message(&mut self, message: &Message) {
+        match message {
+            Message::Status { bitrate: Some(bits) } => self.shared.bitrate.store(*bits, Ordering::Relaxed),
+            Message::Features { features } => {
+                *self.shared.features.lock().unwrap() = Some(features.clone());
+                self.wake_window();
+            }
+            _ => {}
+        }
     }
 
     fn cursor_shape(&mut self, shape: &CursorShape) {
@@ -104,18 +203,20 @@ impl Handler for Feed {
 
     fn closed(&mut self, reason: &str) {
         *self.shared.closed.lock().unwrap() = Some(reason.to_owned());
+        self.wake_window();
     }
 }
 
 /// Start the decode thread; what comes back is handed to `Client::connect`.
-pub fn start(gpu: &Gpu) -> Result<(Arc<Shared>, Feed)> {
-    let shared = Arc::new(Shared::default());
+pub fn start(gpu: &Gpu, scene: &Arc<Scene>) -> Result<(Arc<Shared>, Feed)> {
+    let shared = Arc::new(Shared::new(scene.clone()));
     let (tx, rx) = mpsc::sync_channel::<Msg>(8);
     let (s, gpu) = (shared.clone(), gpu.clone());
     std::thread::Builder::new().name("decode".into()).spawn(move || {
         if let Err(e) = decode_loop(&s, &gpu, rx) {
             say!("decoding stopped: {e:#}");
             *s.closed.lock().unwrap() = Some(format!("{e:#}"));
+            s.scene.wake_window();
         }
     })?;
     Ok((shared.clone(), Feed { tx, shared }))
@@ -167,30 +268,9 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
                     s.replaced.fetch_add(1, Ordering::Relaxed);
                     s.replaced_total.fetch_add(1, Ordering::Relaxed);
                 }
-                s.fresh.notify_one();
+                s.scene.poke();
             }
         }
     }
     Ok(())
-}
-
-/// `--stats`: a line a second.
-pub fn print_stats(shared: Arc<Shared>, client: Arc<Client>) {
-    let _ = std::thread::Builder::new().name("stats".into()).spawn(move || {
-        let ms = |us: u64| if us == 0 { "?".to_owned() } else { format!("{:.1}", us as f64 / 1000.0) };
-        while !shared.quit.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_secs(1));
-            say!(
-                "stats: decoded {}, presented {}, replaced unseen {}, age {} ms when decoded and {} ms when handed to the display, decode {:.1} ms at most, lost {}, {}",
-                shared.decoded.swap(0, Ordering::Relaxed),
-                shared.presented.swap(0, Ordering::Relaxed),
-                shared.replaced.swap(0, Ordering::Relaxed),
-                ms(shared.age_decoded_us.load(Ordering::Relaxed)),
-                ms(shared.age_presented_us.load(Ordering::Relaxed)),
-                shared.decode_us_max.swap(0, Ordering::Relaxed) as f64 / 1000.0,
-                client.stats().lost,
-                shared.decoder.lock().unwrap(),
-            );
-        }
-    });
 }
