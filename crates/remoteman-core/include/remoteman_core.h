@@ -25,7 +25,9 @@ typedef struct rm_callbacks {
     void (*on_stream)(void *ctx, uint16_t epoch, uint8_t codec, uint16_t chroma, uint8_t depth,
                       uint32_t width, uint32_t height, uint32_t refresh, uint8_t hdr);
     // One whole frame, in order, always decodable (after a loss, frames are held back until a
-    // keyframe). `data` is valid only during the call. `capture_us` is the host's clock;
+    // keyframe or a recovery point). `data` is valid only during the call. `key` is a set of
+    // bits: 1 a keyframe, 2 a recovery point (the first frame after a loss, built from frames
+    // the client has; an ordinary frame to the decoder). `capture_us` is the host's clock;
     // `age_us` is how long ago the host captured the frame, or -1 until the clocks are compared.
     void (*on_frame)(void *ctx, const uint8_t *data, size_t len, uint8_t key, uint32_t number,
                      uint64_t capture_us, int64_t age_us);
