@@ -30,6 +30,12 @@ Every claim carries a mark:
   | Linux host | Host | Linux, GNOME | `remoteman-agent`, later with `remotemand` for remote login | 1, 4 |
   | Mac host | Host | macOS | Swift, from espalier's Mac screen code, the shared core's host role | 2 |
 
+- **Asked for on 2026-11-17, to build in:**
+  - **Where the device's display sits is the user's choice,** per computer and changeable in a session: an extra display beside the computer's own, the main display, or the only one (the others switched off while connected). On the Mac host today this is a start-up option (extra by default, `--main yes`); on Linux, attach mode has the extra display and the planned "screens off" setting. It becomes one setting that travels in the hello.
+  - **In a window, the controls can be a hover bar instead of a top bar.** A setting in the viewers (Mac, Linux, and iPad when windowed): the usual title or header bar, or nothing but the picture with a bar that appears when the pointer reaches the top edge.
+  - **Camera.** The device's camera as a camera on the host, for calls made on the remote desktop. The Mac side has a head start: espalier's signed camera extension (a CoreMediaIO extension the user built with the paid team) can be reused as the Mac host's virtual camera. Linux needs a PipeWire or V4L2 loopback camera, Windows its own. A later phase, with sound and microphone.
+  - **Windows:** a host and a viewer, after the current apps are done.
+
 Still to hear: which iPad and iPhone, and how the Mac session gets the code (suggested: a private GitHub repository).
 
 ## Decisions that were yours
@@ -427,13 +433,13 @@ Sound, clipboard, soft keyboard and text input, the key bar and remaps, iPhone t
 End to end in mirror mode first: PQ in, EDR out. Then the Mutter patch: virtual outputs that offer BT.2100 with the device's luminance, and virtual streams that offer the 10-bit PQ formats. Run it as a local package and send it upstream.
 
 ### 8. More displays and devices
-A second virtual monitor on a display plugged into the iPad, Pencil as far as libei allows, files and drag and drop, microphone. **[R]** An app can fill a connected display with a scene of its own and pick its mode. Whether it can pick the refresh rate and HDR there wasn't found.
+The device's camera and microphone as the host's (see "Asked for" under Decided). A second virtual monitor on a display plugged into the iPad, Pencil as far as libei allows, files and drag and drop, microphone. **[R]** An app can fill a connected display with a scene of its own and pick its mode. Whether it can pick the refresh rate and HDR there wasn't found.
 
 ### Later
 - **KDE.** Attach mode through the desktop portals first (ScreenCast with a virtual source, RemoteDesktop, libei), then KWin's own protocol (`stream_virtual_output`) for unattended use. **[R]** As of Plasma 6.8.3: virtual outputs exist and follow the stream's size; they start at 60 Hz and take custom modes; the HiDPI scale tag comes in 6.9; no HDR on them and screencasts are 8-bit (HDR screencast is open for 6.9); unattended access works by pre-authorising the app or a restore token. Remote login isn't there in 6.8 and is planned for 6.9 with Plasma Login Manager.
 - **How others stand** **[R]**: Sunshine has no virtual displays on Linux (the request was closed as not planned) and uses FFmpeg for NVENC there. Nothing found combines virtual displays, a desktop session and HDR on Linux.
 - **Outside the LAN** without Tailscale: a rendezvous and relay of our own.
-- **More hosts and clients:** Windows host; Windows and Android viewers. Each is a new shell around the same core.
+- **Windows host and viewer,** next after the current five apps. Then an Android viewer. Each is a new shell around the same core.
 
 ## Risks
 
