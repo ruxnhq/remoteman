@@ -274,6 +274,19 @@ struct HostSettings: View {
                         .toggleStyle(.checkbox).available(Features.placementPolicy)
                     }
                 }
+                CardGroup(
+                    "What paired devices may do",
+                    footnote: "Both are off until you turn them on. Changing one disconnects a device that is connected; it can connect again at once."
+                ) {
+                    Row("Share the clipboard", caption: "What is copied on this Mac or on the device can be pasted on the other.") {
+                        Toggle("Share the clipboard", isOn: Binding(get: { controller.allowClipboard }, set: { controller.setAllowed(clipboard: $0) }))
+                            .labelsHidden().toggleStyle(.switch)
+                    }
+                    Row("Receive files", caption: "Files a device sends are saved in Downloads.") {
+                        Toggle("Receive files", isOn: Binding(get: { controller.allowFiles }, set: { controller.setAllowed(files: $0) }))
+                            .labelsHidden().toggleStyle(.switch)
+                    }
+                }
                 CardGroup("While a device is connected") {
                     Row("Lock this Mac when the device leaves") {
                         fixedSwitch("Lock this Mac when the device leaves", false, Features.lockOnLeave)
@@ -478,7 +491,10 @@ struct FirstRun: View {
             HStack {
                 Button("Not Now", action: close)
                 Spacer()
-                Button("Continue", action: close)
+                Button("Share This Mac") {
+                    controller.setSharing(true)
+                    close()
+                }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(!(controller.screenRecording && controller.accessibility))

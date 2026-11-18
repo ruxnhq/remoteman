@@ -76,7 +76,13 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     var onClient: ((Client?) -> Void)?
     var onStats: ((_ fps: Int, _ bitsPerSecond: Int) -> Void)?
 
-    private let options: Options
+    private var options: Options
+
+    /// What paired devices may do, as the owner switched it. Takes effect when sharing next starts.
+    func allow(clipboard: Bool, files: Bool) {
+        options.allowClipboard = clipboard
+        options.allowFiles = files
+    }
     private var host: OpaquePointer?
 
     var isRunning: Bool { host != nil }

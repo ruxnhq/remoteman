@@ -21,6 +21,30 @@ final class HostController: ObservableObject {
     @Published private(set) var port = "7791"
     @Published private(set) var addresses: [String] = []
     @Published private(set) var pairing = false
+    /// What paired devices may do with this Mac beyond seeing and using it. Both off until the
+    /// owner turns them on; a device is only offered what is on.
+    @Published private(set) var allowClipboard = false
+    @Published private(set) var allowFiles = false
+    static let clipboardKey = "allowClipboard", filesKey = "allowFiles"
+
+    func setAllowed(clipboard: Bool? = nil, files: Bool? = nil) {
+        if let clipboard { allowClipboard = clipboard }
+        if let files { allowFiles = files }
+        if !unattended {
+            UserDefaults.standard.set(allowClipboard, forKey: Self.clipboardKey)
+            UserDefaults.standard.set(allowFiles, forKey: Self.filesKey)
+        }
+        host.allow(clipboard: allowClipboard, files: allowFiles)
+        hostLog("host: devices may share the clipboard: \(allowClipboard); send files: \(allowFiles)")
+        // A device learns what is offered when it connects, so sharing starts afresh.
+        guard host.isRunning else { return }
+        host.stop()
+        client = nil
+        do { try host.start() } catch {
+            sharing = false
+            startError = error.localizedDescription
+        }
+    }
     /// The devices this Mac trusts, in the order they were paired.
     @Published private(set) var devices: [MacHost.Device] = []
     /// When the pairing started from the interface closes by itself.
@@ -41,6 +65,16 @@ final class HostController: ObservableObject {
     init(options: MacHost.Options, unattended: Bool) {
         self.options = options
         self.unattended = unattended
+        var options = options
+        if unattended {
+            allowClipboard = options.allowClipboard
+            allowFiles = options.allowFiles
+        } else {
+            allowClipboard = UserDefaults.standard.bool(forKey: Self.clipboardKey)
+            allowFiles = UserDefaults.standard.bool(forKey: Self.filesKey)
+            options.allowClipboard = allowClipboard
+            options.allowFiles = allowFiles
+        }
         host = MacHost(options: options)
         host.onClient = { [weak self] c in
             // The same device with another display (it changed its settings) keeps its time.
@@ -78,7 +112,9 @@ final class HostController: ObservableObject {
             }
             sharing = true
             readInfo()
-        } else if !UserDefaults.standard.bool(forKey: Self.pausedKey) {
+        } else if UserDefaults.standard.object(forKey: Self.pausedKey) != nil, !UserDefaults.standard.bool(forKey: Self.pausedKey) {
+            // Sharing was on when the app was last open. On a fresh install nothing starts by
+            // itself (and so macOS asks nothing at launch): the owner turns sharing on.
             setSharing(true)
         }
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
