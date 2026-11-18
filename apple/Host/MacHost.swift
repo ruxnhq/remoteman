@@ -357,14 +357,15 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let host else { return }
         soundQueue.sync {
             if let s = sound, !on {
-                hostLog("host: sound off after \(s.buffers) buffers captured, \(s.totals.packets) packets, \(s.totals.bytes) bytes, \(s.totals.pauses) pauses")
+                hostLog("host: sound off after \(s.buffers) buffers captured, \(s.totals.packets) packets, \(s.totals.bytes) bytes, \(s.totals.pauses) pauses; \(s.gapReport)")
             }
             sound = nil
             guard on else { return }
             guard let s = HostSound() else { return hostLog("host: no Opus encoder for sound") }
-            s.send = { [weak self] data, start, seq in
+            s.send = { [weak self] data, start, seq, behind in
                 guard let h = self?.host else { return }
-                rm_host_send_sound(h, data.bindMemory(to: UInt8.self).baseAddress, data.count, start ? 1 : 0, seq, rm_host_now_us(h))
+                let now = rm_host_now_us(h)
+                rm_host_send_sound(h, data.bindMemory(to: UInt8.self).baseAddress, data.count, start ? 1 : 0, seq, now > behind ? now - behind : 0)
             }
             s.testTone = options.testTone
             sound = s
@@ -524,7 +525,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: config, delegate: self)
         do {
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: frames)
-            try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: soundQueue)
+            if options.sound { try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: soundQueue) }
             try await s.startCapture()
         } catch {
             return "screen capture failed: \(error.localizedDescription)"
@@ -563,7 +564,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         config.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
         config.showsCursor = !cursorApart
         // Everything this Mac plays, bar this app; listened to all the time, sent only on request.
-        config.capturesAudio = true
+        config.capturesAudio = options.sound
         config.sampleRate = 48000
         config.channelCount = 2
         config.excludesCurrentProcessAudio = true

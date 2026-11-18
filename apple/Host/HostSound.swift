@@ -20,7 +20,17 @@ final class HostSound {
     /// Packets and bytes sent, and pauses begun, since the start.
     private(set) var totals = (packets: 0, bytes: 0, pauses: 0)
     /// One packet, on the sound queue.
-    var send: ((UnsafeRawBufferPointer, _ start: Bool, _ seq: UInt32) -> Void)?
+    /// `behindUs`: how long before now the packet's first sample was captured, so that each
+    /// packet of a capture buffer gets its own time, 10 ms apart.
+    var send: ((UnsafeRawBufferPointer, _ start: Bool, _ seq: UInt32, _ behindUs: UInt64) -> Void)?
+    /// For tests: the times between capture buffers, in milliseconds.
+    private var gaps: [Double] = []
+    private var lastBuffer: UInt64 = 0
+    var gapReport: String {
+        guard gaps.count > 2 else { return "too few buffers" }
+        let s = gaps.sorted()
+        return String(format: "between capture buffers: median %.1f ms, p99 %.1f ms, max %.1f ms", s[s.count / 2], s[min(s.count - 1, s.count * 99 / 100)], s[s.count - 1])
+    }
     /// For tests on a Mac that plays nothing: a quiet 440 Hz tone in place of what was captured,
     /// at the capture's own pace.
     var testTone = false
@@ -72,6 +82,9 @@ final class HostSound {
         guard let data = ready.floatChannelData else { return }
         let count = Int(ready.frameLength)
         buffers += 1
+        let arrived = DispatchTime.now().uptimeNanoseconds
+        if lastBuffer != 0, gaps.count < 100_000 { gaps.append(Double(arrived - lastBuffer) / 1e6) }
+        lastBuffer = arrived
         if testTone {
             for c in 0..<Int(ready.format.channelCount) {
                 for i in 0..<count { data[c][i] = 0.05 * Float(sin(2 * Double.pi * 440 * Double(phase + i) / 48000)) }
@@ -127,7 +140,9 @@ final class HostSound {
         var first = start
         for i in 0..<Int(out.packetCount) {
             let d = descriptions[i]
-            send?(UnsafeRawBufferPointer(start: out.data + Int(d.mStartOffset), count: Int(d.mDataByteSize)), first, seq)
+            // What is still waiting, this packet included, was captured that long before now.
+            let behind = UInt64(left.count) * 1_000_000 / 48000
+            send?(UnsafeRawBufferPointer(start: out.data + Int(d.mStartOffset), count: Int(d.mDataByteSize)), first, seq, behind)
             first = false
             seq &+= 1
             totals.packets += 1
