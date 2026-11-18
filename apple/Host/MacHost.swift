@@ -56,6 +56,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         /// What this Mac's owner allows paired devices: the clipboard both ways, files into Downloads.
         var allowClipboard = false
         var allowFiles = false
+        var testAllow: Double?
         var testDrop: Double?
         var testRevoke: Double?
     }
@@ -78,10 +79,30 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private var options: Options
 
-    /// What paired devices may do, as the owner switched it. Takes effect when sharing next starts.
+    /// What this host offers now: the camera only while remoteman's camera is installed on this Mac.
+    private var featureList: String {
+        "video,input,cursor,placement,configure" + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
+            + (options.allowFiles ? ",files" : "") + (HostCamera.installed ? ",camera" : "")
+    }
+    private var announced = ""
+
+    /// Tell the core (and through it a connected device) what is offered, if that changed.
+    /// Nothing restarts; what was switched off is stopped here.
+    func refreshFeatures() {
+        guard let host else { return }
+        let list = featureList
+        guard list != announced else { return }
+        announced = list
+        rm_host_set_features(host, list)
+        hostLog("host: offering \(list)")
+        if !options.allowClipboard, let s = sharing { DispatchQueue.main.async { s.setClipboard(false, sendCurrent: false) } }
+    }
+
+    /// What paired devices may do, as the owner switched it.
     func allow(clipboard: Bool, files: Bool) {
         options.allowClipboard = clipboard
         options.allowFiles = files
+        refreshFeatures()
     }
     private var host: OpaquePointer?
 
@@ -198,12 +219,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var err = [CChar](repeating: 0, count: 512)
         guard
             let h = rm_host_start(
-                options.listen, options.stateDir, options.name, "macos", "video,input,cursor,placement,configure" + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "") + (options.allowFiles ? ",files" : "")
-                    // Offered while remoteman's camera is installed on this Mac.
-                    + (HostCamera.installed ? ",camera" : ""), options.pair ? 1 : 0,
+                options.listen, options.stateDir, options.name, "macos", featureList, options.pair ? 1 : 0,
                 callbacks, &err, err.count)
         else { throw NSError(domain: "remoteman", code: 1, userInfo: [NSLocalizedDescriptionKey: String(cString: err)]) }
         host = h
+        announced = featureList
         var info = [CChar](repeating: 0, count: 256)
         rm_host_info(h, &info, info.count)
         let parts = String(cString: info).split(separator: "\t").map(String.init)

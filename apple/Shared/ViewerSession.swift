@@ -255,6 +255,32 @@ final class ViewerSession: ObservableObject {
             if let b = (m["bitrate"] as? NSNumber)?.intValue {
                 DispatchQueue.main.async { if self.generation == gen { self.hostBitrate = b } }
             }
+        case "features":
+            // The host changed what it offers while connected: the controls follow, and what
+            // was switched off there stops here.
+            let list = Set((m["features"] as? [String]) ?? [])
+            DispatchQueue.main.async { [self] in
+                guard generation == gen, client != nil else { return }
+                features = list
+                if soundOn, !has("sound") {
+                    soundOn = false
+                    soundSetup.async { [sound] in sound.stop() }
+                }
+                if micOn, !has("mic") {
+                    micOn = false
+                    mic?.stop()
+                    mic = nil
+                }
+                if cameraOn, !has("camera") {
+                    cameraOn = false
+                    camera?.stop()
+                    camera = nil
+                }
+                if clipboardOn, !has("clipboard") {
+                    clipboardOn = false
+                    sharing.setClipboard(false, sendCurrent: false)
+                }
+            }
         case "camera_keyframe":
             DispatchQueue.main.async { self.camera?.keyframe() }
         case "file_result":

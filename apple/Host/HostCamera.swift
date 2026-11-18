@@ -99,14 +99,18 @@ final class HostCamera {
         if let d = decoder { VTDecompressionSessionInvalidate(d) }
         decoder = nil
         format = nil
-        let pointers = sets.map { set in set.withUnsafeBytes { UnsafePointer<UInt8>(OpaquePointer($0.baseAddress!)) } }
-        // The pointers must outlive the call: keep the datas alive around it.
-        var desc: CMVideoFormatDescription?
-        let status = withExtendedLifetime(sets) {
-            CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                allocator: nil, parameterSetCount: sets.count, parameterSetPointers: pointers, parameterSetSizes: sets.map { $0.count },
-                nalUnitHeaderLength: 4, formatDescriptionOut: &desc)
+        // Copies that stay put for the call (a short Data keeps its bytes inside itself).
+        let copies: [UnsafeMutablePointer<UInt8>] = sets.map { set in
+            let p = UnsafeMutablePointer<UInt8>.allocate(capacity: set.count)
+            set.copyBytes(to: p, count: set.count)
+            return p
         }
+        defer { copies.forEach { $0.deallocate() } }
+        var desc: CMVideoFormatDescription?
+        let status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
+            allocator: nil, parameterSetCount: sets.count, parameterSetPointers: copies.map { UnsafePointer($0) },
+            parameterSetSizes: sets.map { $0.count }, nalUnitHeaderLength: 4, formatDescriptionOut: &desc)
+        if status != noErr { hostLog("host: the device's camera: parameter sets refused (\(status)), \(sets.map { $0.count }) bytes") }
         guard status == noErr, let desc else { return }
         let attrs: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA, kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
         var session: VTDecompressionSession?

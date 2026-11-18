@@ -276,7 +276,7 @@ struct HostSettings: View {
                 }
                 CardGroup(
                     "What paired devices may do",
-                    footnote: "Both are off until you turn them on. Changing one disconnects a device that is connected; it can connect again at once."
+                    footnote: "Both are off until you turn them on. A connected device is told at once."
                 ) {
                     Row("Share the clipboard", caption: "What is copied on this Mac or on the device can be pasted on the other.") {
                         Toggle("Share the clipboard", isOn: Binding(get: { controller.allowClipboard }, set: { controller.setAllowed(clipboard: $0) }))

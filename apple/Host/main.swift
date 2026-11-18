@@ -19,11 +19,17 @@ options.stateDir = support.path
 // Any of the options below makes this an unattended run: sharing starts at once, the system
 // asks for missing permissions, and a failure to start ends the app.
 var unattended = false
+var installCamera = false
 var args = Array(CommandLine.arguments.dropFirst())
 while !args.isEmpty {
     let a = args.removeFirst()
     func value() -> String { args.isEmpty ? "" : args.removeFirst() }
     func yes() -> Bool { ["yes", "1", "true"].contains(value()) }
+    // Asking macOS to install the camera is something the owner does by hand; it starts nothing else.
+    if a == "--install-camera" {
+        installCamera = yes()
+        continue
+    }
     if a.hasPrefix("--") { unattended = true }
     switch a {
     case "--listen": options.listen = value()
@@ -43,6 +49,8 @@ while !args.isEmpty {
         options.allowClipboard = list.contains("clipboard")
         options.allowFiles = list.contains("files")
     case "--test-tone": options.testTone = yes()
+    // For tests: so many seconds after a device connects, allow the clipboard and files; 4 s later, take them away.
+    case "--test-allow": options.testAllow = Double(value())
     case "--test-drop": options.testDrop = Double(value())
     case "--test-revoke": options.testRevoke = Double(value())
     default:
@@ -76,6 +84,12 @@ app.setActivationPolicy(.accessory)
 let controller = HostController(options: options, unattended: unattended)
 let delegate = HostAppDelegate(controller: controller)
 app.delegate = delegate
+if installCamera {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+        hostLog("camera: asking macOS to install remoteman Camera")
+        controller.installCamera()
+    }
+}
 
 // Ctrl-C or a kill: take the display away and say goodbye before going.
 var signals: [DispatchSourceSignal] = []

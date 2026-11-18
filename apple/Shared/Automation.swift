@@ -208,7 +208,7 @@ enum Automation {
                     let s = shape.map { $0.map { "\($0.image.width)x\($0.image.height) hot \($0.hotX),\($0.hotY)" } ?? "none" } ?? "not sent"
                     print("remoteman: host cursor at \(at.map { String(format: "%.3f, %.3f visible %@", $0.x, $0.y, $0.visible ? "yes" : "no") } ?? "unknown"), shape \(s)")
                 // Features. stats: the figures since the last one (prints the picture's size and rate).
-                case "features": print("remoteman: host features \(c.features.sorted().joined(separator: ","))")
+                case "features": print("remoteman: host features \(DispatchQueue.main.sync { session.features }.sorted().joined(separator: ","))")
                 case "stats":
                     let t = DispatchQueue.main.sync { () -> String in
                         let st = session.stats  // the last half second, as the app shows it

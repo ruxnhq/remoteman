@@ -47,14 +47,6 @@ final class HostController: ObservableObject {
         }
         host.allow(clipboard: allowClipboard, files: allowFiles)
         hostLog("host: devices may share the clipboard: \(allowClipboard); send files: \(allowFiles)")
-        // A device learns what is offered when it connects, so sharing starts afresh.
-        guard host.isRunning else { return }
-        host.stop()
-        client = nil
-        do { try host.start() } catch {
-            sharing = false
-            startError = error.localizedDescription
-        }
     }
     /// The devices this Mac trusts, in the order they were paired.
     @Published private(set) var devices: [MacHost.Device] = []
@@ -92,6 +84,10 @@ final class HostController: ObservableObject {
             self?.client = c
             if let self, c != nil, before == nil {
                 hostLog("host: trusted devices: \(self.host.devices.map { "\($0.name) \($0.fingerprint.prefix(8))\($0.connected ? " (connected)" : "")" }.joined(separator: ", "))")
+                if let t = options.testAllow {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + t) { self.setAllowed(clipboard: true, files: true) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + t + 4) { self.setAllowed(clipboard: false, files: false) }
+                }
                 if let t = options.testDrop { DispatchQueue.main.asyncAfter(deadline: .now() + t) { self.disconnectClient() } }
                 if let t = options.testRevoke {
                     DispatchQueue.main.asyncAfter(deadline: .now() + t) {
@@ -213,6 +209,7 @@ final class HostController: ObservableObject {
         if list != devices { devices = list }
         let cam = HostCamera.installed
         if cam != cameraInstalled { cameraInstalled = cam }
+        host.refreshFeatures()  // the camera is offered while it is installed
         let core = host.pairing
         if pairing, !core {
             // The core turns pairing off once it has let a device in.
