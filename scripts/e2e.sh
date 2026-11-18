@@ -6,6 +6,8 @@
 # RM_MUTTER_ARGS adds options to that Mutter, e.g. "--virtual-monitor 1920x1080@60" to give it a
 # screen of its own, standing in for a PC's real one.
 # RM_CONTENT_ARGS goes to the moving content, e.g. "--monitor Meta-1" to pin it to a monitor.
+# RM_AGENT_ARGS adds options to the agent (e.g. "--allow files"); RM_AGENT_ENV sets variables
+# for it (e.g. "XDG_CONFIG_HOME=/some/folder", to point its Downloads folder elsewhere).
 # RM_KILL_AGENT_AFTER=N kills the agent with no warning N seconds after it starts.
 # Logs land in $RM_LOGS (default: a fresh temporary folder, printed at the end).
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
@@ -16,7 +18,7 @@ dbus-run-session -- sh -c '
   mutter --headless --wayland --no-x11 --wayland-display rm-e2e $RM_MUTTER_ARGS >"$RM_LOGS/mutter.log" 2>&1 &
   mpid=$!
   sleep 2
-  "$bin/remoteman-agent" --listen 127.0.0.1:$RM_PORT --pair --state "$RM_LOGS/state" >"$RM_LOGS/agent.log" 2>&1 &
+  env $RM_AGENT_ENV "$bin/remoteman-agent" --listen 127.0.0.1:$RM_PORT --pair --state "$RM_LOGS/state" $RM_AGENT_ARGS >"$RM_LOGS/agent.log" 2>&1 &
   apid=$!
   sleep 1
   # The content needs the virtual monitor, which exists once the client is in.

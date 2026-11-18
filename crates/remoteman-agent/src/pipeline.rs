@@ -11,7 +11,7 @@ use remoteman_capture::{self as capture, Event, QuitSender};
 use remoteman_encode::{Codec, Config, Encoder, How};
 use remoteman_gpu::{Chroma, Converter};
 use remoteman_core::host::Link;
-use remoteman_core::{self as control, CursorShape};
+use remoteman_core::{self as control, CursorShape, Message};
 
 pub struct Settings {
     pub node: u32,
@@ -34,6 +34,8 @@ pub struct Pipeline {
     /// A loss report not yet acted on: the first frame the client missed, and the newest it
     /// had seen when it said so.
     lost: Arc<Mutex<Option<(u32, u32)>>>,
+    /// The bitrate wanted, in bits a second; the encoder follows it at its next frame.
+    bitrate: Arc<AtomicU32>,
     /// Frames the compositor made that were skipped because the encoder was still busy.
     pub skipped: Arc<AtomicU32>,
     /// The scale the compositor draws the monitor at, as `f32` bits (what was asked for, until
@@ -78,6 +80,8 @@ impl Pipeline {
         let key = keyframe.clone();
         let lost = Arc::new(Mutex::new(None::<(u32, u32)>));
         let lost_r = lost.clone();
+        let wanted = Arc::new(AtomicU32::new(bitrate));
+        let wanted_r = wanted.clone();
         let out = link.clone();
         let encoder = std::thread::Builder::new().name("encode".into()).spawn(move || {
             let opened = (|| {
@@ -113,7 +117,23 @@ impl Pipeline {
             // The last frame sent that a client can restart from (a keyframe or recovery point).
             let mut answer = None::<u64>;
             let mut tally = Tally::default();
+            let mut rate = bitrate;
             while let Ok(c) = rx.recv() {
+                // A new bitrate takes effect here, with no keyframe.
+                let want = wanted_r.load(Ordering::Relaxed);
+                if want != rate {
+                    match enc.set_bitrate(want) {
+                        Ok(()) => {
+                            tracing::info!(from = rate, to = want, "bitrate");
+                            rate = want;
+                            out.send_message(Message::Status { bitrate: Some(rate) });
+                        }
+                        Err(e) => {
+                            tracing::warn!("couldn't change the bitrate: {e:#}");
+                            wanted_r.store(rate, Ordering::Relaxed);
+                        }
+                    }
+                }
                 let mut how = How { idr: key.swap(false, Ordering::Relaxed), ..How::default() };
                 let mut recovery = false;
                 let reported = lost_r.lock().unwrap().take();
@@ -263,12 +283,17 @@ impl Pipeline {
                 tracing::error!("capture: {e:#}");
             }
         })?;
-        Ok(Self { quit: Some(quit), keyframe, lost, skipped, scale: actual_scale, threads: vec![capture, encoder] })
+        Ok(Self { quit: Some(quit), keyframe, lost, bitrate: wanted, skipped, scale: actual_scale, threads: vec![capture, encoder] })
     }
 
     /// Make the next frame a keyframe.
     pub fn request_keyframe(&self) {
         self.keyframe.store(true, Ordering::Relaxed);
+    }
+
+    /// Encode at this many bits a second from the next frame on.
+    pub fn set_bitrate(&self, bitrate: u32) {
+        self.bitrate.store(bitrate, Ordering::Relaxed);
     }
 
     /// The client missed frames from `first` on, and had seen up to `last` when it said so:
