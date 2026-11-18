@@ -49,10 +49,14 @@ typedef struct rm_callbacks {
 // the main thread. `state_dir` holds this device's identity and the hosts it knows; `name` is
 // shown on the host. `decoders` lists what the device decodes in hardware, most preferred
 // first, from "av1", "hevc444", "hevc" (comma-separated). With `pair` non-zero, a host not seen
-// before is accepted and remembered. Returns NULL on failure, with the reason in `err`.
+// before is accepted and remembered. `options` is a list of key=value pairs separated by ';'
+// (NULL or "" for none). So far: placement=extend|main|only, where this display sits among the
+// host's own: an extra display (the default), the main display, or the only display (the
+// host's own screens off while connected). Returns NULL on failure, with the reason in `err`.
 rm_client *rm_client_connect(const char *host, const char *state_dir, const char *name, int32_t pair,
                              uint32_t width, uint32_t height, float scale, uint32_t refresh,
-                             const char *decoders, rm_callbacks callbacks, char *err, size_t err_len);
+                             const char *decoders, const char *options, rm_callbacks callbacks,
+                             char *err, size_t err_len);
 
 // "name\tos\tfingerprint" of the host, copied into `out`.
 void rm_client_host(const rm_client *client, char *out, size_t len);
@@ -90,6 +94,8 @@ typedef struct rm_client_info {
     uint32_t refresh;         // Hz
     const char *decoders;     // what it decodes, most preferred first: from "av1", "hevc444", "hevc"
     uint8_t cursor_apart;     // non-zero: leave the cursor out of the picture and report it apart
+    uint8_t placement;        // 0 an extra display, 1 the main display, 2 the only display
+                              // (this computer's own screens off while it is connected)
 } rm_client_info;
 
 // The host's answer, filled in by on_client.

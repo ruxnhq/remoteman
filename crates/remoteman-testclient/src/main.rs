@@ -10,8 +10,10 @@
 //!     --out FILE         save the video stream, bare (playable by FFmpeg)
 //!     --record FILE      save what the app would be handed, frame by frame (format below)
 //!     --input-demo       move the pointer, click, type and touch while running
+//!     --pointer-demo     move the pointer in a circle and nothing else (safe on a desktop in use)
 //!     --cursor           draw the cursor ourselves: ask for its shape and position apart
 //!     --drop-one-in N    throw away one video packet in N, as a lossy network would
+//!     --placement P      extend (default), main or only: where the display sits on the host
 
 //!
 //! A recording (`--record`) is for testing decoders without a host. It is:
@@ -28,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use remoteman_core::{Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Mode, Options, StreamInfo, TouchPhase};
+use remoteman_core::{Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Mode, Options, Placement, StreamInfo, TouchPhase};
 
 fn pct(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() { 0.0 } else { sorted[((sorted.len() - 1) as f64 * p) as usize] }
@@ -115,7 +117,9 @@ fn main() -> Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let (mut state, mut pair, mut size, mut scale, mut refresh, mut secs) = (home.join(".local/state/remoteman"), false, (2752u32, 2064u32), 2.0f32, 120u32, 10u64);
     let (mut out, mut record, mut demo, mut cursor, mut decoders) = (None::<PathBuf>, None::<PathBuf>, false, false, "av1,hevc444,hevc".to_owned());
+    let mut circle = false;
     let mut drop_one_in = None::<u32>;
+    let mut placement = Placement::Extend;
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -133,8 +137,17 @@ fn main() -> Result<()> {
             "--out" => out = Some(value()?.into()),
             "--record" => record = Some(value()?.into()),
             "--input-demo" => demo = true,
+            "--pointer-demo" => circle = true,
             "--cursor" => cursor = true,
             "--drop-one-in" => drop_one_in = Some(value()?.parse()?),
+            "--placement" => {
+                placement = match value()?.as_str() {
+                    "extend" => Placement::Extend,
+                    "main" => Placement::Main,
+                    "only" => Placement::Only,
+                    other => bail!("unknown placement {other}"),
+                }
+            }
             other => bail!("unknown option {other}"),
         }
     }
@@ -161,11 +174,20 @@ fn main() -> Result<()> {
         None => None,
     };
     let watcher = Watcher { seen: seen.clone(), file, record, warm: Instant::now() + Duration::from_secs(2) };
-    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh }, decoders, test_drop_one_in: drop_one_in, cursor };
+    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement }, decoders, test_drop_one_in: drop_one_in, cursor };
     let client = Client::connect(options, watcher)?;
     println!("host: {} ({}), features {:?}, fingerprint {}", client.host_name, client.host_os, client.host_features, &client.host_fingerprint[..12]);
 
     let end = Instant::now() + Duration::from_secs(secs);
+    if circle {
+        std::thread::sleep(Duration::from_secs(3));
+        for i in 0..120 {
+            let a = i as f32 / 120.0 * std::f32::consts::TAU;
+            client.send(Event::PointerTo { x: 0.5 + 0.2 * a.cos(), y: 0.5 + 0.2 * a.sin() });
+            std::thread::sleep(Duration::from_millis(16));
+        }
+        println!("pointer demo sent");
+    }
     if demo {
         std::thread::sleep(Duration::from_secs(3));
         let mut script = vec![Event::PointerTo { x: 0.5, y: 0.5 }];

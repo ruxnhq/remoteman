@@ -5,7 +5,7 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
 
-use crate::{Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Mode, Options, StreamInfo, TouchPhase};
+use crate::{Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Mode, Options, Placement, StreamInfo, TouchPhase};
 
 /// The app's callbacks. They are called from the core's threads, one at a time, with `ctx`.
 #[repr(C)]
@@ -82,8 +82,10 @@ fn report(err: *mut c_char, len: usize, message: &str) {
 
 /// Connect to `host` ("name:port") and say hello. Blocks until the host answers or the attempt
 /// fails. `decoders` is a comma-separated list in order of preference, from `av1`, `hevc444`,
-/// `hevc`. With `pair` non-zero, a host not seen before is accepted and remembered. Returns
-/// null on failure, with the reason in `err`.
+/// `hevc`. With `pair` non-zero, a host not seen before is accepted and remembered. `options` is
+/// a list of `key=value` pairs separated by `;` (null or empty for none); so far
+/// `placement=extend|main|only`, where the display sits among the host's own. Returns null on
+/// failure, with the reason in `err`.
 ///
 /// # Safety
 /// The strings must be valid C strings and `err` a writable buffer of `err_len` bytes (or null).
@@ -98,11 +100,24 @@ pub unsafe extern "C" fn rm_client_connect(
     scale: f32,
     refresh: u32,
     decoders: *const c_char,
+    options: *const c_char,
     callbacks: RmCallbacks,
     err: *mut c_char,
     err_len: usize,
 ) -> *mut Client {
-    let (host, state, name, decoders) = unsafe { (text(host), text(state_dir), text(name), text(decoders)) };
+    let (host, state, name, decoders, options) = unsafe { (text(host), text(state_dir), text(name), text(decoders), text(options)) };
+    let mut placement = Placement::Extend;
+    for pair in options.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        match pair.split_once('=') {
+            Some(("placement", "extend")) => placement = Placement::Extend,
+            Some(("placement", "main")) => placement = Placement::Main,
+            Some(("placement", "only")) => placement = Placement::Only,
+            _ => {
+                report(err, err_len, &format!("unknown option {pair}"));
+                return std::ptr::null_mut();
+            }
+        }
+    }
     let mut modes = Vec::new();
     for d in decoders.split(',').map(str::trim).filter(|d| !d.is_empty()) {
         modes.push(match d {
@@ -115,7 +130,7 @@ pub unsafe extern "C" fn rm_client_connect(
             }
         });
     }
-    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh }, decoders: modes, test_drop_one_in: None, cursor: callbacks.on_cursor_shape.is_some() };
+    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh, placement }, decoders: modes, test_drop_one_in: None, cursor: callbacks.on_cursor_shape.is_some() };
     match Client::connect(options, callbacks) {
         Ok(c) => Box::into_raw(Box::new(c)),
         Err(e) => {
@@ -215,6 +230,9 @@ pub struct RmClientInfo {
     pub decoders: *const c_char,
     /// Non-zero: it draws the cursor itself.
     pub cursor_apart: u8,
+    /// Where its display should sit: 0 an extra display, 1 the main display, 2 the only
+    /// display (this computer's own screens off while it is connected).
+    pub placement: u8,
 }
 
 /// The host's answer, filled in by `on_client`.
@@ -294,6 +312,7 @@ impl HostHandler for RmHostCallbacks {
             refresh: client.display.refresh,
             decoders: decoders.as_ptr(),
             cursor_apart: client.cursor as u8,
+            placement: client.display.placement as u8,
         };
         let mut a = RmAccept { codec: 0, depth: 10, chroma: 420, width: 0, height: 0, refresh: 0, hdr: 0, refuse: [0; 200] };
         if f(self.ctx, &info, &mut a) == 0 {

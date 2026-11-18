@@ -41,7 +41,7 @@ fn main() -> Result<()> {
         }
     }
     let name = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "linux".into());
-    let options = HostOptions { listen, state, name, os: "linux".into(), features: vec!["video".into(), "input".into(), "cursor".into()], pair, test_drop_one_in: drop_one_in };
+    let options = HostOptions { listen, state, name, os: "linux".into(), features: vec!["video".into(), "input".into(), "cursor".into(), "placement".into()], pair, test_drop_one_in: drop_one_in };
     let host = Host::start(options, session::Agent::new(bitrate * 1_000_000)?)?;
     tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
     if pair {
