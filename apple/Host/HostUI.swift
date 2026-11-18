@@ -365,12 +365,13 @@ struct HostSettings: View {
         .background(Tokens.win)
         .confirmationDialog(
             "Revoke \(revoking?.name ?? "this device")?", isPresented: Binding(get: { revoking != nil }, set: { if !$0 { revoking = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("Revoke", role: .destructive) { if let d = revoking { controller.revoke(d) } }
+            titleVisibility: .visible, presenting: revoking
+        ) { d in
+            // The device is handed in: `revoking` is already cleared when the action runs.
+            Button("Revoke", role: .destructive) { controller.revoke(d) }
             Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(revoking?.connected == true ? "It is disconnected now, and has to be paired again before it can connect." : "It has to be paired again before it can connect.")
+        } message: { d in
+            Text(d.connected ? "It is disconnected now, and has to be paired again before it can connect." : "It has to be paired again before it can connect.")
         }
     }
 

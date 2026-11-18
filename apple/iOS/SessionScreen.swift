@@ -102,6 +102,7 @@ struct SessionScreen: View {
             text("Touch", "hand.point.up.left", active: false) {}.available(Features.trackpadMode)
             separator
             icon(session.soundOn ? "speaker.wave.2.fill" : "speaker.wave.2", session.soundOn ? "Sound, on" : "Sound, off", active: session.soundOn) {
+                Haptics.toggle(!session.soundOn)
                 session.setSound(!session.soundOn)
             }
             .available(Features.sound && session.has("sound"))
@@ -206,13 +207,13 @@ struct SessionScreen: View {
                     keyboardShown.toggle()
                     phoneControls = false
                 }
-                tile("speaker.wave.2", "Sound", on: session.soundOn) { session.setSound(!session.soundOn) }
+                tile("speaker.wave.2", "Sound", on: session.soundOn) { Haptics.toggle(!session.soundOn); session.setSound(!session.soundOn) }
                     .available(Features.sound && session.has("sound"))
-                tile("mic", "Microphone", on: session.micOn) { session.setMic(!session.micOn) }
+                tile("mic", "Microphone", on: session.micOn) { Haptics.toggle(!session.micOn); session.setMic(!session.micOn) }
                     .available(Features.microphone && session.has("mic"))
-                tile("camera", "Camera", on: session.cameraOn) { session.setCamera(!session.cameraOn) }
+                tile("camera", "Camera", on: session.cameraOn) { Haptics.toggle(!session.cameraOn); session.setCamera(!session.cameraOn) }
                     .available(Features.camera && session.has("camera"))
-                tile("doc.on.clipboard", "Clipboard", on: session.clipboardOn) { session.setClipboard(!session.clipboardOn) }
+                tile("doc.on.clipboard", "Clipboard", on: session.clipboardOn) { Haptics.toggle(!session.clipboardOn); session.setClipboard(!session.clipboardOn) }
                     .available(Features.clipboard && session.has("clipboard"))
                 tile("arrow.up.arrow.down", "Files", on: false) { pickFiles() }.available(Features.files && session.has("files"))
             }
@@ -286,6 +287,7 @@ struct PictureMenu: View {
                 .padding(.horizontal, 12).padding(.vertical, 6)
             ForEach(Self.limits, id: \.self) { bits in
                 Button {
+                    Haptics.choice()
                     session.setBitrateLimit(bits)
                     dismiss()
                 } label: {
@@ -327,6 +329,7 @@ struct SessionNotes: View {
         }
         .task(id: session.transfers) {
             guard let t = session.transfers.last, t.state != .moving else { return }
+            if case .failed = t.state { Haptics.failure() } else { Haptics.success() }
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             if !Task.isCancelled { session.clearFinishedTransfers() }
         }
@@ -409,6 +412,7 @@ struct DisplayMenu: View {
     }
 
     private func choose(_ p: ViewerSession.Placement) {
+        Haptics.choice()
         dismiss()
         model.setPlacement(p)
     }
@@ -496,11 +500,14 @@ final class KeyStrip: ObservableObject {
             if held.contains(k.usage) {
                 held.remove(k.usage)
                 input.key(usage: k.usage, down: false)
+                Haptics.toggle(false)
             } else {
                 held.insert(k.usage)
                 input.key(usage: k.usage, down: true)
+                Haptics.toggle(true)
             }
         } else {
+            Haptics.key()
             input.key(usage: k.usage, down: true)
             input.key(usage: k.usage, down: false)
         }

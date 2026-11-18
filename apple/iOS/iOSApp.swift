@@ -101,6 +101,11 @@ final class AppModel: ObservableObject {
     }
 
     private func stateChanged(_ state: ViewerSession.State) {
+        // A mark for what the user was waiting on: connected, or it didn't work.
+        if current != nil {
+            if case .streaming = state { Haptics.success() }
+            if case .failed = state { Haptics.failure() }
+        }
         if case .failed = state, session.mustPairAgain, var c = current {
             c.paired = false
             store.update(c)

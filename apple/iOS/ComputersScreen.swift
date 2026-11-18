@@ -32,22 +32,29 @@ struct ComputersScreen: View {
         .sheet(isPresented: $pairing) { PairSheet() }
         .sheet(isPresented: $settings) { SettingsScreen() }
         .sheet(item: $editing) { ComputerSettingsScreen(computerID: $0.id) }
-        .alert("Rename", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+        // The computer is handed to the buttons (`presenting`): by the time a button's action
+        // runs, the dialog has already cleared `renaming` / `forgetting`, so reading them there
+        // found nothing and the button did nothing.
+        .alert("Rename", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } }), presenting: renaming) { c in
             TextField("Name", text: $newName)
             Button("Cancel", role: .cancel) {}
             Button("Rename") {
-                if var c = renaming, !newName.trimmingCharacters(in: .whitespaces).isEmpty {
-                    c.name = newName.trimmingCharacters(in: .whitespaces)
-                    store.update(c)
-                }
+                let name = newName.trimmingCharacters(in: .whitespaces)
+                guard !name.isEmpty else { return }
+                var renamed = c
+                renamed.name = name
+                store.update(renamed)
             }
         }
         .confirmationDialog(
             "Forget \(forgetting?.name ?? "this computer")?", isPresented: Binding(get: { forgetting != nil }, set: { if !$0 { forgetting = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("Forget This Computer", role: .destructive) { if let c = forgetting { store.forget(c) } }
-        } message: {
+            titleVisibility: .visible, presenting: forgetting
+        ) { c in
+            Button("Forget This Computer", role: .destructive) {
+                store.forget(c)
+                Haptics.warning()
+            }
+        } message: { _ in
             Text("Its key is removed from this \(device). Revoke this \(device) on the computer too.")
         }
     }
