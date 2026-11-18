@@ -161,6 +161,18 @@ struct Counters {
     rtt: AtomicU32,
 }
 
+/// Sends microphone packets on a client's connection, from any thread: as
+/// [`Client::send_mic`]. Sending after the client has closed does nothing.
+#[derive(Clone)]
+pub struct MicSender(Connection);
+
+impl MicSender {
+    pub fn send(&self, start: bool, seq: u32, time_us: u64, data: &[u8]) {
+        let packet = Packet { kind: media::KIND_MIC, start, seq, time_us, data: data.to_vec() };
+        let _ = self.0.send_datagram(packet.write().into());
+    }
+}
+
 /// Why a host closed the connection: the codes of docs/PROTOCOL.md, "Connection".
 pub const CLOSE_DROPPED: u32 = 2;
 pub const CLOSE_REVOKED: u32 = 3;
@@ -280,7 +292,7 @@ impl Client {
                     Message::Error { code, message } => {
                         let _ = failed.send(format!("{code}: {message}"));
                     }
-                    m @ (Message::SoundFormat { .. } | Message::CameraKeyframe | Message::Status { .. } | Message::FileResult { .. }) => {
+                    m @ (Message::SoundFormat { .. } | Message::CameraKeyframe | Message::Status { .. } | Message::FileResult { .. } | Message::Features { .. }) => {
                         let _ = epoch_tx.send(FromHost::Message(m));
                     }
                     _ => {}
@@ -459,6 +471,11 @@ impl Client {
                 let _ = control.send(message).await;
             });
         }
+    }
+
+    /// For sending this device's microphone from the thread that records it.
+    pub fn mic_sender(&self) -> MicSender {
+        MicSender(self.conn.clone())
     }
 
     /// Send one packet of this device's microphone (after `Message::Mic { on: true, .. }`).

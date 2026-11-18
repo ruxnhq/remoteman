@@ -187,6 +187,9 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         decoders: Option<Vec<Mode>>,
     },
+    /// Host to client: what the host can do changed while connected (its owner switched
+    /// something on or off). It replaces the list in the hello.
+    Features { features: Vec<String> },
     /// Host to client, now and then: how the stream stands, for the device to show.
     Status {
         /// What the picture is being encoded at, in bits a second.

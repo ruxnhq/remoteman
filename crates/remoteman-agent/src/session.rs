@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use remoteman_core::host::{Accept, ClientInfo, HostHandler, Link};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use remoteman_core::media::{BLOB_CLIPBOARD, BLOB_FILE, CLIPBOARD_LIMIT, ClipboardHeader, FileHeader, safe_file_name};
@@ -85,6 +85,14 @@ pub struct Agent {
     sound: Option<(Option<DefaultSink>, SpeakerSink)>,
     /// The client's microphone, as one the desktop's programs can pick.
     microphone: Option<MicSource>,
+    /// The client's camera, as one the desktop's programs can pick, and when it last had to
+    /// ask the client for a keyframe.
+    camera: Option<mpsc::SyncSender<remoteman_core::Frame>>,
+    /// Camera frames that came before the message saying the camera is on (they travel
+    /// apart, so the first frame can overtake it), with when each came.
+    early: Vec<(std::time::Instant, remoteman_core::Frame)>,
+    /// A mark of the last copy sent from the desktop to the client, to tell a repeat.
+    last_copy: Arc<std::sync::Mutex<Option<(u64, std::time::Instant)>>>,
     /// Make the client's speaker the desktop's output while it is on (`--keep-output`: don't).
     take_output: bool,
     /// Counts what was copied here and sent, for the client to tell new from stale.
@@ -109,7 +117,7 @@ impl Agent {
         if login_screen.is_some() {
             tracing::info!("this is a login screen's session: no files, no clipboard, and it ends when its client goes");
         }
-        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, take_output, copies: Arc::default(), live: None })
+        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None })
     }
 
     /// What the picture is encoded at when the client's ceiling is `ceiling`.
@@ -217,6 +225,92 @@ impl Agent {
         }
     }
 
+    /// Present the client's camera as one the desktop's programs can pick, or take it away.
+    /// The device says what it sends; what isn't said is the usual 1280x720 at 30 a second.
+    fn take_camera(&mut self, on: bool, codec: &str, width: u32, height: u32, fps: u32) {
+        // The frames that overtook this message are kept for the camera it switches on.
+        self.camera = None;
+        if !on {
+            self.early.clear();
+        }
+        let (Some(l), true, None) = (self.live.as_ref(), on, self.login_screen) else { return };
+        if !codec.is_empty() && codec != "h264" {
+            tracing::warn!(codec, "the device's camera is sent in a codec this host doesn't take; only h264 is");
+            return;
+        }
+        let usual = remoteman_camera::Options::default();
+        let or = |said: u32, usual: u32| if said == 0 { usual } else { said };
+        let options = remoteman_camera::Options { width: or(width, usual.width), height: or(height, usual.height), fps: or(fps, usual.fps), ..usual };
+        let (name, link) = (format!("{} camera (remoteman)", l.name), l.link.clone());
+        // Decoding takes a few milliseconds a frame: on a thread of its own, so that it never
+        // holds up the client's input, which comes through here too. A second of frames may
+        // wait while the camera starts.
+        let (tx, rx) = mpsc::sync_channel::<remoteman_core::Frame>(30);
+        let started = std::thread::Builder::new().name("camera".into()).spawn(move || {
+            let mut camera = match remoteman_camera::Camera::start_with(&name, options) {
+                Ok(camera) => camera,
+                Err(e) => return tracing::warn!("couldn't make a camera for the device: {e:#}"),
+            };
+            tracing::info!(node = camera.node_name(), loopback = ?camera.loopback_device(), "the device's camera is on the desktop");
+            let mut t = CameraTally::default();
+            while let Ok(frame) = rx.recv() {
+                let began = std::time::Instant::now();
+                if let Some(last) = t.last.replace(began) {
+                    t.gap = t.gap.max(began - last);
+                }
+                t.frames += 1;
+                t.keys += frame.key as u32;
+                let pushed = camera.push(&frame.data, frame.key, frame.capture_us);
+                t.decode = t.decode.max(began.elapsed());
+                match pushed {
+                    remoteman_camera::Pushed::Shown => t.shown += 1,
+                    remoteman_camera::Pushed::Waiting => t.waiting += 1,
+                    // A frame the decoder can't use: nothing is shown until the device sends
+                    // a keyframe.
+                    remoteman_camera::Pushed::Lost => {
+                        t.lost += 1;
+                        if t.asked_at.is_none_or(|at| at.elapsed() > std::time::Duration::from_millis(250)) {
+                            t.asked_at = Some(std::time::Instant::now());
+                            t.asked += 1;
+                            link.send_message(Message::CameraKeyframe);
+                        }
+                    }
+                }
+            }
+            // Switched off, or the client went: the camera leaves the desktop here.
+            tracing::info!(
+                frames = t.frames,
+                keyframes = t.keys,
+                shown = t.shown,
+                undecodable = t.lost,
+                skipped = t.waiting,
+                asked_for_keyframe = t.asked,
+                longest_gap_ms = t.gap.as_millis() as u64,
+                longest_decode_us = t.decode.as_micros() as u64,
+                "the device's camera is off the desktop"
+            );
+        });
+        match started {
+            Ok(_) => {
+                // The frames that overtook the message, unless they are a camera's last ones
+                // from before.
+                for (came, frame) in self.early.drain(..) {
+                    if came.elapsed() < std::time::Duration::from_millis(500) {
+                        let _ = tx.try_send(frame);
+                    }
+                }
+                self.camera = Some(tx);
+            }
+            Err(e) => tracing::warn!("couldn't start the camera's thread: {e}"),
+        }
+    }
+
+    /// Take the device's camera off the desktop (its thread says how it went and ends).
+    fn drop_camera(&mut self) {
+        self.camera = None;
+        self.early.clear();
+    }
+
     /// Share the clipboard with the client, both ways, or stop. Only where the computer's
     /// owner allowed it, and never at a login screen.
     fn share_clipboard(&mut self, on: bool) {
@@ -225,6 +319,10 @@ impl Agent {
         if let Some((clipboard, watching)) = l.clipboard.take() {
             watching.abort();
             let _ = self.runtime.block_on(clipboard.disable());
+            tracing::info!("the clipboard is no longer shared with the device");
+        }
+        if on && !allowed {
+            tracing::info!("the device asked to share the clipboard, which isn't allowed here");
         }
         if !on || !allowed {
             return;
@@ -235,6 +333,8 @@ impl Agent {
         };
         let clipboard = Arc::new(clipboard);
         let (desktop, link, copies) = (clipboard.clone(), l.link.clone(), self.copies.clone());
+        *self.last_copy.lock().unwrap() = None;
+        let last_copy = self.last_copy.clone();
         // Whatever is copied on the desktop goes to the client: text if there is any, else a
         // picture.
         let watching = self.runtime.spawn(async move {
@@ -246,17 +346,33 @@ impl Agent {
                 };
                 match desktop.read(&read_as).await {
                     Ok(bytes) if !bytes.is_empty() => {
+                        // The desktop announces one copy more than once (twice, as a rule):
+                        // the same thing again within two seconds is not sent again.
+                        let mark = {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            (send_as, &bytes).hash(&mut h);
+                            h.finish()
+                        };
+                        let now = std::time::Instant::now();
+                        let before = last_copy.lock().unwrap().replace((mark, now));
+                        if before.is_some_and(|(m, at)| m == mark && now - at < std::time::Duration::from_secs(2)) {
+                            continue;
+                        }
+                        // What was copied is never logged, only what kind of thing and how much.
+                        tracing::info!(kind = send_as, bytes = bytes.len(), "a copy on the desktop goes to the device");
                         let header = ClipboardHeader { seq: copies.fetch_add(1, Ordering::Relaxed) + 1, mime: send_as.into(), size: bytes.len() as u64 };
                         let blob = link.open_blob(BLOB_CLIPBOARD, serde_json::to_string(&header).unwrap_or_default());
                         // Writing waits while the network is behind, which this task mustn't.
                         let _ = tokio::task::spawn_blocking(move || blob.write(&bytes) && blob.finish()).await;
                     }
                     Ok(_) => {}
-                    Err(e) => tracing::debug!("the desktop's clipboard: {e:#}"),
+                    Err(e) => tracing::warn!("couldn't read the desktop's clipboard: {e:#}"),
                 }
             }
         });
         l.clipboard = Some((clipboard, watching));
+        tracing::info!("the clipboard is shared with the device");
     }
 
     /// A clipboard blob from the client: what was copied on the device becomes what the
@@ -282,9 +398,14 @@ impl Agent {
             BlobEvent::Close { id, complete } => {
                 let (Some((mime, bytes)), Some((clipboard, _)), true) = (l.copied.remove(id), l.clipboard.as_ref(), *complete) else { return };
                 let clipboard = clipboard.clone();
+                // The desktop's clipboard is the device's copy now: the next copy on the
+                // desktop is news even if it is what was sent before.
+                *self.last_copy.lock().unwrap() = None;
                 self.runtime.spawn(async move {
-                    if let Err(e) = clipboard.offer(vec![(mime, bytes)]).await {
-                        tracing::debug!("couldn't put the device's copy on the clipboard: {e:#}");
+                    let (kind, size) = (mime.clone(), bytes.len());
+                    match clipboard.offer(vec![(mime, bytes)]).await {
+                        Ok(_) => tracing::info!(kind, bytes = size, "a copy on the device is on the desktop's clipboard"),
+                        Err(e) => tracing::warn!("couldn't put the device's copy on the clipboard: {e:#}"),
                     }
                 });
             }
@@ -429,6 +550,23 @@ impl HostHandler for Agent {
         }
     }
 
+    fn camera(&mut self, frame: &remoteman_core::Frame) {
+        // If the camera's thread is a second behind, this frame is left out; what follows it
+        // can't be decoded then, and the thread asks the device for a keyframe.
+        match &self.camera {
+            Some(camera) => {
+                let _ = camera.try_send(frame.clone());
+            }
+            // Not on yet, as far as this side has heard: kept for half a second.
+            None => {
+                self.early.retain(|(came, _)| came.elapsed() < std::time::Duration::from_millis(500));
+                if self.early.len() < 30 {
+                    self.early.push((std::time::Instant::now(), frame.clone()));
+                }
+            }
+        }
+    }
+
     fn message(&mut self, message: &Message) {
         match message {
             Message::Configure { display, bitrate, decoders } => self.configure(*display, *bitrate, decoders.clone()),
@@ -438,6 +576,7 @@ impl HostHandler for Agent {
             }
             Message::Sound { on } => self.send_sound(*on),
             Message::Mic { on, .. } => self.take_microphone(*on),
+            Message::Camera { on, codec, width, height, fps } => self.take_camera(*on, codec, *width, *height, *fps),
             _ => {}
         }
     }
@@ -478,6 +617,7 @@ impl HostHandler for Agent {
 
     fn left(&mut self) {
         self.clipboard_wanted = false;
+        self.drop_camera();
         (self.sound, self.microphone) = (None, None);
         if let Some(l) = self.stop() {
             drop(l.pipeline);
@@ -493,4 +633,22 @@ impl HostHandler for Agent {
             }
         }
     }
+}
+
+/// How a device's camera went, for the log when it is switched off.
+#[derive(Default)]
+struct CameraTally {
+    frames: u32,
+    keys: u32,
+    shown: u32,
+    /// Frames the decoder couldn't use, and frames skipped while waiting for a keyframe.
+    lost: u32,
+    waiting: u32,
+    /// Times the device was asked for a keyframe, and when it last was.
+    asked: u32,
+    asked_at: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+    /// The longest wait between two frames, and the longest a frame took to decode and show.
+    gap: std::time::Duration,
+    decode: std::time::Duration,
 }

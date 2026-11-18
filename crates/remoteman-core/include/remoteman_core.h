@@ -222,6 +222,12 @@ rm_host *rm_host_start(const char *listen, const char *state_dir, const char *na
 // "address:port\tfingerprint" of this host.
 void rm_host_info(const rm_host *host, char *out, size_t len);
 
+// Change what this host can do while it runs: `features` as for rm_host_start. The next
+// client's hello says so, and the connected one gets {"t":"features","features":[...]} through
+// on_message (replacing the hello's list); nothing is restarted and the client stays. Messages
+// for a feature that is off are the host's to ignore.
+void rm_host_set_features(const rm_host *host, const char *features);
+
 // Pairing: let the next unknown device in (it is remembered and pairing turns itself off).
 void rm_host_set_pairing(const rm_host *host, int32_t on);
 int32_t rm_host_pairing(const rm_host *host);

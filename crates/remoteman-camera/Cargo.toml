@@ -1,0 +1,16 @@
+[package]
+name = "remoteman-camera"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Linux: a connected device's camera (H.264 frames from the core) as a camera that programs on
+# the desktop can pick: a PipeWire camera node always, a v4l2loopback device when one is set up.
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+pipewire = { version = "0.10", features = ["v0_3_34"] }
+# Software decoding only: this is 720p at 30 a second, and the GPU is busy with the screen.
+# (`format` is not used here, but ffmpeg-next 9 does not compile without it.)
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }

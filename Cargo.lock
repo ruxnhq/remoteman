@@ -1275,6 +1275,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "remoteman-audio",
+ "remoteman-camera",
  "remoteman-capture",
  "remoteman-core",
  "remoteman-desktop",
@@ -1292,6 +1293,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "opusic-c",
+ "pipewire",
+]
+
+[[package]]
+name = "remoteman-camera"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ffmpeg-next",
+ "libc",
  "pipewire",
 ]
 
@@ -1402,7 +1413,9 @@ dependencies = [
  "ffmpeg-next",
  "gtk4",
  "libadwaita",
+ "remoteman-audio",
  "remoteman-core",
+ "serde_json",
 ]
 
 [[package]]

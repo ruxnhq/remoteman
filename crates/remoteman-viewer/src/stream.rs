@@ -1,12 +1,15 @@
 //! A running session: the core hands frames to a decode thread, which leaves the newest picture
 //! where the window's frame clock picks it up.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::Result;
-use remoteman_core::{Client, CursorShape, Display, Frame, Handler, Mode, Options, StreamInfo};
+use remoteman_core::media::{BLOB_CLIPBOARD, BLOB_FILE, CLIPBOARD_LIMIT, ClipboardHeader, FileHeader};
+use remoteman_core::{BlobEvent, Client, CursorShape, Display, Frame, Handler, Message, Mode, Options, Packet, StreamInfo};
 
 use crate::decode::{Decoder, Picture};
 
@@ -30,6 +33,22 @@ pub struct Shared {
     pub decode_us_max: AtomicU32,
     /// Set by the window when GTK refuses a DMA-BUF picture: copy them down from now on.
     pub no_dmabuf: std::sync::atomic::AtomicBool,
+    /// The stream's size in pixels and its rate, once the host has said (for the window's bar).
+    pub format: Mutex<Option<(u32, u32, u32)>>,
+    /// Bytes of video received since it was last read (for the figures).
+    pub bytes: AtomicU64,
+    /// What plays the computer's sound here, while it is on.
+    pub sound: Mutex<Option<remoteman_audio::Player>>,
+    /// What records this device's microphone for the computer, while it is on.
+    pub microphone: Mutex<Option<remoteman_audio::MicCapture>>,
+    /// What was copied on the computer, whole, until the window takes it: its type and bytes.
+    pub copies: Mutex<Vec<(String, Vec<u8>)>>,
+    /// What became of files sent to the computer, until the window says so: whether it
+    /// arrived, and where it was put or why not.
+    pub results: Mutex<Vec<(bool, String)>>,
+    /// Counts the copies and the files sent.
+    copy_seq: AtomicU32,
+    file_seq: AtomicU32,
 }
 
 enum Msg {
@@ -40,21 +59,65 @@ enum Msg {
 struct Feed {
     tx: mpsc::SyncSender<Msg>,
     shared: Arc<Shared>,
+    /// Copies from the computer that are still arriving.
+    arriving: HashMap<u32, (String, Vec<u8>)>,
 }
 
 impl Handler for Feed {
     fn stream(&mut self, info: &StreamInfo) {
+        *self.shared.format.lock().unwrap() = Some((info.width, info.height, info.refresh));
         let _ = self.tx.send(Msg::Stream(info.clone()));
     }
 
     fn frame(&mut self, frame: &Frame, age_us: Option<i64>) {
         // Every frame leans on the one before, so none may be skipped here: if the decoder
         // falls behind, this waits, and the loss shows up upstream as a keyframe request.
+        self.shared.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
         let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us));
     }
 
     fn cursor_shape(&mut self, shape: &CursorShape) {
         *self.shared.cursor.lock().unwrap() = Some(shape.clone());
+    }
+
+    fn blob(&mut self, event: &BlobEvent) {
+        match event {
+            BlobEvent::Open { id, kind, header } if *kind == BLOB_CLIPBOARD => {
+                if let Ok(h) = serde_json::from_str::<ClipboardHeader>(header) {
+                    if h.size <= CLIPBOARD_LIMIT {
+                        self.arriving.insert(*id, (h.mime, Vec::with_capacity(h.size as usize)));
+                    }
+                }
+            }
+            BlobEvent::Open { .. } => {}
+            BlobEvent::Data { id, bytes } => {
+                let over = self.arriving.get_mut(id).is_some_and(|copy| {
+                    copy.1.extend_from_slice(bytes);
+                    copy.1.len() as u64 > CLIPBOARD_LIMIT
+                });
+                if over {
+                    self.arriving.remove(id);
+                }
+            }
+            BlobEvent::Close { id, complete } => {
+                if let (Some(copy), true) = (self.arriving.remove(id), *complete) {
+                    self.shared.copies.lock().unwrap().push(copy);
+                }
+            }
+        }
+    }
+
+    fn message(&mut self, message: &Message) {
+        if let Message::FileResult { ok, message, .. } = message {
+            self.shared.results.lock().unwrap().push((*ok, message.clone()));
+        }
+    }
+
+    fn sound(&mut self, packet: &Packet) {
+        // The player keeps a few packets ahead and conceals the ones that never come.
+        if let Some(player) = self.shared.sound.lock().unwrap().as_ref() {
+            player.push(remoteman_audio::Packet { seq: packet.seq, capture_us: packet.time_us, data: packet.data.clone() });
+        }
     }
 
     fn closed(&mut self, reason: &str) {
@@ -76,6 +139,103 @@ pub struct Request {
 }
 
 impl Session {
+    /// Whether the computer offers a feature (`sound`, `clipboard`, `files`, ...).
+    pub fn offers(&self, feature: &str) -> bool {
+        self.client.host_features.iter().any(|f| f == feature)
+    }
+
+    /// Play the computer's sound on this device's default output, or stop. While it plays
+    /// here the computer's own speakers are silent, if the computer is set up that way.
+    /// Share the clipboard with the computer from now on, or stop. Copies then go both ways.
+    pub fn share_clipboard(&self, on: bool) {
+        self.client.send_message(Message::Clipboard { on });
+    }
+
+    /// Send what was copied here: `text/plain;charset=utf-8` or `image/png`.
+    pub fn send_copy(&self, kind: &str, bytes: Vec<u8>) {
+        if bytes.is_empty() || bytes.len() as u64 > CLIPBOARD_LIMIT {
+            return;
+        }
+        let header = ClipboardHeader { seq: self.shared.copy_seq.fetch_add(1, Ordering::Relaxed) + 1, mime: kind.to_owned(), size: bytes.len() as u64 };
+        let blob = self.client.open_blob(BLOB_CLIPBOARD, serde_json::to_string(&header).unwrap_or_default());
+        // Writing waits while the network is behind, which the window mustn't.
+        let _ = std::thread::Builder::new().name("copy".into()).spawn(move || blob.write(&bytes) && blob.finish());
+    }
+
+    /// Send a file to the computer, which decides where it goes and answers when it is there
+    /// (`Shared::results`). Fails at once if the file can't be opened.
+    pub fn send_file(&self, path: &Path) -> Result<String> {
+        let mut file = std::fs::File::open(path)?;
+        let size = file.metadata()?.len();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+        let header = FileHeader { id: self.shared.file_seq.fetch_add(1, Ordering::Relaxed) + 1, name: name.clone(), size };
+        let blob = self.client.open_blob(BLOB_FILE, serde_json::to_string(&header).unwrap_or_default());
+        let results = self.shared.clone();
+        let said = name.clone();
+        std::thread::Builder::new().name("file".into()).spawn(move || {
+            let mut piece = vec![0u8; 256 * 1024];
+            loop {
+                match file.read(&mut piece) {
+                    Ok(0) => {
+                        blob.finish();
+                        return;
+                    }
+                    Ok(n) if blob.write(&piece[..n]) => {}
+                    // The connection went, or the file can't be read on: given up (dropping
+                    // the blob tells the computer).
+                    Ok(_) => return,
+                    Err(e) => {
+                        results.results.lock().unwrap().push((false, format!("{said} could not be read: {e}")));
+                        return;
+                    }
+                }
+            }
+        })?;
+        Ok(name)
+    }
+
+    /// Let the computer use this device's microphone, or stop. `from`: a PipeWire node to
+    /// record and no other, instead of the default microphone.
+    pub fn set_microphone(&self, on: bool, from: Option<&str>) -> Result<()> {
+        let mut microphone = self.shared.microphone.lock().unwrap();
+        if !on {
+            if microphone.take().is_some() {
+                self.client.send_message(Message::Mic { on: false, codec: String::new(), rate: 0, channels: 0, frame_us: 0 });
+            }
+            return Ok(());
+        }
+        if microphone.is_some() {
+            return Ok(());
+        }
+        let began = std::time::Instant::now();
+        let sender = self.client.mic_sender();
+        // Silence is left out by the recorder; the first packet after a gap says so.
+        let mut last = None::<u64>;
+        let capture = remoteman_audio::MicCapture::open("remoteman", from, move || began.elapsed().as_micros() as u64, move |packet| {
+            let start = last.is_none_or(|at| packet.capture_us.saturating_sub(at) > 25_000);
+            last = Some(packet.capture_us);
+            sender.send(start, packet.seq, packet.capture_us, &packet.data);
+        })?;
+        self.client.send_message(Message::Mic { on: true, codec: "opus".into(), rate: remoteman_audio::SAMPLE_RATE, channels: 1, frame_us: remoteman_audio::FRAME_US as u32 });
+        *microphone = Some(capture);
+        Ok(())
+    }
+
+    /// `to`: a PipeWire node to play on and no other, instead of the default output.
+    pub fn set_sound(&self, on: bool, to: Option<&str>) -> Result<()> {
+        let mut player = self.shared.sound.lock().unwrap();
+        if on && player.is_none() {
+            *player = Some(remoteman_audio::Player::open("remoteman", to)?);
+        } else if !on {
+            if let Some(p) = player.take() {
+                let s = p.stats();
+                println!("sound: {} packets played, {} concealed, {} late, {} skipped", s.played, s.concealed, s.late, s.skipped);
+            }
+        }
+        self.client.send_message(Message::Sound { on });
+        Ok(())
+    }
+
     /// Connect (this blocks) and start decoding.
     pub fn start(r: Request) -> Result<Self> {
         let shared = Arc::new(Shared::default());
@@ -125,7 +285,7 @@ impl Session {
         })?;
         let hostname = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "Linux".into());
         let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, test_drop_one_in: None, test_delay_lost_ms: None, cursor: true };
-        let client = Client::connect(options, Feed { tx, shared: shared.clone() })?;
+        let client = Client::connect(options, Feed { tx, shared: shared.clone(), arriving: HashMap::new() })?;
         Ok(Self { client, shared })
     }
 }
