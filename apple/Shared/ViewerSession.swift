@@ -215,6 +215,9 @@ final class ViewerSession: ObservableObject {
                 guard let self else { return }
                 self.statsLock.lock()
                 self.decodeTimes.append(f.decodeSeconds)
+                if self.decodeLog.count < 200_000 {
+                    self.decodeLog.append((DispatchTime.now().uptimeNanoseconds, f.decodeSeconds))
+                }
                 self.statsLock.unlock()
                 self.renderer?.submit(
                     VideoRenderer.Frame(
@@ -232,6 +235,7 @@ final class ViewerSession: ObservableObject {
     private func frame(_ data: UnsafeRawBufferPointer, key: Bool, number: UInt32, captureUs: UInt64, ageUs: Int64) {
         statsLock.lock()
         received += 1
+        if receivedLog.count < 200_000 { receivedLog.append(DispatchTime.now().uptimeNanoseconds) }
         statsLock.unlock()
         pipeLock.lock()
         defer { pipeLock.unlock() }
@@ -241,6 +245,45 @@ final class ViewerSession: ObservableObject {
         } catch {
             note(error: "\(error)")
         }
+    }
+
+    // MARK: Run summary (for unattended measurements)
+
+    private var receivedLog: [UInt64] = []
+    private var decodeLog: [(UInt64, Double)] = []
+
+    /// Figures over the run so far, leaving out the first `skip` seconds after the first frame.
+    func summary(skip: Double) -> String {
+        let shown = renderer?.takeShownLog() ?? []
+        statsLock.lock()
+        let received = receivedLog, decodes = decodeLog
+        statsLock.unlock()
+        guard let first = received.first, let last = received.last else { return "no frames received" }
+        let from = first + UInt64(skip * 1e9)
+        let seconds = Double(last - min(last, from)) / 1e9
+        guard seconds > 0.5 else { return "too short a run to summarise (\(received.count) frames)" }
+        func pct(_ v: [Double], _ p: Double) -> String {
+            guard !v.isEmpty else { return "–" }
+            let s = v.sorted()
+            return String(format: "%.2f", s[min(s.count - 1, Int(Double(s.count) * p))])
+        }
+        let ages = shown.filter { $0.0 >= from && $0.1 >= 0 }.map { Double($0.1) / 1000 }
+        let shownCount = shown.filter { $0.0 >= from }.count
+        let recv = received.filter { $0 >= from }.count
+        let dec = decodes.filter { $0.0 >= from }.map { $0.1 * 1000 }
+        // Gaps between frames shown, to see stutter that an average rate hides.
+        let times = shown.filter { $0.0 >= from }.map { $0.0 }
+        let gaps = zip(times.dropFirst(), times).map { Double($0 - $1) / 1e6 }
+        var out = "summary over \(String(format: "%.1f", seconds)) s (first \(skip) s left out): \(info?.label ?? "?")\n"
+        out += "  shown \(String(format: "%.1f", Double(shownCount) / seconds)) fps, received \(String(format: "%.1f", Double(recv) / seconds)) fps (\(recv) frames)\n"
+        out += "  age at presentation ms: median \(pct(ages, 0.5)) p95 \(pct(ages, 0.95)) p99 \(pct(ages, 0.99)) max \(pct(ages, 1.0)) (\(ages.count) frames with a clock)\n"
+        out += "  decode ms: median \(pct(dec, 0.5)) p95 \(pct(dec, 0.95)) p99 \(pct(dec, 0.99)) max \(pct(dec, 1.0))\n"
+        out += "  gap between frames shown ms: median \(pct(gaps, 0.5)) p99 \(pct(gaps, 0.99)) max \(pct(gaps, 1.0))\n"
+        if let c = client {
+            let cs = c.stats
+            out += "  lost \(cs.lost), keyframe requests \(cs.keyframeRequests), round trip \(String(format: "%.2f", Double(cs.roundTripUs) / 1000)) ms, decode errors \(decodeErrors)"
+        }
+        return out
     }
 
     private func note(error: String) {

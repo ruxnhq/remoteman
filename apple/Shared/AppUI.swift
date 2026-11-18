@@ -264,6 +264,7 @@ enum Automation {
                 let h = c.host
                 print("remoteman: host \(h.name) (\(h.os)) \(h.fingerprint)")
             }
+            print("remoteman: \(session.summary(skip: 3))")
             session.disconnect()
             // Give the goodbye a moment to leave.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }

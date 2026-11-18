@@ -57,6 +57,16 @@ final class VideoRenderer {
     private var superseded = 0
     private var presented = 0
     private var lastAgeAtPresentUs: Int64 = -1
+    /// Every frame shown: when (uptime ns) and how old it was (µs, -1 unknown). For run summaries.
+    private var shownLog: [(UInt64, Int64)] = []
+
+    func takeShownLog() -> [(UInt64, Int64)] {
+        lock.lock()
+        defer { lock.unlock() }
+        let l = shownLog
+        shownLog = []
+        return l
+    }
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else { return nil }
@@ -195,6 +205,7 @@ final class VideoRenderer {
             lock.lock()
             presented += 1
             lastAgeAtPresentUs = fresh.ageUs < 0 ? -1 : fresh.ageUs + Int64((now - fresh.receivedNs) / 1000)
+            if shownLog.count < 200_000 { shownLog.append((now, lastAgeAtPresentUs)) }
             lock.unlock()
         }
     }
