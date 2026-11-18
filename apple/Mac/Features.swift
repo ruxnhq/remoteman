@@ -52,5 +52,5 @@ enum Features {
     /// "Scroll direction", "Scroll speed", "Trackpad pinch".
     static let scrollOptions = false
     /// Forgetting a computer also removing its key from this Mac (today only the list entry goes).
-    static let forgetKey = false
+    static let forgetKey = true
 }

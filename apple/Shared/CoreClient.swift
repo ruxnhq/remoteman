@@ -44,6 +44,10 @@ final class CoreClient {
     /// A blob from the host. what 0: opened (kind, header). 1: a piece. 2: closed (complete).
     var onBlob: ((_ what: UInt8, _ id: UInt32, _ kind: UInt8, _ header: [String: Any], UnsafeRawBufferPointer, _ complete: Bool) -> Void)?
 
+    /// How far connecting has got: 0 looking the host up, 1 reaching it and checking
+    /// identities (pairing happens here), 2 hello, 3 the host is making the display.
+    var onStage: ((Int) -> Void)?
+
     static let clipboardKind: UInt8 = 0x40
     static let fileKind: UInt8 = 0x41
 
@@ -119,6 +123,10 @@ final class CoreClient {
                 let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
                 let h = header.flatMap { CoreClient.object(String(cString: $0)) } ?? [:]
                 me.onBlob?(what, id, kind, h, UnsafeRawBufferPointer(start: data, count: data == nil ? 0 : len), complete != 0)
+            },
+            on_stage: { ctx, stage in
+                let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
+                me.onStage?(Int(stage))
             })
         var err = [CChar](repeating: 0, count: 512)
         let h = rm_client_connect(

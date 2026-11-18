@@ -636,12 +636,13 @@ struct ConnectingView: View {
                 .font(.system(size: 14)).lineSpacing(4).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).frame(maxWidth: 620)
             HStack(alignment: .top, spacing: 12) {
-                step("Found", answered ? "At \(computer.address)" : "Looking at \(computer.address)", answered ? .done : .busy)
+                let stage = answered ? 4 : session.stage
+                step("Found", stage >= 1 ? "At \(computer.address)" : "Looking at \(computer.address)", stage >= 1 ? .done : .busy)
                 step(
                     "Recognised",
                     answered ? "Its key matches the pairing" : (computer.pairOnConnect ? "Pairing with its key" : "By its key"),
-                    answered ? .done : .waiting)
-                step("Attach", answered ? "Waiting for the picture" : "To its session", answered ? .busy : .waiting)
+                    stage >= 2 ? .done : stage == 1 ? .busy : .waiting)
+                step("Attach", answered ? "Waiting for the picture" : "To its session", stage >= 2 ? .busy : .waiting)
             }
             .frame(maxWidth: 720)
             Label(joinsAs, systemImage: "lock")

@@ -86,6 +86,8 @@ final class ComputerStore: ObservableObject {
 
     func forget(_ c: Computer) {
         computers.removeAll { $0.id == c.id }
+        // Its key goes too (unless another entry is the same computer), so it must be paired again.
+        if !computers.contains(where: { $0.address == c.address }) { ViewerSession.forget(host: c.address) }
         try? FileManager.default.removeItem(at: thumbnailURL(c))
         save()
     }

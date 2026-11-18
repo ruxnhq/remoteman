@@ -116,9 +116,11 @@ struct GettingInScreen: View {
             icon: "display", iconColor: .white, circle: .white.opacity(0.12), headline: "Connecting to \(name)",
             text: model.current?.paired == false ? "Pairing this \(device) with the computer." : "Reaching your session.")
         VStack(alignment: .leading, spacing: 14) {
-            step(.current, "Reaching \(name)", "At \(model.current?.address ?? "its address").")
-            step(.pending, "Recognising it by its key", model.current?.paired == false ? "This first connection pairs the two." : nil)
-            step(.pending, placementTitle, nil)
+            step(session.stage >= 1 ? .done : .current, "Reaching \(name)", "At \(model.current?.address ?? "its address").")
+            step(
+                session.stage >= 2 ? .done : session.stage == 1 ? .current : .pending, "Recognising it by its key",
+                model.current?.paired == false ? "This first connection pairs the two." : nil)
+            step(session.stage >= 2 ? .current : .pending, placementTitle, nil)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         Button("Cancel") { model.cancelConnecting() }.buttonStyle(WideButtonStyle(kind: .secondary))

@@ -210,7 +210,7 @@ enum Automation {
                 case "features": print("remoteman: host features \(c.features.sorted().joined(separator: ","))")
                 case "stats":
                     let t = DispatchQueue.main.sync { () -> String in
-                        let st = session.takeStats()
+                        let st = session.stats  // the last half second, as the app shows it
                         return "\(st.text)\n\(String(format: "%.1f", st.megabitsPerSecond)) Mb/s received · host says \(session.hostBitrate) bit/s · limit \(session.bitrateLimit)"
                     }
                     print("remoteman: stats\n\(t)")

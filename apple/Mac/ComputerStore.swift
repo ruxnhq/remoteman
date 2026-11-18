@@ -114,7 +114,9 @@ final class ComputerStore: ObservableObject {
     }
 
     func remove(_ id: SavedComputer.ID) {
+        let address = self[id]?.address
         computers.removeAll { $0.id == id }
+        if let address, !computers.contains(where: { $0.address == address }) { ViewerSession.forget(host: address) }
         save()
     }
 

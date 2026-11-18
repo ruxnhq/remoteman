@@ -3,6 +3,7 @@
 import Combine
 import CoreMedia
 import Foundation
+import RemotemanCore
 import VideoToolbox
 
 final class ViewerSession: ObservableObject {
@@ -39,6 +40,8 @@ final class ViewerSession: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
+    /// How far connecting has got (CoreClient.onStage); when it fails, the stage that failed.
+    @Published private(set) var stage = 0
     @Published private(set) var statsText = ""
     /// The latest half-second of figures, for an app that draws them itself.
     @Published private(set) var stats = Snapshot()
@@ -233,6 +236,12 @@ final class ViewerSession: ObservableObject {
         return list.joined(separator: ",")
     }
 
+    /// Forget a computer's key, so that it has to be paired again. `host` as given to connect.
+    @discardableResult
+    static func forget(host: String) -> Bool {
+        rm_forget_host(stateDir, host.contains(":") ? host : host + ":7791") == 1
+    }
+
     static var stateDir: String {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("remoteman", isDirectory: true)
@@ -259,6 +268,7 @@ final class ViewerSession: ObservableObject {
         generation += 1
         let gen = generation
         self.target = target
+        stage = 0
         self.display = display
         self.placement = placement
         let config = CoreClient.Config(
@@ -271,6 +281,9 @@ final class ViewerSession: ObservableObject {
                 let client = try CoreClient.connect(config) { c in
                     let sharing = Sharing(client: c)
                     shared = sharing
+                    c.onStage = { [weak self] stage in
+                        DispatchQueue.main.async { if let self, self.generation == gen { self.stage = stage } }
+                    }
                     c.onMessage = { [weak self] m in self?.message(m, sharing: sharing, generation: gen) }
                     c.onSound = { [weak self] data, start, seq, _ in self?.sound.packet(data, start: start, seq: seq) }
                     c.onBlob = { what, id, kind, header, data, complete in
