@@ -151,11 +151,11 @@ pub fn preferences(app: &Rc<App>) {
     page.add(&media);
 
     let sharing = adw::PreferencesGroup::builder().title("Sharing").build();
-    sharing.add(&gate(switch("Share the clipboard", "Text and images copied on either side can be pasted on the other", false), FEATURES.clipboard));
+    sharing.add(&gate(switch("Share the clipboard", "Text and images copied on either side can be pasted on the other", false), FEATURES.sharing_settings));
     let folder = adw::ActionRow::builder().title("Save received files to").build();
     folder.add_suffix(&gtk::Label::builder().label("Downloads").css_classes(["dim-label"]).build());
     folder.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-    sharing.add(&gate(folder, FEATURES.files));
+    sharing.add(&gate(folder, FEATURES.sharing_settings));
     page.add(&sharing);
 
     let paired = adw::PreferencesGroup::builder().title("Paired computers").description("A forgotten computer has to be paired again before this device can connect to it").build();

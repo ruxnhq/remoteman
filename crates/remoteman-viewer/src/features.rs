@@ -23,10 +23,12 @@ pub struct Features {
     pub microphone: bool,
     /// This device's camera used by the computer.
     pub camera: bool,
-    /// One clipboard for both sides.
+    /// One clipboard for both sides: the line in the session's sharing menu.
     pub clipboard: bool,
-    /// Files sent across.
+    /// Files sent to the computer: the line in the session's sharing menu.
     pub files: bool,
+    /// Remembering the clipboard choice, and choosing where received files go.
+    pub sharing_settings: bool,
     /// HDR pictures.
     pub hdr: bool,
     /// A choice of whether the stream follows this display's refresh rate (it always does, up
@@ -62,8 +64,9 @@ pub const FEATURES: Features = Features {
     sound_setting: false,
     microphone: false,
     camera: false,
-    clipboard: false,
-    files: false,
+    clipboard: true,
+    files: true,
+    sharing_settings: false,
     hdr: false,
     refresh_choice: false,
     pointer_capture: false,

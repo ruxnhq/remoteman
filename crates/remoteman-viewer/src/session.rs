@@ -130,8 +130,10 @@ pub struct View {
     title: adw::WindowTitle,
     disconnect: gtk::Button,
     fullscreen: gtk::Button,
-    /// The buttons that open menus: send keys, display, picture, and the main one.
-    menus: [gtk::MenuButton; 4],
+    /// The buttons that open menus: send keys, display, picture, the main one, and sharing.
+    menus: [gtk::MenuButton; 5],
+    share_clipboard: Item,
+    send_file: Item,
     placements: [(Placement, Item); 3],
     qualities: [(Quality, Item); 2],
     mirror: Item,
@@ -197,7 +199,13 @@ pub fn build(video: &Video) -> View {
     let camera = gate(icon_toggle("camera-video-symbolic", "Camera"), FEATURES.camera);
     let microphone = gate(icon_toggle("audio-input-microphone-symbolic", "Microphone"), FEATURES.microphone);
     let sound = gate(icon_toggle("audio-volume-high-symbolic", "Sound"), FEATURES.sound);
-    let sharing = gate(icon_button("folder-symbolic", "Clipboard and Files"), FEATURES.clipboard || FEATURES.files);
+    // Sharing: the clipboard and files.
+    let share_clipboard = item("Share the Clipboard", "Both ways", Mark::Tick);
+    gate(share_clipboard.button.clone(), FEATURES.clipboard);
+    let send_file = item("Send a File…", "", Mark::None);
+    gate(send_file.button.clone(), FEATURES.files);
+    let sharing_popover = popover(&[section("Clipboard and Files").upcast_ref(), share_clipboard.button.upcast_ref(), send_file.button.upcast_ref()], 280);
+    let sharing = gtk::MenuButton::builder().icon_name("folder-symbolic").tooltip_text("Clipboard and Files").popover(&sharing_popover).css_classes(["flat", "rm-icon"]).build();
 
     let fullscreen = icon_button("view-fullscreen-symbolic", "Full Screen (F11)");
     let menu_model = gio::Menu::new();
@@ -233,7 +241,9 @@ pub fn build(video: &Video) -> View {
         title,
         disconnect,
         fullscreen,
-        menus: [send_keys, display, picture, menu],
+        menus: [send_keys, display, picture, menu, sharing],
+        share_clipboard,
+        send_file,
         placements: [(Placement::Extend, extra), (Placement::Main, main), (Placement::Only, only)],
         qualities: [(Quality::Automatic, automatic), (Quality::Sharp, sharp)],
         mirror,
@@ -270,6 +280,27 @@ impl View {
     }
 
     /// The stream's size and rate, once known.
+    /// What this computer shares: the lines of the sharing menu are there for what it does.
+    /// `clipboard_on`: the clipboard is shared now.
+    pub fn offer_sharing(&self, clipboard: bool, files: bool, clipboard_on: bool) {
+        let no = "This computer doesn't allow it";
+        if FEATURES.clipboard {
+            self.share_clipboard.button.set_sensitive(clipboard);
+            self.share_clipboard.button.set_tooltip_text((!clipboard).then_some(no));
+        }
+        if FEATURES.files {
+            self.send_file.button.set_sensitive(files);
+            self.send_file.button.set_tooltip_text((!files).then_some(no));
+        }
+        self.show_clipboard(clipboard && clipboard_on);
+    }
+
+    pub fn show_clipboard(&self, on: bool) {
+        if let Some(mark) = &self.share_clipboard.mark {
+            mark.set_active(on);
+        }
+    }
+
     /// Whether this computer sends its sound: the button is there for those that do. A button
     /// left pressed in from the session before (the same computer, joined again) stays so.
     pub fn offer_sound(&self, offered: bool) {
@@ -316,7 +347,7 @@ impl View {
         for menu in &self.menus {
             menu.popdown();
         }
-        let index = ["keys", "display", "picture", "main"].iter().position(|n| *n == name);
+        let index = ["keys", "display", "picture", "main", "sharing"].iter().position(|n| *n == name);
         if let Some(i) = index {
             self.menus[i].popup();
         }
@@ -373,6 +404,26 @@ pub fn wire(app: &Rc<App>) {
             }
         });
     }
+    view.share_clipboard.button.connect_clicked({
+        let app = app.clone();
+        move |_| {
+            app.view.menus[4].popdown();
+            app.set_clipboard(!app.clipboard_on.get());
+        }
+    });
+    view.send_file.button.connect_clicked({
+        let app = app.clone();
+        move |_| {
+            app.view.menus[4].popdown();
+            let dialog = gtk::FileDialog::builder().title("Send a File").modal(true).build();
+            let app = app.clone();
+            dialog.open(Some(&app.window.clone()), gio::Cancellable::NONE, move |chosen| {
+                if let Some(path) = chosen.ok().and_then(|f| f.path()) {
+                    app.send_file(&path);
+                }
+            });
+        }
+    });
     view.sound.connect_toggled({
         let app = app.clone();
         move |button| {

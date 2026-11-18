@@ -38,6 +38,11 @@ pub struct App {
     /// The picture itself.
     pub video: Rc<Video>,
     pub session: RefCell<Option<Session>>,
+    /// The clipboard is shared with the computer of the session (while it allows that).
+    pub clipboard_on: Cell<bool>,
+    /// A mark of what was last put on this clipboard from the computer, so that it isn't sent
+    /// straight back.
+    from_computer: Cell<Option<u64>>,
     /// Who the session, or the attempt under way, is with.
     pub target: RefCell<Option<Target>>,
     /// Counts attempts to connect, so that an answer to one that was given up is recognised.
@@ -280,6 +285,12 @@ impl App {
         self.view.show_figures(self.store.borrow().settings.figures);
         self.video.attach(session.shared.clone());
         self.shown_before.set(self.video.shown_total.get());
+        // So does a shared clipboard.
+        let shares = session.offers("clipboard") && self.clipboard_on.get();
+        self.view.offer_sharing(session.offers("clipboard"), session.offers("files"), shares);
+        if shares {
+            session.share_clipboard(true);
+        }
         // Sound that was on carries over when the same computer is joined again.
         self.view.offer_sound(session.offers("sound"));
         if self.args.sound && session.offers("sound") {
@@ -346,6 +357,8 @@ impl App {
         session.client.close();
         if !stay {
             self.view.sound.set_active(false);
+            self.clipboard_on.set(false);
+            self.view.show_clipboard(false);
         }
         if let Some(top) = self.window.surface().and_downcast::<gdk::Toplevel>() {
             top.restore_system_shortcuts();
@@ -410,8 +423,91 @@ impl App {
         self.view.show_figures(on);
     }
 
+    /// Share the clipboard with the session's computer, or stop.
+    pub fn set_clipboard(self: &Rc<Self>, on: bool) {
+        let offered = self.session.borrow().as_ref().is_some_and(|s| s.offers("clipboard"));
+        let on = on && offered;
+        self.clipboard_on.set(on);
+        self.view.show_clipboard(on);
+        if let Some(s) = self.session.borrow().as_ref() {
+            s.share_clipboard(on);
+        }
+        if on {
+            // What is on this clipboard now goes over, as the computer's comes here.
+            self.from_computer.set(None);
+            self.copied_here();
+        }
+    }
+
+    /// This computer's clipboard changed (or sharing has just begun): send text if it holds
+    /// any, else a picture. What came from the other computer is not sent back.
+    pub fn copied_here(self: &Rc<Self>) {
+        if !self.clipboard_on.get() || self.session.borrow().is_none() {
+            return;
+        }
+        let clipboard = self.window.clipboard();
+        let formats = clipboard.formats();
+        let app = self.clone();
+        if formats.contains_type(glib::Type::STRING) {
+            clipboard.read_text_async(gio::Cancellable::NONE, move |text| {
+                if let Ok(Some(text)) = text {
+                    app.send_copy("text/plain;charset=utf-8", text.as_bytes().to_vec());
+                }
+            });
+        } else if formats.contains_type(gdk::Texture::static_type()) {
+            clipboard.read_texture_async(gio::Cancellable::NONE, move |picture| {
+                if let Ok(Some(picture)) = picture {
+                    app.send_copy("image/png", picture.save_to_png_bytes().to_vec());
+                }
+            });
+        }
+    }
+
+    fn send_copy(&self, kind: &str, bytes: Vec<u8>) {
+        if self.from_computer.get() == Some(mark_of(kind, &bytes)) || !self.clipboard_on.get() {
+            return;
+        }
+        if let Some(s) = self.session.borrow().as_ref() {
+            s.send_copy(kind, bytes);
+        }
+    }
+
+    /// Send a file to the session's computer.
+    pub fn send_file(&self, path: &std::path::Path) {
+        let sent = self.session.borrow().as_ref().map(|s| s.send_file(path));
+        match sent {
+            Some(Ok(name)) => self.toast(&format!("Sending {name}…")),
+            Some(Err(e)) => self.toast(&format!("{} can't be sent: {e}", path.display())),
+            None => {}
+        }
+    }
+
+    /// What arrived from the computer since the last frame: copies for this clipboard, and
+    /// word of files sent.
+    fn arrivals(&self) {
+        let (copies, results) = match self.session.borrow().as_ref() {
+            Some(s) => (std::mem::take(&mut *s.shared.copies.lock().unwrap()), std::mem::take(&mut *s.shared.results.lock().unwrap())),
+            None => return,
+        };
+        // Only the newest copy matters.
+        if let (Some((kind, bytes)), true) = (copies.into_iter().last(), self.clipboard_on.get()) {
+            self.from_computer.set(Some(mark_of(&kind, &bytes)));
+            let clipboard = self.window.clipboard();
+            if kind.starts_with("text/plain") {
+                clipboard.set_text(&String::from_utf8_lossy(&bytes));
+            } else if kind == "image/png" {
+                let content = gdk::ContentProvider::for_bytes("image/png", &glib::Bytes::from_owned(bytes));
+                let _ = clipboard.set_content(Some(&content));
+            }
+        }
+        for (ok, said) in results {
+            self.toast(&if ok { format!("Sent: it is at {said}") } else { format!("The file wasn't taken: {said}") });
+        }
+    }
+
     /// Once per frame of this window: show the newest picture, and notice the session ending.
     fn tick(self: &Rc<Self>) {
+        self.arrivals();
         let (picture, closed, cursor) = match self.session.borrow().as_ref() {
             Some(s) => (s.shared.picture.lock().unwrap().take(), s.shared.closed.lock().unwrap().clone(), s.shared.cursor.lock().unwrap().take()),
             None => return,
@@ -534,6 +630,8 @@ pub fn build(application: &adw::Application, args: Args) {
         view,
         video,
         session: RefCell::new(None),
+        clipboard_on: Cell::new(false),
+        from_computer: Cell::new(None),
         target: RefCell::new(None),
         attempt: Cell::new(0),
         hover_bar: Cell::new(hover_bar),
@@ -562,6 +660,11 @@ pub fn build(application: &adw::Application, args: Args) {
 
     computers::wire(&app);
     session::wire(&app);
+    // Whatever is copied on this computer while the clipboard is shared goes to the other.
+    window.clipboard().connect_changed({
+        let app = app.clone();
+        move |_| app.copied_here()
+    });
     computers::refresh(&app);
 
     window.connect_fullscreened_notify({
@@ -616,4 +719,12 @@ pub fn build(application: &adw::Application, args: Args) {
     if let Some(script) = args.ui.clone() {
         shot::run(&app, script);
     }
+}
+
+/// A mark of a copy, to tell it from the next one.
+fn mark_of(kind: &str, bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (kind, bytes).hash(&mut h);
+    h.finish()
 }

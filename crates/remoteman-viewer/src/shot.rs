@@ -15,6 +15,8 @@
 //! - `shot=FILE.png` (the window's contents, with any open menu), `page=FILE.png` (the whole
 //!   scrolling page of the open dialog)
 //! - `keys?` and `size?` print whether keys go to the other computer, and the window's size
+//! - `share` (the clipboard), `copy=TEXT` (as if copied in this window), `clipboard?` (print
+//!   what this clipboard holds), `sendfile=PATH`
 //! - things that can't happen yet, to see how they are laid out: `pair-code=NAME` (the code
 //!   dialog, with a made-up code), `asleep=ADDRESS` (the asleep page), `state=asleep:ADDRESS`
 //!   or `state=online:ADDRESS` (shown in the list only with `Features::presence`)
@@ -205,6 +207,13 @@ pub fn run(app: &Rc<App>, script: String) {
                 }
                 "size?" => println!("~ window {} x {}, default {:?}", app.window.width(), app.window.height(), app.window.default_size()),
                 "keys?" => println!("~ keys go to the other computer: {}", app.forwarding()),
+                // Sharing: the clipboard on, a copy made here, what this clipboard holds, a file.
+                "share" => app.set_clipboard(true),
+                "copy" => app.window.clipboard().set_text(value),
+                "clipboard?" => app.window.clipboard().read_text_async(gtk::gio::Cancellable::NONE, |text| {
+                    println!("~ this clipboard holds: {}", text.ok().flatten().map(|t| t.to_string()).unwrap_or_default());
+                }),
+                "sendfile" => app.send_file(std::path::Path::new(value)),
                 // An entry of the Send Keys menu: `send=ctrl-alt-delete`.
                 "send" => {
                     let _ = gtk::prelude::WidgetExt::activate_action(&app.window, "win.send-keys", Some(&value.to_variant()));

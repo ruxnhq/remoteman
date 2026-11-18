@@ -1415,6 +1415,7 @@ dependencies = [
  "libadwaita",
  "remoteman-audio",
  "remoteman-core",
+ "serde_json",
 ]
 
 [[package]]
