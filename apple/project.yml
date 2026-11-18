@@ -19,14 +19,14 @@ targets:
   RemotemanMac:
     type: application
     platform: macOS
-    sources: [Shared]
+    sources: [Shared, Mac]
     dependencies:
       - framework: build/RemotemanCore.xcframework
         embed: false
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
     info:
-      path: Mac/Info.plist
+      path: Support/Mac-Info.plist
       properties:
         CFBundleDisplayName: remoteman
         LSApplicationCategoryType: public.app-category.utilities
@@ -40,14 +40,14 @@ targets:
   Remoteman:
     type: application
     platform: iOS
-    sources: [Shared]
+    sources: [Shared, iOS]
     dependencies:
       - framework: build/RemotemanCore.xcframework
         embed: false
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
     info:
-      path: iOS/Info.plist
+      path: Support/iOS-Info.plist
       properties:
         CFBundleDisplayName: remoteman
         UILaunchScreen: {}
