@@ -87,9 +87,9 @@ pub struct Agent {
     microphone: Option<MicSource>,
     /// The client's camera, as one the desktop's programs can pick, and when it last had to
     /// ask the client for a keyframe.
-    camera: Option<(remoteman_camera::Camera, Option<std::time::Instant>)>,
+    camera: Option<(remoteman_camera::Camera, CameraTally)>,
     /// A mark of the last copy sent from the desktop to the client, to tell a repeat.
-    last_copy: Arc<std::sync::Mutex<Option<u64>>>,
+    last_copy: Arc<std::sync::Mutex<Option<(u64, std::time::Instant)>>>,
     /// Make the client's speaker the desktop's output while it is on (`--keep-output`: don't).
     take_output: bool,
     /// Counts what was copied here and sent, for the client to tell new from stale.
@@ -225,7 +225,7 @@ impl Agent {
     /// Present the client's camera as one the desktop's programs can pick, or take it away.
     /// The device says what it sends; what isn't said is the usual 1280x720 at 30 a second.
     fn take_camera(&mut self, on: bool, codec: &str, width: u32, height: u32, fps: u32) {
-        self.camera = None;
+        self.drop_camera();
         let (Some(l), true, None) = (self.live.as_ref(), on, self.login_screen) else { return };
         if !codec.is_empty() && codec != "h264" {
             tracing::warn!(codec, "the device's camera is sent in a codec this host doesn't take; only h264 is");
@@ -237,9 +237,26 @@ impl Agent {
         match remoteman_camera::Camera::start_with(&format!("{} camera (remoteman)", l.name), options) {
             Ok(camera) => {
                 tracing::info!(node = camera.node_name(), loopback = ?camera.loopback_device(), "the device's camera is on the desktop");
-                self.camera = Some((camera, None));
+                self.camera = Some((camera, CameraTally::default()));
             }
             Err(e) => tracing::warn!("couldn't make a camera for the device: {e:#}"),
+        }
+    }
+
+    /// Take the device's camera off the desktop, saying how it went.
+    fn drop_camera(&mut self) {
+        if let Some((_, t)) = self.camera.take() {
+            tracing::info!(
+                frames = t.frames,
+                keyframes = t.keys,
+                shown = t.shown,
+                undecodable = t.lost,
+                skipped = t.waiting,
+                asked_for_keyframe = t.asked,
+                longest_gap_ms = t.gap.as_millis() as u64,
+                longest_decode_us = t.decode.as_micros() as u64,
+                "the device's camera is off the desktop"
+            );
         }
     }
 
@@ -279,14 +296,16 @@ impl Agent {
                 match desktop.read(&read_as).await {
                     Ok(bytes) if !bytes.is_empty() => {
                         // The desktop announces one copy more than once (twice, as a rule):
-                        // the same thing again is not sent again.
+                        // the same thing again within two seconds is not sent again.
                         let mark = {
                             use std::hash::{Hash, Hasher};
                             let mut h = std::collections::hash_map::DefaultHasher::new();
                             (send_as, &bytes).hash(&mut h);
                             h.finish()
                         };
-                        if last_copy.lock().unwrap().replace(mark) == Some(mark) {
+                        let now = std::time::Instant::now();
+                        let before = last_copy.lock().unwrap().replace((mark, now));
+                        if before.is_some_and(|(m, at)| m == mark && now - at < std::time::Duration::from_secs(2)) {
                             continue;
                         }
                         // What was copied is never logged, only what kind of thing and how much.
@@ -481,12 +500,28 @@ impl HostHandler for Agent {
     }
 
     fn camera(&mut self, frame: &remoteman_core::Frame) {
-        let Some((camera, asked)) = &mut self.camera else { return };
-        // A frame the decoder can't use: nothing is shown until the device sends a keyframe.
-        if camera.push(&frame.data, frame.key, frame.capture_us) == remoteman_camera::Pushed::Lost && asked.is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(250)) {
-            *asked = Some(std::time::Instant::now());
-            if let Some(l) = &self.live {
-                l.link.send_message(Message::CameraKeyframe);
+        let Some((camera, t)) = &mut self.camera else { return };
+        let began = std::time::Instant::now();
+        if let Some(last) = t.last.replace(began) {
+            t.gap = t.gap.max(began - last);
+        }
+        t.frames += 1;
+        t.keys += frame.key as u32;
+        let pushed = camera.push(&frame.data, frame.key, frame.capture_us);
+        t.decode = t.decode.max(began.elapsed());
+        match pushed {
+            remoteman_camera::Pushed::Shown => t.shown += 1,
+            remoteman_camera::Pushed::Waiting => t.waiting += 1,
+            // A frame the decoder can't use: nothing is shown until the device sends a keyframe.
+            remoteman_camera::Pushed::Lost => {
+                t.lost += 1;
+                if t.asked_at.is_none_or(|at| at.elapsed() > std::time::Duration::from_millis(250)) {
+                    t.asked_at = Some(std::time::Instant::now());
+                    t.asked += 1;
+                    if let Some(l) = &self.live {
+                        l.link.send_message(Message::CameraKeyframe);
+                    }
+                }
             }
         }
     }
@@ -541,7 +576,8 @@ impl HostHandler for Agent {
 
     fn left(&mut self) {
         self.clipboard_wanted = false;
-        (self.sound, self.microphone, self.camera) = (None, None, None);
+        self.drop_camera();
+        (self.sound, self.microphone) = (None, None);
         if let Some(l) = self.stop() {
             drop(l.pipeline);
             self.runtime.block_on(l.desktop.close());
@@ -556,4 +592,22 @@ impl HostHandler for Agent {
             }
         }
     }
+}
+
+/// How a device's camera went, for the log when it is switched off.
+#[derive(Default)]
+struct CameraTally {
+    frames: u32,
+    keys: u32,
+    shown: u32,
+    /// Frames the decoder couldn't use, and frames skipped while waiting for a keyframe.
+    lost: u32,
+    waiting: u32,
+    /// Times the device was asked for a keyframe, and when it last was.
+    asked: u32,
+    asked_at: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+    /// The longest wait between two frames, and the longest a frame took to decode and show.
+    gap: std::time::Duration,
+    decode: std::time::Duration,
 }
