@@ -100,6 +100,14 @@ final class Sharing {
 
     init(client: CoreClient) { self.client = client }
 
+    /// For tests: put text on this device's clipboard, and say what is on it without showing it.
+    static func copyForTest(_ text: String) { _ = Clip.write(type: Clip.text, data: Data(text.utf8)) }
+    static func clipboardSummary(expecting: String?) -> String {
+        guard let c = Clip.read() else { return "nothing readable" }
+        let same = expecting.map { c.data == Data($0.utf8) ? ", equal to the test text" : ", not the test text" } ?? ""
+        return "\(c.type), \(c.data.count) bytes\(same)"
+    }
+
     // MARK: Clipboard
 
     private var timer: Timer?

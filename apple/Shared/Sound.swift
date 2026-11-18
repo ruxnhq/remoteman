@@ -55,6 +55,9 @@ final class SoundPlayer {
     private var nextSeq: UInt32?
     private var queued = 0  // frames handed to the node and not played yet
     private var counters = Counters()
+    /// Over the whole time since `start`: packets, bytes, concealed, left out, times run dry, starts marked.
+    private(set) var totals = (packets: 0, bytes: 0, concealed: 0, dropped: 0, underruns: 0, starts: 0)
+    private(set) var format = ""
     /// A deeper buffer, for a link that pauses at intervals (the iPad's Wi-Fi does, see
     /// ViewerSession): what a pause holds back then plays instead of being cut.
     var deep = false
@@ -93,6 +96,8 @@ final class SoundPlayer {
         self.opus = opus
         self.pcm = pcm
         framesPerPacket = fpp
+        totals = (0, 0, 0, 0, 0, 0)
+        format = "opus 48000 Hz, \(channels) channels, \(frameUs / 1000) ms"
         nextSeq = nil
         queued = 0
         lock.unlock()
@@ -130,6 +135,9 @@ final class SoundPlayer {
         defer { lock.unlock() }
         guard decoder != nil else { return }
         counters.packets += 1
+        totals.packets += 1
+        totals.bytes += data.count
+        if start { totals.starts += 1 }
         if start {
             decoder?.reset()
         } else if let expected = nextSeq {
@@ -139,6 +147,7 @@ final class SoundPlayer {
             if missing > 0, missing <= 5 {
                 for _ in 0..<missing {
                     counters.concealed += 1
+                    totals.concealed += 1
                     decode(nil)
                 }
             } else if missing > 5 {
@@ -175,12 +184,14 @@ final class SoundPlayer {
             // More is waiting than should be (a burst after a pause, or the clocks drifting):
             // leave this one out, so the delay comes back down.
             counters.dropped += 1
+            totals.dropped += 1
             return
         }
         if queued <= 0 {
             // Ran dry (or just started): put a little silence ahead, so the next packets have
             // time to arrive before the sound catches up with them.
             counters.underruns += 1
+            totals.underruns += 1
             if let silence = AVAudioPCMBuffer(pcmFormat: pcm, frameCapacity: AVAudioFrameCount(prime)) {
                 silence.frameLength = AVAudioFrameCount(prime)
                 schedule(silence, on: node)

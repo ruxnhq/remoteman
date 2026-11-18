@@ -101,6 +101,14 @@ final class ViewerSession: ObservableObject {
     private var mic: MicSender?
     private var sharing: Sharing?
 
+    /// For tests: what the sound player has taken since the host announced the format.
+    var soundReport: String {
+        let t = sound.totals
+        return sound.running
+            ? "\(sound.format): \(t.packets) packets, \(t.bytes) bytes, \(t.starts) starts after a pause, \(t.concealed) concealed, \(t.dropped) left out, ran dry \(t.underruns) times"
+            : "no sound_format received (or sound is off)"
+    }
+
     func has(_ feature: String) -> Bool { features.contains(feature) }
 
     private func remembered(_ what: String) -> Bool { UserDefaults.standard.bool(forKey: "\(what).\(target)") }

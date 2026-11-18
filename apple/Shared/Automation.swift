@@ -233,6 +233,16 @@ enum Automation {
                 case "mic": DispatchQueue.main.sync { session.setMic(arg.contains("on")) }
                 case "clipboard": DispatchQueue.main.sync { session.setClipboard(arg.contains("on")) }
                 case "file": DispatchQueue.main.sync { session.send(file: resolve(arg.trimmingCharacters(in: .whitespaces))) }
+                case "soundreport": print("remoteman: sound: \(DispatchQueue.main.sync { session.soundReport })")
+                case "copy": DispatchQueue.main.sync { Sharing.copyForTest(arg) }
+                case "clip": print("remoteman: clipboard here: \(DispatchQueue.main.sync { Sharing.clipboardSummary(expecting: arg.isEmpty ? nil : arg) })")
+                case "makefile":
+                    let p = arg.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                    if p.count == 2, let n = Int(p[1]) {
+                        let bytes = Data((0..<n).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) })
+                        try? bytes.write(to: resolve(p[0]))
+                        print("remoteman: made \(p[0]), \(n) bytes")
+                    }
                 case "transfers":
                     print("remoteman: transfers \(DispatchQueue.main.sync { session.transfers })  notice \(DispatchQueue.main.sync { session.notice ?? "none" })")
                 case "shot":
