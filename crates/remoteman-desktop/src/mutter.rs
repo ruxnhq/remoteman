@@ -57,7 +57,20 @@ impl VirtualDisplay {
             bail!("Mutter's ScreenCast API is version {version}; virtual monitors as real monitors need 3");
         }
 
-        let before = display_state(&conn).await.map(|s| Before::of(&s)).unwrap_or_default();
+        // A device that leaves and comes straight back finds the monitor of its last session
+        // still listed for a moment. Counted among the displays that were there before, it
+        // would hide the new one, which gets the same name: wait for it to go (two seconds
+        // at most; a virtual monitor that stays is someone else's and is left alone).
+        let mut before = Before::default();
+        for _ in 0..20 {
+            let Ok(state) = display_state(&conn).await else { break };
+            let stale = state.1.iter().any(|m| m.0.0.starts_with("Meta-"));
+            before = Before::of(&state);
+            if !stale {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         let remote_path: OwnedObjectPath = Proxy::new(&conn, REMOTE, "/org/gnome/Mutter/RemoteDesktop", REMOTE).await?.call("CreateSession", &()).await?;
         let remote = Proxy::new(&conn, REMOTE, remote_path, "org.gnome.Mutter.RemoteDesktop.Session").await?;
         let session_id: String = remote.get_property("SessionId").await?;
