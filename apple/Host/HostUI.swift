@@ -308,6 +308,10 @@ struct HostSettings: View {
                     }
                 }
                 CardGroup("While a device is connected") {
+                    Row("Silence this Mac's speakers while a device plays its sound", caption: "The sound is then heard on the device only. The speakers come back when it stops listening or leaves.") {
+                        Toggle("Silence this Mac's speakers", isOn: Binding(get: { controller.silenceSpeakers }, set: { controller.setSilenceSpeakers($0) }))
+                            .labelsHidden().toggleStyle(.switch)
+                    }
                     Row("Lock this Mac when the device leaves") {
                         fixedSwitch("Lock this Mac when the device leaves", false, Features.lockOnLeave)
                     }

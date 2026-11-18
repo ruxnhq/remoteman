@@ -19,6 +19,9 @@ final class CameraSender: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private(set) var turned = 0.0
     /// Frames, bytes and keyframes sent, and the size they were last encoded at.
     private(set) var totals = (frames: 0, bytes: 0, keyframes: 0, width: 0, height: 0)
+    /// For tests: keyframes this side forced (the first, a new size, the computer asking), frames
+    /// that hold an IDR picture, and how often the computer asked.
+    private(set) var forced = 0, idr = 0, asked = 0
     /// One whole frame, on the camera's queue.
     var send: ((UnsafeRawBufferPointer, _ key: Bool, _ timeUs: UInt64) -> Void)?
 
@@ -77,6 +80,9 @@ final class CameraSender: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         #endif
         began = DispatchTime.now().uptimeNanoseconds
         totals = (0, 0, 0, 0, 0)
+        forced = 0
+        idr = 0
+        asked = 0
         wantKeyframe = true
         running = true
         queue.async { [session] in session.startRunning() }
@@ -106,7 +112,12 @@ final class CameraSender: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     }
 
     /// The computer lost a frame: the next one is a keyframe.
-    func keyframe() { queue.async { self.wantKeyframe = true } }
+    func keyframe() {
+        queue.async {
+            self.wantKeyframe = true
+            self.asked += 1
+        }
+    }
 
     // MARK: Camera queue
 
@@ -122,6 +133,7 @@ final class CameraSender: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         }
         guard let encoder else { return }
         let options: CFDictionary? = wantKeyframe ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
+        if wantKeyframe { forced += 1 }
         wantKeyframe = false
         let timeUs = (DispatchTime.now().uptimeNanoseconds - began) / 1000
         VTCompressionSessionEncodeFrame(
@@ -188,11 +200,16 @@ final class CameraSender: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
         guard CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: total, destination: &bytes) == noErr else { return }
         let n = Int(lengthSize)
         var at = 0
+        var sawIDR = false
         while at + n <= total {
             var length = 0
             for i in 0..<n { length = length << 8 | Int(bytes[at + i]) }
             at += n
             guard length > 0, at + length <= total else { break }
+            if bytes[at] & 0x1F == 5, !sawIDR {
+                sawIDR = true
+                idr += 1
+            }
             out.append(contentsOf: startCode)
             out.append(contentsOf: bytes[at..<at + length])
             at += length

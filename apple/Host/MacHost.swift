@@ -50,9 +50,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var bitrate = 0
         /// Fill the virtual display with moving test content while a client is on.
         var testWindow = false
-        /// Offer this Mac's sound (--sound no leaves it out). The Mac's own speakers keep playing
-        /// while a device has it on, unlike the Linux host, which moves its output to the device.
+        /// Offer this Mac's sound (--sound no leaves it out).
         var sound = true
+        /// Silence this Mac's own speakers while a device plays its sound, so that it is heard in
+        /// one place, as on the Linux host. The owner can turn that off in Settings.
+        var silenceSpeakers = true
         var testTone = false
         /// What this Mac's owner allows paired devices: the clipboard both ways, files into Downloads.
         var allowClipboard = false
@@ -233,6 +235,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stop() {
+        soundQueue.sync { speakers.restore() }
         teardown()
         if let h = host {
             host = nil
@@ -432,9 +435,21 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     /// On the sound queue: there while the client wants this Mac's sound.
     private var sound: HostSound?
 
+    private let speakers = HostSpeakers()
+
+    /// Whether the Mac's speakers are silenced while a device listens; takes effect at once.
+    func setSilenceSpeakers(_ on: Bool) {
+        options.silenceSpeakers = on
+        soundQueue.sync {
+            guard sound != nil else { return }
+            if on { hostLog("host: this Mac's speakers: \(speakers.silence())") } else { speakers.restore() }
+        }
+    }
+
     private func setSound(_ on: Bool) {
         guard let host else { return }
         soundQueue.sync {
+            if !on { speakers.restore() }
             if let s = sound, !on {
                 hostLog("host: sound off after \(s.buffers) buffers captured, \(s.totals.packets) packets, \(s.totals.bytes) bytes, \(s.totals.pauses) pauses; \(s.gapReport)")
             }
@@ -449,7 +464,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             s.testTone = options.testTone
             sound = s
             rm_host_send_message(host, HostSound.format)
-            hostLog("host: sound on for the device (this Mac's own speakers keep playing)")
+            let quiet = options.silenceSpeakers ? speakers.silence() : "left playing"
+            hostLog("host: sound on for the device; this Mac's own speakers: \(quiet)")
         }
     }
 
@@ -535,7 +551,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         picture = nil
         setCamera(["on": false])
         setMicrophone(["on": false])
-        soundQueue.sync { sound = nil }
+        soundQueue.sync {
+            sound = nil
+            speakers.restore()
+        }
         if let s = sharing {
             sharing = nil
             DispatchQueue.main.async {

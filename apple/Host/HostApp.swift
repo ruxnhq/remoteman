@@ -26,6 +26,15 @@ final class HostController: ObservableObject {
     @Published private(set) var allowClipboard = false
     @Published private(set) var allowFiles = false
     static let clipboardKey = "allowClipboard", filesKey = "allowFiles"
+    /// Silence this Mac's speakers while a device plays its sound. On unless the owner turns it off.
+    @Published private(set) var silenceSpeakers = true
+    static let speakersKey = "keepSpeakersOn"
+
+    func setSilenceSpeakers(_ on: Bool) {
+        silenceSpeakers = on
+        if !unattended { UserDefaults.standard.set(!on, forKey: Self.speakersKey) }
+        host.setSilenceSpeakers(on)
+    }
     /// remoteman's camera on this Mac: whether it is installed, and what the last request came to.
     @Published private(set) var cameraInstalled = HostCamera.installed
     @Published private(set) var cameraNote = ""
@@ -86,7 +95,9 @@ final class HostController: ObservableObject {
             options.allowClipboard = UserDefaults.standard.bool(forKey: Self.clipboardKey)
             options.allowFiles = UserDefaults.standard.bool(forKey: Self.filesKey)
         }
+        if !unattended { options.silenceSpeakers = !UserDefaults.standard.bool(forKey: Self.speakersKey) }
         host = MacHost(options: options)
+        silenceSpeakers = options.silenceSpeakers
         allowClipboard = options.allowClipboard
         allowFiles = options.allowFiles
         host.onClient = { [weak self] c in
