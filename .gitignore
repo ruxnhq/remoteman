@@ -1,2 +1,5 @@
 target/
 *.log
+
+# Working copies made for agents working in parallel
+.claude/
