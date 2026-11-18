@@ -393,8 +393,7 @@ final class ViewerSession: ObservableObject {
     private func closed(_ reason: String, generation gen: Int) {
         guard gen == generation else { return }
         closeCode = client?.closeCode ?? -1
-        // Its key for this computer is no use any more; the next connection pairs afresh.
-        if closeCode == 3 { Self.forget(host: target) }
+        // On 3 the computer's key is kept: pairing again still checks it is the same computer.
         client = nil
         teardown()
         state = .failed(reason)
