@@ -287,22 +287,27 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         button.toolTip = "remoteman: \(state)"
     }
 
-    /// A display outline; with a dot in the middle while a device is connected.
+    /// The host icon's leaning display with its stand bar, as a template: an outline when
+    /// ready, filled while a device is connected.
     static func icon(connected: Bool) -> NSImage {
-        let image = NSImage(size: NSSize(width: 18, height: 16), flipped: false) { _ in
+        let image = NSImage(size: NSSize(width: 19, height: 16), flipped: false) { _ in
             NSColor.black.set()
-            let screen = NSBezierPath(roundedRect: NSRect(x: 1.5, y: 4.5, width: 15, height: 10), xRadius: 2, yRadius: 2)
-            screen.lineWidth = 1.4
+            // Lean 14 degrees to the right about the middle, as the app icon does.
+            var lean = AffineTransform(translationByX: 9.5, byY: 8)
+            lean.append(AffineTransform(m11: 1, m12: 0, m21: CGFloat(tan(14 * Double.pi / 180)), m22: 1, tX: 0, tY: 0))
+            lean.translate(x: -9.5, y: -8)
+            let screen = NSBezierPath(roundedRect: NSRect(x: 2.5, y: 5, width: 14, height: 9.5), xRadius: 2.2, yRadius: 2.2)
+            screen.transform(using: lean)
+            screen.lineWidth = 1.5
             screen.stroke()
+            if connected { screen.fill() }
             let stand = NSBezierPath()
-            stand.move(to: NSPoint(x: 9, y: 4.5))
-            stand.line(to: NSPoint(x: 9, y: 1.5))
-            stand.move(to: NSPoint(x: 5.5, y: 1.5))
-            stand.line(to: NSPoint(x: 12.5, y: 1.5))
-            stand.lineWidth = 1.4
+            stand.move(to: NSPoint(x: 6.5, y: 1.6))
+            stand.line(to: NSPoint(x: 12.5, y: 1.6))
+            stand.transform(using: lean)
+            stand.lineWidth = 1.5
             stand.lineCapStyle = .round
             stand.stroke()
-            if connected { NSBezierPath(ovalIn: NSRect(x: 7, y: 7.5, width: 4, height: 4)).fill() }
             return true
         }
         image.isTemplate = true
