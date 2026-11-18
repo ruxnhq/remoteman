@@ -1260,11 +1260,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "remoteman-capture",
+ "remoteman-core",
  "remoteman-desktop",
  "remoteman-encode",
  "remoteman-gpu",
- "remoteman-proto",
- "remoteman-transport",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -1,5 +1,6 @@
-//! The client core as a C interface, for Swift and anything else that isn't Rust.
-//! `include/remoteman_core.h` is the header; keep the two in step by hand.
+//! The core as a C interface, for Swift and anything else that isn't Rust: the client role
+//! (`rm_client_*`) and the host role (`rm_host_*`). `include/remoteman_core.h` is the header;
+//! keep the two in step by hand.
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
@@ -193,5 +194,280 @@ pub unsafe extern "C" fn rm_client_text(client: *const Client, utf8: *const c_ch
 pub unsafe extern "C" fn rm_client_close(client: *mut Client) {
     if !client.is_null() {
         unsafe { Box::from_raw(client) }.close();
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The host role.
+
+use crate::host::{Accept, ClientInfo, Host, HostHandler, HostOptions, Link};
+
+/// A client that said hello. The strings are valid only during the call.
+#[repr(C)]
+pub struct RmClientInfo {
+    pub name: *const c_char,
+    pub fingerprint: *const c_char,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f32,
+    pub refresh: u32,
+    /// What it decodes, most preferred first: a comma-separated list from `av1`, `hevc444`, `hevc`.
+    pub decoders: *const c_char,
+    /// Non-zero: it draws the cursor itself.
+    pub cursor_apart: u8,
+}
+
+/// The host's answer, filled in by `on_client`.
+#[repr(C)]
+pub struct RmAccept {
+    /// 0 HEVC, 1 AV1.
+    pub codec: u8,
+    pub depth: u8,
+    /// 420 or 444.
+    pub chroma: u16,
+    pub width: u32,
+    pub height: u32,
+    pub refresh: u32,
+    /// 0 BT.709, 1 BT.2020 PQ.
+    pub hdr: u8,
+    /// When refusing: why, as a C string the client is shown.
+    pub refuse: [c_char; 200],
+}
+
+/// One input event, as docs/PROTOCOL.md numbers them. Fields that a type doesn't use are zero.
+#[repr(C)]
+pub struct RmInput {
+    /// 1 pointer to (x, y as fractions), 2 pointer by (x, y in pixels), 3 button, 4 scroll
+    /// (x, y in pixels), 5 key, 6 touch (x, y as fractions), 7 text.
+    pub kind: u8,
+    /// 0 left, 1 right, 2 middle.
+    pub button: u8,
+    pub down: u8,
+    /// 0 down, 1 move, 2 up.
+    pub phase: u8,
+    pub slot: u8,
+    /// A USB HID usage on page 7.
+    pub usage: u16,
+    pub x: f32,
+    pub y: f32,
+    /// UTF-8, valid only during the call; null unless `kind` is 7.
+    pub text: *const c_char,
+}
+
+/// The host program's callbacks, all called on one thread of the core's, one at a time. They
+/// may block.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RmHostCallbacks {
+    pub ctx: *mut c_void,
+    /// Return non-zero having filled `accept` and started the picture, or zero having written
+    /// a reason into `accept.refuse`.
+    pub on_client: Option<extern "C" fn(ctx: *mut c_void, client: *const RmClientInfo, accept: *mut RmAccept) -> i32>,
+    pub on_keyframe: Option<extern "C" fn(ctx: *mut c_void)>,
+    pub on_input: Option<extern "C" fn(ctx: *mut c_void, input: *const RmInput)>,
+    pub on_client_left: Option<extern "C" fn(ctx: *mut c_void)>,
+}
+
+// SAFETY: the host program promises its context may be used from the core's handler thread.
+unsafe impl Send for RmHostCallbacks {}
+
+fn mode_name(m: &Mode) -> &'static str {
+    match (m.codec, m.chroma) {
+        (Codec::Av1, _) => "av1",
+        (Codec::Hevc, Chroma::C444) => "hevc444",
+        (Codec::Hevc, Chroma::C420) => "hevc",
+    }
+}
+
+impl HostHandler for RmHostCallbacks {
+    fn connected(&mut self, client: &ClientInfo, _link: Link) -> Result<Accept, String> {
+        let Some(f) = self.on_client else { return Err("this host takes no clients".into()) };
+        let c = |s: &str| CString::new(s.replace('\0', " ")).unwrap_or_default();
+        let (name, fingerprint) = (c(&client.name), c(&client.fingerprint));
+        let decoders = c(&client.decoders.iter().map(mode_name).collect::<Vec<_>>().join(","));
+        let info = RmClientInfo {
+            name: name.as_ptr(),
+            fingerprint: fingerprint.as_ptr(),
+            width: client.display.width,
+            height: client.display.height,
+            scale: client.display.scale,
+            refresh: client.display.refresh,
+            decoders: decoders.as_ptr(),
+            cursor_apart: client.cursor as u8,
+        };
+        let mut a = RmAccept { codec: 0, depth: 10, chroma: 420, width: 0, height: 0, refresh: 0, hdr: 0, refuse: [0; 200] };
+        if f(self.ctx, &info, &mut a) == 0 {
+            a.refuse[199] = 0;
+            // SAFETY: terminated just above.
+            let why = unsafe { CStr::from_ptr(a.refuse.as_ptr()) }.to_string_lossy().into_owned();
+            return Err(if why.is_empty() { "the host refused".into() } else { why });
+        }
+        Ok(Accept {
+            mode: Mode { codec: if a.codec == 1 { Codec::Av1 } else { Codec::Hevc }, chroma: if a.chroma == 444 { Chroma::C444 } else { Chroma::C420 }, depth: a.depth },
+            width: a.width,
+            height: a.height,
+            refresh: a.refresh,
+            colour: if a.hdr != 0 { "bt2020-pq" } else { "bt709" }.into(),
+        })
+    }
+
+    fn keyframe(&mut self) {
+        if let Some(f) = self.on_keyframe {
+            f(self.ctx);
+        }
+    }
+
+    fn input(&mut self, event: Event) {
+        let Some(f) = self.on_input else { return };
+        let mut i = RmInput { kind: 0, button: 0, down: 0, phase: 0, slot: 0, usage: 0, x: 0.0, y: 0.0, text: std::ptr::null() };
+        let mut text = None;
+        match event {
+            Event::PointerTo { x, y } => (i.kind, i.x, i.y) = (1, x, y),
+            Event::PointerBy { dx, dy } => (i.kind, i.x, i.y) = (2, dx, dy),
+            Event::Button { button, down } => (i.kind, i.button, i.down) = (3, button as u8, down as u8),
+            Event::Scroll { dx, dy } => (i.kind, i.x, i.y) = (4, dx, dy),
+            Event::Key { usage, down } => (i.kind, i.usage, i.down) = (5, usage, down as u8),
+            Event::Touch { phase, slot, x, y } => (i.kind, i.phase, i.slot, i.x, i.y) = (6, phase as u8, slot, x, y),
+            Event::Text(s) => {
+                i.kind = 7;
+                text = Some(CString::new(s.replace('\0', " ")).unwrap_or_default());
+            }
+        }
+        if let Some(t) = &text {
+            i.text = t.as_ptr();
+        }
+        f(self.ctx, &i);
+    }
+
+    fn left(&mut self) {
+        if let Some(f) = self.on_client_left {
+            f(self.ctx);
+        }
+    }
+}
+
+/// Start a host listening on `listen` ("0.0.0.0:7791"). `state_dir` holds its identity and the
+/// devices it trusts; `name` and `os` ("macos", "linux") are shown on clients; `features` is a
+/// comma-separated list of what it can do ("video,input,cursor"). With `pair` non-zero the next
+/// unknown device is let in and remembered. Returns null on failure, with the reason in `err`.
+///
+/// # Safety
+/// The strings must be valid C strings and `err` a writable buffer of `err_len` bytes (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_start(
+    listen: *const c_char,
+    state_dir: *const c_char,
+    name: *const c_char,
+    os: *const c_char,
+    features: *const c_char,
+    pair: i32,
+    callbacks: RmHostCallbacks,
+    err: *mut c_char,
+    err_len: usize,
+) -> *mut Host {
+    let (listen, state, name, os, features) = unsafe { (text(listen), text(state_dir), text(name), text(os), text(features)) };
+    let listen = match listen.parse() {
+        Ok(a) => a,
+        Err(_) => {
+            report(err, err_len, &format!("{listen} isn't an address and port"));
+            return std::ptr::null_mut();
+        }
+    };
+    let features = features.split(',').map(str::trim).filter(|f| !f.is_empty()).map(str::to_owned).collect();
+    match Host::start(HostOptions { listen, state: PathBuf::from(state), name, os, features, pair: pair != 0 }, callbacks) {
+        Ok(h) => Box::into_raw(Box::new(h)),
+        Err(e) => {
+            report(err, err_len, &format!("{e:#}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// "address:port\tfingerprint" of this host, copied into `out`.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `out` must be writable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_info(host: *const Host, out: *mut c_char, len: usize) {
+    let h = unsafe { &*host };
+    report(out, len, &format!("{}\t{}", h.address, h.fingerprint));
+}
+
+/// Let the next unknown device in (it is remembered, and pairing turns itself off), or stop.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_set_pairing(host: *const Host, on: i32) {
+    unsafe { &*host }.set_pairing(on != 0);
+}
+
+/// Whether pairing is on.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_pairing(host: *const Host) -> i32 {
+    unsafe { &*host }.pairing() as i32
+}
+
+/// The connected client's session clock in microseconds, to stamp frames with at capture; 0
+/// when no client is connected.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_now_us(host: *const Host) -> u64 {
+    unsafe { &*host }.link().map_or(0, |l| l.now_us().max(1))
+}
+
+/// Send one encoded frame to the connected client. Waits while the network is behind, so call
+/// it from the encoder's thread, never the main one. Returns 1 if it was taken, 0 if no client
+/// is connected.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `data` must be readable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_send_frame(host: *const Host, data: *const u8, len: usize, key: u8, capture_us: u64) -> i32 {
+    match unsafe { &*host }.link() {
+        Some(l) => l.send_frame(unsafe { std::slice::from_raw_parts(data, len) }, key != 0, capture_us) as i32,
+        None => 0,
+    }
+}
+
+/// The cursor's image changed: `width * height * 4` bytes of premultiplied RGBA, rows top to
+/// bottom, hotspot in its pixels. `width` 0: no cursor. Only for clients that asked
+/// (`cursor_apart`).
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `rgba` must be readable for `width * height * 4` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_cursor_shape(host: *const Host, rgba: *const u8, width: u32, height: u32, hot_x: i32, hot_y: i32) {
+    if let Some(l) = unsafe { &*host }.link() {
+        let n = width as usize * height as usize * 4;
+        let rgba = if n == 0 || rgba.is_null() { Vec::new() } else { unsafe { std::slice::from_raw_parts(rgba, n) }.to_vec() };
+        l.cursor_shape(CursorShape { width, height, hot_x, hot_y, rgba });
+    }
+}
+
+/// Where the cursor is, as fractions of the display; `visible` 0 when it isn't on it.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_cursor_at(host: *const Host, x: f32, y: f32, visible: u8) {
+    if let Some(l) = unsafe { &*host }.link() {
+        l.cursor_at(x, y, visible != 0);
+    }
+}
+
+/// Stop listening, drop the client, and free the host.
+///
+/// # Safety
+/// `host` must come from `rm_host_start` and not be used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_stop(host: *mut Host) {
+    if !host.is_null() {
+        unsafe { Box::from_raw(host) }.stop();
     }
 }

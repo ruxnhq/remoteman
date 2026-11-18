@@ -1,8 +1,12 @@
-//! The client role of the remoteman core. It owns the connection: pairing, the hello, putting
-//! video back together, asking for keyframes after a loss, and the clock exchange. The app
-//! around it decodes and shows the frames it is handed, and passes input in.
+//! The remoteman core, shared by every client and host.
+//!
+//! This file is the client role. It owns the connection: pairing, the hello, putting video back
+//! together, asking for keyframes after a loss, and the clock exchange. The app around it
+//! decodes and shows the frames it is handed, and passes input in. The host role is in
+//! [`host`], and both as a C interface in [`ffi`].
 
 pub mod ffi;
+pub mod host;
 
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -15,6 +19,7 @@ pub use remoteman_proto::control::{Chroma, Codec, Display, Mode};
 use remoteman_proto::control::Message;
 pub use remoteman_proto::input::{Button, Event, TouchPhase};
 pub use remoteman_proto::keys;
+pub use remoteman_proto::{PORT, PROTO};
 use remoteman_proto::video::{CursorAt, KIND_CURSOR, Reassembler};
 pub use remoteman_proto::video::Frame;
 use remoteman_transport::{Connection, Endpoint, Expect, Identity, connect, read_message, write_message};

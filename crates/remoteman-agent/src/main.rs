@@ -10,10 +10,9 @@ mod session;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use remoteman_transport::{Identity, Trust, listen, peer_fingerprint};
+use remoteman_core::host::{Host, HostOptions};
 
 fn state_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
@@ -23,69 +22,40 @@ fn state_dir() -> PathBuf {
         .join("remoteman")
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let level = if std::env::var_os("REMOTEMAN_DEBUG").is_some() { tracing::Level::DEBUG } else { tracing::Level::INFO };
     tracing_subscriber::fmt().with_max_level(level).init();
-    let mut addr: SocketAddr = format!("0.0.0.0:{}", remoteman_proto::PORT).parse()?;
+    let mut listen: SocketAddr = format!("0.0.0.0:{}", remoteman_core::PORT).parse()?;
     let (mut pair, mut state, mut bitrate) = (false, state_dir(), 40u32);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
-            "--listen" => addr = value()?.parse().context("--listen ADDR:PORT")?,
+            "--listen" => listen = value()?.parse().context("--listen ADDR:PORT")?,
             "--state" => state = value()?.into(),
             "--bitrate" => bitrate = value()?.parse().context("--bitrate in Mbit/s")?,
             "--pair" => pair = true,
             other => anyhow::bail!("unknown option {other}"),
         }
     }
-    let identity = Identity::load_or_create(&state.join("host"))?;
-    let trust = Arc::new(Trust::load(&state.join("host/trusted")));
-    trust.set_pairing(pair);
-    let endpoint = listen(addr, &identity, trust.clone())?;
-    tracing::info!("listening on {}; this host's fingerprint is {}", endpoint.local_addr()?, identity.fingerprint);
+    let name = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "linux".into());
+    let options = HostOptions { listen, state, name, os: "linux".into(), features: vec!["video".into(), "input".into(), "cursor".into()], pair };
+    let host = Host::start(options, session::Agent::new(bitrate * 1_000_000)?)?;
+    tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
     if pair {
         tracing::info!("pairing: the next unknown device to connect will be trusted");
     }
 
-    let mut current: Option<tokio::task::JoinHandle<()>> = None;
-    loop {
-        let incoming = tokio::select! {
-            i = endpoint.accept() => match i { Some(i) => i, None => break },
-            _ = tokio::signal::ctrl_c() => break,
-        };
-        let conn = match incoming.await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("refused a connection: {e}");
-                continue;
-            }
-        };
-        let Some(fp) = peer_fingerprint(&conn) else { continue };
-        if !trust.contains(&fp) {
-            // Only reachable while pairing: the handshake refuses strangers otherwise.
-            trust.add(&fp, &conn.remote_address().ip().to_string())?;
-            trust.set_pairing(false);
-            tracing::info!("paired with {fp}");
+    // Until Ctrl-C or a request to stop.
+    let wait = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    wait.block_on(async {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
         }
-        tracing::info!("client {} connected from {}", &fp[..12], conn.remote_address());
-        // The newest client takes the desktop over.
-        if let Some(old) = current.take() {
-            old.abort();
-            let _ = old.await;
-        }
-        current = Some(tokio::spawn(async move {
-            if let Err(e) = session::serve(conn.clone(), bitrate * 1_000_000).await {
-                tracing::error!("session: {e:#}");
-                conn.close(1u32.into(), b"failed");
-            }
-        }));
-    }
-    if let Some(c) = current {
-        c.abort();
-        let _ = c.await;
-    }
-    endpoint.close(0u32.into(), b"bye");
+        anyhow::Ok(())
+    })?;
+    host.stop();
     Ok(())
 }
