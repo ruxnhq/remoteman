@@ -73,3 +73,31 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman
         PRODUCT_NAME: remoteman
         TARGETED_DEVICE_FAMILY: "1,2"
+  # The Mac as a host. An app with no Dock icon or window, so that macOS files its Screen
+  # Recording and Accessibility grants under its own name; it logs to
+  # ~/Library/Logs/remoteman-host.log and takes the options in Host/main.swift.
+  RemotemanHost:
+    type: application
+    platform: macOS
+    sources:
+      - Host
+      - Shared/HIDKeys.swift
+    dependencies:
+      - framework: build/RemotemanCore.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: ScreenCaptureKit.framework
+      - sdk: VideoToolbox.framework
+    info:
+      path: Host/Info.plist
+      properties:
+        CFBundleDisplayName: remoteman host
+        LSUIElement: true
+        NSLocalNetworkUsageDescription: remoteman host lets your own devices connect to this Mac to show and control its desktop.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman.host
+        PRODUCT_NAME: remoteman-host
+        SWIFT_OBJC_BRIDGING_HEADER: Host/Bridging.h
+        ENABLE_HARDENED_RUNTIME: YES
