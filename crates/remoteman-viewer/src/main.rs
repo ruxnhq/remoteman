@@ -2,6 +2,11 @@
 //!
 //!     remoteman [HOST:PORT] [--pair] [--size WxH] [--scale S] [--refresh HZ]
 //!               [--decoders av1,hevc444,hevc] [--state DIR]
+//!               [--placement extend|main|only] [--hover-bar yes|no]
+//!
+//! `--placement`: this window as an extra display beside the other computer's own, as its main
+//! display, or as its only one. `--hover-bar yes`: no title bar while connected; it comes out
+//! when the pointer reaches the top edge. Both are on the first page too, and remembered.
 //!
 //! With a host on the command line it connects at once. For testing: `--quit-after SECONDS`
 //! leaves by itself and prints what it saw, and `--dump FILE.png` saves the 200th picture shown.
@@ -17,7 +22,7 @@ use std::sync::atomic::Ordering;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
-use remoteman_core::{Button, Chroma, Codec, Display, Event, Mode, keys};
+use remoteman_core::{Button, Chroma, Codec, Display, Event, Mode, Placement, keys};
 
 use decode::{Layout, Picture, Pixels, Surface};
 
@@ -42,13 +47,25 @@ struct Args {
     state: PathBuf,
     quit_after: Option<u32>,
     dump: Option<PathBuf>,
+    /// Where the display sits among the other computer's own, if said on the command line.
+    placement: Option<Placement>,
+    /// Hide the window's bar while connected, if said on the command line.
+    hover_bar: Option<bool>,
 }
+
+/// What the first page's choices were last time: `key=value` lines in `viewer-settings`.
+fn remembered(state: &std::path::Path, key: &str) -> Option<String> {
+    let all = std::fs::read_to_string(state.join("viewer-settings")).ok()?;
+    all.lines().find_map(|l| l.split_once('=').filter(|(k, _)| *k == key).map(|(_, v)| v.to_owned()))
+}
+
+const PLACEMENTS: [(Placement, &str, &str); 3] = [(Placement::Extend, "extend", "An extra display"), (Placement::Main, "main", "The main display"), (Placement::Only, "only", "The only display")];
 
 fn parse_args() -> anyhow::Result<Args> {
     use anyhow::Context;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/state")).join("remoteman");
-    let mut a = Args { host: None, pair: false, size: None, scale: None, refresh: None, decoders: Vec::new(), state, quit_after: None, dump: None };
+    let mut a = Args { host: None, pair: false, size: None, scale: None, refresh: None, decoders: Vec::new(), state, quit_after: None, dump: None, placement: None, hover_bar: None };
     let mut decoders = "av1,hevc444,hevc".to_owned();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -66,6 +83,11 @@ fn parse_args() -> anyhow::Result<Args> {
             "--state" => a.state = value()?.into(),
             "--quit-after" => a.quit_after = Some(value()?.parse()?),
             "--dump" => a.dump = Some(value()?.into()),
+            "--placement" => {
+                let v = value()?;
+                a.placement = Some(PLACEMENTS.iter().find(|p| p.1 == v).context("--placement extend, main or only")?.0);
+            }
+            "--hover-bar" => a.hover_bar = Some(value()? == "yes"),
             other if other.starts_with("--") => anyhow::bail!("unknown option {other}"),
             host => a.host = Some(host.to_owned()),
         }
@@ -107,6 +129,10 @@ struct Ui {
     leave: gtk::Button,
     host: adw::EntryRow,
     pair: adw::SwitchRow,
+    placement: adw::ComboRow,
+    hover_bar: adw::SwitchRow,
+    /// The pointer is at the top edge (or on the bar), so a hidden bar is out.
+    bar_out: Cell<bool>,
     args: Args,
     session: RefCell<Option<Session>>,
     colour: gdk::ColorState,
@@ -118,6 +144,21 @@ struct Ui {
 }
 
 impl Ui {
+    /// Show or hide the window's bar. While a stream is up it is hidden in full screen, and in
+    /// a window too if the user chose that; the pointer at the top edge brings it out.
+    fn place_bar(&self) {
+        let hidden = self.streaming() && (self.window.is_fullscreen() || self.hover_bar.is_active());
+        // Over the picture when it comes and goes, so the picture doesn't jump.
+        self.toolbar.set_extend_content_to_top_edge(hidden);
+        self.toolbar.set_reveal_top_bars(!hidden || self.bar_out.get());
+    }
+
+    /// Keep the first page's choices for next time.
+    fn remember(&self) {
+        let placement = PLACEMENTS[(self.placement.selected() as usize).min(2)].1;
+        let _ = std::fs::write(self.args.state.join("viewer-settings"), format!("placement={placement}\nhover-bar={}\n", if self.hover_bar.is_active() { "yes" } else { "no" }));
+    }
+
     fn send(&self, event: Event) {
         if let Some(s) = self.session.borrow().as_ref() {
             s.client.send(event);
@@ -161,7 +202,7 @@ impl Ui {
         if let Some((sw, sh)) = self.args.size {
             (w, h) = (sw, sh);
         }
-        Display { width: w & !1, height: h & !1, scale: self.args.scale.unwrap_or(scale), refresh: self.args.refresh.unwrap_or(refresh), placement: Default::default() }
+        Display { width: w & !1, height: h & !1, scale: self.args.scale.unwrap_or(scale), refresh: self.args.refresh.unwrap_or(refresh), placement: PLACEMENTS[(self.placement.selected() as usize).min(2)].0 }
     }
 
     /// The picture as something GTK can draw. `None`: GTK refused it, and the decoder has been
@@ -306,6 +347,8 @@ impl Ui {
                     *ui.session.borrow_mut() = Some(session);
                     ui.status.set_text("");
                     ui.stack.set_visible_child_name("stream");
+                    ui.remember();
+                    ui.place_bar();
                     ui.leave.set_visible(true);
                     ui.picture.grab_focus();
                     // Super, Alt+Tab and the like go to the other computer while this has focus.
@@ -338,6 +381,8 @@ impl Ui {
         self.video.set((0, 0));
         self.leave.set_visible(false);
         self.stack.set_visible_child_name("connect");
+        self.bar_out.set(false);
+        self.place_bar();
         match reason {
             Some(r) => self.fail(r),
             None => self.status.set_text(""),
@@ -457,12 +502,31 @@ fn build(app: &adw::Application, args: Args) {
     let group = adw::PreferencesGroup::builder().title("Connect to a computer").description("Its name or address, and port: blackbox:7791").build();
     group.add(&host);
     group.add(&pair);
+    // How the other computer sees this window, and how much of the window is the picture.
+    let said = args.placement.map(|p| PLACEMENTS.iter().position(|x| x.0 == p).unwrap_or(0));
+    let was = remembered(&args.state, "placement").and_then(|v| PLACEMENTS.iter().position(|x| x.1 == v));
+    let names: Vec<&str> = PLACEMENTS.iter().map(|p| p.2).collect();
+    let placement = adw::ComboRow::builder()
+        .title("This window is")
+        .subtitle("Beside the computer's own screens, in place of its main one, or with its own screens off. For computers that offer the choice.")
+        .model(&gtk::StringList::new(&names))
+        .selected(said.or(was).unwrap_or(0) as u32)
+        .build();
+    let hover_bar = adw::SwitchRow::builder()
+        .title("Hide the title bar while connected")
+        .subtitle("Move the pointer to the top edge to bring it back.")
+        .active(args.hover_bar.unwrap_or_else(|| remembered(&args.state, "hover-bar").as_deref() == Some("yes")))
+        .build();
+    let options = adw::PreferencesGroup::builder().title("Display").build();
+    options.add(&placement);
+    options.add(&hover_bar);
     let connect = gtk::Button::builder().label("Connect").halign(gtk::Align::Center).build();
     connect.add_css_class("suggested-action");
     connect.add_css_class("pill");
     let status = gtk::Label::builder().wrap(true).justify(gtk::Justification::Center).build();
     let page = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).margin_top(36).margin_bottom(36).margin_start(18).margin_end(18).valign(gtk::Align::Center).build();
     page.append(&group);
+    page.append(&options);
     page.append(&connect);
     page.append(&status);
     let clamp = adw::Clamp::builder().maximum_size(480).child(&page).build();
@@ -522,6 +586,9 @@ fn build(app: &adw::Application, args: Args) {
         colour,
         shown: Cell::new(0),
         shown_total: Cell::new(0),
+        placement,
+        hover_bar,
+        bar_out: Cell::new(false),
         video: Cell::new((0, 0)),
     });
 
@@ -560,8 +627,31 @@ fn build(app: &adw::Application, args: Args) {
     });
     window.connect_fullscreened_notify({
         let ui = ui.clone();
-        move |w| ui.toolbar.set_reveal_top_bars(!w.is_fullscreen())
+        move |_| ui.place_bar()
     });
+    // A hidden bar comes out when the pointer reaches the top edge and goes when it has left
+    // the bar.
+    let edge = gtk::EventControllerMotion::new();
+    edge.set_propagation_phase(gtk::PropagationPhase::Capture);
+    edge.connect_motion({
+        let ui = ui.clone();
+        move |_, _, y| {
+            let out = if ui.bar_out.get() { y < 64.0 } else { y < 2.0 };
+            if out != ui.bar_out.get() {
+                ui.bar_out.set(out);
+                ui.place_bar();
+            }
+        }
+    });
+    edge.connect_leave({
+        let ui = ui.clone();
+        move |_| {
+            if ui.bar_out.replace(false) {
+                ui.place_bar();
+            }
+        }
+    });
+    window.add_controller(edge);
 
     // Keys: by physical position, to the other computer, before anything here sees them.
     let keys_ctl = gtk::EventControllerKey::new();

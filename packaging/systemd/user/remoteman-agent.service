@@ -1,0 +1,15 @@
+[Unit]
+Description=remoteman agent: this session's screen for paired devices
+Documentation=https://github.com/xnixy/remoteman
+# One in every graphical session, the login screen's included. It does nothing until the system
+# service (remotemand) hands it a client.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/lib/remoteman/remoteman-agent --daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=gnome-session.target

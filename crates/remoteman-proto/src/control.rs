@@ -113,6 +113,9 @@ pub enum Message {
     Lost {
         first: u32,
         last: u32,
+        /// The stream epoch the numbers belong to (older clients leave it out).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<u16>,
     },
     Ping {
         id: u32,

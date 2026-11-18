@@ -23,6 +23,7 @@ typedef struct rm_nvenc_cfg {
     uint32_t preset;      // 1..7 (P1 fastest)
     uint32_t hdr_pq;      // 0 = BT.709 SDR, 1 = BT.2020 PQ signalling
     uint32_t long_term;   // how many long-term reference frames to keep room for (0: none)
+    uint32_t short_term;  // how many recent frames to keep (0: the usual, fitted to the picture)
 } rm_nvenc_cfg;
 
 #define RM_MAX_INPUTS 8
@@ -160,6 +161,8 @@ rm_nvenc *rm_nvenc_open(rm_cuda *cuda, const rm_nvenc_cfg *cfg, char *err, int e
     // over 6,684,672 pixels (an iPad's 3200x2400), and NVENC answers one more by moving the
     // stream to level 6, which not every decoder takes. So there, one long-term frame.
     if (!e->av1 && e->long_term > 1 && (uint64_t)cfg->width * cfg->height > 6684672 && (uint64_t)cfg->width * cfg->height <= 8912896) e->long_term = 1;
+    // Said outright (for trying layouts out): as said, whatever level that makes.
+    if (cfg->short_term) { e->short_term = cfg->short_term; e->long_term = cfg->long_term; }
     if (e->long_term > (uint32_t)cap(e, codec, NV_ENC_CAPS_NUM_MAX_LTR_FRAMES)) e->long_term = cap(e, codec, NV_ENC_CAPS_NUM_MAX_LTR_FRAMES);
     if (cfg->codec == 1) {
         NV_ENC_CONFIG_AV1 *a = &e->config.encodeCodecConfig.av1Config;

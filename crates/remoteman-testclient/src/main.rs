@@ -11,6 +11,12 @@
 //!     --record FILE      save what the app would be handed, frame by frame (format below)
 //!     --input-demo       move the pointer, click, type and touch while running
 //!     --pointer-demo     move the pointer in a circle and nothing else (safe on a desktop in use)
+//!     --script FILE      send input from a script while running, one step a line:
+//!                          wait SECONDS | move X Y | click X Y | key enter|tab|esc|space|HEX
+//!                          text WORDS | textfile PATH | mark NAME
+//!                        X and Y are fractions of the display. `textfile` types a file's
+//!                        contents without showing them. `mark` prints how many frames have
+//!                        arrived, to find that moment in a stream saved with --out.
 //!     --cursor           draw the cursor ourselves: ask for its shape and position apart
 //!     --drop-one-in N    throw away one video packet in N, as a lossy network would
 //!     --delay-lost MS    hold each loss report back this long, as a slow path to the host would
@@ -49,6 +55,8 @@ struct Seen {
     positions: u32,
     last_at: Option<(f32, f32, bool)>,
     closed: Option<String>,
+    /// Every frame handed over, the first two seconds' included (what --out has saved).
+    saved: u32,
 }
 
 struct Watcher {
@@ -84,10 +92,11 @@ impl Handler for Watcher {
             head.extend_from_slice(&frame.capture_us.to_le_bytes());
             let _ = f.write_all(&head).and_then(|()| f.write_all(&frame.data));
         }
+        let mut s = self.seen.lock().unwrap();
+        s.saved += 1;
         if Instant::now() < self.warm {
             return;
         }
-        let mut s = self.seen.lock().unwrap();
         s.arrivals.push(Instant::now());
         s.bytes += frame.data.len();
         s.keys += frame.key as u32;
@@ -119,6 +128,7 @@ fn main() -> Result<()> {
     let (mut state, mut pair, mut size, mut scale, mut refresh, mut secs) = (home.join(".local/state/remoteman"), false, (2752u32, 2064u32), 2.0f32, 120u32, 10u64);
     let (mut out, mut record, mut demo, mut cursor, mut decoders) = (None::<PathBuf>, None::<PathBuf>, false, false, "av1,hevc444,hevc".to_owned());
     let mut circle = false;
+    let mut script = None::<PathBuf>;
     let mut drop_one_in = None::<u32>;
     let mut delay_lost = None::<u32>;
     let mut placement = Placement::Extend;
@@ -140,6 +150,7 @@ fn main() -> Result<()> {
             "--record" => record = Some(value()?.into()),
             "--input-demo" => demo = true,
             "--pointer-demo" => circle = true,
+            "--script" => script = Some(value()?.into()),
             "--cursor" => cursor = true,
             "--drop-one-in" => drop_one_in = Some(value()?.parse()?),
             "--delay-lost" => delay_lost = Some(value()?.parse()?),
@@ -182,6 +193,57 @@ fn main() -> Result<()> {
     println!("host: {} ({}), features {:?}, fingerprint {}", client.host_name, client.host_os, client.host_features, &client.host_fingerprint[..12]);
 
     let end = Instant::now() + Duration::from_secs(secs);
+    if let Some(path) = &script {
+        let steps = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        for (i, line) in steps.lines().enumerate() {
+            if seen.lock().unwrap().closed.is_some() {
+                break;
+            }
+            let line = line.trim();
+            let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+            let xy = || -> Result<(f32, f32)> {
+                let (x, y) = rest.trim().split_once(' ').with_context(|| format!("line {}: X Y", i + 1))?;
+                Ok((x.parse()?, y.trim().parse()?))
+            };
+            match word {
+                "" | "#" => {}
+                "wait" => std::thread::sleep(Duration::from_secs_f32(rest.trim().parse().with_context(|| format!("line {}: wait SECONDS", i + 1))?)),
+                "move" => {
+                    let (x, y) = xy()?;
+                    client.send(Event::PointerTo { x, y });
+                }
+                "click" => {
+                    let (x, y) = xy()?;
+                    client.send(Event::PointerTo { x, y });
+                    std::thread::sleep(Duration::from_millis(80));
+                    client.send(Event::Button { button: Button::Left, down: true });
+                    std::thread::sleep(Duration::from_millis(60));
+                    client.send(Event::Button { button: Button::Left, down: false });
+                }
+                "key" => {
+                    let usage = match rest.trim() {
+                        "enter" => 0x28,
+                        "esc" => 0x29,
+                        "tab" => 0x2B,
+                        "space" => 0x2C,
+                        hex => u16::from_str_radix(hex.trim_start_matches("0x"), 16).with_context(|| format!("line {}: key NAME or HEX", i + 1))?,
+                    };
+                    client.send(Event::Key { usage, down: true });
+                    std::thread::sleep(Duration::from_millis(40));
+                    client.send(Event::Key { usage, down: false });
+                }
+                "text" => client.send(Event::Text(rest.to_owned())),
+                "textfile" => {
+                    let text = std::fs::read_to_string(rest.trim()).with_context(|| format!("line {}: read {}", i + 1, rest.trim()))?;
+                    client.send(Event::Text(text.trim_end_matches('\n').to_owned()));
+                }
+                "mark" => println!("mark {}: {} frames so far", rest.trim(), seen.lock().unwrap().saved),
+                other => bail!("line {}: unknown step {other}", i + 1),
+            }
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        println!("script done");
+    }
     if circle {
         std::thread::sleep(Duration::from_secs(3));
         for i in 0..120 {

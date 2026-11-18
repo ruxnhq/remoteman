@@ -37,7 +37,7 @@ pub struct HostOptions {
 }
 
 /// A client that has said hello.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClientInfo {
     pub name: String,
     /// The fingerprint of its certificate.
@@ -51,7 +51,7 @@ pub struct ClientInfo {
 }
 
 /// What the host will send, in answer to a client's hello.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Accept {
     pub mode: Mode,
     pub width: u32,
@@ -82,27 +82,61 @@ pub trait HostHandler: Send + 'static {
     fn left(&mut self);
 }
 
-struct Frame {
-    data: Vec<u8>,
-    key: bool,
-    recovery: bool,
-    capture_us: u64,
+/// One encoded frame on its way to the client.
+pub struct Frame {
+    pub data: Vec<u8>,
+    pub key: bool,
+    pub recovery: bool,
+    pub capture_us: u64,
 }
 
-enum CursorMsg {
+/// What a [`Link`] carries besides the cursor.
+pub enum Out {
+    Frame(Frame),
+    /// The picture starts afresh as this (see [`Link::restart`]).
+    Restart(Accept),
+}
+
+pub enum CursorMsg {
     Shape(CursorShape),
     At { x: f32, y: f32, visible: bool },
+}
+
+/// The far end of a [`Link`] made with [`Link::pipe`]: what the host program sent, to be
+/// carried on to wherever the client really is. Each half is read from a thread of its own.
+pub struct LinkEnd {
+    pub frames: tokio::sync::mpsc::Receiver<Out>,
+    pub cursor: tokio::sync::mpsc::UnboundedReceiver<CursorMsg>,
 }
 
 /// The way to one connected client. Cheap to clone; usable from any thread.
 #[derive(Clone)]
 pub struct Link {
-    frames: tokio::sync::mpsc::Sender<Frame>,
+    frames: tokio::sync::mpsc::Sender<Out>,
     cursor: tokio::sync::mpsc::UnboundedSender<CursorMsg>,
     clock: Instant,
 }
 
 impl Link {
+    /// A link that leads to `LinkEnd` and not to a client: for a host program that reaches its
+    /// client through another process (the Linux agent behind the system daemon). `elapsed_us`
+    /// is what the client's session clock reads now, so both processes stamp alike.
+    pub fn pipe(elapsed_us: u64) -> (Link, LinkEnd) {
+        let (frames, frame_rx) = tokio::sync::mpsc::channel::<Out>(4);
+        let (cursor, cursor_rx) = tokio::sync::mpsc::unbounded_channel::<CursorMsg>();
+        let now = Instant::now();
+        let clock = now.checked_sub(Duration::from_micros(elapsed_us)).unwrap_or(now);
+        (Link { frames, cursor, clock }, LinkEnd { frames: frame_rx, cursor: cursor_rx })
+    }
+
+    /// Start the picture afresh as something else: another size or codec, or another desktop
+    /// altogether (the login screen giving way to the session). The client is told, drops what
+    /// it has and waits for a keyframe, so the next frame sent must be one; frames count from
+    /// 0 again. Returns false once the client is gone.
+    pub fn restart(&self, accept: Accept) -> bool {
+        self.frames.blocking_send(Out::Restart(accept)).is_ok()
+    }
+
     /// This session's clock in microseconds: stamp each frame with it when it is captured.
     pub fn now_us(&self) -> u64 {
         self.clock.elapsed().as_micros() as u64
@@ -112,13 +146,13 @@ impl Link {
     /// so an encoder calling this is held back and frames get skipped before encoding, never
     /// after. Returns false once the client is gone.
     pub fn send_frame(&self, data: &[u8], key: bool, capture_us: u64) -> bool {
-        self.frames.blocking_send(Frame { data: data.to_vec(), key, recovery: false, capture_us }).is_ok()
+        self.frames.blocking_send(Out::Frame(Frame { data: data.to_vec(), key, recovery: false, capture_us })).is_ok()
     }
 
     /// As [`Self::send_frame`], for the first frame after a reported loss that leans on nothing
     /// the client missed: the client picks the picture up again at it.
     pub fn send_recovery_frame(&self, data: &[u8], capture_us: u64) -> bool {
-        self.frames.blocking_send(Frame { data: data.to_vec(), key: false, recovery: true, capture_us }).is_ok()
+        self.frames.blocking_send(Out::Frame(Frame { data: data.to_vec(), key: false, recovery: true, capture_us })).is_ok()
     }
 
     /// The cursor's image changed (for clients that draw it themselves). Zero size: no cursor.
@@ -277,7 +311,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         return Err(no(anyhow::anyhow!("the client speaks protocol {proto}")));
     }
 
-    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Frame>(4);
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Out>(4);
     let (cursor_tx, mut cursor_rx) = tokio::sync::mpsc::unbounded_channel::<CursorMsg>();
     let link = Link { frames: frame_tx, cursor: cursor_tx, clock };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -297,11 +331,15 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         Err(_) => return Err(no(anyhow::anyhow!("the host is shutting down"))),
     };
     let yes = |e: anyhow::Error| (true, e);
-    const EPOCH: u16 = 1;
-    let (width, height) = (accept.width.max(1) as f32, accept.height.max(1) as f32);
-    write_message(&mut send, &Message::Stream { epoch: EPOCH, mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour })
+    // Counts up each time the picture starts afresh.
+    let epoch = std::sync::atomic::AtomicU32::new(1);
+    let now = || epoch.load(std::sync::atomic::Ordering::Relaxed) as u16;
+    write_message(&mut send, &Message::Stream { epoch: now(), mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour })
         .await
         .map_err(yes)?;
+    // Three things write to the control stream: answers to the client, cursor shapes, and a
+    // new stream description when the picture starts afresh.
+    let send = tokio::sync::Mutex::new(send);
 
     let drop_one_in = options.test_drop_one_in.filter(|n| *n > 1);
     // The number of the last frame sent that the client can restart from, plus one.
@@ -309,9 +347,20 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     let video = async {
         let mut number = 0u32;
         let mut sent = 0u32;
-        while let Some(f) = frame_rx.recv().await {
+        while let Some(out) = frame_rx.recv().await {
+            let f = match out {
+                Out::Frame(f) => f,
+                Out::Restart(a) => {
+                    epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    number = 0;
+                    answer.store(0, std::sync::atomic::Ordering::Relaxed);
+                    let m = Message::Stream { epoch: now(), mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour };
+                    write_message(&mut *send.lock().await, &m).await?;
+                    continue;
+                }
+            };
             let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
-            for d in fragment(&f.data, f.key, f.recovery, EPOCH, number, f.capture_us, max) {
+            for d in fragment(&f.data, f.key, f.recovery, now(), number, f.capture_us, max) {
                 sent = sent.wrapping_add(1);
                 if drop_one_in.is_some_and(|n| sent % n == 0) {
                     continue;
@@ -327,15 +376,18 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         std::future::pending::<()>().await;
         anyhow::Ok(())
     };
-    // Two things write to the control stream: answers to the client, and cursor shapes.
-    let send = tokio::sync::Mutex::new(send);
     let control = async {
         while let Some(m) = read_message(&mut recv).await? {
             match m {
                 Message::Keyframe => {
                     let _ = calls.send(Call::Keyframe);
                 }
-                Message::Lost { first, last } => {
+                Message::Lost { first, last, epoch: of } => {
+                    // About a picture that has since been replaced: its frame numbers mean
+                    // nothing now.
+                    if of.is_some_and(|e| e != now()) {
+                        continue;
+                    }
                     // Said before the last keyframe or recovery point could have reached the
                     // client: that frame is the answer, and a second one would only add a burst.
                     let answered = answer.load(std::sync::atomic::Ordering::Relaxed);
@@ -360,7 +412,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     write_message(&mut *send.lock().await, &m).await?;
                 }
                 CursorMsg::At { x, y, visible } => {
-                    let at = CursorAt { epoch: EPOCH, visible, x, y };
+                    let at = CursorAt { epoch: now(), visible, x, y };
                     if last != Some(at) {
                         last = Some(at);
                         let _ = conn.send_datagram(at.write().into());
@@ -375,7 +427,6 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         let stream = conn.accept_uni().await?;
         read_input(stream, calls).await
     };
-    let _ = (width, height);
     let result = tokio::select! {
         r = video => r.context("video"),
         r = control => r.context("control"),

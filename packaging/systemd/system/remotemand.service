@@ -1,0 +1,34 @@
+[Unit]
+Description=remoteman host: paired devices reach this computer's desktop sessions
+Documentation=https://github.com/xnixy/remoteman
+After=network-online.target gdm.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/lib/remoteman/remotemand
+# /run/remoteman holds the socket the agents in each desktop session attach to;
+# /var/lib/remoteman holds this computer's identity and the devices it trusts.
+RuntimeDirectory=remoteman
+StateDirectory=remoteman
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=2
+# It handles packets from the network and never touches a session's files or pictures. It runs
+# as root for now because asking GDM for a login screen is allowed to root only; a user of its
+# own with a D-Bus policy file is the plan.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
