@@ -95,7 +95,9 @@ final class CoreClient {
                 : { ctx, x, y, visible in
                     let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
                     me.onCursorAt?(x, y, visible != 0)
-                })
+                },
+            // Feature messages, sound and blobs: not used yet.
+            on_message: nil, on_sound: nil, on_blob: nil)
         var err = [CChar](repeating: 0, count: 512)
         let h = rm_client_connect(
             c.host, c.stateDir, c.name, c.pair ? 1 : 0, UInt32(c.width), UInt32(c.height), c.scale,

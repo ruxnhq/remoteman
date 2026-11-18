@@ -98,7 +98,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             on_input: { ctx, input in
                 Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().inputArrived(input!.pointee)
             },
-            on_client_left: { ctx in Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().clientLeft() })
+            on_client_left: { ctx in Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().clientLeft() },
+            // Feature messages, microphone, camera and blobs: not acted on yet, so not announced.
+            on_message: nil, on_mic: nil, on_camera: nil, on_blob: nil)
         var err = [CChar](repeating: 0, count: 512)
         guard
             let h = rm_host_start(
