@@ -8,6 +8,7 @@
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
 export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT="${RM_PORT:-7799}" RM_LISTEN="${RM_LISTEN:-127.0.0.1}"
 export RM_SECONDS="${1:-600}"
+mkdir -p "$RM_LOGS"
 echo "logs: $RM_LOGS"
 dbus-run-session -- sh -c '
   bin="$RM_ROOT/target/release"
