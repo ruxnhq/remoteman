@@ -304,6 +304,8 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         .map_err(yes)?;
 
     let drop_one_in = options.test_drop_one_in.filter(|n| *n > 1);
+    // The number of the last frame sent that the client can restart from, plus one.
+    let answer = std::sync::atomic::AtomicU32::new(0);
     let video = async {
         let mut number = 0u32;
         let mut sent = 0u32;
@@ -315,6 +317,9 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     continue;
                 }
                 conn.send_datagram_wait(d.into()).await?;
+            }
+            if f.key || f.recovery {
+                answer.store(number.wrapping_add(1), std::sync::atomic::Ordering::Relaxed);
             }
             number = number.wrapping_add(1);
         }
@@ -331,7 +336,12 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     let _ = calls.send(Call::Keyframe);
                 }
                 Message::Lost { first, last } => {
-                    let _ = calls.send(Call::Lost(first, last));
+                    // Said before the last keyframe or recovery point could have reached the
+                    // client: that frame is the answer, and a second one would only add a burst.
+                    let answered = answer.load(std::sync::atomic::Ordering::Relaxed);
+                    if answered == 0 || last >= answered - 1 {
+                        let _ = calls.send(Call::Lost(first, last));
+                    }
                 }
                 Message::Ping { id, client_us } => write_message(&mut *send.lock().await, &Message::Pong { id, client_us, host_us: clock.elapsed().as_micros() as u64 }).await?,
                 _ => {}

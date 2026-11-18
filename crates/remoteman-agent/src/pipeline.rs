@@ -104,8 +104,9 @@ impl Pipeline {
             let mut kept = [None::<u64>; 2];
             let mut kept_last = 0u64;
             // A new one four times a second: with two, one is always older than any loss
-            // reported within a quarter of a second.
-            let every = (fps as u64 / 4).max(8);
+            // reported within a quarter of a second. With room for only one, twice a second: a
+            // late report then finds it too new now and then, and gets a keyframe.
+            let every = (fps as u64 / if slots > 1 { 4 } else { 2 }).max(8);
             let mut n = 0u64;
             // The last frame sent that a client can restart from (a keyframe or recovery point).
             let mut answer = None::<u64>;
