@@ -494,9 +494,32 @@ impl App {
         }
     }
 
+    /// The computer's owner switched something on or off while this device is connected: the
+    /// bar offers what it offers now. A clipboard that was shared, or chosen before it was
+    /// allowed, follows; sound and a microphone that are withdrawn stop.
+    fn follow_features(&self) {
+        let session = self.session.borrow();
+        let Some(s) = session.as_ref() else { return };
+        if !s.shared.features_changed.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let was_shared = self.view.clipboard_shown();
+        let shares = s.offers("clipboard") && self.clipboard_on.get();
+        self.view.offer_sharing(s.offers("clipboard"), s.offers("files"), shares);
+        if shares && !was_shared {
+            s.share_clipboard(true);
+        }
+        self.view.offer_sound(s.offers("sound"));
+        self.view.offer_microphone(s.offers("mic"));
+        if self.args.ui.is_some() {
+            println!("~ the computer now offers: clipboard {}, files {}", s.offers("clipboard"), s.offers("files"));
+        }
+    }
+
     /// What arrived from the computer since the last frame: copies for this clipboard, and
     /// word of files sent.
     fn arrivals(&self) {
+        self.follow_features();
         let (copies, results) = match self.session.borrow().as_ref() {
             Some(s) => (std::mem::take(&mut *s.shared.copies.lock().unwrap()), std::mem::take(&mut *s.shared.results.lock().unwrap())),
             None => return,

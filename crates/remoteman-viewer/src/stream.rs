@@ -46,6 +46,11 @@ pub struct Shared {
     /// What became of files sent to the computer, until the window says so: whether it
     /// arrived, and where it was put or why not.
     pub results: Mutex<Vec<(bool, String)>>,
+    /// What the computer offers now: what it said at the start, then whatever it has said since
+    /// (its owner can switch the clipboard and files on and off while a device is connected).
+    pub features: Mutex<Vec<String>>,
+    /// The computer changed what it offers, until the window has caught up.
+    pub features_changed: std::sync::atomic::AtomicBool,
     /// Counts the copies and the files sent.
     copy_seq: AtomicU32,
     file_seq: AtomicU32,
@@ -108,8 +113,13 @@ impl Handler for Feed {
     }
 
     fn message(&mut self, message: &Message) {
-        if let Message::FileResult { ok, message, .. } = message {
-            self.shared.results.lock().unwrap().push((*ok, message.clone()));
+        match message {
+            Message::FileResult { ok, message, .. } => self.shared.results.lock().unwrap().push((*ok, message.clone())),
+            Message::Features { features } => {
+                *self.shared.features.lock().unwrap() = features.clone();
+                self.shared.features_changed.store(true, Ordering::Relaxed);
+            }
+            _ => {}
         }
     }
 
@@ -141,7 +151,7 @@ pub struct Request {
 impl Session {
     /// Whether the computer offers a feature (`sound`, `clipboard`, `files`, ...).
     pub fn offers(&self, feature: &str) -> bool {
-        self.client.host_features.iter().any(|f| f == feature)
+        self.shared.features.lock().unwrap().iter().any(|f| f == feature)
     }
 
     /// Play the computer's sound on this device's default output, or stop. While it plays
@@ -286,6 +296,10 @@ impl Session {
         let hostname = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "Linux".into());
         let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, test_drop_one_in: None, test_delay_lost_ms: None, cursor: true };
         let client = Client::connect(options, Feed { tx, shared: shared.clone(), arriving: HashMap::new() })?;
+        // What it said in its hello, unless it has already said otherwise since.
+        if !shared.features_changed.load(Ordering::Relaxed) {
+            *shared.features.lock().unwrap() = client.host_features.clone();
+        }
         Ok(Self { client, shared })
     }
 }

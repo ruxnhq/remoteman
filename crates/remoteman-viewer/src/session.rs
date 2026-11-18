@@ -298,6 +298,16 @@ impl View {
         self.show_clipboard(clipboard && clipboard_on);
     }
 
+    /// Whether the sharing menu's clipboard and file lines can be chosen.
+    pub fn offers(&self) -> (bool, bool) {
+        (self.share_clipboard.button.is_sensitive(), self.send_file.button.is_sensitive())
+    }
+
+    /// Whether the sharing menu shows the clipboard as shared.
+    pub fn clipboard_shown(&self) -> bool {
+        self.share_clipboard.mark.as_ref().is_some_and(|m| m.is_active())
+    }
+
     pub fn show_clipboard(&self, on: bool) {
         if let Some(mark) = &self.share_clipboard.mark {
             mark.set_active(on);
