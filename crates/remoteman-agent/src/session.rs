@@ -85,6 +85,9 @@ pub struct Agent {
     sound: Option<(Option<DefaultSink>, SpeakerSink)>,
     /// The client's microphone, as one the desktop's programs can pick.
     microphone: Option<MicSource>,
+    /// The microphone's packets so far: how many came, how many were missing in between, and
+    /// the last one's number.
+    mic_count: (u32, u32, Option<u32>),
     /// The client's camera, as one the desktop's programs can pick, and when it last had to
     /// ask the client for a keyframe.
     camera: Option<mpsc::SyncSender<remoteman_core::Frame>>,
@@ -117,7 +120,7 @@ impl Agent {
         if login_screen.is_some() {
             tracing::info!("this is a login screen's session: no files, no clipboard, and it ends when its client goes");
         }
-        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None })
+        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None })
     }
 
     /// What the picture is encoded at when the client's ceiling is `ceiling`.
@@ -214,7 +217,7 @@ impl Agent {
 
     /// Present the client's microphone as one the desktop's programs can pick, or take it away.
     fn take_microphone(&mut self, on: bool) {
-        self.microphone = None;
+        self.drop_microphone();
         let (Some(l), true, None) = (self.live.as_ref(), on, self.login_screen) else { return };
         match MicSource::open("remoteman-microphone", &format!("{} microphone (remoteman)", l.name)) {
             Ok(microphone) => {
@@ -302,6 +305,14 @@ impl Agent {
                 self.camera = Some(tx);
             }
             Err(e) => tracing::warn!("couldn't start the camera's thread: {e}"),
+        }
+    }
+
+    /// Take the device's microphone off the desktop, saying how it went.
+    fn drop_microphone(&mut self) {
+        if self.microphone.take().is_some() {
+            let (packets, missing, _) = std::mem::replace(&mut self.mic_count, (0, 0, None));
+            tracing::info!(packets, missing, "the device's microphone is off the desktop");
         }
     }
 
@@ -546,6 +557,16 @@ impl HostHandler for Agent {
 
     fn mic(&mut self, packet: &Packet) {
         if let Some(microphone) = &self.microphone {
+            // A hole in the numbers is packets lost on the way (a pause leaves none).
+            let (packets, missing, last) = &mut self.mic_count;
+            *packets += 1;
+            if let (Some(last), false) = (*last, packet.start) {
+                let gap = packet.seq.wrapping_sub(last).wrapping_sub(1);
+                if gap < 1000 {
+                    *missing += gap;
+                }
+            }
+            *last = Some(packet.seq);
             microphone.push(remoteman_audio::Packet { seq: packet.seq, capture_us: packet.time_us, data: packet.data.clone() });
         }
     }
@@ -618,7 +639,8 @@ impl HostHandler for Agent {
     fn left(&mut self) {
         self.clipboard_wanted = false;
         self.drop_camera();
-        (self.sound, self.microphone) = (None, None);
+        self.drop_microphone();
+        self.sound = None;
         if let Some(l) = self.stop() {
             drop(l.pipeline);
             self.runtime.block_on(l.desktop.close());
