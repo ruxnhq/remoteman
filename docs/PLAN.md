@@ -35,6 +35,8 @@ Every claim carries a mark:
   - **In a window, the controls can be a hover bar instead of a top bar.** A setting in the viewers (Mac, Linux, and iPad when windowed): the usual title or header bar, or nothing but the picture with a bar that appears when the pointer reaches the top edge.
   - **Camera.** The device's camera as a camera on the host, for calls made on the remote desktop. The Mac side has a head start: espalier's signed camera extension (a CoreMediaIO extension the user built with the paid team) can be reused as the Mac host's virtual camera. Linux needs a PipeWire or V4L2 loopback camera, Windows its own. A later phase, with sound and microphone.
   - **Windows:** a host and a viewer, after the current apps are done.
+- **The designs are approved (2026-11-17).** The user reviewed the three design pages (iPad and iPhone, Mac, Linux: viewers and hosts) and likes all of it; the apps are built to them.
+- **Asked for next (2026-11-17), to be built in parallel by several agents:** speakers and microphone, camera, settings for bitrate, resolution and refresh rate, clipboard, files. An **iOS host** (an iPhone or iPad as the computer being viewed) is wanted if it can be done, later, together with Windows.
 
 Still to hear: which iPad and iPhone, and how the Mac session gets the code (suggested: a private GitHub repository).
 
