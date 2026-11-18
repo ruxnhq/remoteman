@@ -222,11 +222,26 @@ enum Call {
     Left,
 }
 
+/// A device this host trusts.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Device {
+    /// The fingerprint of its certificate: what it is trusted by.
+    pub fingerprint: String,
+    /// The name it gave in its last hello, or the address it paired from until it has said one.
+    pub name: String,
+    /// It is the client connected right now.
+    pub connected: bool,
+}
+
+/// The connection of the client being served, and its fingerprint.
+type Who = Arc<Mutex<Option<(String, Connection)>>>;
+
 pub struct Host {
     runtime: Option<tokio::runtime::Runtime>,
     endpoint: remoteman_transport::Endpoint,
     trust: Arc<Trust>,
     link: Arc<Mutex<Option<Link>>>,
+    who: Who,
     /// This host's certificate fingerprint, for pairing by hand.
     pub fingerprint: String,
     /// The address actually listened on.
@@ -271,8 +286,9 @@ impl Host {
         })?;
 
         let link: Arc<Mutex<Option<Link>>> = Arc::default();
-        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls, link.clone()));
-        Ok(Self { runtime: Some(runtime), endpoint, trust, link, fingerprint: identity.fingerprint, address })
+        let who = Who::default();
+        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls, link.clone(), who.clone()));
+        Ok(Self { runtime: Some(runtime), endpoint, trust, link, who, fingerprint: identity.fingerprint, address })
     }
 
     /// Let the next unknown device in (it is remembered and pairing turns itself off), or stop
@@ -283,6 +299,37 @@ impl Host {
 
     pub fn pairing(&self) -> bool {
         self.trust.pairing()
+    }
+
+    /// Every device this host trusts, in the order they were paired.
+    pub fn devices(&self) -> Vec<Device> {
+        let connected = self.who.lock().unwrap().as_ref().map(|(fp, _)| fp.clone());
+        self.trust.list().into_iter().map(|(fingerprint, name)| Device { connected: connected.as_deref() == Some(&fingerprint), fingerprint, name }).collect()
+    }
+
+    /// Stop trusting a device. It is dropped if it is the one connected, and refused from now
+    /// on until it is paired again. Says whether it was trusted.
+    pub fn revoke(&self, fingerprint: &str) -> Result<bool> {
+        let was = self.trust.remove(fingerprint)?;
+        let who = self.who.lock().unwrap();
+        if let Some((fp, conn)) = who.as_ref() {
+            if fp == fingerprint {
+                conn.close(CLOSE_REVOKED.into(), b"this device is no longer trusted here");
+            }
+        }
+        Ok(was)
+    }
+
+    /// Drop the connected client and keep listening. It stays trusted, so it may come back.
+    /// Says whether there was one.
+    pub fn drop_client(&self) -> bool {
+        match self.who.lock().unwrap().as_ref() {
+            Some((_, conn)) => {
+                conn.close(CLOSE_DROPPED.into(), b"the host ended the connection");
+                true
+            }
+            None => false,
+        }
     }
 
     /// The connected client, if there is one.
@@ -311,7 +358,12 @@ impl Drop for Host {
     }
 }
 
-async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>) {
+/// Why the host closed a connection, as the code of the close: 0 it stopped or another device
+/// took over, 1 something failed, 2 the host's owner ended it, 3 the device's trust was taken away.
+pub const CLOSE_DROPPED: u32 = 2;
+pub const CLOSE_REVOKED: u32 = 3;
+
+async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>, who: Who) {
     let options = Arc::new(options);
     let mut current: Option<(tokio::task::JoinHandle<()>, Connection)> = None;
     while let Some(incoming) = endpoint.accept().await {
@@ -331,8 +383,20 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
         }
         let (options, calls, current_link) = (options.clone(), calls.clone(), current_link.clone());
         let session_conn = conn.clone();
+        *who.lock().unwrap() = Some((fingerprint.clone(), conn.clone()));
+        // Revoked between its handshake and here: it doesn't get a session.
+        if !trust.contains(&fingerprint) {
+            conn.close(CLOSE_REVOKED.into(), b"this device is no longer trusted here");
+        }
+        let (who, trust) = (who.clone(), trust.clone());
         current = Some((tokio::spawn(async move {
-            let started = serve(&conn, fingerprint, &options, &calls, &current_link).await;
+            let started = serve(&conn, fingerprint, &options, &calls, &current_link, &trust).await;
+            {
+                let mut who = who.lock().unwrap();
+                if who.as_ref().is_some_and(|(_, c)| c.stable_id() == conn.stable_id()) {
+                    who.take();
+                }
+            }
             match started {
                 // The handler was told about this client, so it is told when it goes.
                 Ok(true) | Err((true, _)) => {
@@ -352,7 +416,7 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
 
 /// One client's session. The flag in the result says whether the handler's `connected` ran (and
 /// so whether `left` is owed).
-async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>) -> Result<bool, (bool, anyhow::Error)> {
+async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, trust: &Trust) -> Result<bool, (bool, anyhow::Error)> {
     let no = |e: anyhow::Error| (false, e);
     let clock = Instant::now();
     let (mut send, mut recv) = conn.accept_bi().await.context("control stream").map_err(no)?;
@@ -360,6 +424,10 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         return Err(no(anyhow::anyhow!("the first message wasn't client_hello")));
     };
     write_message(&mut send, &Message::HostHello { proto: remoteman_proto::PROTO, name: options.name.clone(), os: options.os.clone(), features: options.features.clone() }).await.map_err(no)?;
+    // The list of trusted devices shows the name the device gives itself.
+    if !name.trim().is_empty() {
+        let _ = trust.rename(&fingerprint, name.trim());
+    }
     if proto != remoteman_proto::PROTO {
         let message = format!("this host speaks protocol {}", remoteman_proto::PROTO);
         let _ = write_message(&mut send, &Message::Error { code: "unsupported".into(), message }).await;

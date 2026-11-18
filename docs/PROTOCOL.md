@@ -10,6 +10,7 @@ Nothing here names an operating system. A host describes what it can do, a clien
 - **TLS 1.3 with a certificate on both sides.** Each device has one long-lived self-signed certificate. Its identity is the SHA-256 of the certificate's DER bytes, written as 64 hex digits (the *fingerprint*). Nothing in the certificate is trusted except that fingerprint.
 - **Trust.** A host accepts a client only if its fingerprint is in the host's trust list, or the host is in pairing mode, in which case it adds it. A client accepts a host only if the fingerprint matches the one it stored for that host, or it has none yet and the user is pairing. (QR-code pairing with a one-time secret replaces "first one in" in version 1.)
 - The client opens the connection. Keep-alives every second; a silent connection is dropped after 10 s.
+- **Closing.** Either side closes the QUIC connection with an application code and a short reason in words. From the host: `0` it is stopping, or another device took over; `1` something failed (the reason says what); `2` the host's owner ended this connection (the device stays trusted and may come back); `3` the device was taken off the trust list (it is refused from now on, until it is paired again). A client shows the reason, and after `3` offers pairing instead of reconnecting.
 
 ## Channels
 

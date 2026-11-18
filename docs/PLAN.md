@@ -487,6 +487,13 @@ Still to build from this phase: re-requesting lost fragments and parity (so most
 ### 6. The rest of daily use
 Sound, clipboard, soft keyboard and text input, the key bar and remaps, iPhone trackpad mode and zoom, Wake-on-LAN.
 
+**In flight on 2026-11-17, 19:00 PST** (main is at `ff63fd5`; this is what a later session picks up):
+- Two builders are working in their own copies under `.claude/worktrees/`, not yet on main. `agent-afb6ecae1eed49aad` (branch `worktree-agent-afb6ecae1eed49aad`): the GTK viewer rebuilt to the approved design, two commits ahead of main plus uncommitted edits to `shot.rs` and `store.rs`. `agent-a474610ef0279c5db`: a new crate `crates/remoteman-camera` (PipeWire camera, V4L2 loopback, decoding), nothing committed yet.
+- To finish each: review it, apply it to main as a patch, run `scripts/e2e-viewer.sh` for the viewer; for the camera, wire `Message::Camera` and `HostHandler::camera` in `crates/remoteman-agent/src/session.rs` and add the feature `camera`.
+- Next in the core, asked for by the Apple side: list and revoke trusted devices on the host and drop the connected client without stopping the host; forget a host on the client; connection stages for the connecting screen.
+- Waiting on the owner: whether the everyday host gets the sound build (a device with sound on takes over the PC's audio output; `DefaultSink::set` has never run on a real desktop; `--keep-output` avoids it), whether it allows clipboard and files (`--allow files,clipboard`), a root run of `scripts/remote-login-test.sh start` for the daemon's own GDM handling, and where espalier's camera extension goes on the Mac (copied into remoteman's Mac host app is the recommendation).
+- The everyday host still runs the 18:49 build: video, input, cursor, placement, configure. No sound, microphone, clipboard or files.
+
 ### 7. HDR
 End to end in mirror mode first: PQ in, EDR out. Then the Mutter patch: virtual outputs that offer BT.2100 with the device's luminance, and virtual streams that offer the 10-bit PQ formats. Run it as a local package and send it upstream.
 

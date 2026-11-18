@@ -96,8 +96,46 @@ pub trait Handler: Send + 'static {
     fn sound(&mut self, _packet: &Packet) {}
     /// A blob from the host (what was copied there, a file): opened, its content, closed.
     fn blob(&mut self, _event: &BlobEvent) {}
+    /// How far connecting has got. Called on the connecting thread, before
+    /// [`Client::connect`] returns; after [`Stage::Display`] come `stream` and the first `frame`.
+    fn stage(&mut self, _stage: Stage) {}
     /// The connection is over.
     fn closed(&mut self, reason: &str);
+}
+
+/// The steps of connecting, in order, for a connecting screen. Each is reported as it begins;
+/// if connecting fails, the last one reported is the one that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Stage {
+    /// Looking the host's name up.
+    Lookup = 0,
+    /// Reaching the host and checking each other's identity (this is where pairing happens).
+    Handshake = 1,
+    /// Saying hello: names, protocol, what the host can do.
+    Hello = 2,
+    /// The host is making this device's display and starting the picture.
+    Display = 3,
+}
+
+fn known_host(state: &std::path::Path, host: &str) -> PathBuf {
+    state.join("client/hosts").join(host.replace([':', '/'], "_"))
+}
+
+/// Forget a host this device paired with ("address:port", as it was given to
+/// [`Client::connect`]): its key is thrown away, so connecting again needs pairing again.
+/// Says whether it was known. The host still trusts this device until it is revoked there.
+pub fn forget_host(state: &std::path::Path, host: &str) -> Result<bool> {
+    match std::fs::remove_file(known_host(state, host)) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("forget {host}")),
+    }
+}
+
+/// Whether this device has paired with `host` ("address:port").
+pub fn knows_host(state: &std::path::Path, host: &str) -> bool {
+    known_host(state, host).exists()
 }
 
 enum FromHost {
@@ -152,9 +190,10 @@ impl Client {
     }
 
     async fn start(o: Options, mut handler: Box<dyn Handler>) -> Result<Self> {
+        handler.stage(Stage::Lookup);
         let addr = o.host.to_socket_addrs().with_context(|| format!("look up {}", o.host))?.next().context("no such host")?;
         let identity = Identity::load_or_create(&o.state.join("client"))?;
-        let known = o.state.join("client/hosts").join(o.host.replace([':', '/'], "_"));
+        let known = known_host(&o.state, &o.host);
         let expect = match std::fs::read_to_string(&known) {
             Ok(fp) => Expect::Fingerprint(fp.trim().to_owned()),
             Err(_) if o.pair => Expect::Anyone,
@@ -162,6 +201,7 @@ impl Client {
         };
         let o_drop = o.test_drop_one_in.filter(|n| *n > 1);
         let o_delay = o.test_delay_lost_ms.filter(|ms| *ms > 0);
+        handler.stage(Stage::Handshake);
         let (endpoint, conn, fingerprint) = connect(addr, &identity, expect).await?;
         if !known.exists() {
             std::fs::create_dir_all(known.parent().unwrap())?;
@@ -170,6 +210,7 @@ impl Client {
 
         let clock = Instant::now();
         let now_us = move || clock.elapsed().as_micros() as u64;
+        handler.stage(Stage::Hello);
         let (mut send, mut recv) = conn.open_bi().await?;
         write_message(&mut send, &Message::ClientHello { proto: remoteman_proto::PROTO, name: o.name, display: o.display, decoders: o.decoders, cursor: o.cursor }).await?;
         let (host_name, host_os, host_features) = loop {
@@ -179,6 +220,7 @@ impl Client {
                 _ => {}
             }
         };
+        handler.stage(Stage::Display);
 
         let counters = Arc::new(Counters::default());
         let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::channel::<Message>(16);
