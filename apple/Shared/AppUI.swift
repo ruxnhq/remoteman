@@ -245,6 +245,15 @@ enum Automation {
             case "--decoders": decoders = value()
             case "--view-only": session.viewOnly = ["yes", "1", "true"].contains(value())
             case "--script": script = value()
+            case "--opus-test":
+                if ["yes", "1", "true"].contains(value()) {
+                    let text = opusProbe()
+                    print(text)
+                    session.report = text
+                    try? text.write(to: resolve("opus-test.txt"), atomically: true, encoding: .utf8)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { exit(0) }
+                    return
+                }
             case "--frame-log": frameLog = value()
             case "--placement": placement = ViewerSession.Placement(rawValue: value()) ?? .extend
             case "--verbose": verbose = ["yes", "1", "true"].contains(value())
