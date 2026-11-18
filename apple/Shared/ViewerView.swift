@@ -14,11 +14,16 @@ final class RefreshMeter {
     func tick(_ t: CFTimeInterval) {
         stamps.append(t)
         if stamps.count > 90 { stamps.removeFirst(stamps.count - 90) }
-        guard stamps.count >= 45, let first = stamps.first, let last = stamps.last, last > first else { return }
+        guard stamps.count >= 60, let first = stamps.first, let last = stamps.last, last > first else { return }
         let hz = Double(stamps.count - 1) / (last - first)
+        // Only a steady link counts: just after a wake or an unlock it runs slow for a moment,
+        // and the two halves of the window then disagree.
+        let mid = stamps[stamps.count / 2]
+        let a = Double(stamps.count / 2) / (mid - first), b = Double(stamps.count - 1 - stamps.count / 2) / (last - mid)
+        guard abs(a - b) / hz < 0.02 else { return }
         // Snap to the rate it is evidently aiming for.
         let common = [24, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240]
-        rate = common.first { abs(Double($0) - hz) / Double($0) < 0.03 } ?? Int(hz.rounded())
+        rate = common.first { abs(Double($0) - hz) / Double($0) < 0.04 } ?? Int(hz.rounded())
     }
 }
 
