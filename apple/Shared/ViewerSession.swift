@@ -105,7 +105,7 @@ final class ViewerSession: ObservableObject {
     var soundReport: String {
         let t = sound.totals
         return sound.running
-            ? "\(sound.format): \(t.packets) packets, \(t.bytes) bytes, \(t.starts) starts after a pause, \(t.concealed) concealed, \(t.dropped) left out, ran dry \(t.underruns) times"
+            ? "\(sound.format): \(t.packets) packets, \(t.bytes) bytes, \(t.starts) starts after a pause, \(t.concealed) concealed, \(t.dropped) left out, ran dry \(t.underruns) times; \(sound.tone)"
             : "no sound_format received (or sound is off)"
     }
 

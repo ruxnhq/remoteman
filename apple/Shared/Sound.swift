@@ -58,6 +58,16 @@ final class SoundPlayer {
     /// Over the whole time since `start`: packets, bytes, concealed, left out, times run dry, starts marked.
     private(set) var totals = (packets: 0, bytes: 0, concealed: 0, dropped: 0, underruns: 0, starts: 0)
     private(set) var format = ""
+    /// For tests: the decoded sound's level and pitch (upward zero crossings of the left channel).
+    private var crossings = 0, measured = 0, squares = 0.0, lastSample: Float = 0
+    var tone: String {
+        lock.lock()
+        defer { lock.unlock() }
+        guard measured > 0 else { return "nothing decoded" }
+        return String(
+            format: "%.2f s decoded, %.1f Hz by zero crossings, level %.4f rms", Double(measured) / 48000,
+            Double(crossings) * 48000 / Double(measured), (squares / Double(measured)).squareRoot())
+    }
     /// A deeper buffer, for a link that pauses at intervals (the iPad's Wi-Fi does, see
     /// ViewerSession): what a pause holds back then plays instead of being cut.
     var deep = false
@@ -97,6 +107,10 @@ final class SoundPlayer {
         self.pcm = pcm
         framesPerPacket = fpp
         totals = (0, 0, 0, 0, 0, 0)
+        crossings = 0
+        measured = 0
+        squares = 0
+        lastSample = 0
         format = "opus 48000 Hz, \(channels) channels, \(frameUs / 1000) ms"
         nextSeq = nil
         queued = 0
@@ -180,6 +194,14 @@ final class SoundPlayer {
             return packet
         }
         guard status != .error, out.frameLength > 0 else { return }
+        if let p = out.floatChannelData?[0] {
+            for i in 0..<Int(out.frameLength) {
+                if lastSample <= 0, p[i] > 0 { crossings += 1 }
+                lastSample = p[i]
+                squares += Double(p[i] * p[i])
+            }
+            measured += Int(out.frameLength)
+        }
         if queued > most {
             // More is waiting than should be (a burst after a pause, or the clocks drifting):
             // leave this one out, so the delay comes back down.
