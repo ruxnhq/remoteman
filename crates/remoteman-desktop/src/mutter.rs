@@ -85,6 +85,10 @@ impl VirtualDisplay {
         for down in [true, false] {
             let _ = remote.call::<_, _, ()>("NotifyKeyboardKeycode", &(240u32, down)).await;
         }
+        // The same goes for its virtual pointer: a click with no movement before it went
+        // nowhere (seen on a login screen, where the first thing a user does is click a name).
+        // A move by nothing makes the pointer without moving it.
+        let _ = remote.call::<_, _, ()>("NotifyPointerMotionRelative", &(0.0f64, 0.0f64)).await;
         Ok(Self { conn, before, remote, stream_path: stream_path.to_string(), node })
     }
 
