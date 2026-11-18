@@ -3,7 +3,7 @@
 //
 // For unattended runs the app also takes arguments:
 //   --host name[:port]  connect at launch        --pair yes        accept a host not seen before
-//   --play file.rmrec   play a recording          --seconds N       stop after N seconds and quit
+//   --play file.rmrec   play a recording          --seconds N       stop after N seconds and quit (--verbose yes: stats each second)
 //   --snapshot out.png  save the picture at the end
 //   --script "move:.5,.5;wait:1;shot:a.png"   drive input and take pictures (see runScript)
 //   --view-only yes     send no input            --bench dir       time decode of the .rmrec files there (--exit yes to quit after)
@@ -197,6 +197,7 @@ enum Automation {
         var bench: String?
         var exitAfter = false
         var script: String?
+        var verbose = false
         while !args.isEmpty {
             let a = args.removeFirst()
             func value() -> String { args.isEmpty ? "" : args.removeFirst() }
@@ -214,6 +215,7 @@ enum Automation {
             case "--decoders": decoders = value()
             case "--view-only": session.viewOnly = ["yes", "1", "true"].contains(value())
             case "--script": script = value()
+            case "--verbose": verbose = ["yes", "1", "true"].contains(value())
             case "--bench": bench = value()
             case "--exit": exitAfter = ["yes", "1", "true"].contains(value())
             default: break
@@ -244,7 +246,8 @@ enum Automation {
         var elapsed = 0.0
         Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { t in
             elapsed += 1
-            print("remoteman: [\(Int(elapsed)) s] \(session.state)\n\(session.statsText)")
+            // Off by default: printing from the main thread can hold up the display link.
+            if verbose { print("remoteman: [\(Int(elapsed)) s] \(session.state)\n\(session.statsText)") }
             if case .failed(let reason) = session.state {
                 print("remoteman: failed: \(reason)")
                 t.invalidate()
