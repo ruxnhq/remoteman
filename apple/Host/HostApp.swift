@@ -66,16 +66,13 @@ final class HostController: ObservableObject {
         self.options = options
         self.unattended = unattended
         var options = options
-        if unattended {
-            allowClipboard = options.allowClipboard
-            allowFiles = options.allowFiles
-        } else {
-            allowClipboard = UserDefaults.standard.bool(forKey: Self.clipboardKey)
-            allowFiles = UserDefaults.standard.bool(forKey: Self.filesKey)
-            options.allowClipboard = allowClipboard
-            options.allowFiles = allowFiles
+        if !unattended {
+            options.allowClipboard = UserDefaults.standard.bool(forKey: Self.clipboardKey)
+            options.allowFiles = UserDefaults.standard.bool(forKey: Self.filesKey)
         }
         host = MacHost(options: options)
+        allowClipboard = options.allowClipboard
+        allowFiles = options.allowFiles
         host.onClient = { [weak self] c in
             // The same device with another display (it changed its settings) keeps its time.
             let before = self?.client
