@@ -1,6 +1,7 @@
 // remoteman-host: the Mac as a remoteman host. An app with no window; start it with
 //   open -n remoteman-host.app --args [--listen 0.0.0.0:7791] [--name NAME] [--pair yes]
 //        [--state DIR] [--main yes] [--capture l10r|420v] [--bitrate BITS_PER_SECOND]
+//        [--test-window yes]
 // and read ~/Library/Logs/remoteman-host.log. Every option takes a value. It needs Screen
 // Recording (to capture) and Accessibility (to put input in), granted to "remoteman-host" in
 // System Settings. `pkill -TERM remoteman-host` (or Ctrl-C when run from a shell) leaves cleanly.
@@ -27,6 +28,7 @@ while !args.isEmpty {
     case "--main": options.makeMain = yes()
     case "--capture": options.capture = value()
     case "--bitrate": options.bitrate = Int(value()) ?? 0
+    case "--test-window": options.testWindow = yes()
     default:
         // AppKit passes arguments of its own (-NSDocumentRevisionsDebugMode and the like).
         if a.hasPrefix("--") { hostLog("host: unknown option \(a)") }
@@ -35,11 +37,15 @@ while !args.isEmpty {
 try? FileManager.default.createDirectory(atPath: options.stateDir, withIntermediateDirectories: true)
 
 if !CGPreflightScreenCaptureAccess() {
-    hostLog("host: no Screen Recording permission yet. macOS will ask; clients are refused until it is granted.")
+    hostLog("host: no Screen Recording permission yet; clients are refused until it is granted. If macOS doesn't ask, turn on remoteman-host in System Settings > Privacy & Security > Screen & System Audio Recording.")
     CGRequestScreenCaptureAccess()
+} else {
+    hostLog("host: Screen Recording permission: granted")
 }
-if !AXIsProcessTrusted() {
-    hostLog("host: no Accessibility permission: the picture will work, input will not.")
+if AXIsProcessTrusted() { hostLog("host: Accessibility permission: granted") }
+// Asks with the system's own prompt the first time, and points at System Settings after that.
+if !AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary) {
+    hostLog("host: no Accessibility permission: the picture will work, input will not. Turn on remoteman-host in System Settings > Privacy & Security > Accessibility.")
 }
 
 let app = NSApplication.shared

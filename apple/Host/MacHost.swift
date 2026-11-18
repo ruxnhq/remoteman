@@ -45,6 +45,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         /// What ScreenCaptureKit delivers: "l10r" (10-bit RGB) or "420v" (8-bit YCbCr).
         var capture = "l10r"
         var bitrate = 0
+        /// Fill the virtual display with moving test content while a client is on.
+        var testWindow = false
     }
 
     private let options: Options
@@ -272,6 +274,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         stream = s
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.stats() }
         if cursorApart { startCursor() }
+        if options.testWindow { testWindow.show(on: id) }
         firstFrame(d, width: width, height: height, cursorApart: cursorApart, gen: gen)
         hostLog("host: sending \(width)×\(height) at \(fps) Hz, HEVC Main10 4:2:0, \(bitrate / 1000) kbit/s, capture \(options.capture), cursor \(cursorApart ? "apart" : "in the picture")")
         return nil
@@ -317,8 +320,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    private let testWindow = TestWindow()
+
     private func teardown() {
         generation += 1
+        testWindow.close()
         statsTimer?.invalidate()
         statsTimer = nil
         cursorTimer?.invalidate()

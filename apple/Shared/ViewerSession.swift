@@ -238,6 +238,7 @@ final class ViewerSession: ObservableObject {
         statsLock.lock()
         received += 1
         if receivedLog.count < 200_000 { receivedLog.append(DispatchTime.now().uptimeNanoseconds) }
+        if key { keyframesReceived += 1 }
         statsLock.unlock()
         pipeLock.lock()
         defer { pipeLock.unlock() }
@@ -251,6 +252,7 @@ final class ViewerSession: ObservableObject {
 
     // MARK: Run summary (for unattended measurements)
 
+    private var keyframesReceived = 0
     private var receivedLog: [UInt64] = []
     private var decodeLog: [(UInt64, Double)] = []
 
@@ -283,7 +285,7 @@ final class ViewerSession: ObservableObject {
         out += "  gap between frames shown ms: median \(pct(gaps, 0.5)) p99 \(pct(gaps, 0.99)) max \(pct(gaps, 1.0))\n"
         if let c = client {
             let cs = c.stats
-            out += "  lost \(cs.lost), keyframe requests \(cs.keyframeRequests), round trip \(String(format: "%.2f", Double(cs.roundTripUs) / 1000)) ms, decode errors \(decodeErrors)"
+            out += "  lost \(cs.lost), loss reports \(cs.keyframeRequests), keyframes received \(keyframesReceived) (whole run), round trip \(String(format: "%.2f", Double(cs.roundTripUs) / 1000)) ms, decode errors \(decodeErrors)"
         }
         return out
     }
@@ -316,7 +318,7 @@ final class ViewerSession: ObservableObject {
             var s = "\(label)\n"
             s += "shown \(f(shownFps, 0)) fps · received \(f(receivedFps, 0)) fps · replaced unseen \(replaced)\n"
             s += "decode \(f(decodeMedianMs, 2)) ms (max \(f(decodeMaxMs, 2))) · age \(f(ageMs)) ms\n"
-            s += "lost \(lost) · keyframe requests \(keyframeRequests) · round trip \(f(roundTripMs, 2)) ms"
+            s += "lost \(lost) · loss reports \(keyframeRequests) · round trip \(f(roundTripMs, 2)) ms"
             if decodeErrors > 0 { s += "\ndecode errors \(decodeErrors): \(lastError)" }
             return s
         }
