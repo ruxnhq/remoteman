@@ -3,11 +3,12 @@
 //!
 //!     remoteman-host [--listen ADDR:PORT] [--state DIR] [--pair] [--name NAME] [--log FILE]
 //!                    [--bitrate MBIT] [--mode keep|listed|any] [--seconds N]
-//!     remoteman-host --probe [--log FILE]
+//!     remoteman-host --probe | --probe-picture [--log FILE]
 //!
-//! `--probe` changes nothing: it opens the display driver, says what it finds (the driver, its
-//! frame channel, the adapter, the monitor's modes), takes one frame through the whole picture
-//! path as far as each step works, and exits. Run it first on a new machine.
+//! `--probe` only looks: it opens the display driver, says what it finds (the driver, its frame
+//! channel, the monitor's modes, the adapter, the shared textures) and exits. Run it first on
+//! a new machine. `--probe-picture` goes on to take one frame, convert it and encode it once
+//! with each codec, to show how far the picture path gets with no client.
 //!
 //! `--mode` says how far the host may go to give a client its own size: `keep` streams the
 //! monitor as it is, `listed` switches to the client's size if the monitor offers it, `any`
@@ -85,7 +86,7 @@ mod windows_main {
     pub fn main() -> Result<()> {
         let mut listen: SocketAddr = format!("0.0.0.0:{}", remoteman_core::PORT).parse()?;
         let (mut pair, mut state, mut bitrate, mut drop_one_in) = (false, state_dir(), 40u32, None::<u32>);
-        let (mut name, mut log, mut seconds, mut probing, mut fit) = (None::<String>, None::<PathBuf>, None::<u64>, false, Fit::Any);
+        let (mut name, mut log, mut seconds, mut probing, mut fit) = (None::<String>, None::<PathBuf>, None::<u64>, None::<bool>, Fit::Any);
         let mut args = std::env::args().skip(1);
         while let Some(a) = args.next() {
             let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -98,7 +99,8 @@ mod windows_main {
                 "--log" => log = Some(value()?.into()),
                 // For tests: stop by itself after this long.
                 "--seconds" => seconds = Some(value()?.parse().context("--seconds N")?),
-                "--probe" => probing = true,
+                "--probe" => probing = Some(false),
+                "--probe-picture" => probing = Some(true),
                 "--mode" => {
                     fit = match value()?.as_str() {
                         "keep" => Fit::Keep,
@@ -131,7 +133,7 @@ mod windows_main {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run(listen: SocketAddr, state: PathBuf, pair: bool, name: Option<String>, bitrate: u32, drop_one_in: Option<u32>, seconds: Option<u64>, probing: bool, fit: Fit) -> Result<()> {
+    fn run(listen: SocketAddr, state: PathBuf, pair: bool, name: Option<String>, bitrate: u32, drop_one_in: Option<u32>, seconds: Option<u64>, probing: Option<bool>, fit: Fit) -> Result<()> {
         // Sizes and places in real pixels, whatever scale the desktop is drawn at: the cursor's
         // place, the monitor's corner and the pointer's target must all be in the picture's own.
         // SAFETY: plain call, before any window exists.
@@ -141,8 +143,8 @@ mod windows_main {
         // Sleeps of a few milliseconds (the cursor's) are that long, not a whole 15 ms tick.
         // SAFETY: plain call.
         unsafe { timeBeginPeriod(1) };
-        if probing {
-            return probe::run();
+        if let Some(picture) = probing {
+            return probe::run(picture);
         }
 
         let screen = Screen::open()?;

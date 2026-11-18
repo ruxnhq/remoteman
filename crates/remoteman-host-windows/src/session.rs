@@ -27,7 +27,9 @@ struct Live {
     screen: Display,
     decoders: Vec<Mode>,
     cursor_apart: bool,
-    mode: Mode,
+    /// The modes the picture was chosen from: the client's and this host's in common. (Which
+    /// of them it became is the encoder's doing, and not always the first.)
+    common: Vec<Mode>,
     /// The most the picture may use, as the client last said (0: this host's own figure).
     ceiling: u32,
 }
@@ -74,7 +76,7 @@ impl Host {
         let (device, shared) = (self.screen.device().to_owned(), area.clone());
         let settings = pipeline::Settings {
             driver: self.screen.driver(),
-            modes,
+            modes: modes.clone(),
             fps: refresh,
             bitrate: self.rate(ceiling),
             nudge_at: (at.left, at.top),
@@ -102,7 +104,7 @@ impl Host {
         if !cursor_apart {
             tracing::warn!("this client doesn't draw the cursor itself, and the driver keeps it out of the frames: it will see no cursor");
         }
-        self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, mode: started.mode, ceiling });
+        self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, common: modes, ceiling });
         Ok(Accept { mode: started.mode, width: started.width, height: started.height, refresh, colour: "bt709".into() })
     }
 
@@ -125,8 +127,8 @@ impl Host {
         }
         let screen = display.unwrap_or(l.screen);
         let decoders = decoders.unwrap_or_else(|| l.decoders.clone());
-        // Another picture only if the display differs, or the mode in use is no longer wanted.
-        if screen == l.screen && Self::common(&decoders).first() == Some(&l.mode) {
+        // Another picture only if the display differs, or the modes to choose from do.
+        if screen == l.screen && Self::common(&decoders) == l.common {
             l.decoders = decoders;
             return;
         }

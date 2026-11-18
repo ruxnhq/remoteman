@@ -18,7 +18,7 @@ use remoteman_core::host::{Accept, Link};
 use remoteman_core::{Message, Mode};
 use remoteman_encode::FrameEncoder;
 use remoteman_encode::recovery::{Recovery, Sent};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
 use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
 
@@ -303,13 +303,21 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
     let (mut quiet_since, mut checked) = (Instant::now(), Instant::now());
     // The stream must begin with a keyframe after it starts afresh.
     let mut afresh = false;
+    let mut wait_failed = false;
     loop {
         let held = control.held.load(Ordering::Relaxed);
         if !p.again || held {
             // Held back: wait for the word only, and leave the driver's frames where they are.
             let handles = [control.wake.0, p.source.channel().ready];
             // SAFETY: live events. The timeout is for the housekeeping below.
-            unsafe { WaitForMultipleObjects(&handles[..if held { 1 } else { 2 }], false, 100) };
+            let waited = unsafe { WaitForMultipleObjects(&handles[..if held { 1 } else { 2 }], false, 100) };
+            if waited == WAIT_FAILED {
+                // Not to become a loop that eats a core in silence.
+                if !std::mem::replace(&mut wait_failed, true) {
+                    tracing::warn!("waiting for the driver's frame event failed ({}); looking for frames ten times a second instead. Said once.", windows::core::Error::from_thread());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
         if control.stop.load(Ordering::Relaxed) {
             break;

@@ -1,7 +1,12 @@
-//! `--probe`: go through everything the host needs, one step at a time, say what each step
-//! found, and change nothing. It listens for no client, switches no mode and sends no input.
-//! The steps are the picture path in order, and each failure says which later steps it rules
-//! out, so one run on a new machine shows how far the path goes.
+//! `--probe`: open the display driver, say what is found (the driver, its frame channel, the
+//! monitor and its modes, the adapter, the shared textures), and exit. It listens for no
+//! client, switches no mode and sends no input. One thing it can't avoid: asking about the
+//! frame channel is what makes the driver start copying frames into it, and the driver goes on
+//! doing so until it restarts.
+//!
+//! `--probe-picture` goes on from there through the picture path: it takes one frame, converts
+//! it, and encodes it once in each mode the host offers. That is a moment of GPU work, hence
+//! the flag of its own.
 
 use std::time::Duration;
 
@@ -24,7 +29,7 @@ macro_rules! say {
     }};
 }
 
-pub fn run() -> Result<()> {
+pub fn run(picture: bool) -> Result<()> {
     // Where this process is: the display calls and input need the desktop's session.
     let (mut session, pid) = (0u32, unsafe { GetCurrentProcessId() });
     // SAFETY: a live out-parameter.
@@ -117,6 +122,11 @@ pub fn run() -> Result<()> {
     let mut source = Source::open(&gpu, channel).inspect_err(|e| say!("FAILED: {e:#}"))?;
     let desc = source.format()?;
     say!("textures: opened, {}x{} DXGI format {}, bind flags {:#x}, misc flags {:#x}", desc.Width, desc.Height, desc.Format.0, desc.BindFlags, desc.MiscFlags);
+
+    if !picture {
+        say!("probe done (--probe-picture goes on to take, convert and encode one frame)");
+        return Ok(());
+    }
 
     // 5. Convert one frame.
     let (input, note) = convert::input_for(meta.format, meta.is_hdr != 0).inspect_err(|e| say!("FAILED: {e:#}"))?;
