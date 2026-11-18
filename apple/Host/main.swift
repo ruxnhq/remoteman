@@ -21,6 +21,7 @@ options.stateDir = support.path
 var unattended = false
 var installCamera = false
 var probeDisplay = false
+var testPanel = false
 var installMicrophone = false
 var args = Array(CommandLine.arguments.dropFirst())
 while !args.isEmpty {
@@ -28,6 +29,10 @@ while !args.isEmpty {
     func value() -> String { args.isEmpty ? "" : args.removeFirst() }
     func yes() -> Bool { ["yes", "1", "true"].contains(value()) }
     // Asking macOS to install the camera is something the owner does by hand; it starts nothing else.
+    if a == "--test-panel" {
+        testPanel = yes()
+        continue
+    }
     if a == "--probe-display" {
         probeDisplay = yes()
         continue
@@ -95,6 +100,7 @@ app.setActivationPolicy(.accessory)
 let controller = HostController(options: options, unattended: unattended)
 let delegate = HostAppDelegate(controller: controller)
 app.delegate = delegate
+if testPanel { DispatchQueue.main.asyncAfter(deadline: .now() + 2) { delegate.testPanel() } }
 if probeDisplay { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { DisplayProbe.run() } }
 if installMicrophone {
     DispatchQueue.main.asyncAfter(deadline: .now() + 1) {

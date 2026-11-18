@@ -302,7 +302,9 @@ final class HostController: ObservableObject {
 final class HostAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let controller: HostController
     private var statusItem: NSStatusItem?
-    private let popover = NSPopover()
+    private var menuPanel: MenuPanel?
+
+    private func closePanel() { menuPanel?.close(statusItem?.button) }
     private var windows: [String: NSWindow] = [:]
     private var sinks: Set<AnyCancellable> = []
     static let firstRunKey = "firstRunDone"
@@ -318,15 +320,14 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         item.button?.action = #selector(togglePanel)
         statusItem = item
 
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(
-            rootView: HostPanel(
+        menuPanel = MenuPanel(
+            content: HostPanel(
                 controller: controller,
-                pair: { [weak self] in self?.showPairing() },
-                settings: { [weak self] in self?.showSettings() },
+                pair: { [weak self] in self?.closePanel(); self?.showPairing() },
+                settings: { [weak self] in self?.closePanel(); self?.showSettings() },
                 quit: { NSApp.terminate(nil) },
-                close: { [weak self] in self?.popover.performClose(nil) }
-            ).tint(Tokens.tint))
+                close: { [weak self] in self?.closePanel() }
+            ).tint(Tokens.tint).frame(width: 340))
 
         controller.launch()
         controller.$client.combineLatest(controller.$sharing).sink { [weak self] client, sharing in
@@ -404,13 +405,32 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return image
     }
 
+    /// For tests: press the menu-bar item as a click does, and log where the item and the panel are.
+    func testPanel() {
+        guard let button = statusItem?.button else { return hostLog("panel: no menu-bar item") }
+        button.performClick(nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
+            let item = button.window?.frame ?? .zero
+            let panel = menuPanel?.frame ?? .zero
+            let screens = NSScreen.screens.map { "\($0.localizedName) \($0.frame) visible \($0.visibleFrame)" }.joined(separator: " | ")
+            hostLog("panel: shown \(menuPanel?.isShown ?? false); item window \(item) on \(button.window?.screen?.localizedName ?? "no screen"); panel window \(panel) on \(menuPanel?.screenName ?? "?"); gap under the menu bar \(item.minY - panel.maxY) pt; screens: \(screens)")
+            if let cg = CGWindowListCreateImage(.infinite, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution]) {
+                let rep = NSBitmapImageRep(cgImage: cg)
+                let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Logs/remoteman-host-panel.png")
+                try? rep.representation(using: .png, properties: [:])?.write(to: url)
+                hostLog("panel: picture of the screen saved to \(url.path) (\(cg.width)x\(cg.height))")
+            }
+        }
+    }
+
     @objc private func togglePanel() {
-        guard let button = statusItem?.button else { return }
-        if popover.isShown {
-            popover.performClose(nil)
+        guard let button = statusItem?.button, let menuPanel else { return }
+        if menuPanel.isShown {
+            menuPanel.close(button)
         } else {
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.makeKey()
+            // An accessory app has to come forward for its panel to take the keyboard.
+            NSApp.activate(ignoringOtherApps: true)
+            menuPanel.show(under: button)
         }
     }
 
@@ -419,7 +439,7 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func show<V: View>(
         _ key: String, title: String, size: NSSize, resizable: Bool = false, plain: Bool = false, _ view: () -> V
     ) {
-        popover.performClose(nil)
+        closePanel()
         if windows[key] == nil {
             var style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable]
             if resizable { style.insert(.resizable) }
