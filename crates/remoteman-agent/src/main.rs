@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     let level = if std::env::var_os("REMOTEMAN_DEBUG").is_some() { tracing::Level::DEBUG } else { tracing::Level::INFO };
     tracing_subscriber::fmt().with_max_level(level).init();
     let mut listen: SocketAddr = format!("0.0.0.0:{}", remoteman_core::PORT).parse()?;
-    let (mut pair, mut state, mut bitrate) = (false, state_dir(), 40u32);
+    let (mut pair, mut state, mut bitrate, mut drop_one_in) = (false, state_dir(), 40u32, None::<u32>);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -35,11 +35,13 @@ fn main() -> Result<()> {
             "--state" => state = value()?.into(),
             "--bitrate" => bitrate = value()?.parse().context("--bitrate in Mbit/s")?,
             "--pair" => pair = true,
+            // For tests: lose one video packet in this many.
+            "--test-drop-one-in" => drop_one_in = Some(value()?.parse().context("--test-drop-one-in N")?),
             other => anyhow::bail!("unknown option {other}"),
         }
     }
     let name = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "linux".into());
-    let options = HostOptions { listen, state, name, os: "linux".into(), features: vec!["video".into(), "input".into(), "cursor".into()], pair };
+    let options = HostOptions { listen, state, name, os: "linux".into(), features: vec!["video".into(), "input".into(), "cursor".into()], pair, test_drop_one_in: drop_one_in };
     let host = Host::start(options, session::Agent::new(bitrate * 1_000_000)?)?;
     tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
     if pair {

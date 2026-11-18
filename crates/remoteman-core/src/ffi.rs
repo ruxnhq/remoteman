@@ -374,7 +374,7 @@ pub unsafe extern "C" fn rm_host_start(
         }
     };
     let features = features.split(',').map(str::trim).filter(|f| !f.is_empty()).map(str::to_owned).collect();
-    match Host::start(HostOptions { listen, state: PathBuf::from(state), name, os, features, pair: pair != 0 }, callbacks) {
+    match Host::start(HostOptions { listen, state: PathBuf::from(state), name, os, features, pair: pair != 0, test_drop_one_in: None }, callbacks) {
         Ok(h) => Box::into_raw(Box::new(h)),
         Err(e) => {
             report(err, err_len, &format!("{e:#}"));
