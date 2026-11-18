@@ -386,6 +386,15 @@ Known gaps, found by these runs:
 - **The iPad has shown the real desktop too** (the Mac session's report, and the host's trust list has its key): iPad Pro 13-inch (M5) over the tailnet, AV1 10-bit decoded in hardware, picture correct, frame age 17 ms on a still desktop, nothing lost. It asked for 3200×2400 by mistake (the iPad's "More Space" setting); the app now sends the panel's real 2752×2064. The iPhone hasn't connected.
 - **Pointer and touch landed in the wrong place once the scale was on (found 2026-11-17, fixed the same day).** Mutter places them in the desktop's scaled units, not pixels. At scale 2 every move hit the bottom-right corner, which is why the Mac's first pointer test showed no cursor; at the iPad's 1.72 the host's cursor sat away from the finger. The host now reads the scale Mutter chose from the stream and divides by it. Tested at 2 and 1.72: a move to the middle lands in the middle.
 - **Cursor channel: built on the PC side (2026-11-17).** A client that asks gets the cursor left out of the picture, its shape on the control stream and its position as datagrams (`docs/PROTOCOL.md`, Cursor). The core passes both to the app (`on_cursor_shape`, `on_cursor_at` in the C interface, which grew by two callbacks), and the Linux viewer uses the shape as its own pointer. In the test the shape arrived once and all 32 positions followed. The Mac and iPad apps switched to it the same day, and the user, trying the iPad with its trackpad, reported that the cursor "feels native". From the Mac, moves to three spots were each reported back by the host at the spot asked for.
+- **Phase 1's figure, measured live (2026-11-17, the Mac session's runs against the PC over the tailnet, moving test content, AV1 10-bit, 30 s each):**
+
+  | Client | Stream | Shown / received fps | Age at presentation, ms (median / p95 / p99 / max) | Lost | Round trip |
+  |---|---|---|---|---|---|
+  | Mac viewer (wired) | 2752×2064 at 120 | 118 / 120 | 13.4 / 14.2 / 14.6 / 16.7 | 0 | 0.5 ms |
+  | Mac viewer (wired) | 2752×1436 at 144 | 118.5 / 144 | 16.1 / 20.2 / 21.1 / 22.2 | 0 | 0.5 ms |
+  | iPhone 18 Pro Max (Wi-Fi) | 1320×2868 at 120 | 104 / 115 | 15.9 / 20.4 / 21.4 / 28.3 | 10 frames, 7 keyframes asked | 3.5 ms |
+
+  The target was 25 ms at the 95th percentile and 120 fps: met on the Mac with room. At 144 Hz the Mac shows only about 118 a second because its display link (on a headless Mac) runs near 120 whatever the mode says. On the iPhone the age is fine but each lost frame froze the picture until a keyframe arrived (the longest gap was 150 ms), which is what loss recovery is for. The iPad was locked and not measured.
 - **Not built yet from this phase's list:** QR pairing (pairing is "first unknown device while `--pair` is on"),. The stats overlay and the apps exist. Confirmed by the user on the iPad with its keyboard case (2026-11-17): hardware keys including shortcuts, and trackpad pointer, click and drag ("moving apps") all work. Not tested: the bare iPad with touch only and its on-screen keyboard (left for later by the user), the iPhone beyond viewing, and clicks, keys and scroll from the Mac viewer.
 
 ### 2. Mac host
