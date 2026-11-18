@@ -12,6 +12,13 @@ use crate::{Channels, FRAME_SAMPLES, Packet};
 /// arriving unevenly; the plan asks for 20 to 40 ms.
 pub const JITTER_FRAMES: usize = 3;
 
+/// The most frames the buffer holds back before playing (80 ms): where it starts if asked for
+/// more, and as far as it grows by itself when packets keep arriving after their turn.
+const MAX_DEPTH: usize = 8;
+
+/// A packet no more than this many frames after its turn just missed it.
+const JUST_MISSED: i32 = 5;
+
 /// A packet this far from the one expected, on either side, isn't late or early: the sender
 /// started over, and so does the buffer.
 const RESYNC_FRAMES: u32 = 100;
@@ -75,7 +82,7 @@ pub struct JitterBuffer {
 impl JitterBuffer {
     /// `depth` in frames; it is kept between 1 and 8 (10 to 80 ms).
     pub fn new(channels: Channels, depth: usize) -> Result<Self> {
-        let depth = depth.clamp(1, 8);
+        let depth = depth.clamp(1, MAX_DEPTH);
         Ok(Self {
             decoder: Decoder::new(channels)?,
             channels: channels.count(),
@@ -126,6 +133,17 @@ impl JitterBuffer {
         }
         if ahead < 0 {
             self.stats.late += 1;
+            // Its turn came before it did, and a made-up frame was played in its place: the
+            // sender delivers less evenly than this depth allows for (one that sends two or
+            // three packets at a time, say). Hold one frame more from here on, starting with
+            // a refill now, when the sound has just had its gap anyway. It never goes back
+            // down while this sender lasts.
+            // (One that comes long after its turn is a straggler, and says nothing of that.)
+            if ahead >= -JUST_MISSED && self.depth < MAX_DEPTH && !self.filling {
+                self.depth += 1;
+                self.filling = true;
+                self.waited = 0;
+            }
             return;
         }
         let at = ahead as usize;
@@ -288,6 +306,35 @@ mod tests {
         out.extend(pull_frames(&mut buffer, 2));
         assert!((frequency(&out[7 * FRAME_SAMPLES..]) - 1000.0).abs() < 5.0);
         assert_eq!(buffer.stats(), JitterStats { played: 40, ..Default::default() });
+    }
+
+    #[test]
+    fn holds_more_when_packets_just_miss_their_turn() {
+        // A sender that hands over two packets at a time, every fourth pair a frame after it
+        // is needed: with a depth of 2 their turn comes before they do.
+        let mut buffer = JitterBuffer::new(Channels::Mono, 2).unwrap();
+        let packets = tone_packets(3, 240);
+        let mut late_at_half = 0;
+        for (i, pair) in packets.chunks(2).enumerate() {
+            // As much is taken as comes; a late pair is one that comes after the first of its
+            // two frames was asked for.
+            let late = i % 4 == 3;
+            if late {
+                pull_frames(&mut buffer, 1);
+            }
+            for p in pair {
+                buffer.push(p.clone());
+            }
+            pull_frames(&mut buffer, if late { 1 } else { 2 });
+            if i == 59 {
+                late_at_half = buffer.stats().late;
+            }
+        }
+        let stats = buffer.stats();
+        assert!(late_at_half > 0, "the test never made a packet late: {stats:?}");
+        // It grew until nothing was late any more, in a few steps, and stayed there.
+        assert_eq!(stats.late, late_at_half, "still late in the second half: {stats:?}");
+        assert!(stats.late <= 6, "{stats:?}");
     }
 
     #[test]
