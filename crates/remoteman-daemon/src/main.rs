@@ -1,6 +1,7 @@
 //! `remotemand`: the system service of a Linux host.
 //!
 //!     remotemand [--listen ADDR:PORT] [--state DIR] [--socket PATH] [--pair] [--name NAME]
+//!                [--user NAME] [--login screen|key|off]
 //!     remotemand ctl [--socket PATH] status | switch N | prefer N
 //!     remotemand test-agent [--socket PATH] [--label NAME]      (for tests: see standin.rs)
 //!
@@ -9,8 +10,15 @@
 //! `ctl status` lists them; `ctl switch N` moves the connected client to agent N without the
 //! client reconnecting (what happens by itself when a login screen gives way to a session);
 //! `ctl prefer N` gives the next client to agent N.
+//!
+//! `--user NAME`: the paired devices are NAME's (one user for all of them, for now). A device
+//! goes to NAME's session if there is one. If there is none, `--login` says what happens:
+//! `screen` (the default when run as root) asks GDM for a headless login screen and moves the
+//! device to the session once someone has logged in on it; `key` asks GDM for NAME's session
+//! straight away, with no password, trusting the device's key alone; `off` turns it away.
 
 mod broker;
+mod gdm;
 mod standin;
 
 use std::io::Read;
@@ -34,6 +42,7 @@ fn main() -> Result<()> {
     let (mut pair, mut drop_one_in, mut name) = (false, None::<u32>, None::<String>);
     let mut ctl = None::<Vec<String>>;
     let (mut standin, mut label) = (false, "stand-in".to_owned());
+    let (mut user, mut login) = (None::<String>, if root { "screen" } else { "off" }.to_owned());
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if let Some(words) = &mut ctl {
@@ -54,6 +63,8 @@ fn main() -> Result<()> {
             "--socket" => socket = value()?.into(),
             "--name" => name = Some(value()?),
             "--pair" => pair = true,
+            "--user" => user = Some(value()?),
+            "--login" => login = value()?,
             // For tests: lose one video packet in this many.
             "--test-drop-one-in" => drop_one_in = Some(value()?.parse().context("--test-drop-one-in N")?),
             other => anyhow::bail!("unknown option {other}"),
@@ -85,10 +96,24 @@ fn main() -> Result<()> {
     // agent is comes from the kernel, never from this file's mode.
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(if root { 0o666 } else { 0o600 }))?;
 
-    let shared = broker::Shared::new();
+    let owner = match user {
+        Some(name) => Some((name.clone(), uid_of(&name).with_context(|| format!("there is no user {name}"))?)),
+        None => None,
+    };
+    let login = match login.as_str() {
+        "off" => None,
+        how @ ("screen" | "key") => {
+            anyhow::ensure!(owner.is_some(), "--login {how} needs --user: whose session a device logs in to");
+            let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name("gdm").enable_all().build()?;
+            let gdm = runtime.block_on(gdm::Gdm::connect())?;
+            Some(broker::Login { runtime, gdm, by_key: how == "key" })
+        }
+        other => anyhow::bail!("--login {other}: screen, key or off"),
+    };
+    let shared = broker::Shared::new(owner, login);
     // What the agents can do. (Each agent says what it has when it attaches; until the daemon
-    // tells clients per session, it lists what an agent started with --allow files would have.)
-    let features = ["video", "input", "cursor", "placement", "configure", "files"].map(String::from).to_vec();
+    // tells clients per session, it lists what an agent allowed everything would have.)
+    let features = ["video", "input", "cursor", "placement", "configure", "sound", "mic", "files", "clipboard"].map(String::from).to_vec();
     let options = HostOptions { listen, state, name, os: "linux".into(), features, pair, test_drop_one_in: drop_one_in };
     let host = Host::start(options, broker::Broker(shared.clone()))?;
     tracing::info!("listening on {}; this host's fingerprint is {}; agents attach at {}", host.address, host.fingerprint, socket.display());
@@ -110,6 +135,14 @@ fn main() -> Result<()> {
     host.stop();
     let _ = std::fs::remove_file(&socket);
     Ok(())
+}
+
+/// A user's number, from the system's user database.
+fn uid_of(name: &str) -> Option<u32> {
+    let name = std::ffi::CString::new(name).ok()?;
+    // SAFETY: a valid C string; the result is read at once, before any other such call.
+    let entry = unsafe { libc::getpwnam(name.as_ptr()) };
+    if entry.is_null() { None } else { Some(unsafe { (*entry).pw_uid }) }
 }
 
 fn state_dir() -> PathBuf {

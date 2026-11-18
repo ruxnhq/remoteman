@@ -199,6 +199,16 @@ pub unsafe extern "C" fn rm_client_host(client: *const Client, out: *mut c_char,
     report(out, len, &format!("{}\t{}\t{}", c.host_name, c.host_os, c.host_fingerprint));
 }
 
+/// What the host can do, from its hello, as a comma-separated list copied into `out`
+/// ("video,input,cursor,placement,configure,sound"). An app offers only these.
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`; `out` must be writable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_features(client: *const Client, out: *mut c_char, len: usize) {
+    report(out, len, &unsafe { &*client }.host_features.join(","));
+}
+
 /// Frames lost, keyframes asked for, and the shortest round trip in microseconds.
 ///
 /// # Safety

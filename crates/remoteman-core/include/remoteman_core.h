@@ -80,6 +80,10 @@ rm_client *rm_client_connect(const char *host, const char *state_dir, const char
 // "name\tos\tfingerprint" of the host, copied into `out`.
 void rm_client_host(const rm_client *client, char *out, size_t len);
 
+// What the host can do, from its hello, as a comma-separated list:
+// "video,input,cursor,placement,configure,sound". Offer only these.
+void rm_client_features(const rm_client *client, char *out, size_t len);
+
 // FEATURES, client side (docs/PROTOCOL.md, "Features"). A host lists what it has in its
 // features (rm_client_host gives name, os, fingerprint; the features come with the hello).
 // One feature message, as JSON: {"t":"sound","on":true}, mic, camera, configure, clipboard,

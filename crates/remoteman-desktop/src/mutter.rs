@@ -172,6 +172,11 @@ impl VirtualDisplay {
         Ok(())
     }
 
+    /// The remote-desktop session, for what else goes through it: the clipboard.
+    pub(crate) fn session(&self) -> &Proxy<'static> {
+        &self.remote
+    }
+
     /// End the session; the virtual monitor goes with it.
     pub async fn close(self) {
         let _ = self.remote.call::<_, _, ()>("Stop", &()).await;
