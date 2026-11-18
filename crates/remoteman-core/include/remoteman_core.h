@@ -72,6 +72,94 @@ void rm_client_text(const rm_client *client, const char *utf8);
 // Leave and free the client. `on_closed` is called before this returns or shortly after.
 void rm_client_close(rm_client *client);
 
+// ---------------------------------------------------------------------------------------------
+// The host role: this computer is the one being controlled. The core owns the listening port
+// and the connection (trust and pairing, the hello, cutting video into datagrams, the cursor
+// channel, the clock, reading input). The host program makes the display, captures and encodes,
+// and puts input into its desktop. One client at a time; a new one replaces the old
+// (on_client_left for the old, then on_client for the new).
+
+typedef struct rm_host rm_host;
+
+// A client that said hello. The strings are valid only during the call.
+typedef struct rm_client_info {
+    const char *name;
+    const char *fingerprint;
+    uint32_t width, height;   // its display, in pixels
+    float scale;              // the scale it wants the desktop drawn at
+    uint32_t refresh;         // Hz
+    const char *decoders;     // what it decodes, most preferred first: from "av1", "hevc444", "hevc"
+    uint8_t cursor_apart;     // non-zero: leave the cursor out of the picture and report it apart
+} rm_client_info;
+
+// The host's answer, filled in by on_client.
+typedef struct rm_accept {
+    uint8_t codec;            // 0 HEVC (Annex-B, parameter sets on every keyframe), 1 AV1 (OBUs)
+    uint8_t depth;            // 10
+    uint16_t chroma;          // 420 or 444
+    uint32_t width, height, refresh;
+    uint8_t hdr;              // 0 BT.709 limited range, 1 BT.2020 PQ
+    char refuse[200];         // when refusing: why, shown to the client
+} rm_accept;
+
+// One input event (docs/PROTOCOL.md, Input). Fields a kind doesn't use are zero.
+typedef struct rm_input {
+    uint8_t kind;             // 1 pointer to, 2 pointer by, 3 button, 4 scroll, 5 key, 6 touch, 7 text
+    uint8_t button;           // 0 left, 1 right, 2 middle
+    uint8_t down;
+    uint8_t phase;            // touch: 0 down, 1 move, 2 up
+    uint8_t slot;             // touch: tells fingers apart
+    uint16_t usage;           // key: USB HID usage, page 7
+    float x, y;               // 1 and 6: fractions of the display; 2 and 4: display pixels
+    const char *text;         // 7: UTF-8, valid only during the call
+} rm_input;
+
+// All called on one thread of the core's, one at a time; they may block.
+typedef struct rm_host_callbacks {
+    void *ctx;
+    // Make the client's display and start the picture; fill `accept` and return non-zero. Or
+    // write a reason into accept->refuse and return zero.
+    int32_t (*on_client)(void *ctx, const rm_client_info *client, rm_accept *accept);
+    // The client lost a frame: make the next one a keyframe.
+    void (*on_keyframe)(void *ctx);
+    void (*on_input)(void *ctx, const rm_input *input);
+    // The client is gone or was replaced: stop the picture and take the display away.
+    void (*on_client_left)(void *ctx);
+} rm_host_callbacks;
+
+// Start listening on `listen` ("0.0.0.0:7791"). `features` lists what this host can do, comma
+// separated: "video,input,cursor". With `pair` non-zero the next unknown device is let in and
+// remembered. Returns NULL on failure, with the reason in `err`.
+rm_host *rm_host_start(const char *listen, const char *state_dir, const char *name, const char *os,
+                       const char *features, int32_t pair, rm_host_callbacks callbacks,
+                       char *err, size_t err_len);
+
+// "address:port\tfingerprint" of this host.
+void rm_host_info(const rm_host *host, char *out, size_t len);
+
+// Pairing: let the next unknown device in (it is remembered and pairing turns itself off).
+void rm_host_set_pairing(const rm_host *host, int32_t on);
+int32_t rm_host_pairing(const rm_host *host);
+
+// The connected client's session clock in microseconds: stamp each frame with it at capture.
+// 0 when no client is connected.
+uint64_t rm_host_now_us(const rm_host *host);
+
+// Send one encoded frame. It waits while the network is behind, so call it from the encoder's
+// thread, never the main one; that wait is what holds the encoder back, so frames are skipped
+// before encoding and never after (every frame refers to the one before; no B-frames, no
+// periodic keyframes). Returns 1 if taken, 0 if no client is connected.
+int32_t rm_host_send_frame(const rm_host *host, const uint8_t *data, size_t len, uint8_t key, uint64_t capture_us);
+
+// For clients with cursor_apart: the cursor's image when it changes (premultiplied RGBA, rows
+// top to bottom, in the display's pixels; width 0 for no cursor), and its position whenever it
+// moves (fractions of the display; visible 0 when it isn't on it).
+void rm_host_cursor_shape(const rm_host *host, const uint8_t *rgba, uint32_t width, uint32_t height, int32_t hot_x, int32_t hot_y);
+void rm_host_cursor_at(const rm_host *host, float x, float y, uint8_t visible);
+
+// Stop listening, drop the client, and free the host.
+void rm_host_stop(rm_host *host);
+
 #ifdef __cplusplus
 }
 #endif

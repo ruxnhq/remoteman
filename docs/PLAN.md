@@ -386,6 +386,11 @@ Known gaps, found by these runs:
 A Mac host app from espalier's `Screen.swift`, `ScreenEncoder.swift`, `Input.swift`, `Cursor.swift` and the virtual display shim, with the Rust core's host role in place of the bridge's TCP records. The same iPad app connects to it with nothing Mac-specific in it. Built by the Mac session; the Linux session supplies the core's host interface for Swift.
 **Done when:** the iPad app lists both the PC and the Mac and controls either at native resolution and 120 fps, and the Linux test client can control the Mac too (which proves any client works with any host).
 
+**Status (2026-11-17): the core's host role exists and is tested; the Mac host isn't started.**
+- `remoteman-core` now has both roles. The host role (`host.rs`) owns the port and the connection: trust and pairing, the hello, cutting video into datagrams, the cursor channel, the clock, reading input. A host program only makes the display, encodes, and puts input into its desktop.
+- The Linux agent was moved onto it, so the same code runs on the PC. All end-to-end runs pass as before (three modes at 120 fps, nothing lost, input, cursor, the viewer).
+- Its C interface (`rm_host_*` in `remoteman_core.h`) is tested by a host written in C alone (`scripts/test-c-host.sh`): the real test client pairs with it, receives 120 frames a second and the cursor, its input arrives (text included), a refusal reaches the client with its reason, and a client leaving is reported exactly once.
+
 ### 3. Linux viewer
 A GTK 4 and libadwaita app in Rust on the shared core: a list of paired hosts, pairing, and the stream in a window or full screen with hardware decode and no copy to the CPU. Mouse, keyboard and touch go back. It reaches the Linux host and the Mac host alike.
 **Done when:** from another Linux machine, or this one, the viewer controls the PC and the Mac at the window's size and the monitor's refresh rate.

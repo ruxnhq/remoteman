@@ -5,21 +5,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 use remoteman_capture::{self as capture, Event, QuitSender};
 use remoteman_encode::{Codec, Config, Encoder};
 use remoteman_gpu::{Chroma, Converter};
-use remoteman_proto::control;
-
-/// One encoded frame on its way to the network.
-pub struct Encoded {
-    pub data: Vec<u8>,
-    pub key: bool,
-    /// When it was captured, in microseconds on the session's clock.
-    pub capture_us: u64,
-}
+use remoteman_core::host::Link;
+use remoteman_core::{self as control, CursorShape};
 
 pub struct Settings {
     pub node: u32,
@@ -30,8 +22,8 @@ pub struct Settings {
     pub scale: f32,
     pub mode: control::Mode,
     pub bitrate: u32,
-    /// Where cursor changes go, when the client draws the cursor itself.
-    pub cursor: Option<tokio::sync::mpsc::UnboundedSender<capture::Cursor>>,
+    /// The client draws the cursor itself: report it apart from the picture.
+    pub cursor: bool,
 }
 
 pub struct Pipeline {
@@ -51,10 +43,10 @@ struct Converted {
 }
 
 impl Pipeline {
-    /// Start streaming `settings.node`. Encoded frames go to `out`; when the network can't take
-    /// them, the encoder waits and frames are skipped before encoding (never after, since every
-    /// frame refers to the one before).
-    pub fn start(settings: Settings, clock: Instant, out: tokio::sync::mpsc::Sender<Encoded>) -> Result<Self> {
+    /// Start streaming `settings.node` to `link`. When the network can't take frames, the encoder
+    /// waits and frames are skipped before encoding (never after, since every frame refers to
+    /// the one before).
+    pub fn start(settings: Settings, link: Link) -> Result<Self> {
         const SLOTS: usize = 4;
         let Settings { node, width, height, fps, scale, mode, bitrate, cursor } = settings;
         let chroma = match mode.chroma {
@@ -79,6 +71,7 @@ impl Pipeline {
 
         let (ready_tx, ready_rx) = mpsc::channel::<Result<String>>();
         let key = keyframe.clone();
+        let out = link.clone();
         let encoder = std::thread::Builder::new().name("encode".into()).spawn(move || {
             let opened = (|| {
                 let mut enc = Encoder::new(&Config { codec, chroma444: chroma == Chroma::C444, width, height, fps, bitrate, preset: 1 })?;
@@ -103,7 +96,7 @@ impl Pipeline {
                 match enc.encode(c.slot, n, force) {
                     Ok((data, key)) => {
                         n += 1;
-                        if out.blocking_send(Encoded { data: data.to_vec(), key, capture_us: c.capture_us }).is_err() {
+                        if !out.send_frame(data, key, c.capture_us) {
                             break;
                         }
                     }
@@ -123,16 +116,17 @@ impl Pipeline {
         let skip = skipped.clone();
         let capture = std::thread::Builder::new().name("capture".into()).spawn(move || {
             let mut next = 0usize;
-            let cursor_meta = cursor.is_some();
+            let cursor_meta = cursor;
             let on_event = Box::new(move |ev: Event| match ev {
                 Event::Scale(s) => {
                     tracing::info!(scale = s, "the compositor draws the monitor at this scale");
                     scale_w.store(s.to_bits(), Ordering::Relaxed);
                 }
                 Event::Cursor(c) => {
-                    if let Some(tx) = &cursor {
-                        let _ = tx.send(c);
+                    if let Some(s) = c.shape {
+                        link.cursor_shape(CursorShape { width: s.width, height: s.height, hot_x: s.hot_x, hot_y: s.hot_y, rgba: s.rgba });
                     }
+                    link.cursor_at(c.x as f32 / width as f32, c.y as f32 / height as f32, c.on_screen);
                 }
                 Event::Format { width, height, modifier } => {
                     tracing::info!(width, height, modifier = format!("{modifier:#x}"), "stream format");
@@ -142,7 +136,7 @@ impl Pipeline {
                     if (f.width, f.height) != (conv.width, conv.height) {
                         return;
                     }
-                    let capture_us = clock.elapsed().as_micros() as u64;
+                    let capture_us = link.now_us();
                     match conv.convert(f.fd, f.modifier, f.offset, f.stride, next) {
                         Ok(()) => {
                             if tx.try_send(Converted { slot: next, capture_us }).is_ok() {
