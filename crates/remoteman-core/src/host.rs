@@ -65,6 +65,14 @@ pub trait HostHandler: Send + 'static {
     fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String>;
     /// The client lost a frame: make the next one a keyframe.
     fn keyframe(&mut self);
+    /// The client missed frames from `first` on (counting the frames sent to it from 0). A host
+    /// whose encoder can drop its references to them answers with a frame that leans on none
+    /// of them, sent with [`Link::send_recovery_frame`]; the others send a keyframe, which is
+    /// what this does unless overridden.
+    fn lost(&mut self, first: u32, last: u32) {
+        let _ = (first, last);
+        self.keyframe();
+    }
     /// The client's input, in order.
     fn input(&mut self, event: Event);
     /// The client is gone (or was replaced): stop the picture and take the display away.
@@ -74,6 +82,7 @@ pub trait HostHandler: Send + 'static {
 struct Frame {
     data: Vec<u8>,
     key: bool,
+    recovery: bool,
     capture_us: u64,
 }
 
@@ -100,7 +109,13 @@ impl Link {
     /// so an encoder calling this is held back and frames get skipped before encoding, never
     /// after. Returns false once the client is gone.
     pub fn send_frame(&self, data: &[u8], key: bool, capture_us: u64) -> bool {
-        self.frames.blocking_send(Frame { data: data.to_vec(), key, capture_us }).is_ok()
+        self.frames.blocking_send(Frame { data: data.to_vec(), key, recovery: false, capture_us }).is_ok()
+    }
+
+    /// As [`Self::send_frame`], for the first frame after a reported loss that leans on nothing
+    /// the client missed: the client picks the picture up again at it.
+    pub fn send_recovery_frame(&self, data: &[u8], capture_us: u64) -> bool {
+        self.frames.blocking_send(Frame { data: data.to_vec(), key: false, recovery: true, capture_us }).is_ok()
     }
 
     /// The cursor's image changed (for clients that draw it themselves). Zero size: no cursor.
@@ -117,6 +132,7 @@ impl Link {
 enum Call {
     Connected(ClientInfo, Link, tokio::sync::oneshot::Sender<Result<Accept, String>>),
     Keyframe,
+    Lost(u32, u32),
     Input(Event),
     Left,
 }
@@ -155,6 +171,7 @@ impl Host {
                         let _ = reply.send(handler.connected(&client, link));
                     }
                     Call::Keyframe => handler.keyframe(),
+                    Call::Lost(first, last) => handler.lost(first, last),
                     Call::Input(event) => handler.input(event),
                     Call::Left => handler.left(),
                 }
@@ -287,7 +304,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         let mut number = 0u32;
         while let Some(f) = frame_rx.recv().await {
             let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
-            for d in fragment(&f.data, f.key, EPOCH, number, f.capture_us, max) {
+            for d in fragment(&f.data, f.key, f.recovery, EPOCH, number, f.capture_us, max) {
                 conn.send_datagram_wait(d.into()).await?;
             }
             number = number.wrapping_add(1);
@@ -303,6 +320,9 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             match m {
                 Message::Keyframe => {
                     let _ = calls.send(Call::Keyframe);
+                }
+                Message::Lost { first, last } => {
+                    let _ = calls.send(Call::Lost(first, last));
                 }
                 Message::Ping { id, client_us } => write_message(&mut *send.lock().await, &Message::Pong { id, client_us, host_us: clock.elapsed().as_micros() as u64 }).await?,
                 _ => {}

@@ -30,6 +30,12 @@ Every claim carries a mark:
   | Linux host | Host | Linux, GNOME | `remoteman-agent`, later with `remotemand` for remote login | 1, 4 |
   | Mac host | Host | macOS | Swift, from espalier's Mac screen code, the shared core's host role | 2 |
 
+- **Asked for on 2026-11-17, to build in:**
+  - **Where the device's display sits is the user's choice,** per computer and changeable in a session: an extra display beside the computer's own, the main display, or the only one (the others switched off while connected). On the Mac host today this is a start-up option (extra by default, `--main yes`); on Linux, attach mode has the extra display and the planned "screens off" setting. It becomes one setting that travels in the hello.
+  - **In a window, the controls can be a hover bar instead of a top bar.** A setting in the viewers (Mac, Linux, and iPad when windowed): the usual title or header bar, or nothing but the picture with a bar that appears when the pointer reaches the top edge.
+  - **Camera.** The device's camera as a camera on the host, for calls made on the remote desktop. The Mac side has a head start: espalier's signed camera extension (a CoreMediaIO extension the user built with the paid team) can be reused as the Mac host's virtual camera. Linux needs a PipeWire or V4L2 loopback camera, Windows its own. A later phase, with sound and microphone.
+  - **Windows:** a host and a viewer, after the current apps are done.
+
 Still to hear: which iPad and iPhone, and how the Mac session gets the code (suggested: a private GitHub repository).
 
 ## Decisions that were yours
@@ -380,13 +386,25 @@ Known gaps, found by these runs:
 - **The iPad has shown the real desktop too** (the Mac session's report, and the host's trust list has its key): iPad Pro 13-inch (M5) over the tailnet, AV1 10-bit decoded in hardware, picture correct, frame age 17 ms on a still desktop, nothing lost. It asked for 3200×2400 by mistake (the iPad's "More Space" setting); the app now sends the panel's real 2752×2064. The iPhone hasn't connected.
 - **Pointer and touch landed in the wrong place once the scale was on (found 2026-11-17, fixed the same day).** Mutter places them in the desktop's scaled units, not pixels. At scale 2 every move hit the bottom-right corner, which is why the Mac's first pointer test showed no cursor; at the iPad's 1.72 the host's cursor sat away from the finger. The host now reads the scale Mutter chose from the stream and divides by it. Tested at 2 and 1.72: a move to the middle lands in the middle.
 - **Cursor channel: built on the PC side (2026-11-17).** A client that asks gets the cursor left out of the picture, its shape on the control stream and its position as datagrams (`docs/PROTOCOL.md`, Cursor). The core passes both to the app (`on_cursor_shape`, `on_cursor_at` in the C interface, which grew by two callbacks), and the Linux viewer uses the shape as its own pointer. In the test the shape arrived once and all 32 positions followed. The Mac and iPad apps switched to it the same day, and the user, trying the iPad with its trackpad, reported that the cursor "feels native". From the Mac, moves to three spots were each reported back by the host at the spot asked for.
+- **Phase 1's figure, measured live (2026-11-17, the Mac session's runs against the PC over the tailnet, moving test content, AV1 10-bit, 30 s each):**
+
+  | Client | Stream | Shown / received fps | Age at presentation, ms (median / p95 / p99 / max) | Lost | Round trip |
+  |---|---|---|---|---|---|
+  | Mac viewer (wired) | 2752×2064 at 120 | 118 / 120 | 13.4 / 14.2 / 14.6 / 16.7 | 0 | 0.5 ms |
+  | Mac viewer (wired) | 2752×1436 at 144 | 118.5 / 144 | 16.1 / 20.2 / 21.1 / 22.2 | 0 | 0.5 ms |
+  | iPhone 18 Pro Max (Wi-Fi) | 1320×2868 at 120 | 104 / 115 | 15.9 / 20.4 / 21.4 / 28.3 | 10 frames, 7 keyframes asked | 3.5 ms |
+
+  | iPad Pro 13-inch M5 (Wi-Fi) | 3200×2400 at 120 | 110 / 119 | 16.1 / 18.2 / 18.8 / 20.5 | 0 | 3.8 ms |
+
+  The target was 25 ms at the 95th percentile and 120 fps: met on the Mac with room, and on the iPad for age. On the iPad about 8% of frames are replaced before they are shown: two arrive inside one refresh and the next refresh has nothing new. The iPad asks for 3200×2400 because in its "More Space" mode iPadOS itself composes at that size. The iPhone's gap and shown-fps figures are suspect (the test's own logging held up its display); its loss counts stand. At 144 Hz the Mac shows only about 118 a second because its display link (on a headless Mac) runs near 120 whatever the mode says. On the iPhone the age is fine but each lost frame froze the picture until a keyframe arrived (the longest gap was 150 ms), which is what loss recovery is for. The iPad was locked and not measured.
 - **Not built yet from this phase's list:** QR pairing (pairing is "first unknown device while `--pair` is on"),. The stats overlay and the apps exist. Confirmed by the user on the iPad with its keyboard case (2026-11-17): hardware keys including shortcuts, and trackpad pointer, click and drag ("moving apps") all work. Not tested: the bare iPad with touch only and its on-screen keyboard (left for later by the user), the iPhone beyond viewing, and clicks, keys and scroll from the Mac viewer.
 
 ### 2. Mac host
 A Mac host app from espalier's `Screen.swift`, `ScreenEncoder.swift`, `Input.swift`, `Cursor.swift` and the virtual display shim, with the Rust core's host role in place of the bridge's TCP records. The same iPad app connects to it with nothing Mac-specific in it. Built by the Mac session; the Linux session supplies the core's host interface for Swift.
 **Done when:** the iPad app lists both the PC and the Mac and controls either at native resolution and 120 fps, and the Linux test client can control the Mac too (which proves any client works with any host).
 
-**Status (2026-11-17): the core's host role exists and is tested; the Mac host isn't started.**
+**Status (2026-11-17): the core's host role exists and is tested; the Mac host is written and waits on macOS permissions.**
+- **Mac host (the Mac session's report):** `apple/Host`, an app with no window. It builds, listens, pairs and answers a hello; the Mac viewer connected to it and was refused with the right reason, "the Mac host needs Screen Recording permission". Nothing after the hello has run yet (virtual display, capture, HEVC Main10 encode, input, cursor), because macOS hasn't been granted Screen Recording and Accessibility for it, which only the user can do. Two choices to revisit once it runs: the virtual display is an extra display by default, not the main one; and capture is 10-bit RGB converted by VideoToolbox.
 - `remoteman-core` now has both roles. The host role (`host.rs`) owns the port and the connection: trust and pairing, the hello, cutting video into datagrams, the cursor channel, the clock, reading input. A host program only makes the display, encodes, and puts input into its desktop.
 - The Linux agent was moved onto it, so the same code runs on the PC. All end-to-end runs pass as before (three modes at 120 fps, nothing lost, input, cursor, the viewer).
 - Its C interface (`rm_host_*` in `remoteman_core.h`) is tested by a host written in C alone (`scripts/test-c-host.sh`): the real test client pairs with it, receives 120 frames a second and the cursor, its input arrives (text included), a refusal reaches the client with its reason, and a client leaving is reported exactly once.
@@ -419,6 +437,8 @@ A GTK 4 and libadwaita app in Rust on the shared core: a list of paired hosts, p
 Our own Vulkan conversion, direct NVENC, re-requests and parity, the rate controller, static refinement, 4:4:4 if S2 and S3 passed, rotation and resizing.
 **Done when:** 2% random loss shows no stall and puts no keyframe on the wire; the bitrate follows a throttled link within 1 s; an idle desktop sends under 100 kbit/s.
 
+**Status (2026-11-17):** recovery without keyframes is built. When a client misses a frame it says which; the Linux host has NVENC drop its references to everything from that frame on and continue from an older one, flagging the next frame as a recovery point. Tested with one packet in 300 thrown away at the client (about 8 losses a second, far worse than real Wi-Fi): in AV1, HEVC and HEVC 4:4:4 every loss was answered by a recovery point, no keyframe was sent, the longest gap in the picture was 25 to 28 ms (three frames), and the frames delivered decode in FFmpeg with no errors. Before this each loss cost a keyframe and a freeze of up to 150 ms. Still to build from this phase: re-requesting lost fragments and parity (so most losses are never seen at all), bitrate that follows the network, and static refinement. The Mac host answers a loss with a keyframe.
+
 ### 6. The rest of daily use
 Sound, clipboard, soft keyboard and text input, the key bar and remaps, iPhone trackpad mode and zoom, Wake-on-LAN.
 
@@ -426,13 +446,13 @@ Sound, clipboard, soft keyboard and text input, the key bar and remaps, iPhone t
 End to end in mirror mode first: PQ in, EDR out. Then the Mutter patch: virtual outputs that offer BT.2100 with the device's luminance, and virtual streams that offer the 10-bit PQ formats. Run it as a local package and send it upstream.
 
 ### 8. More displays and devices
-A second virtual monitor on a display plugged into the iPad, Pencil as far as libei allows, files and drag and drop, microphone. **[R]** An app can fill a connected display with a scene of its own and pick its mode. Whether it can pick the refresh rate and HDR there wasn't found.
+The device's camera and microphone as the host's (see "Asked for" under Decided). A second virtual monitor on a display plugged into the iPad, Pencil as far as libei allows, files and drag and drop, microphone. **[R]** An app can fill a connected display with a scene of its own and pick its mode. Whether it can pick the refresh rate and HDR there wasn't found.
 
 ### Later
 - **KDE.** Attach mode through the desktop portals first (ScreenCast with a virtual source, RemoteDesktop, libei), then KWin's own protocol (`stream_virtual_output`) for unattended use. **[R]** As of Plasma 6.8.3: virtual outputs exist and follow the stream's size; they start at 60 Hz and take custom modes; the HiDPI scale tag comes in 6.9; no HDR on them and screencasts are 8-bit (HDR screencast is open for 6.9); unattended access works by pre-authorising the app or a restore token. Remote login isn't there in 6.8 and is planned for 6.9 with Plasma Login Manager.
 - **How others stand** **[R]**: Sunshine has no virtual displays on Linux (the request was closed as not planned) and uses FFmpeg for NVENC there. Nothing found combines virtual displays, a desktop session and HDR on Linux.
 - **Outside the LAN** without Tailscale: a rendezvous and relay of our own.
-- **More hosts and clients:** Windows host; Windows and Android viewers. Each is a new shell around the same core.
+- **Windows host and viewer,** next after the current five apps. Then an Android viewer. Each is a new shell around the same core.
 
 ## Risks
 

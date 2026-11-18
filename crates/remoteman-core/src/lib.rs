@@ -36,6 +36,8 @@ pub struct Options {
     pub display: Display,
     /// What this device decodes in hardware, most preferred first.
     pub decoders: Vec<Mode>,
+    /// For tests: throw away one video datagram in this many, as a lossy network would.
+    pub test_drop_one_in: Option<u32>,
     /// This app draws the cursor itself: the host leaves it out of the picture and reports its
     /// shape and position through [`Handler::cursor_shape`] and [`Handler::cursor_at`].
     pub cursor: bool,
@@ -90,7 +92,7 @@ enum FromHost {
 pub struct Stats {
     /// Frames that never arrived whole.
     pub lost: u32,
-    /// Keyframes asked for because of them.
+    /// Times the host was told of a loss (or asked for a keyframe).
     pub keyframe_requests: u32,
     /// The shortest round trip seen, in microseconds (0: none yet).
     pub round_trip_us: u32,
@@ -135,6 +137,7 @@ impl Client {
             Err(_) if o.pair => Expect::Anyone,
             Err(_) => bail!("{} isn't paired yet", o.host),
         };
+        let o_drop = o.test_drop_one_in.filter(|n| *n > 1);
         let (endpoint, conn, fingerprint) = connect(addr, &identity, expect).await?;
         if !known.exists() {
             std::fs::create_dir_all(known.parent().unwrap())?;
@@ -233,7 +236,11 @@ impl Client {
         let c = counters.clone();
         tokio::spawn(async move {
             let mut r = Reassembler::new();
-            let (mut started, mut waiting_key) = (false, true);
+            // What the next frame handed on must be: a keyframe at the start, and after a loss a
+            // keyframe or a recovery point. `Some(first)`: frames from `first` on were missed.
+            let (mut started, mut need_key, mut missed) = (false, true, None::<u32>);
+            let mut asked = None::<Instant>;
+            let mut dropped = 0u32;
             let reason = loop {
                 tokio::select! {
                     biased;
@@ -241,7 +248,7 @@ impl Client {
                     Some(m) = epoch_rx.recv() => match m {
                         FromHost::Stream(info) => {
                             r.reset(info.epoch);
-                            (started, waiting_key) = (true, true);
+                            (started, need_key, missed) = (true, true, None);
                             handler.stream(&info);
                         }
                         FromHost::Cursor(shape) => handler.cursor_shape(&shape),
@@ -260,24 +267,40 @@ impl Client {
                             }
                             continue;
                         }
+                        if let Some(n) = o_drop {
+                            dropped += 1;
+                            if dropped % n == 0 {
+                                continue;
+                            }
+                        }
                         let frame = match r.push(&d) {
                             Ok(Some(f)) => f,
                             Ok(None) => continue,
                             Err(e) => break format!("bad video datagram: {e}"),
                         };
-                        let gone = r.take_lost();
-                        if gone > 0 {
-                            c.lost.fetch_add(gone, Ordering::Relaxed);
-                            waiting_key = true;
+                        if let Some((first, last)) = r.take_lost() {
+                            c.lost.fetch_add(last - first + 1, Ordering::Relaxed);
+                            // Keep the earliest loss not yet recovered from.
+                            missed = Some(missed.map_or(first, |m: u32| m.min(first)));
+                            asked = None;
                         }
-                        if waiting_key && !frame.key {
-                            // Later frames lean on the lost one: ask for a fresh start.
-                            if ctl_tx.try_send(Message::Keyframe).is_ok() {
-                                c.requests.fetch_add(1, Ordering::Relaxed);
+                        let usable = frame.key || (frame.recovery && !need_key);
+                        if (need_key || missed.is_some()) && !usable {
+                            // Later frames lean on what was missed. Tell the host (again, if it
+                            // has had time to answer and hasn't).
+                            if asked.is_none_or(|t| t.elapsed() > Duration::from_millis(40)) {
+                                let m = match missed {
+                                    Some(first) if !need_key => Message::Lost { first, last: frame.number },
+                                    _ => Message::Keyframe,
+                                };
+                                if ctl_tx.try_send(m).is_ok() {
+                                    c.requests.fetch_add(1, Ordering::Relaxed);
+                                    asked = Some(Instant::now());
+                                }
                             }
                             continue;
                         }
-                        waiting_key = false;
+                        (need_key, missed) = (false, None);
                         let age = (*offset_rx.borrow()).map(|offset| now_us() as i64 + offset - frame.capture_us as i64);
                         handler.frame(&frame, age);
                     }

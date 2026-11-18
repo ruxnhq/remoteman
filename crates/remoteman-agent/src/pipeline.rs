@@ -29,6 +29,8 @@ pub struct Settings {
 pub struct Pipeline {
     quit: Option<QuitSender<()>>,
     keyframe: Arc<AtomicBool>,
+    /// The first frame the client reported missing, plus one (0: nothing reported).
+    lost: Arc<AtomicU32>,
     /// Frames the compositor made that were skipped because the encoder was still busy.
     pub skipped: Arc<AtomicU32>,
     /// The scale the compositor draws the monitor at, as `f32` bits (what was asked for, until
@@ -71,6 +73,8 @@ impl Pipeline {
 
         let (ready_tx, ready_rx) = mpsc::channel::<Result<String>>();
         let key = keyframe.clone();
+        let lost = Arc::new(AtomicU32::new(0));
+        let lost_r = lost.clone();
         let out = link.clone();
         let encoder = std::thread::Builder::new().name("encode".into()).spawn(move || {
             let opened = (|| {
@@ -90,13 +94,30 @@ impl Pipeline {
                     return;
                 }
             };
+            // How many earlier frames the encoder keeps to refer to (as the wrapper sets it up).
+            const REFERENCES: u64 = 4;
             let mut n = 0u64;
             while let Ok(c) = rx.recv() {
-                let force = key.swap(false, Ordering::Relaxed);
+                let mut force = key.swap(false, Ordering::Relaxed);
+                let mut recovery = false;
+                let reported = lost_r.swap(0, Ordering::Relaxed);
+                if reported != 0 && !force {
+                    // The client missed frames from `first` on, and nothing sent since is any
+                    // use to it either. If the encoder still holds a frame from before the loss,
+                    // drop its references to everything after and carry on from there: no
+                    // keyframe, so no burst. Otherwise start afresh.
+                    let first = (reported - 1) as u64;
+                    if first < n && n - first < REFERENCES && (first..n).all(|t| enc.invalidate(t).is_ok()) {
+                        recovery = true;
+                    } else {
+                        force = true;
+                    }
+                }
                 match enc.encode(c.slot, n, force) {
                     Ok((data, key)) => {
                         n += 1;
-                        if !out.send_frame(data, key, c.capture_us) {
+                        let sent = if recovery && !key { out.send_recovery_frame(data, c.capture_us) } else { out.send_frame(data, key, c.capture_us) };
+                        if !sent {
                             break;
                         }
                     }
@@ -153,12 +174,25 @@ impl Pipeline {
                 tracing::error!("capture: {e:#}");
             }
         })?;
-        Ok(Self { quit: Some(quit), keyframe, skipped, scale: actual_scale, threads: vec![capture, encoder] })
+        Ok(Self { quit: Some(quit), keyframe, lost, skipped, scale: actual_scale, threads: vec![capture, encoder] })
     }
 
     /// Make the next frame a keyframe.
     pub fn request_keyframe(&self) {
         self.keyframe.store(true, Ordering::Relaxed);
+    }
+
+    /// The client missed frames from `first` on: recover at the next frame.
+    pub fn report_lost(&self, first: u32) {
+        // Keep the earliest report not yet acted on.
+        let mut old = self.lost.load(Ordering::Relaxed);
+        loop {
+            let new = if old == 0 { first + 1 } else { old.min(first + 1) };
+            match self.lost.compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(now) => old = now,
+            }
+        }
     }
 }
 
