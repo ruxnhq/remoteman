@@ -1342,6 +1342,7 @@ name = "remoteman-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "remoteman-audio",
  "remoteman-camera",
  "remoteman-capture",
@@ -1349,6 +1350,7 @@ dependencies = [
  "remoteman-desktop",
  "remoteman-encode",
  "remoteman-gpu",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

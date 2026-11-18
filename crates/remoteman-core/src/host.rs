@@ -244,6 +244,7 @@ pub struct Host {
     who: Who,
     /// What this host can do, as the next hello will say it.
     features: Arc<Mutex<Vec<String>>>,
+    calls: Mutex<mpsc::Sender<Call>>,
     /// This host's certificate fingerprint, for pairing by hand.
     pub fingerprint: String,
     /// The address actually listened on.
@@ -290,8 +291,8 @@ impl Host {
         let link: Arc<Mutex<Option<Link>>> = Arc::default();
         let who = Who::default();
         let features = Arc::new(Mutex::new(options.features.clone()));
-        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls, link.clone(), who.clone(), features.clone()));
-        Ok(Self { runtime: Some(runtime), endpoint, trust, link, who, features, fingerprint: identity.fingerprint, address })
+        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone()));
+        Ok(Self { runtime: Some(runtime), endpoint, trust, link, who, features, calls: Mutex::new(calls), fingerprint: identity.fingerprint, address })
     }
 
     /// Let the next unknown device in (it is remembered and pairing turns itself off), or stop
@@ -313,6 +314,14 @@ impl Host {
         if let Some(link) = self.link() {
             link.send_message(Message::Features { features });
         }
+    }
+
+    /// Hand the handler a message as if the client had sent it, on the handler's own thread
+    /// and in turn with everything else: how the host program itself switches something off
+    /// for the connected client (`Message::Clipboard { on: false }` when its owner stops
+    /// allowing the clipboard, say).
+    pub fn tell_handler(&self, message: Message) {
+        let _ = self.calls.lock().unwrap().send(Call::Message(message));
     }
 
     /// Every device this host trusts, in the order they were paired.

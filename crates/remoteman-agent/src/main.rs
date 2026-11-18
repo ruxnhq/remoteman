@@ -14,6 +14,7 @@
 //! one unknown device in and remembers it. With `--daemon` it listens for nothing: it attaches
 //! to `remotemand`, which owns the port and the trust list and hands it clients.
 
+mod control;
 mod pipeline;
 mod session;
 
@@ -38,7 +39,9 @@ fn main() -> Result<()> {
     let (mut pair, mut state, mut bitrate, mut drop_one_in) = (false, state_dir(), 40u32, None::<u32>);
     let (mut daemon, mut socket) = (false, None::<PathBuf>);
     let mut refs = None::<(u32, u32)>;
-    let mut allowed = session::Allowed::default();
+    let allowed = session::Allowed::default();
+    let (mut allow_files, mut allow_clipboard) = (false, false);
+    let mut control_at = None::<PathBuf>;
     let mut take_output = true;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -56,8 +59,8 @@ fn main() -> Result<()> {
             "--allow" => {
                 for what in value()?.split(',') {
                     match what.trim() {
-                        "files" => allowed.files = true,
-                        "clipboard" => allowed.clipboard = true,
+                        "files" => allow_files = true,
+                        "clipboard" => allow_clipboard = true,
                         other => anyhow::bail!("--allow {other}: files, clipboard"),
                     }
                 }
@@ -69,18 +72,19 @@ fn main() -> Result<()> {
                 refs = Some((s.parse()?, l.parse()?));
             }
             "--socket" => socket = Some(value()?.into()),
+            // Where the host's owner asks how things stand and changes them (see control.rs).
+            "--control" => control_at = Some(value()?.into()),
             // For tests: lose one video packet in this many.
             "--test-drop-one-in" => drop_one_in = Some(value()?.parse().context("--test-drop-one-in N")?),
             other => anyhow::bail!("unknown option {other}"),
         }
     }
-    let mut features: Vec<String> = ["video", "input", "cursor", "placement", "configure", "sound", "mic", "camera"].map(String::from).to_vec();
-    if allowed.files {
-        features.push("files".into());
-    }
-    if allowed.clipboard {
-        features.push("clipboard".into());
-    }
+    // What the owner switched on earlier (from the host's window) holds until switched off;
+    // `--allow` adds to it for this run.
+    let saved = control::Saved::load(&state);
+    allowed.files.store(allow_files || saved.files, std::sync::atomic::Ordering::Relaxed);
+    allowed.clipboard.store(allow_clipboard || saved.clipboard, std::sync::atomic::Ordering::Relaxed);
+    let features = control::features(&allowed);
     if daemon {
         // The system service's socket if it is there, else one run by hand as this user.
         let socket = socket.unwrap_or_else(|| {
@@ -94,7 +98,7 @@ fn main() -> Result<()> {
                 Ok(stream) => {
                     tracing::info!("attached to the daemon at {}", socket.display());
                     said = false;
-                    if let Err(e) = remoteman_core::relay::run_agent(stream, features.clone(), session::Agent::new(bitrate * 1_000_000, refs, allowed, take_output)?) {
+                    if let Err(e) = remoteman_core::relay::run_agent(stream, features.clone(), session::Agent::new(bitrate * 1_000_000, refs, allowed.clone(), take_output)?) {
                         tracing::warn!("{e:#}");
                     }
                     tracing::info!("the daemon went away");
@@ -110,8 +114,11 @@ fn main() -> Result<()> {
     }
     let name = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "linux".into());
     let options = HostOptions { listen, state, name, os: "linux".into(), features, pair, test_drop_one_in: drop_one_in };
-    let host = Host::start(options, session::Agent::new(bitrate * 1_000_000, refs, allowed, take_output)?)?;
+    let state_dir = options.state.clone();
+    let host = std::sync::Arc::new(Host::start(options, session::Agent::new(bitrate * 1_000_000, refs, allowed.clone(), take_output)?)?);
     tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
+    let control_at = control_at.unwrap_or_else(|| control::default_path(host.address.port()));
+    control::serve(&control_at, std::sync::Arc::downgrade(&host), allowed, state_dir);
     if pair {
         tracing::info!("pairing: the next unknown device to connect will be trusted");
     }
@@ -126,6 +133,18 @@ fn main() -> Result<()> {
         }
         anyhow::Ok(())
     })?;
+    let _ = std::fs::remove_file(&control_at);
+    // A control request may hold the host for a moment.
+    let mut host = host;
+    let host = loop {
+        match std::sync::Arc::try_unwrap(host) {
+            Ok(host) => break host,
+            Err(held) => {
+                host = held;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    };
     host.stop();
     Ok(())
 }

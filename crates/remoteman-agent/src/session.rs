@@ -63,11 +63,29 @@ struct Incoming {
 
 /// What a device may do besides see and control the desktop. Off unless the computer's owner
 /// said otherwise (`--allow`), because any paired device could otherwise write files here.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct Allowed {
-    pub files: bool,
+    pub files: Arc<std::sync::atomic::AtomicBool>,
     /// Sharing the clipboard both ways: a device could otherwise read whatever is copied here.
-    pub clipboard: bool,
+    pub clipboard: Arc<std::sync::atomic::AtomicBool>,
+    /// The client being served, for whoever asks how things stand (the control socket).
+    pub now: Arc<std::sync::Mutex<Option<Now>>>,
+}
+
+/// The client being served, as the host's owner is shown it.
+#[derive(Clone, serde::Serialize)]
+pub struct Now {
+    pub name: String,
+    /// When it connected, in seconds since 1970.
+    pub since: u64,
+    pub width: u32,
+    pub height: u32,
+    pub refresh: u32,
+    /// `extend`, `main` or `only`.
+    pub placement: &'static str,
+    /// What its picture is encoded as, e.g. "AV1 10-bit".
+    pub picture: String,
+    pub sound: bool,
 }
 
 pub struct Agent {
@@ -166,6 +184,19 @@ impl Agent {
         self.live = Some(Live { desktop, pipeline, size: (screen.width, screen.height), placing, name, link, screen, decoders, cursor, mode, ceiling, files: BTreeMap::new(), clipboard: None, copied: BTreeMap::new() });
         // The clipboard belongs to the display's session, so a new display shares it anew.
         self.share_clipboard(self.clipboard_wanted);
+        if let Some(l) = &self.live {
+            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let mut now = self.allowed.now.lock().unwrap();
+            // A new picture for the same client keeps the time it came.
+            let since = now.as_ref().filter(|n| n.name == l.name).map_or(since, |n| n.since);
+            let placement = match screen.placement {
+                remoteman_core::Placement::Extend => "extend",
+                remoteman_core::Placement::Main => "main",
+                remoteman_core::Placement::Only => "only",
+            };
+            let picture = format!("{} {}-bit{}", if mode.codec == remoteman_core::Codec::Av1 { "AV1" } else { "HEVC" }, mode.depth, if mode.chroma == remoteman_core::Chroma::C444 { " 4:4:4" } else { "" });
+            *now = Some(Now { name: l.name.clone(), since, width: screen.width, height: screen.height, refresh, placement, picture, sound: self.sound.is_some() });
+        }
         Ok(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into() })
     }
 
@@ -325,7 +356,7 @@ impl Agent {
     /// Share the clipboard with the client, both ways, or stop. Only where the computer's
     /// owner allowed it, and never at a login screen.
     fn share_clipboard(&mut self, on: bool) {
-        let allowed = self.allowed.clipboard && self.login_screen.is_none();
+        let allowed = self.allowed.clipboard.load(Ordering::Relaxed) && self.login_screen.is_none();
         let Some(l) = self.live.as_mut() else { return };
         if let Some((clipboard, watching)) = l.clipboard.take() {
             watching.abort();
@@ -466,7 +497,7 @@ impl Agent {
     /// A file blob from the client: written into the user's Downloads folder under a name of
     /// this host's choosing, and answered with where it went.
     fn file(&mut self, event: &BlobEvent) {
-        let allowed = self.allowed.files && self.login_screen.is_none();
+        let allowed = self.allowed.files.load(Ordering::Relaxed) && self.login_screen.is_none();
         let Some(l) = self.live.as_mut() else { return };
         match event {
             BlobEvent::Open { id, header, .. } => {
@@ -595,7 +626,12 @@ impl HostHandler for Agent {
                 self.clipboard_wanted = *on;
                 self.share_clipboard(*on);
             }
-            Message::Sound { on } => self.send_sound(*on),
+            Message::Sound { on } => {
+                self.send_sound(*on);
+                if let Some(now) = self.allowed.now.lock().unwrap().as_mut() {
+                    now.sound = self.sound.is_some();
+                }
+            }
             Message::Mic { on, .. } => self.take_microphone(*on),
             Message::Camera { on, codec, width, height, fps } => self.take_camera(*on, codec, *width, *height, *fps),
             _ => {}
@@ -637,6 +673,7 @@ impl HostHandler for Agent {
     }
 
     fn left(&mut self) {
+        *self.allowed.now.lock().unwrap() = None;
         self.clipboard_wanted = false;
         self.drop_camera();
         self.drop_microphone();
