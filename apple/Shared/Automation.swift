@@ -114,7 +114,13 @@ enum Automation {
             session.play(recording: resolve(play))
         } else if let host {
             print("remoteman: hello \(display.width)x\(display.height) scale \(display.scale) @\(display.refresh), decoders \(decoders), placement \(placement.rawValue)")
-            session.connect(host: host, pair: pair, name: name, display: display, decoders: decoders, placement: placement)
+            let join = { session.connect(host: host, pair: pair, name: name, display: display, decoders: decoders, placement: placement) }
+            if script?.contains("mem") == true { print("remoteman: memory before any session \(memory())") }
+            join()
+            if let script {
+                runScript(script, session: session, join: join)
+                return
+            }
         } else {
             return
         }
@@ -164,14 +170,15 @@ enum Automation {
     /// keydown:usage  keyup:usage  text:words  touch:phase,slot,x,y  wait:seconds  shot:file.png  cursor (print the host's)
     /// features  stats  bitrate:bits  resize:w,h[,scale[,refresh]]  placement:extend|main|only
     /// sound:on|off  mic:on|off  clipboard:on|off  file:path  transfers
-    static func runScript(_ script: String, session: ViewerSession) {
+    /// leave (end the session, stay open)  join (connect again as at launch)  mem (this app's memory)
+    static func runScript(_ script: String, session: ViewerSession, join: (() -> Void)? = nil) {
         DispatchQueue.global().async {
             // Wait for the stream and its first picture.
             for _ in 0..<150 {
                 if session.renderer?.videoSize != nil { break }
                 usleep(100_000)
             }
-            guard let c = session.client, session.renderer?.videoSize != nil else {
+            guard var c = session.client, session.renderer?.videoSize != nil else {
                 print("remoteman: script: no picture, state \(DispatchQueue.main.sync { session.state })")
                 DispatchQueue.main.async {
                     session.disconnect()
@@ -253,6 +260,18 @@ enum Automation {
                         try? bytes.write(to: resolve(p[0]))
                         print("remoteman: made \(p[0]), \(n) bytes")
                     }
+                case "leave": DispatchQueue.main.sync { session.disconnect() }
+                case "join":
+                    DispatchQueue.main.sync { join?() }
+                    for _ in 0..<150 {
+                        if let again = DispatchQueue.main.sync(execute: { session.client }), session.renderer?.videoSize != nil {
+                            c = again
+                            break
+                        }
+                        usleep(100_000)
+                    }
+                    print("remoteman: joined: \(DispatchQueue.main.sync { "\(session.state)" })")
+                case "mem": print("remoteman: memory \(memory()), \(DispatchQueue.main.sync { session.client == nil ? "not connected" : "connected" })")
                 case "transfers":
                     print("remoteman: transfers \(DispatchQueue.main.sync { session.transfers })  notice \(DispatchQueue.main.sync { session.notice ?? "none" })")
                 case "shot":
@@ -271,6 +290,22 @@ enum Automation {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
             }
         }
+    }
+
+    /// What this app holds now (the figure Activity Monitor shows), and how many threads.
+    static func memory() -> String {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let ok = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count) }
+        }
+        guard ok == KERN_SUCCESS else { return "unreadable" }
+        var threads: thread_act_array_t?
+        var n: mach_msg_type_number_t = 0
+        if task_threads(mach_task_self_, &threads, &n) == KERN_SUCCESS, let threads {
+            vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: threads)), vm_size_t(Int(n) * MemoryLayout<thread_act_t>.size))
+        }
+        return String(format: "%.1f MB, %d threads", Double(info.phys_footprint) / 1_048_576, Int(n))
     }
 
     /// A path as given if absolute, otherwise inside the app's Documents folder (where files can
