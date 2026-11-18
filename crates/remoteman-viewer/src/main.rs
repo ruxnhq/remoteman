@@ -161,7 +161,7 @@ impl Ui {
         if let Some((sw, sh)) = self.args.size {
             (w, h) = (sw, sh);
         }
-        Display { width: w & !1, height: h & !1, scale: self.args.scale.unwrap_or(scale), refresh: self.args.refresh.unwrap_or(refresh) }
+        Display { width: w & !1, height: h & !1, scale: self.args.scale.unwrap_or(scale), refresh: self.args.refresh.unwrap_or(refresh), placement: Default::default() }
     }
 
     /// The picture as something GTK can draw. `None`: GTK refused it, and the decoder has been

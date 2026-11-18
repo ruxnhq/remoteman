@@ -19,6 +19,8 @@ struct Live {
     desktop: VirtualDisplay,
     pipeline: Pipeline,
     size: (u32, u32),
+    /// Putting the display where the client asked for it, which waits for the monitor to exist.
+    placing: tokio::task::JoinHandle<()>,
 }
 
 pub struct Agent {
@@ -64,7 +66,15 @@ impl HostHandler for Agent {
                 return Err(format!("{e:#}"));
             }
         };
-        self.live = Some(Live { desktop, pipeline, size: (screen.width, screen.height) });
+        // Not waited for: the client must hear about its stream before the first frame reaches it.
+        let place = desktop.place(screen.placement);
+        let placing = self.runtime.spawn(async move {
+            if let Err(e) = place.await {
+                // The client still gets its display, just beside the others.
+                tracing::warn!("couldn't make the display {:?}: {e:#}", screen.placement);
+            }
+        });
+        self.live = Some(Live { desktop, pipeline, size: (screen.width, screen.height), placing });
         Ok(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into() })
     }
 
@@ -91,6 +101,7 @@ impl HostHandler for Agent {
     fn left(&mut self) {
         if let Some(l) = self.live.take() {
             tracing::info!(skipped = l.pipeline.skipped.load(std::sync::atomic::Ordering::Relaxed), "session over");
+            l.placing.abort();
             drop(l.pipeline);
             self.runtime.block_on(l.desktop.close());
         }

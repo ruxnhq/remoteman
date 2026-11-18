@@ -31,6 +31,9 @@ pub struct HostOptions {
     pub features: Vec<String>,
     /// Let the next unknown device in, and remember it.
     pub pair: bool,
+    /// For tests: throw away one video datagram in this many before sending, as a lossy
+    /// network would.
+    pub test_drop_one_in: Option<u32>,
 }
 
 /// A client that has said hello.
@@ -300,11 +303,17 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         .await
         .map_err(yes)?;
 
+    let drop_one_in = options.test_drop_one_in.filter(|n| *n > 1);
     let video = async {
         let mut number = 0u32;
+        let mut sent = 0u32;
         while let Some(f) = frame_rx.recv().await {
             let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
             for d in fragment(&f.data, f.key, f.recovery, EPOCH, number, f.capture_us, max) {
+                sent = sent.wrapping_add(1);
+                if drop_one_in.is_some_and(|n| sent % n == 0) {
+                    continue;
+                }
                 conn.send_datagram_wait(d.into()).await?;
             }
             number = number.wrapping_add(1);

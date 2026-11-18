@@ -10,7 +10,7 @@
 static volatile int connected, inputs, keyframes;
 
 static int32_t on_client(void *ctx, const rm_client_info *c, rm_accept *a) {
-    printf("host: client \"%s\" %ux%u scale %.2f at %u Hz, decoders %s, cursor apart %d\n", c->name, c->width, c->height, c->scale, c->refresh, c->decoders, c->cursor_apart);
+    printf("host: client \"%s\" %ux%u scale %.2f at %u Hz, decoders %s, cursor apart %d, placement %d\n", c->name, c->width, c->height, c->scale, c->refresh, c->decoders, c->cursor_apart, c->placement);
     if (c->width > 4000) { snprintf(a->refuse, sizeof a->refuse, "too wide for the test host"); return 0; }
     a->codec = 1; a->depth = 10; a->chroma = 420; a->width = c->width; a->height = c->height; a->refresh = c->refresh; a->hdr = 0;
     connected = 1;

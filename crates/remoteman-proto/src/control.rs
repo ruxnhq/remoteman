@@ -30,6 +30,28 @@ pub struct Mode {
     pub depth: u8,
 }
 
+/// Where the client's display sits among the host's own screens. The numbers are the C
+/// interface's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Placement {
+    /// The main display: where the desktop's panel and new windows go.
+    Main = 1,
+    /// The only display: the host's own screens are off while the client is connected.
+    Only = 2,
+    /// An extra display beside the host's own. Also what a placement this version doesn't know
+    /// is read as.
+    #[default]
+    #[serde(other)]
+    Extend = 0,
+}
+
+impl Placement {
+    fn is_default(&self) -> bool {
+        *self == Placement::Extend
+    }
+}
+
 /// A client's screen.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Display {
@@ -39,6 +61,8 @@ pub struct Display {
     pub scale: f32,
     /// In Hz.
     pub refresh: u32,
+    #[serde(default, skip_serializing_if = "Placement::is_default")]
+    pub placement: Placement,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -151,7 +175,11 @@ mod tests {
         let m = Message::parse(json.as_bytes()).unwrap();
         let Message::ClientHello { display, decoders, cursor, .. } = &m else { panic!("{m:?}") };
         assert!(!cursor);
-        assert_eq!((display.width, display.refresh), (2752, 120));
+        assert_eq!((display.width, display.refresh, display.placement), (2752, 120, Placement::Extend));
+        let only = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"only"},"decoders":[]}"#).unwrap();
+        assert!(matches!(only, Message::ClientHello { display: Display { placement: Placement::Only, .. }, .. }));
+        let newer = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"mirror"},"decoders":[]}"#).unwrap();
+        assert!(matches!(newer, Message::ClientHello { display: Display { placement: Placement::Extend, .. }, .. }));
         assert_eq!(decoders[1], Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 });
         assert_eq!(serde_json::to_string(&m).unwrap(), json);
     }
