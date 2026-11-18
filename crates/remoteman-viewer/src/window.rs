@@ -301,6 +301,16 @@ impl App {
                 self.toast(&format!("The sound can't be played here: {e:#}"));
             }
         }
+        // And the microphone.
+        self.view.offer_microphone(session.offers("mic"));
+        if self.args.mic && session.offers("mic") {
+            self.view.microphone.set_active(true);
+        }
+        if self.view.microphone.is_active() {
+            if let Err(e) = session.set_microphone(true, self.args.mic_from.as_deref()) {
+                self.toast(&format!("The microphone can't be used: {e:#}"));
+            }
+        }
         *self.session.borrow_mut() = Some(session);
         *self.target.borrow_mut() = Some(Target { address: target.address.clone(), name });
         self.ended.borrow_mut().clear();
@@ -354,9 +364,11 @@ impl App {
         let Some(session) = self.session.borrow_mut().take() else { return false };
         self.video.free_gl();
         let _ = session.set_sound(false, None);
+        let _ = session.set_microphone(false, None);
         session.client.close();
         if !stay {
             self.view.sound.set_active(false);
+            self.view.microphone.set_active(false);
             self.clipboard_on.set(false);
             self.view.show_clipboard(false);
         }

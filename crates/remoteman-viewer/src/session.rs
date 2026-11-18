@@ -140,6 +140,8 @@ pub struct View {
     show_figures: Item,
     /// Plays the computer's sound here while it is pressed in.
     pub sound: gtk::ToggleButton,
+    /// Lets the computer use this device's microphone while it is pressed in.
+    pub microphone: gtk::ToggleButton,
     pub figures: Figures,
 }
 
@@ -249,6 +251,7 @@ pub fn build(video: &Video) -> View {
         mirror,
         show_figures,
         sound,
+        microphone,
         figures,
     }
 }
@@ -298,6 +301,17 @@ impl View {
     pub fn show_clipboard(&self, on: bool) {
         if let Some(mark) = &self.share_clipboard.mark {
             mark.set_active(on);
+        }
+    }
+
+    /// Whether this computer takes a device's microphone: the button is there for those that do.
+    pub fn offer_microphone(&self, offered: bool) {
+        if FEATURES.microphone {
+            self.microphone.set_sensitive(offered);
+            self.microphone.set_tooltip_text(Some(if offered { "Microphone" } else { "This computer doesn't take a microphone" }));
+        }
+        if !offered {
+            self.microphone.set_active(false);
         }
     }
 
@@ -422,6 +436,20 @@ pub fn wire(app: &Rc<App>) {
                     app.send_file(&path);
                 }
             });
+        }
+    });
+    view.microphone.connect_toggled({
+        let app = app.clone();
+        move |button| {
+            let on = button.is_active();
+            let failed = match app.session.borrow().as_ref() {
+                Some(session) => session.set_microphone(on, app.args.mic_from.as_deref()).err(),
+                None => None,
+            };
+            if let Some(e) = failed {
+                app.toast(&format!("The microphone can't be used: {e:#}"));
+                button.set_active(false);
+            }
         }
     });
     view.sound.connect_toggled({

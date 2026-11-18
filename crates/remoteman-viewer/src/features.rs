@@ -19,8 +19,10 @@ pub struct Features {
     pub sound: bool,
     /// Remembering, for all computers and for each, whether sound starts with the session.
     pub sound_setting: bool,
-    /// This device's microphone used by the computer.
+    /// This device's microphone used by the computer: the button in the session's bar.
     pub microphone: bool,
+    /// Remembering, for all computers and for each, whether the computer may use it.
+    pub microphone_setting: bool,
     /// This device's camera used by the computer.
     pub camera: bool,
     /// One clipboard for both sides: the line in the session's sharing menu.
@@ -62,7 +64,8 @@ pub const FEATURES: Features = Features {
     pairing_code: false,
     sound: true,
     sound_setting: false,
-    microphone: false,
+    microphone: true,
+    microphone_setting: false,
     camera: false,
     clipboard: true,
     files: true,

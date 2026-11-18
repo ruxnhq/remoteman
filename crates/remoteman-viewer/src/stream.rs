@@ -39,6 +39,8 @@ pub struct Shared {
     pub bytes: AtomicU64,
     /// What plays the computer's sound here, while it is on.
     pub sound: Mutex<Option<remoteman_audio::Player>>,
+    /// What records this device's microphone for the computer, while it is on.
+    pub microphone: Mutex<Option<remoteman_audio::MicCapture>>,
     /// What was copied on the computer, whole, until the window takes it: its type and bytes.
     pub copies: Mutex<Vec<(String, Vec<u8>)>>,
     /// What became of files sent to the computer, until the window says so: whether it
@@ -190,6 +192,33 @@ impl Session {
             }
         })?;
         Ok(name)
+    }
+
+    /// Let the computer use this device's microphone, or stop. `from`: a PipeWire node to
+    /// record and no other, instead of the default microphone.
+    pub fn set_microphone(&self, on: bool, from: Option<&str>) -> Result<()> {
+        let mut microphone = self.shared.microphone.lock().unwrap();
+        if !on {
+            if microphone.take().is_some() {
+                self.client.send_message(Message::Mic { on: false, codec: String::new(), rate: 0, channels: 0, frame_us: 0 });
+            }
+            return Ok(());
+        }
+        if microphone.is_some() {
+            return Ok(());
+        }
+        let began = std::time::Instant::now();
+        let sender = self.client.mic_sender();
+        // Silence is left out by the recorder; the first packet after a gap says so.
+        let mut last = None::<u64>;
+        let capture = remoteman_audio::MicCapture::open("remoteman", from, move || began.elapsed().as_micros() as u64, move |packet| {
+            let start = last.is_none_or(|at| packet.capture_us.saturating_sub(at) > 25_000);
+            last = Some(packet.capture_us);
+            sender.send(start, packet.seq, packet.capture_us, &packet.data);
+        })?;
+        self.client.send_message(Message::Mic { on: true, codec: "opus".into(), rate: remoteman_audio::SAMPLE_RATE, channels: 1, frame_us: remoteman_audio::FRAME_US as u32 });
+        *microphone = Some(capture);
+        Ok(())
     }
 
     /// `to`: a PipeWire node to play on and no other, instead of the default output.
