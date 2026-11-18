@@ -35,6 +35,9 @@ while !args.isEmpty {
     case "--bitrate": options.bitrate = Int(value()) ?? 0
     case "--test-window": options.testWindow = yes()
     case "--in-flight": options.inFlight = Int(value()) ?? 2
+    // For tests: so many seconds after a device connects, drop it or stop trusting it.
+    case "--test-drop": options.testDrop = Double(value())
+    case "--test-revoke": options.testRevoke = Double(value())
     default:
         // AppKit passes arguments of its own (-NSDocumentRevisionsDebugMode and the like).
         if a.hasPrefix("--") { hostLog("host: unknown option \(a)") }

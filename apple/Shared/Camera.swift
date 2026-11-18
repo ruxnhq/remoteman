@@ -15,6 +15,8 @@ final class CameraSender: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     private var connection: AVCaptureConnection?
     private var turnTimer: Timer?
     private(set) var running = false
+    /// For tests: how far the picture was last turned to stay upright, in degrees.
+    private(set) var turned = 0.0
     /// Frames, bytes and keyframes sent, and the size they were last encoded at.
     private(set) var totals = (frames: 0, bytes: 0, keyframes: 0, width: 0, height: 0)
     /// One whole frame, on the camera's queue.
@@ -86,6 +88,7 @@ final class CameraSender: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             guard let c = connection, let r = rotation as? AVCaptureDevice.RotationCoordinator else { return }
             let angle = r.videoRotationAngleForHorizonLevelCapture
             if c.isVideoRotationAngleSupported(angle), c.videoRotationAngle != angle { c.videoRotationAngle = angle }
+            turned = Double(c.videoRotationAngle)
         }
     #endif
 
@@ -141,6 +144,8 @@ final class CameraSender: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             (kVTCompressionPropertyKey_AllowFrameReordering, false),
             (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel),
             (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 2),
+            // In frames too: by the duration alone the encoder made one about every second.
+            (kVTCompressionPropertyKey_MaxKeyFrameInterval, 60),
             (kVTCompressionPropertyKey_ExpectedFrameRate, 30),
             (kVTCompressionPropertyKey_AverageBitRate, 2_500_000),
         ]

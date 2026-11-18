@@ -188,8 +188,9 @@ final class ViewerSession: ObservableObject {
 
     /// For tests: what the camera has sent.
     var cameraReport: String {
-        guard let t = camera?.totals else { return "the camera is off" }
-        return "\(t.frames) frames, \(t.bytes) bytes, \(t.keyframes) keyframes, last \(t.width)x\(t.height)"
+        guard let c = camera else { return "the camera is off" }
+        let t = c.totals
+        return "\(t.frames) frames, \(t.bytes) bytes, \(t.keyframes) keyframes, last \(t.width)x\(t.height), turned \(Int(c.turned)) degrees to stay upright"
     }
 
     /// Share the clipboard both ways.

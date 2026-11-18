@@ -50,6 +50,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var bitrate = 0
         /// Fill the virtual display with moving test content while a client is on.
         var testWindow = false
+        var testDrop: Double?
+        var testRevoke: Double?
     }
 
     /// The device that is connected, as the interface shows it.
@@ -88,6 +90,39 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         get { host.map { rm_host_pairing($0) != 0 } ?? false }
         set { if let h = host { rm_host_set_pairing(h, newValue ? 1 : 0) } }
     }
+    /// A device this Mac trusts.
+    struct Device: Identifiable, Equatable {
+        var fingerprint: String
+        var name: String
+        var connected: Bool
+        var id: String { fingerprint }
+    }
+
+    /// The trusted devices, in the order they were paired.
+    var devices: [Device] {
+        guard let h = host else { return [] }
+        var buf = [CChar](repeating: 0, count: 8192)
+        var n = rm_host_devices(h, &buf, buf.count)
+        if n >= buf.count {
+            buf = [CChar](repeating: 0, count: n + 1)
+            n = rm_host_devices(h, &buf, buf.count)
+        }
+        guard let list = (try? JSONSerialization.jsonObject(with: Data(String(cString: buf).utf8))) as? [[String: Any]] else { return [] }
+        return list.map {
+            Device(fingerprint: $0["fingerprint"] as? String ?? "", name: $0["name"] as? String ?? "", connected: $0["connected"] as? Bool ?? false)
+        }
+    }
+
+    /// Stop trusting a device (it is dropped if connected). 1 done, 0 it wasn't trusted, -1 the list couldn't be saved.
+    func revoke(_ fingerprint: String) -> Int {
+        guard let h = host else { return 0 }
+        return Int(rm_host_revoke(h, fingerprint))
+    }
+
+    /// Drop the connected device and keep listening; it stays trusted.
+    @discardableResult
+    func dropClient() -> Bool { host.map { rm_host_drop_client($0) != 0 } ?? false }
+
     private let frames = DispatchQueue(label: "remoteman.host.frames", qos: .userInteractive)
     private let input = HostInput()
 

@@ -21,6 +21,8 @@ final class HostController: ObservableObject {
     @Published private(set) var port = "7791"
     @Published private(set) var addresses: [String] = []
     @Published private(set) var pairing = false
+    /// The devices this Mac trusts, in the order they were paired.
+    @Published private(set) var devices: [MacHost.Device] = []
     /// When the pairing started from the interface closes by itself.
     @Published private(set) var pairingEnds: Date?
     /// The core closed pairing by itself: a device was let in.
@@ -42,6 +44,16 @@ final class HostController: ObservableObject {
         host = MacHost(options: options)
         host.onClient = { [weak self] c in
             self?.client = c
+            if let self, c != nil {
+                hostLog("host: trusted devices: \(self.host.devices.map { "\($0.name) \($0.fingerprint.prefix(8))\($0.connected ? " (connected)" : "")" }.joined(separator: ", "))")
+                if let t = options.testDrop { DispatchQueue.main.asyncAfter(deadline: .now() + t) { self.disconnectClient() } }
+                if let t = options.testRevoke {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + t) {
+                        if let d = self.host.devices.first(where: { $0.connected }) { self.revoke(d) }
+                        hostLog("host: trusted devices now: \(self.host.devices.count)")
+                    }
+                }
+            }
             if c == nil {
                 self?.fps = 0
                 self?.bitsPerSecond = 0
@@ -95,18 +107,18 @@ final class HostController: ObservableObject {
         if !unattended { UserDefaults.standard.set(!on, forKey: Self.pausedKey) }
     }
 
-    /// The core has no way to drop one device, so sharing is stopped and started again.
+    /// Drop the connected device; it stays trusted and sharing goes on.
     func disconnectClient() {
         guard host.isRunning else { return }
-        hostLog("host: disconnecting the device")
-        host.stop()
-        client = nil
-        pairing = false
-        pairingEnds = nil
-        do { try host.start() } catch {
-            sharing = false
-            startError = error.localizedDescription
-        }
+        hostLog("host: disconnecting the device: \(host.dropClient() ? "dropped" : "none was connected")")
+    }
+
+    /// Stop trusting a device; it has to be paired again before it can connect.
+    func revoke(_ d: MacHost.Device) {
+        let r = host.revoke(d.fingerprint)
+        hostLog("host: revoking \(d.name): \(r == 1 ? "done" : r == 0 ? "it wasn't trusted" : "the list couldn't be saved")")
+        if r < 0 { startError = "The list of paired devices couldn't be saved." }
+        devices = host.devices
     }
 
     /// Let the next unknown device in, for two minutes.
@@ -145,7 +157,12 @@ final class HostController: ObservableObject {
         let sr = CGPreflightScreenCaptureAccess(), ax = AXIsProcessTrusted()
         if sr != screenRecording { screenRecording = sr }
         if ax != accessibility { accessibility = ax }
-        guard host.isRunning else { return }
+        guard host.isRunning else {
+            if !devices.isEmpty { devices = [] }
+            return
+        }
+        let list = host.devices
+        if list != devices { devices = list }
         let core = host.pairing
         if pairing, !core {
             // The core turns pairing off once it has let a device in.

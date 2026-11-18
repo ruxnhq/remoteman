@@ -7,7 +7,7 @@ enum Features {
     /// The 6-digit code in "Pair a Device", compared on both sides.
     static let codePairing = false
     /// The list of paired devices and "Revoke…" (the core keeps the list to itself so far).
-    static let trustedDevices = false
+    static let trustedDevices = true
     /// "Open remoteman at login".
     static let openAtLogin = false
     /// "Default for a new device" and "Devices may choose" (today the device chooses, freely).

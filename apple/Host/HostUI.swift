@@ -120,13 +120,23 @@ struct HostPanel: View {
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Tokens.boxBorder, lineWidth: 1))
     }
 
-    /// "Paired devices": the core keeps the list to itself so far.
+    /// "Paired devices": the devices this Mac trusts. Revoking is in Settings.
     private var devices: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Paired devices").font(.system(size: 11, weight: .bold)).foregroundStyle(Tokens.l2)
-            if !Features.trustedDevices {
-                Text("The list of paired devices can't be shown yet.")
-                    .font(.system(size: 11)).foregroundStyle(Tokens.l3).opacity(0.7)
+            if controller.devices.isEmpty {
+                Text(controller.sharing ? "No device is paired yet." : "Shown while this Mac is shared.")
+                    .font(.system(size: 11)).foregroundStyle(Tokens.l3)
+            }
+            ForEach(controller.devices.prefix(6)) { d in
+                HStack(spacing: 6) {
+                    Image(systemName: HostWording.symbol(d.name)).foregroundStyle(Tokens.l2).frame(width: 16)
+                    Text(d.name).font(.system(size: 12)).lineLimit(1)
+                    Spacer()
+                }
+            }
+            if controller.devices.count > 6 {
+                Text("and \(controller.devices.count - 6) more, in Settings").font(.system(size: 11)).foregroundStyle(Tokens.l3)
             }
         }
         .padding(.horizontal, 10)
@@ -209,6 +219,7 @@ private struct PanelItem: View {
 struct HostSettings: View {
     @ObservedObject var controller: HostController
     var pair: () -> Void
+    @State private var revoking: MacHost.Device?
 
     var body: some View {
         ScrollView {
@@ -278,16 +289,16 @@ struct HostSettings: View {
                     }
                 }
                 CardGroup("Paired devices") {
-                    if let c = controller.client {
+                    ForEach(controller.devices) { d in
                         Row(
-                            title: c.name, caption: "Connected now", strong: true,
-                            leading: { Image(systemName: HostWording.symbol(c.name)).foregroundStyle(Tokens.tintfg).frame(width: 20) },
-                            trailing: { Button("Revoke…") {}.foregroundStyle(Tokens.red).available(Features.trustedDevices) })
+                            title: d.name, caption: d.connected ? "Connected now" : "Key \(d.fingerprint.prefix(8).uppercased())", strong: d.connected,
+                            leading: { Image(systemName: HostWording.symbol(d.name)).foregroundStyle(Tokens.tintfg).frame(width: 20) },
+                            trailing: { Button("Revoke…") { revoking = d }.foregroundStyle(Tokens.red) })
                     }
-                    if !Features.trustedDevices {
+                    if controller.devices.isEmpty {
                         Row(
-                            "The list of paired devices can't be shown yet",
-                            caption: "Devices that were paired stay paired and can connect. Taking one off the list isn't possible from here yet."
+                            controller.sharing ? "No device is paired yet" : "Paired devices are shown while this Mac is shared",
+                            caption: nil
                         ) { EmptyView() }
                         .opacity(0.7)
                     }
@@ -319,6 +330,15 @@ struct HostSettings: View {
         }
         .frame(width: 760)
         .background(Tokens.win)
+        .confirmationDialog(
+            "Revoke \(revoking?.name ?? "this device")?", isPresented: Binding(get: { revoking != nil }, set: { if !$0 { revoking = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Revoke", role: .destructive) { if let d = revoking { controller.revoke(d) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(revoking?.connected == true ? "It is disconnected now, and has to be paired again before it can connect." : "It has to be paired again before it can connect.")
+        }
     }
 
     private func fixedSwitch(_ title: String, _ value: Bool, _ flag: Bool) -> some View {
