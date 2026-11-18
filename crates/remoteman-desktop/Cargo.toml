@@ -11,5 +11,9 @@ publish.workspace = true
 remoteman-proto = { path = "../remoteman-proto" }
 anyhow = "1"
 futures-util = "0.3"
-tokio = { version = "1", features = ["time"] }
+# net and io-util: the clipboard's content goes through pipes.
+tokio = { version = "1", features = ["time", "rt", "sync", "net", "io-util"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }

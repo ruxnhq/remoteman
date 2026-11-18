@@ -66,11 +66,15 @@ struct Seen {
     saved: u32,
     /// Sound packets, how many were missing in between, and the last one's number.
     sound: (u32, u32, Option<u32>),
+    /// The sound decoded, left channel only, up to half a minute of it.
+    heard: Vec<f32>,
     /// Blobs coming in: kind, header, content so far.
     blobs: std::collections::BTreeMap<u32, (u8, String, Vec<u8>)>,
 }
 
 struct Watcher {
+    /// For the desktop's sound (made at the first packet).
+    decoder: Option<remoteman_audio::Decoder>,
     seen: Arc<Mutex<Seen>>,
     file: Option<std::fs::File>,
     record: Option<std::fs::File>,
@@ -136,6 +140,16 @@ impl Handler for Watcher {
         // A packet marked as a start begins a new count (after a pause, or from another agent).
         let missing = s.sound.2.filter(|_| !packet.start).map_or(0, |last| packet.seq.saturating_sub(last).saturating_sub(1));
         s.sound = (s.sound.0 + 1, s.sound.1 + missing, Some(packet.seq));
+        // Decode it, to say at the end what was heard.
+        if self.decoder.is_none() {
+            self.decoder = remoteman_audio::Decoder::new(remoteman_audio::Channels::Stereo).ok();
+        }
+        let mut frame = [0f32; remoteman_audio::FRAME_SAMPLES * 2];
+        if let Some(Ok(())) = self.decoder.as_mut().map(|d| d.decode(&packet.data, &mut frame)) {
+            if s.heard.len() < 48_000 * 30 {
+                s.heard.extend(frame.chunks(2).map(|lr| lr[0]));
+            }
+        }
     }
 
     fn blob(&mut self, event: &BlobEvent) {
@@ -231,7 +245,7 @@ fn main() -> Result<()> {
         Some(p) => Some(std::fs::File::create(p).with_context(|| format!("create {}", p.display()))?),
         None => None,
     };
-    let watcher = Watcher { seen: seen.clone(), file, record, warm: Instant::now() + Duration::from_secs(2) };
+    let watcher = Watcher { decoder: None, seen: seen.clone(), file, record, warm: Instant::now() + Duration::from_secs(2) };
     let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement }, decoders, test_drop_one_in: drop_one_in, test_delay_lost_ms: delay_lost, cursor };
     let client = Client::connect(options, watcher)?;
     println!("host: {} ({}), features {:?}, fingerprint {}", client.host_name, client.host_os, client.host_features, &client.host_fingerprint[..12]);
@@ -286,9 +300,12 @@ fn main() -> Result<()> {
                 "mic" => {
                     let n: u32 = rest.trim().parse().with_context(|| format!("line {}: mic PACKETS", i + 1))?;
                     client.send_message(Message::Mic { on: true, codec: "opus".into(), rate: 48000, channels: 1, frame_us: 10_000 });
+                    // A 1 kHz tone, as a microphone would send it.
+                    let mut encoder = remoteman_audio::Encoder::new(remoteman_audio::Channels::Mono)?;
                     let start = Instant::now();
                     for seq in 0..n {
-                        client.send_mic(seq == 0, seq, start.elapsed().as_micros() as u64, format!("mic {seq}").as_bytes());
+                        let frame: Vec<f32> = (0..remoteman_audio::FRAME_SAMPLES).map(|i| 0.25 * (std::f32::consts::TAU * 1000.0 * (seq as usize * remoteman_audio::FRAME_SAMPLES + i) as f32 / 48_000.0).sin()).collect();
+                        client.send_mic(seq == 0, seq, start.elapsed().as_micros() as u64, &encoder.encode(&frame)?);
                         std::thread::sleep((start + Duration::from_millis((seq as u64 + 1) * 10)).saturating_duration_since(Instant::now()));
                     }
                     client.send_message(Message::Mic { on: false, codec: String::new(), rate: 0, channels: 0, frame_us: 0 });
@@ -389,6 +406,18 @@ fn main() -> Result<()> {
     }
     if s.sound.0 > 0 {
         println!("sound: {} packets, {} missing in between", s.sound.0, s.sound.1);
+        // What was heard: its level, and its pitch by counting upward zero crossings where it
+        // is loud enough to be a tone.
+        let loud: Vec<f32> = s.heard.iter().copied().skip_while(|x| x.abs() < 0.02).collect();
+        let peak = loud.iter().fold(0f32, |a, x| a.max(x.abs()));
+        if peak > 0.02 {
+            let end = loud.iter().rposition(|x| x.abs() > 0.02).unwrap_or(0);
+            let tone = &loud[..end];
+            let crossings = tone.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+            println!("heard: {:.2} s of sound, peak {peak:.2}, about {:.0} Hz", tone.len() as f32 / 48_000.0, crossings as f32 * 48_000.0 / tone.len().max(1) as f32);
+        } else if !s.heard.is_empty() {
+            println!("heard: only silence");
+        }
     }
     if cursor {
         println!("cursor: {} shapes {:?}, {} positions, last {:?}", s.shapes.len(), s.shapes, s.positions, s.last_at);

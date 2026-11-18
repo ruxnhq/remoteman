@@ -1,0 +1,16 @@
+[package]
+name = "remoteman-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Linux sound: Opus through the system's libopus, and PipeWire nodes for the host's speaker and
+# microphone and for a viewer's playback and microphone.
+[dependencies]
+anyhow = "1"
+# No default features: the default builds its own copy of libopus with cmake. Without it the
+# crate links the system's libopus.
+opusic-c = { version = "1.6", default-features = false }
+# v0_3_49: how many samples an output buffer is asked to hold.
+pipewire = { version = "0.10", features = ["v0_3_49"] }

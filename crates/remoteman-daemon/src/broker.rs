@@ -15,6 +15,8 @@ use remoteman_core::host::{Accept, ClientInfo, HostHandler, Link};
 use remoteman_core::{BlobEvent, BlobSender, Event, Frame, Message, Packet};
 use remoteman_core::relay::{ToAgent, ToDaemon};
 
+use crate::gdm::{self, Gdm};
+
 type Writer = Arc<Mutex<UnixStream>>;
 
 struct Agent {
@@ -47,18 +49,108 @@ struct State {
     /// The client's last word on each feature (sound on, microphone on, ...), for telling an
     /// agent that takes the client over.
     said: Vec<Message>,
+    /// Counts clients, so that work started for one stops when it has gone.
+    generation: u64,
+}
+
+/// Getting a device into a session it isn't in yet, through GDM.
+pub struct Login {
+    pub runtime: tokio::runtime::Runtime,
+    pub gdm: Gdm,
+    /// Straight into the owner's session by the device's key alone, with no login screen.
+    pub by_key: bool,
 }
 
 pub struct Shared {
     /// Held while a frame goes to the client and while the agent in charge changes.
     sending: Mutex<()>,
     state: Mutex<State>,
+    /// Whose the paired devices are: name and uid. (One user for every device, until each
+    /// device has an owner of its own.)
+    owner: Option<(String, u32)>,
+    login: Option<Login>,
 }
 
 impl Shared {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self { sending: Mutex::new(()), state: Mutex::default() })
+    pub fn new(owner: Option<(String, u32)>, login: Option<Login>) -> Arc<Self> {
+        Arc::new(Self { sending: Mutex::new(()), state: Mutex::default(), owner, login })
     }
+
+    /// The newest agent running as `uid`.
+    fn agent_of(&self, uid: u32) -> Option<u32> {
+        let st = self.state.lock().unwrap();
+        st.agents.iter().rev().find(|(_, a)| a.uid == uid).map(|(id, _)| *id)
+    }
+
+    /// Ask GDM for a display for this client and wait for the agent of the session behind it:
+    /// the login screen's, or with `by_key` the owner's own.
+    fn open_login(&self, login: &Login, remote_id: &str, client: &ClientInfo) -> Result<u32, String> {
+        let user = if login.by_key { self.owner.as_ref().map(|o| o.0.as_str()) } else { None };
+        login.runtime.block_on(login.gdm.create_display(remote_id, &client.name, user));
+        let start = std::time::Instant::now();
+        let mut seen = None;
+        while start.elapsed() < Duration::from_secs(30) {
+            if let Ok(sessions) = login.runtime.block_on(login.gdm.sessions(remote_id)) {
+                // A user's session if there is one already, else the login screen's.
+                if let Some(s) = sessions.iter().find(|s| s.class == "user").or(sessions.first()) {
+                    seen = Some(s.clone());
+                    if let Some(id) = self.agent_of(s.uid) {
+                        tracing::info!(session = %s.id, class = %s.class, uid = s.uid, agent = id, "GDM made a session for the client");
+                        return Ok(id);
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        Err(match seen {
+            Some(s) => format!("GDM made a session ({}, {}), but no remoteman agent started in it: is remoteman-agent.service enabled for every user?", s.id, s.class),
+            None => "GDM made no session for this device within 30 s".into(),
+        })
+    }
+}
+
+/// Follow a client that came in through GDM: when a user's session turns up behind its
+/// display (someone logged in on the login screen), move the client to that session's agent.
+async fn follow(shared: Arc<Shared>, remote_id: String, generation: u64) {
+    let Some(login) = shared.login.as_ref() else { return };
+    loop {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        {
+            let st = shared.state.lock().unwrap();
+            if st.generation != generation || st.client.is_none() {
+                return;
+            }
+        }
+        let Ok(sessions) = login.gdm.sessions(&remote_id).await else { continue };
+        let Some(user) = sessions.iter().find(|s| s.class == "user") else { continue };
+        // Its agent attaches a moment after the session starts.
+        let Some(target) = shared.agent_of(user.uid) else { continue };
+        if shared.state.lock().unwrap().current == Some(target) {
+            return;
+        }
+        match begin_switch(&shared, target) {
+            Ok(()) => tracing::info!(session = %user.id, agent = target, "someone logged in: moving the client to their session"),
+            // A change is under way; look again.
+            Err(_) => continue,
+        }
+    }
+}
+
+/// Hand the connected client to another agent. It takes over once it has answered.
+fn begin_switch(shared: &Shared, id: u32) -> Result<(), &'static str> {
+    let mut st = shared.state.lock().unwrap();
+    let (Some(client), Some(link)) = (st.client.clone(), st.link.clone()) else { return Err("no client is connected") };
+    let Some(writer) = st.agents.get(&id).map(|a| a.writer.clone()) else { return Err("no such agent") };
+    if st.current == Some(id) {
+        return Err("that agent is serving the client already");
+    }
+    if st.waiting.is_some() {
+        return Err("a change is under way already");
+    }
+    st.waiting = Some(Waiting { agent: id, reply: None });
+    drop(st);
+    tell(&writer, ToAgent::Client { info: client, elapsed_us: link.now_us() });
+    Ok(())
 }
 
 fn tell(writer: &Writer, message: ToAgent) {
@@ -83,18 +175,46 @@ impl Broker {
 impl HostHandler for Broker {
     fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
         let (tx, rx) = mpsc::channel();
+        let generation = {
+            let mut st = self.0.state.lock().unwrap();
+            st.generation += 1;
+            st.generation
+        };
+        // Where the client goes: an agent that was asked for (tests), else the session its
+        // owner already has; with no owner said, the newest agent.
+        let found = {
+            let st = self.0.state.lock().unwrap();
+            st.preferred.filter(|id| st.agents.contains_key(id))
+        };
+        let found = found.or_else(|| match &self.0.owner {
+            Some((_, uid)) => self.0.agent_of(*uid),
+            None => self.0.state.lock().unwrap().agents.keys().next_back().copied(),
+        });
+        // Not logged in: ask GDM, and remember to follow the client to wherever it logs in.
+        let mut following = None;
+        let id = match (found, &self.0.login, &self.0.owner) {
+            (Some(id), _, _) => id,
+            (None, Some(login), Some(_)) => {
+                let remote_id = gdm::new_remote_id();
+                let id = self.0.open_login(login, &remote_id, client)?;
+                following = Some(remote_id);
+                id
+            }
+            (None, _, Some((name, _))) => return Err(format!("{name} isn't logged in on this computer, and it isn't set up to log in from a device")),
+            (None, _, None) => return Err("nobody is logged in on this computer".into()),
+        };
         let (id, writer) = {
             let mut st = self.0.state.lock().unwrap();
-            // Until sessions are told apart (whose they are, login screen or not): the one
-            // that was asked for, else the newest.
-            let id = st.preferred.filter(|id| st.agents.contains_key(id)).or_else(|| st.agents.keys().next_back().copied());
-            let Some(id) = id else {
-                return Err("nobody is logged in on this computer, and logging in from here isn't built yet".into());
-            };
+            let Some(agent) = st.agents.get(&id) else { return Err("the desktop session ended".into()) };
+            let writer = agent.writer.clone();
+            if let (Some(remote_id), Some(login)) = (following, &self.0.login) {
+                login.runtime.spawn(follow(self.0.clone(), remote_id, generation));
+            }
+            let _ = &writer;
             st.link = Some(link.clone());
             st.client = Some(client.clone());
             st.waiting = Some(Waiting { agent: id, reply: Some(tx) });
-            (id, st.agents[&id].writer.clone())
+            (id, writer)
         };
         tracing::info!(name = %client.name, agent = id, "client");
         tell(&writer, ToAgent::Client { info: client.clone(), elapsed_us: link.now_us() });
@@ -160,6 +280,7 @@ impl HostHandler for Broker {
             let ids = [st.current.take(), st.waiting.take().map(|w| w.agent)];
             (st.link, st.client) = (None, None);
             st.said.clear();
+            st.generation += 1;
             ids.into_iter().flatten().filter_map(|id| st.agents.get(&id)).map(|a| a.writer.clone()).collect()
         };
         for w in writers {
@@ -384,19 +505,10 @@ fn control(shared: &Shared, words: &str) -> String {
         },
         Some("switch") => {
             let Some(id) = number(words.next()) else { return "switch N: which agent?\n".into() };
-            let mut st = shared.state.lock().unwrap();
-            let (Some(client), Some(link)) = (st.client.clone(), st.link.clone()) else { return "no client is connected\n".into() };
-            let Some(writer) = st.agents.get(&id).map(|a| a.writer.clone()) else { return "no such agent\n".into() };
-            if st.current == Some(id) {
-                return "that agent is serving the client already\n".into();
+            match begin_switch(shared, id) {
+                Ok(()) => format!("moving the client to agent {id}\n"),
+                Err(why) => format!("{why}\n"),
             }
-            if st.waiting.is_some() {
-                return "a change is under way already\n".into();
-            }
-            st.waiting = Some(Waiting { agent: id, reply: None });
-            drop(st);
-            tell(&writer, ToAgent::Client { info: client, elapsed_us: link.now_us() });
-            format!("moving the client to agent {id}\n")
         }
         Some(other) => format!("unknown command {other}: status, switch N, prefer N\n"),
     }

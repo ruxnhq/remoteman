@@ -1006,6 +1006,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "opusic-c"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89f8e9c909466f15e60277212cc4fec082c68a5e1c9f6e373eee716fec2fed47"
+dependencies = [
+ "opusic-sys",
+]
+
+[[package]]
+name = "opusic-sys"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "986d749e9dc12035f11bf3ecc83a2a696ff7534d4143be9469a4a0faa25b9fd1"
+
+[[package]]
 name = "ordered-stream"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1259,6 +1274,7 @@ name = "remoteman-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "remoteman-audio",
  "remoteman-capture",
  "remoteman-core",
  "remoteman-desktop",
@@ -1268,6 +1284,15 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "remoteman-audio"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "opusic-c",
+ "pipewire",
 ]
 
 [[package]]
@@ -1301,6 +1326,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zbus",
 ]
 
 [[package]]
@@ -1346,6 +1372,7 @@ name = "remoteman-testclient"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "remoteman-audio",
  "remoteman-core",
  "serde_json",
 ]
