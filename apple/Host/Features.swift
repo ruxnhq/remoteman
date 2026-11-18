@@ -1,0 +1,29 @@
+// What the Mac host can do today. Every control for something it can't do yet reads its flag
+// here, and is drawn disabled (and does nothing) while the flag is false. Turn a feature on in
+// this one place when the engine has it.
+enum Features {
+    /// The QR code in "Pair a Device", for iPad and iPhone.
+    static let qrPairing = false
+    /// The 6-digit code in "Pair a Device", compared on both sides.
+    static let codePairing = false
+    /// The list of paired devices and "Revoke…" (the core keeps the list to itself so far).
+    static let trustedDevices = false
+    /// "Open remoteman at login".
+    static let openAtLogin = false
+    /// "Default for a new device" and "Devices may choose" (today the device chooses, freely).
+    static let placementPolicy = false
+    /// "Lock this Mac when the device leaves".
+    static let lockOnLeave = false
+    /// "Notify me when a device connects".
+    static let notifyOnConnect = false
+    /// "Use the device's camera and microphone on this Mac", and their lines in the panel.
+    static let deviceCameraAndMicrophone = false
+    /// This Mac's sound on the device.
+    static let sound = false
+    /// "Bitrate limit".
+    static let bitrateLimit = false
+    /// "Allow sharp text (4:4:4)".
+    static let sharpText = false
+    /// "10-bit colour" as a choice (the picture is always 10-bit today).
+    static let tenBitChoice = false
+}

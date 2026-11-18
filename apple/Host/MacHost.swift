@@ -52,8 +52,42 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var testWindow = false
     }
 
+    /// The device that is connected, as the interface shows it.
+    struct Client {
+        var name: String
+        var width: Int
+        var height: Int
+        var refresh: Int
+        /// 0 an extra display, 1 the main display, 2 the only display.
+        var placement: Int
+        var since = Date()
+    }
+
+    /// For the interface, on the main queue: the device that connected (nil: it left), and
+    /// once a second while a picture is going out, the frames and bits sent in that second.
+    var onClient: ((Client?) -> Void)?
+    var onStats: ((_ fps: Int, _ bitsPerSecond: Int) -> Void)?
+
     private let options: Options
     private var host: OpaquePointer?
+
+    var isRunning: Bool { host != nil }
+
+    /// "address:port" this host listens on, and its key's fingerprint.
+    var info: (address: String, fingerprint: String)? {
+        guard let h = host else { return nil }
+        var info = [CChar](repeating: 0, count: 256)
+        rm_host_info(h, &info, info.count)
+        let parts = String(cString: info).split(separator: "\t").map(String.init)
+        return (parts.first ?? options.listen, parts.count > 1 ? parts[1] : "")
+    }
+
+    /// Pairing mode: the next unknown device is let in and remembered, and the core then turns
+    /// the mode off by itself.
+    var pairing: Bool {
+        get { host.map { rm_host_pairing($0) != 0 } ?? false }
+        set { if let h = host { rm_host_set_pairing(h, newValue ? 1 : 0) } }
+    }
     private let frames = DispatchQueue(label: "remoteman.host.frames", qos: .userInteractive)
     private let input = HostInput()
 
@@ -180,6 +214,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         accept.pointee.height = UInt32(height)
         accept.pointee.refresh = UInt32(fps)
         accept.pointee.hdr = 0
+        let summary = Client(name: name, width: width, height: height, refresh: fps, placement: min(placement, 2))
+        DispatchQueue.main.async { self.onClient?(summary) }
         return 1
     }
 
@@ -208,7 +244,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func clientLeft() {
         hostLog("host: client left")
-        DispatchQueue.main.async { self.teardown() }
+        DispatchQueue.main.async {
+            self.teardown()
+            self.onClient?(nil)
+        }
     }
 
     // MARK: Display and capture (main queue)
@@ -508,9 +547,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let line = sent > 0 || dropped > 0
             ? String(format: "host: %d fps, %d kbit/s, encode %.2f ms, %d dropped (busy), %d keyframe requests", sent, bytes * 8 / 1000, encodeMs / Double(max(sent, 1)), dropped, keyframes)
             : nil
+        let fps = sent, bits = bytes * 8
         sent = 0; bytes = 0; encodeMs = 0; dropped = 0
         lock.unlock()
         if let line { hostLog(line) }
+        onStats?(fps, bits)
     }
 
     // MARK: Cursor (main queue)

@@ -73,7 +73,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman
         PRODUCT_NAME: remoteman
         TARGETED_DEVICE_FAMILY: "1,2"
-  # The Mac as a host. An app with no Dock icon or window, so that macOS files its Screen
+  # The Mac as a host: a menu-bar app with no Dock icon, so that macOS files its Screen
   # Recording and Accessibility grants under its own name; it logs to
   # ~/Library/Logs/remoteman-host.log and takes the options in Host/main.swift.
   RemotemanHost:
@@ -82,6 +82,8 @@ targets:
     sources:
       - Host
       - Shared/HIDKeys.swift
+      # The design's colours and card pieces, shared with the viewer.
+      - Mac/Kit.swift
     dependencies:
       - framework: build/RemotemanCore.xcframework
         embed: false
