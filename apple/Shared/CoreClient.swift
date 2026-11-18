@@ -27,7 +27,9 @@ final class CoreClient {
 
     // Called on the core's threads, one at a time.
     var onStream: ((StreamInfo) -> Void)?
-    var onFrame: ((UnsafeRawBufferPointer, _ key: Bool, _ number: UInt32, _ captureUs: UInt64, _ ageUs: Int64) -> Void)?
+    /// `flags`: bit 0 a keyframe, bit 1 a recovery point (an ordinary frame to the decoder, the
+    /// first one after a loss).
+    var onFrame: ((UnsafeRawBufferPointer, _ flags: UInt8, _ number: UInt32, _ captureUs: UInt64, _ ageUs: Int64) -> Void)?
     var onClosed: ((String) -> Void)?
     /// The host's cursor image (nil: no cursor) and its hotspot, in the host display's pixels.
     /// Setting this before connecting is what makes the host leave the cursor out of the picture.
@@ -59,7 +61,7 @@ final class CoreClient {
             },
             on_frame: { ctx, data, len, key, number, captureUs, ageUs in
                 let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
-                me.onFrame?(UnsafeRawBufferPointer(start: data, count: len), key != 0, number, captureUs, ageUs)
+                me.onFrame?(UnsafeRawBufferPointer(start: data, count: len), key, number, captureUs, ageUs)
             },
             on_closed: { ctx, reason in
                 let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()

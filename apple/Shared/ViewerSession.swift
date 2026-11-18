@@ -125,8 +125,10 @@ final class ViewerSession: ObservableObject {
             do {
                 let client = try CoreClient.connect(config) { c in
                     c.onStream = { [weak self] info in self?.streamStarted(info) }
-                    c.onFrame = { [weak self] data, key, number, captureUs, ageUs in
-                        self?.frame(data, key: key, number: number, captureUs: captureUs, ageUs: ageUs)
+                    c.onFrame = { [weak self] data, flags, number, captureUs, ageUs in
+                        self?.frame(
+                            data, key: flags & 1 != 0, recovery: flags & 2 != 0, number: number, captureUs: captureUs,
+                            ageUs: ageUs)
                     }
                     c.onCursorShape = { [weak self] image, hotX, hotY in
                         DispatchQueue.main.async {
@@ -256,13 +258,17 @@ final class ViewerSession: ObservableObject {
         old?.invalidate()
     }
 
-    private func frame(_ data: UnsafeRawBufferPointer, key: Bool, number: UInt32, captureUs: UInt64, ageUs: Int64) {
+    private func frame(
+        _ data: UnsafeRawBufferPointer, key: Bool, recovery: Bool = false, number: UInt32, captureUs: UInt64, ageUs: Int64
+    ) {
         statsLock.lock()
         received += 1
         if receivedLog.count < 200_000 { receivedLog.append(DispatchTime.now().uptimeNanoseconds) }
         if key { keyframesReceived += 1 }
         if frameLog.count < 200_000 {
-            frameLog.append((number, data.count, key, DispatchTime.now().uptimeNanoseconds))
+            frameLog.append((number, data.count, key ? 1 : recovery ? 2 : 0, DispatchTime.now().uptimeNanoseconds))
+        }
+        if recovery { recoveryPoints += 1
         }
         statsLock.unlock()
         pipeLock.lock()
@@ -279,7 +285,8 @@ final class ViewerSession: ObservableObject {
 
     private var keyframesReceived = 0
     /// Every frame handed over by the core: its number, size, whether a keyframe, and when.
-    private var frameLog: [(UInt32, Int, Bool, UInt64)] = []
+    private var frameLog: [(UInt32, Int, Int, UInt64)] = []
+    private var recoveryPoints = 0
 
     /// The frame log as CSV, and the frames around the longest waits between two frames.
     func frameReport(stalls: Int = 4) -> (csv: String, text: String) {
@@ -287,10 +294,23 @@ final class ViewerSession: ObservableObject {
         let log = frameLog
         statsLock.unlock()
         guard let t0 = log.first?.3 else { return ("", "no frames") }
-        var csv = "number,bytes,key,ms\n"
-        for f in log { csv += "\(f.0),\(f.1),\(f.2 ? 1 : 0),\(String(format: "%.2f", Double(f.3 - t0) / 1e6))\n" }
+        var csv = "number,bytes,flags,ms\n"
+        for f in log { csv += "\(f.0),\(f.1),\(f.2),\(String(format: "%.2f", Double(f.3 - t0) / 1e6))\n" }
         let sizes = log.map { $0.1 }.sorted()
         var text = "frames \(log.count), bytes median \(sizes[sizes.count / 2]) p95 \(sizes[sizes.count * 95 / 100]) max \(sizes.last ?? 0)\n"
+        // How many numbers each loss skipped, and whether a recovery point followed.
+        var skips: [Int: Int] = [:]
+        var unflagged = 0
+        for i in 1..<max(1, log.count) {
+            let skipped = Int(log[i].0) - Int(log[i - 1].0) - 1
+            if skipped > 0 {
+                skips[min(skipped, 12), default: 0] += 1
+                if log[i].2 == 0 { unflagged += 1 }
+            }
+        }
+        text += "recovery points \(recoveryPoints); numbers skipped per loss (12 = 12 or more): "
+            + skips.keys.sorted().map { "\($0): \(skips[$0]!)" }.joined(separator: ", ")
+            + "; resumed on an unflagged frame \(unflagged) times\n"
         // The longest waits before a frame, after the first three seconds.
         let waits = (1..<log.count).filter { log[$0].3 - t0 > 3_000_000_000 }
             .map { ($0, Double(log[$0].3 - log[$0 - 1].3) / 1e6) }.sorted { $0.1 > $1.1 }.prefix(stalls)
@@ -298,7 +318,7 @@ final class ViewerSession: ObservableObject {
             text += String(format: "wait of %.1f ms before frame %d (numbers skipped: %d):\n", ms, log[i].0, Int(log[i].0) - Int(log[i - 1].0) - 1)
             for j in max(0, i - 4)...min(log.count - 1, i + 6) {
                 let dt = j > 0 ? Double(log[j].3 - log[j - 1].3) / 1e6 : 0
-                text += String(format: "  %@ #%d  %6d B  +%.1f ms%@\n", j == i ? ">" : " ", log[j].0, log[j].1, dt, log[j].2 ? "  KEY" : "")
+                text += String(format: "  %@ #%d  %6d B  +%.1f ms%@\n", j == i ? ">" : " ", log[j].0, log[j].1, dt, log[j].2 == 1 ? "  KEY" : log[j].2 == 2 ? "  RECOVERY" : "")
             }
         }
         return (csv, text)
@@ -335,7 +355,7 @@ final class ViewerSession: ObservableObject {
         out += "  gap between frames shown ms: median \(pct(gaps, 0.5)) p99 \(pct(gaps, 0.99)) max \(pct(gaps, 1.0))\n"
         if let c = client {
             let cs = c.stats
-            out += "  lost \(cs.lost), loss reports \(cs.keyframeRequests), keyframes received \(keyframesReceived) (whole run), round trip \(String(format: "%.2f", Double(cs.roundTripUs) / 1000)) ms, decode errors \(decodeErrors)"
+            out += "  lost \(cs.lost), loss reports \(cs.keyframeRequests), keyframes received \(keyframesReceived), recovery points \(recoveryPoints) (whole run), round trip \(String(format: "%.2f", Double(cs.roundTripUs) / 1000)) ms, decode errors \(decodeErrors)"
         }
         return out
     }
