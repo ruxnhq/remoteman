@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Remoteman Host
+GenericName=Remote Desktop Sharing
+Comment=Share this computer's screen with your paired devices
+Exec=remoteman-tray
+Icon=dev.remoteman.Host
+Terminal=false
+Categories=Network;RemoteAccess;GTK;
+Keywords=remote;desktop;screen;share;
+StartupNotify=true
