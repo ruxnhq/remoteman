@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The Linux host's icon, for when it has a window or a launcher: assets/icon/ inside a rounded tile, on the 128-pixel grid with the margin
+     desktops expect. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <rect x="12" y="14" width="104" height="104" rx="24" fill="#050A1F"/>
+  <rect x="12" y="10" width="104" height="104" rx="24" fill="#0B1437"/>
+  <g transform="translate(12,10) scale(0.1015625)">
+  <g transform="translate(492 512) skewX(-14) translate(-512 -512)" fill="none" stroke="#2458F5" stroke-width="56" stroke-linecap="round">
+    <rect x="152" y="282" width="500" height="356" rx="72" fill="#2458F5"/>
+    <path d="M292 744h220"/>
+    <path d="M754 362h120" stroke="#fff"/>
+    <path d="M754 460h174" stroke="#fff" opacity=".75"/>
+    <path d="M754 558h84" stroke="#fff" opacity=".5"/>
+  </g>
+  </g>
+</svg>

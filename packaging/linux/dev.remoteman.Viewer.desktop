@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Remoteman
+GenericName=Remote Desktop Viewer
+Comment=Use another computer's desktop from this one
+Exec=remoteman
+Icon=dev.remoteman.Viewer
+Terminal=false
+Categories=Network;RemoteAccess;GTK;
+Keywords=remote;desktop;screen;
+StartupNotify=true
