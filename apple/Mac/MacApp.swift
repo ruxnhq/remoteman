@@ -189,6 +189,11 @@ final class AppModel: ObservableObject {
             if reconnecting { return }
             finish(id, reason: nil)
         case .failed(let reason):
+            if session.mustPairAgain {
+                store.update(id) { $0.pairOnConnect = true }
+                finish(id, reason: "This Mac was taken off its list of trusted devices. Turn pairing on there, then pair again.")
+                return
+            }
             finish(id, reason: started == nil ? reason : "The connection ended: \(reason)")
         }
     }

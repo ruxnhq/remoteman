@@ -42,6 +42,10 @@ final class ViewerSession: ObservableObject {
     @Published private(set) var state: State = .idle
     /// How far connecting has got (CoreClient.onStage); when it fails, the stage that failed.
     @Published private(set) var stage = 0
+    /// Why the host ended the last session (CoreClient.closeCode); -1 when it wasn't the host.
+    @Published private(set) var closeCode = -1
+    /// The computer took this device off its trust list: it has to be paired again.
+    var mustPairAgain: Bool { closeCode == 3 }
     @Published private(set) var statsText = ""
     /// The latest half-second of figures, for an app that draws them itself.
     @Published private(set) var stats = Snapshot()
@@ -269,6 +273,7 @@ final class ViewerSession: ObservableObject {
         let gen = generation
         self.target = target
         stage = 0
+        closeCode = -1
         self.display = display
         self.placement = placement
         let config = CoreClient.Config(
@@ -387,6 +392,9 @@ final class ViewerSession: ObservableObject {
 
     private func closed(_ reason: String, generation gen: Int) {
         guard gen == generation else { return }
+        closeCode = client?.closeCode ?? -1
+        // Its key for this computer is no use any more; the next connection pairs afresh.
+        if closeCode == 3 { Self.forget(host: target) }
         client = nil
         teardown()
         state = .failed(reason)

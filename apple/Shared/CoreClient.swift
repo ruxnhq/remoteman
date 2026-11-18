@@ -51,6 +51,11 @@ final class CoreClient {
     static let clipboardKind: UInt8 = 0x40
     static let fileKind: UInt8 = 0x41
 
+    /// Why the host closed the connection, known once `onClosed` is called: 0 the host stopped
+    /// or another device took over, 1 something failed there, 2 its owner ended this connection
+    /// (connecting again is fine), 3 this device was taken off its trust list (pair again),
+    /// -1 it ended some other way (the network, this side leaving).
+    private(set) var closeCode = -1
     private var handle: OpaquePointer?
     private let lock = NSLock()
     private var closedSeen = false
@@ -84,6 +89,9 @@ final class CoreClient {
                 me.closedSeen = true
                 me.lock.unlock()
                 guard first else { return }
+                me.lock.lock()
+                if let h = me.handle { me.closeCode = Int(rm_client_close_code(h)) }
+                me.lock.unlock()
                 me.onClosed?(reason.map { String(cString: $0) } ?? "closed")
                 Unmanaged<CoreClient>.fromOpaque(ctx!).release()
             },

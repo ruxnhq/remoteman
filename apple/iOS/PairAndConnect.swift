@@ -137,10 +137,12 @@ struct GettingInScreen: View {
     @ViewBuilder
     private func failed(_ reason: String) -> some View {
         StateBlock(
-            icon: "wifi.slash", iconColor: .white.opacity(0.8), circle: .white.opacity(0.12), headline: "Can't reach \(name)",
-            text: reason)
+            icon: session.mustPairAgain ? "lock.slash" : "wifi.slash", iconColor: .white.opacity(0.8), circle: .white.opacity(0.12),
+            headline: session.mustPairAgain
+                ? "\(name) no longer trusts this \(device)" : session.closeCode >= 0 ? "\(name) ended the session" : "Can't reach \(name)",
+            text: session.mustPairAgain ? "Turn pairing on at the computer, then pair again." : reason)
         VStack(spacing: 10) {
-            Button("Try Again") { if let c = model.current { model.connect(c) } }.buttonStyle(WideButtonStyle())
+            Button(session.mustPairAgain ? "Pair Again" : session.closeCode >= 0 ? "Connect Again" : "Try Again") { if let c = model.current { model.connect(c) } }.buttonStyle(WideButtonStyle())
             Button("Back to Computers") { model.cancelConnecting() }.buttonStyle(WideButtonStyle(kind: .secondary))
         }
     }

@@ -101,6 +101,11 @@ final class AppModel: ObservableObject {
     }
 
     private func stateChanged(_ state: ViewerSession.State) {
+        if case .failed = state, session.mustPairAgain, var c = current {
+            c.paired = false
+            store.update(c)
+            current = c
+        }
         guard case .streaming = state, var c = current, let host = session.client?.host else { return }
         c.paired = true
         c.lastUsed = Date()
