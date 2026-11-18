@@ -2,7 +2,10 @@
 // NVIDIA's very large structs. Spike quality: one encoder, synchronous, one bitstream buffer.
 //
 // The headers are FFmpeg's nv-codec-headers (MIT), which load libcuda and libnvidia-encode at
-// run time.
+// run time (on Windows, nvEncodeAPI64.dll).
+//
+// Two ways in for the picture: on Linux, CUDA memory that Vulkan wrote; on Windows, textures
+// of a Direct3D 11 device. Everything after the session is opened is the same for both.
 
 #include <stdint.h>
 #include <stdio.h>
@@ -48,6 +51,7 @@ typedef struct rm_nvenc {
     char err[256];
 } rm_nvenc;
 
+#ifndef _WIN32
 static int cuda_fail(rm_cuda *c, CUresult r, const char *what, char *err, int errlen) {
     const char *name = NULL;
     if (c && c->cu && c->cu->cuGetErrorName) c->cu->cuGetErrorName(r, &name);
@@ -95,6 +99,26 @@ int rm_cuda_import(rm_cuda *c, int fd, uint64_t size, uint64_t *devptr, char *er
     return 0;
 }
 
+#endif
+
+// The CUDA context is made current around each call that touches the inputs; a Direct3D
+// session has none.
+static void ctx_push(rm_nvenc *e) {
+#ifndef _WIN32
+    if (e->cuda) e->cuda->cu->cuCtxPushCurrent(e->cuda->ctx);
+#else
+    (void)e;
+#endif
+}
+static void ctx_pop(rm_nvenc *e) {
+#ifndef _WIN32
+    CUcontext dummy;
+    if (e->cuda) e->cuda->cu->cuCtxPopCurrent(&dummy);
+#else
+    (void)e;
+#endif
+}
+
 static int nv_fail(rm_nvenc *e, NVENCSTATUS s, const char *what) {
     const char *detail = e->enc && e->f.nvEncGetLastErrorString ? e->f.nvEncGetLastErrorString(e->enc) : "";
     snprintf(e->err, sizeof e->err, "%s: NVENC status %d %s", what, (int)s, detail ? detail : "");
@@ -111,7 +135,7 @@ static int cap(rm_nvenc *e, GUID codec, NV_ENC_CAPS which) {
     return v;
 }
 
-rm_nvenc *rm_nvenc_open(rm_cuda *cuda, const rm_nvenc_cfg *cfg, char *err, int errlen) {
+static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void *device, const rm_nvenc_cfg *cfg, char *err, int errlen) {
     rm_nvenc *e = calloc(1, sizeof *e);
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS open = { NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER };
     NV_ENC_PRESET_CONFIG preset = { NV_ENC_PRESET_CONFIG_VER, 0, { NV_ENC_CONFIG_VER } };
@@ -123,15 +147,17 @@ rm_nvenc *rm_nvenc_open(rm_cuda *cuda, const rm_nvenc_cfg *cfg, char *err, int e
     NVENCSTATUS s;
     e->cuda = cuda;
 #define FAIL(what) do { nv_fail(e, s, what); snprintf(err, errlen, "%s", e->err); goto fail; } while (0)
-    if (nvenc_load_functions(&e->nv, NULL) < 0) { snprintf(err, errlen, "libnvidia-encode not found"); free(e); return NULL; }
+    if (nvenc_load_functions(&e->nv, NULL) < 0) { snprintf(err, errlen, "NVIDIA's encoder library (libnvidia-encode, or nvEncodeAPI64.dll) not found"); free(e); return NULL; }
     e->f.version = NV_ENCODE_API_FUNCTION_LIST_VER;
     if ((s = e->nv->NvEncodeAPICreateInstance(&e->f))) FAIL("create API instance");
-    open.deviceType = NV_ENC_DEVICE_TYPE_CUDA;
-    open.device = cuda->ctx;
+    open.deviceType = device_type;
+    open.device = device;
     open.apiVersion = NVENCAPI_VERSION;
     if ((s = e->f.nvEncOpenEncodeSessionEx(&open, &e->enc))) FAIL("open session");
 
     if (!cap(e, codec, NV_ENC_CAPS_SUPPORT_10BIT_ENCODE)) { snprintf(err, errlen, "no 10-bit encode for this codec"); goto fail; }
+    // Direct3D has no planar 10-bit 4:4:4 texture to hand over, so that path is 4:2:0 (P010) only.
+    if (cfg->chroma444 && device_type == NV_ENC_DEVICE_TYPE_DIRECTX) { snprintf(err, errlen, "no 4:4:4 input from Direct3D"); goto fail; }
     if (cfg->chroma444 && !cap(e, codec, NV_ENC_CAPS_SUPPORT_YUV444_ENCODE)) { snprintf(err, errlen, "no 4:4:4 encode for this codec"); goto fail; }
 
     if ((s = e->f.nvEncGetEncodePresetConfigEx(e->enc, codec, preset_guid, NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &preset))) FAIL("preset");
@@ -232,6 +258,37 @@ fail:
 #undef FAIL
 }
 
+#ifndef _WIN32
+rm_nvenc *rm_nvenc_open(rm_cuda *cuda, const rm_nvenc_cfg *cfg, char *err, int errlen) {
+    return nvenc_open(cuda, NV_ENC_DEVICE_TYPE_CUDA, cuda->ctx, cfg, err, errlen);
+}
+#else
+// `device` is an ID3D11Device*. The encoder works on that device from its own threads, so the
+// caller must have switched on the device's multithread protection.
+rm_nvenc *rm_nvenc_open_d3d11(void *device, const rm_nvenc_cfg *cfg, char *err, int errlen) {
+    return nvenc_open(NULL, NV_ENC_DEVICE_TYPE_DIRECTX, device, cfg, err, errlen);
+}
+
+// Register one ID3D11Texture2D* (P010, the encoder's size) as an encoder input.
+int rm_nvenc_register_d3d11(rm_nvenc *e, void *texture) {
+    NV_ENC_REGISTER_RESOURCE r = { NV_ENC_REGISTER_RESOURCE_VER };
+    NVENCSTATUS s;
+    if (e->n_inputs >= RM_MAX_INPUTS) { snprintf(e->err, sizeof e->err, "register input: too many inputs"); return -1; }
+    r.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+    r.resourceToRegister = texture;
+    r.width = e->init.encodeWidth;
+    r.height = e->init.encodeHeight;
+    r.pitch = 0;
+    r.bufferFormat = e->fmt;
+    r.bufferUsage = NV_ENC_INPUT_IMAGE;
+    if ((s = e->f.nvEncRegisterResource(e->enc, &r))) return nv_fail(e, s, "register input");
+    e->pitch = 0;
+    e->inputs[e->n_inputs] = r.registeredResource;
+    return e->n_inputs++;
+}
+#endif
+
+#ifndef _WIN32
 // Register one CUDA buffer (planes stacked, `pitch` bytes a row) as an encoder input.
 int rm_nvenc_register(rm_nvenc *e, uint64_t devptr, uint32_t pitch) {
     NV_ENC_REGISTER_RESOURCE r = { NV_ENC_REGISTER_RESOURCE_VER };
@@ -253,6 +310,7 @@ int rm_nvenc_register(rm_nvenc *e, uint64_t devptr, uint32_t pitch) {
     e->inputs[e->n_inputs] = r.registeredResource;
     return e->n_inputs++;
 }
+#endif
 
 uint32_t rm_nvenc_short_term(rm_nvenc *e) { return e->short_term; }
 uint32_t rm_nvenc_long_term(rm_nvenc *e) { return e->long_term; }
@@ -268,9 +326,9 @@ int rm_nvenc_encode(rm_nvenc *e, int idx, uint64_t timestamp, int force_idr, int
     NV_ENC_PIC_PARAMS pic = { NV_ENC_PIC_PARAMS_VER };
     NV_ENC_LOCK_BITSTREAM lock = { NV_ENC_LOCK_BITSTREAM_VER };
     NVENCSTATUS s;
-    CUcontext dummy;
     int rc = -1;
-    e->cuda->cu->cuCtxPushCurrent(e->cuda->ctx);
+    if (idx < 0 || idx >= e->n_inputs) { snprintf(e->err, sizeof e->err, "encode: no input %d", idx); return -1; }
+    ctx_push(e);
     map.registeredResource = e->inputs[idx];
     if ((s = e->f.nvEncMapInputResource(e->enc, &map))) { nv_fail(e, s, "map input"); goto out; }
     pic.inputBuffer = map.mappedResource;
@@ -308,7 +366,7 @@ int rm_nvenc_encode(rm_nvenc *e, int idx, uint64_t timestamp, int force_idr, int
     e->f.nvEncUnmapInputResource(e->enc, map.mappedResource);
     rc = 0;
 out:
-    e->cuda->cu->cuCtxPopCurrent(&dummy);
+    ctx_pop(e);
     return rc;
 }
 

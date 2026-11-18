@@ -1,5 +1,12 @@
-//! NVENC through NVIDIA's API directly (by way of the C wrapper in `shim/`), fed from CUDA
-//! memory that Vulkan wrote: 10-bit, 4:2:0 or 4:4:4, HEVC or AV1, tuned for the lowest delay.
+//! NVENC through NVIDIA's API directly (by way of the C wrapper in `shim/`): 10-bit, 4:2:0 or
+//! 4:4:4, HEVC or AV1, tuned for the lowest delay. On Linux it is fed from CUDA memory that
+//! Vulkan wrote; on Windows from P010 textures of a Direct3D 11 device (4:2:0 only).
+//!
+//! What a host needs of any encoder is the small [`FrameEncoder`] trait, and what it does with
+//! a client's loss reports is [`recovery::Recovery`]; neither knows about NVIDIA, so another
+//! encoder (AMF, QSV, Direct3D 12 Video Encode, VA-API) goes behind the same two.
+
+pub mod recovery;
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 
@@ -19,12 +26,22 @@ struct Cfg {
     short_term: u32,
 }
 
+#[cfg(not(windows))]
 unsafe extern "C" {
     fn rm_cuda_open(err: *mut c_char, errlen: c_int) -> *mut c_void;
     fn rm_cuda_import(c: *mut c_void, fd: c_int, size: u64, devptr: *mut u64, err: *mut c_char, errlen: c_int) -> c_int;
     fn rm_nvenc_open(cuda: *mut c_void, cfg: *const Cfg, err: *mut c_char, errlen: c_int) -> *mut c_void;
-    fn rm_nvenc_error(e: *mut c_void) -> *const c_char;
     fn rm_nvenc_register(e: *mut c_void, devptr: u64, pitch: u32) -> c_int;
+}
+
+#[cfg(windows)]
+unsafe extern "C" {
+    fn rm_nvenc_open_d3d11(device: *mut c_void, cfg: *const Cfg, err: *mut c_char, errlen: c_int) -> *mut c_void;
+    fn rm_nvenc_register_d3d11(e: *mut c_void, texture: *mut c_void) -> c_int;
+}
+
+unsafe extern "C" {
+    fn rm_nvenc_error(e: *mut c_void) -> *const c_char;
     #[allow(clippy::too_many_arguments)]
     fn rm_nvenc_encode(e: *mut c_void, idx: c_int, ts: u64, force_idr: c_int, mark: c_int, refer: u32, data: *mut *const u8, size: *mut u32, key: *mut c_int, long_term: *mut u32) -> c_int;
     fn rm_nvenc_short_term(e: *mut c_void) -> u32;
@@ -78,7 +95,26 @@ pub struct Made<'a> {
     pub referred: u32,
 }
 
+/// What a host asks of an encoder, whichever it is. Inputs are registered with the encoder in
+/// its own way (CUDA memory, Direct3D textures) and named here by their index.
+pub trait FrameEncoder {
+    /// What the encoder said about itself when it opened, for the log.
+    fn note(&self) -> &str;
+    /// How many recent frames it keeps to refer to.
+    fn short_term(&self) -> u32;
+    /// How many long-term frames it agreed to keep.
+    fn long_term(&self) -> u32;
+    /// Encode input `idx` as `how` says; `timestamp` is the frame's number, by which
+    /// [`Self::invalidate`] names it later.
+    fn encode_how(&mut self, idx: usize, timestamp: u64, how: How) -> Result<Made<'_>>;
+    /// Encode at this many bits a second from the next frame on, with no keyframe.
+    fn set_bitrate(&mut self, bitrate: u32) -> Result<()>;
+    /// The frame with this timestamp was lost on the way: stop referring to it.
+    fn invalidate(&mut self, timestamp: u64) -> Result<()>;
+}
+
 pub struct Encoder {
+    #[cfg_attr(windows, allow(dead_code))]
     cuda: *mut c_void,
     enc: *mut c_void,
     /// What the encoder said about itself when it opened.
@@ -90,7 +126,26 @@ fn text(buf: &[c_char]) -> String {
     unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
 }
 
+impl Config {
+    fn raw(&self) -> Cfg {
+        Cfg {
+            codec: (self.codec == Codec::Av1) as u32,
+            chroma444: self.chroma444 as u32,
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+            bitrate: self.bitrate,
+            preset: self.preset,
+            hdr_pq: 0,
+            long_term: self.long_term,
+            short_term: self.short_term.unwrap_or(0),
+        }
+    }
+}
+
 impl Encoder {
+    /// An encoder fed from CUDA memory (see [`Self::add_input`]).
+    #[cfg(not(windows))]
     pub fn new(cfg: &Config) -> Result<Self> {
         let mut err = [0 as c_char; 256];
         // SAFETY: the wrapper's contract; `err` is a writable buffer of the given length.
@@ -99,24 +154,46 @@ impl Encoder {
             if cuda.is_null() {
                 bail!("{}", text(&err));
             }
-            let c = Cfg {
-                codec: (cfg.codec == Codec::Av1) as u32,
-                chroma444: cfg.chroma444 as u32,
-                width: cfg.width,
-                height: cfg.height,
-                fps: cfg.fps,
-                bitrate: cfg.bitrate,
-                preset: cfg.preset,
-                hdr_pq: 0,
-                long_term: cfg.long_term,
-                short_term: cfg.short_term.unwrap_or(0),
-            };
-            let enc = rm_nvenc_open(cuda, &c, err.as_mut_ptr(), 256);
+            let enc = rm_nvenc_open(cuda, &cfg.raw(), err.as_mut_ptr(), 256);
             if enc.is_null() {
                 bail!("{}", text(&err));
             }
             Ok(Self { cuda, enc, note: text(&err) })
         }
+    }
+
+    /// An encoder fed from textures of a Direct3D 11 device (see [`Self::add_texture`]).
+    /// 4:2:0 only: Direct3D has no planar 10-bit 4:4:4 texture.
+    ///
+    /// # Safety
+    /// `device` must be a live `ID3D11Device*` with multithread protection switched on (the
+    /// encoder works on it from threads of its own), and must outlive the encoder.
+    #[cfg(windows)]
+    pub unsafe fn new_d3d11(device: *mut c_void, cfg: &Config) -> Result<Self> {
+        let mut err = [0 as c_char; 256];
+        // SAFETY: the wrapper's contract; `err` is a writable buffer of the given length.
+        unsafe {
+            let enc = rm_nvenc_open_d3d11(device, &cfg.raw(), err.as_mut_ptr(), 256);
+            if enc.is_null() {
+                bail!("{}", text(&err));
+            }
+            Ok(Self { cuda: std::ptr::null_mut(), enc, note: text(&err) })
+        }
+    }
+
+    /// Register a P010 texture of the encoder's size as an input. Returns the input's index.
+    ///
+    /// # Safety
+    /// `texture` must be a live `ID3D11Texture2D*` of the device the encoder was opened on, and
+    /// must outlive the encoder.
+    #[cfg(windows)]
+    pub unsafe fn add_texture(&mut self, texture: *mut c_void) -> Result<usize> {
+        // SAFETY: a live encoder; the caller vouches for the texture.
+        let idx = unsafe { rm_nvenc_register_d3d11(self.enc, texture) };
+        if idx < 0 {
+            bail!("{}", self.last_error());
+        }
+        Ok(idx as usize)
     }
 
     fn last_error(&self) -> String {
@@ -126,6 +203,7 @@ impl Encoder {
 
     /// Share memory Vulkan exported (CUDA takes `fd` over) and register it as an input.
     /// Returns the input's index.
+    #[cfg(not(windows))]
     pub fn add_input(&mut self, fd: i32, size: u64, pitch: u32) -> Result<usize> {
         let mut err = [0 as c_char; 256];
         let mut ptr = 0u64;
@@ -195,6 +273,32 @@ impl Encoder {
             bail!("{}", self.last_error());
         }
         Ok(())
+    }
+}
+
+impl FrameEncoder for Encoder {
+    fn note(&self) -> &str {
+        &self.note
+    }
+
+    fn short_term(&self) -> u32 {
+        Encoder::short_term(self)
+    }
+
+    fn long_term(&self) -> u32 {
+        Encoder::long_term(self)
+    }
+
+    fn encode_how(&mut self, idx: usize, timestamp: u64, how: How) -> Result<Made<'_>> {
+        Encoder::encode_how(self, idx, timestamp, how)
+    }
+
+    fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
+        Encoder::set_bitrate(self, bitrate)
+    }
+
+    fn invalidate(&mut self, timestamp: u64) -> Result<()> {
+        Encoder::invalidate(self, timestamp)
     }
 }
 
