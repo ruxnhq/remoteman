@@ -13,13 +13,14 @@ settings:
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: R82PLAJ45H
     MARKETING_VERSION: "0.1"
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     CURRENT_PROJECT_VERSION: "1"
     DEAD_CODE_STRIPPING: YES
 targets:
   RemotemanMac:
     type: application
     platform: macOS
-    sources: [Shared, Mac]
+    sources: [Shared, Mac, Support/Assets.xcassets]
     dependencies:
       - framework: build/RemotemanCore.xcframework
         embed: false
@@ -42,7 +43,7 @@ targets:
   Remoteman:
     type: application
     platform: iOS
-    sources: [Shared, iOS]
+    sources: [Shared, iOS, Support/Assets.xcassets]
     dependencies:
       - framework: build/RemotemanCore.xcframework
         embed: false
@@ -89,6 +90,7 @@ targets:
       - Shared/HIDKeys.swift
       # The design's colours and card pieces, shared with the viewer.
       - Mac/Kit.swift
+      - Support/Assets.xcassets
     dependencies:
       - framework: build/RemotemanCore.xcframework
         embed: false
