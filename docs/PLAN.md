@@ -433,6 +433,15 @@ A GTK 4 and libadwaita app in Rust on the shared core: a list of paired hosts, p
 `remotemand`, the GDM broker, login screen to session inside one connection, the resume token, unlock and re-lock for attach, the Arch package.
 **Done when:** from a PC sitting at its login screen you reach a desktop on the iPad; a dropped connection lands back in the same session in under 1 s; attaching to a locked local session works and re-locks when you leave.
 
+**Status (2026-11-17): spike S4 passes for the password-less path; nothing of the daemon is built.** Run with `scripts/spike-s4.sh` (as root, on a throwaway user):
+- **GDM makes the session.** `CreateRemoteDisplay` with `preauthenticated-user` gave the test user a full headless GNOME session: logind lists it as remote, class user, Wayland, no seat; GNOME Shell logs "No seat assigned, running headlessly" and picks the 5090. It goes through PAM's `gdm-autologin` service.
+- **GDM's answer can't be trusted.** The call returned the error "Display destroyed before being exported" although the session was created. The daemon must watch for the session (logind, or GDM's RemoteDisplay objects), not the reply.
+- **The remoteman host runs in it and streams.** Started as a user unit in that session, it gave the test client a 2752×2064 virtual monitor at 120 Hz in AV1, 2 ms from capture to received, with the cursor apart and input arriving. A frame from it shows the user's GNOME desktop.
+- **The session outlives the client.** After a disconnect it was still active, and a second connection at an iPhone's size (1320×2868, scale 3) got a new monitor in the same session. A device that wasn't paired was refused in the handshake.
+- **The keyring stays locked,** as expected: PAM logged "couldn't unlock the login keyring".
+- **GNOME shows its orange "screen is being shared" mark** in the top bar of the headless session while connected. Cosmetic, to look into.
+- Not tested yet: the login-screen path (a headless greeter, for typing the password or answering it for Face ID), the agent starting by itself in such sessions, and what logging out leaves behind.
+
 ### 5. Picture and resilience
 Our own Vulkan conversion, direct NVENC, re-requests and parity, the rate controller, static refinement, 4:4:4 if S2 and S3 passed, rotation and resizing.
 **Done when:** 2% random loss shows no stall and puts no keyframe on the wire; the bitrate follows a throttled link within 1 s; an idle desktop sends under 100 kbit/s.
