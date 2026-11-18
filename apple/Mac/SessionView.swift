@@ -149,7 +149,7 @@ struct SessionNotes: View {
             let part = t.size > 0 ? " · \(min(100, t.moved * 100 / t.size))%" : ""
             return (t.incoming ? "Receiving " : "Sending ") + t.name + part
         case .done(let place):
-            return t.incoming ? "Saved \(place) in Downloads" : "\(t.name) is on the computer: \(place)"
+            return t.incoming ? "Saved \((place as NSString).lastPathComponent) in Downloads" : "\(t.name) is on the computer: \(place)"
         case .failed(let why):
             return "\(t.name): \(why)"
         }

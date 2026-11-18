@@ -309,7 +309,12 @@ final class Sharing {
             do {
                 try FileManager.default.moveItem(at: part, to: final)
                 ok = true
-                message = final.lastPathComponent
+                // Where it is: the whole path on a Mac; on iPad and iPhone its name in the app's folder in Files.
+                #if os(macOS)
+                    message = final.path
+                #else
+                    message = final.lastPathComponent
+                #endif
             } catch {
                 message = "This device couldn't save it: \(error.localizedDescription)"
             }
