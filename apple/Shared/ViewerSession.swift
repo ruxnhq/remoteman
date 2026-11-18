@@ -135,6 +135,7 @@ final class ViewerSession: ObservableObject {
         if !on {
             micOn = false
             mic?.stop()
+            micSent = mic?.totals ?? micSent
             mic = nil
             client.send(["t": "mic", "on": false])
             return
@@ -185,6 +186,13 @@ final class ViewerSession: ObservableObject {
             self.camera = c
             self.cameraOn = true
         }
+    }
+
+    /// For tests: what the microphone has sent. Kept after it goes off, until the next time it is on.
+    private var micSent = (packets: 0, bytes: 0)
+    var micReport: String {
+        let t = mic?.totals ?? micSent
+        return "\(t.packets) packets, \(t.bytes) bytes\(mic == nil ? " (the microphone is off)" : "")"
     }
 
     /// For tests: what the camera has sent.

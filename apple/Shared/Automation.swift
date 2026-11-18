@@ -235,6 +235,7 @@ enum Automation {
                 case "clipboard": DispatchQueue.main.sync { session.setClipboard(arg.contains("on")) }
                 case "file": DispatchQueue.main.sync { session.send(file: resolve(arg.trimmingCharacters(in: .whitespaces))) }
                 case "camera": DispatchQueue.main.sync { session.setCamera(arg.contains("on")) }
+                case "micreport": print("remoteman: microphone: \(DispatchQueue.main.sync { session.micReport })")
                 case "camerareport": print("remoteman: camera: \(DispatchQueue.main.sync { session.cameraReport })")
                 case "tone" where n.count == 1: print("remoteman: tone: \(DispatchQueue.main.sync { TestTone.play(seconds: Double(n[0])) })")
                 case "soundreport": print("remoteman: sound: \(DispatchQueue.main.sync { session.soundReport })")

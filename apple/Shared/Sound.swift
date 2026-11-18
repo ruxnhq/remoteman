@@ -279,6 +279,8 @@ final class MicSender {
     private let began = DispatchTime.now().uptimeNanoseconds
     private let queue = DispatchQueue(label: "remoteman.mic")
     private(set) var running = false
+    /// Packets and bytes sent since the microphone went on, for comparing with the host's count.
+    private(set) var totals = (packets: 0, bytes: 0)
     var send: ((UnsafeRawBufferPointer, _ start: Bool, _ seq: UInt32, _ timeUs: UInt64) -> Void)?
 
     static func allowed(_ then: @escaping (Bool) -> Void) {
@@ -378,6 +380,8 @@ final class MicSender {
             let d = descriptions[i]
             let bytes = UnsafeRawBufferPointer(start: out.data + Int(d.mStartOffset), count: Int(d.mDataByteSize))
             send?(bytes, first, seq, timeUs)
+            totals.packets += 1
+            totals.bytes += bytes.count
             first = false
             seq &+= 1
         }
