@@ -34,8 +34,8 @@ async fn display_state(conn: &Connection) -> Result<DisplayState> {
 /// A virtual monitor that lives as long as this does, and the session that takes input for it.
 pub struct VirtualDisplay {
     conn: Connection,
-    /// The monitors that were there before this one.
-    before: Vec<String>,
+    /// The computer's own displays as they were before this one.
+    before: Before,
     remote: Proxy<'static>,
     stream_path: String,
     /// The PipeWire node carrying the monitor's picture.
@@ -57,7 +57,7 @@ impl VirtualDisplay {
             bail!("Mutter's ScreenCast API is version {version}; virtual monitors as real monitors need 3");
         }
 
-        let before = display_state(&conn).await.map(|s| s.1.into_iter().map(|m| m.0.0).collect()).unwrap_or_default();
+        let before = display_state(&conn).await.map(|s| Before::of(&s)).unwrap_or_default();
         let remote_path: OwnedObjectPath = Proxy::new(&conn, REMOTE, "/org/gnome/Mutter/RemoteDesktop", REMOTE).await?.call("CreateSession", &()).await?;
         let remote = Proxy::new(&conn, REMOTE, remote_path, "org.gnome.Mutter.RemoteDesktop.Session").await?;
         let session_id: String = remote.get_property("SessionId").await?;
@@ -88,9 +88,15 @@ impl VirtualDisplay {
         Ok(Self { conn, before, remote, stream_path: stream_path.to_string(), node })
     }
 
-    /// Put this display where the client wants it among the computer's own: beside them (which
-    /// is where Mutter puts it anyway), as the main display, or as the only one, with the
-    /// others off. Call it once the stream is running, since the monitor only exists from then.
+    /// Put this display where the client wants it among the computer's own: beside them, as
+    /// the main display, or as the only one, with the others off. Call it once the stream is
+    /// running, since the monitor only exists from then.
+    ///
+    /// Beside them needs doing too. When a monitor appears that Mutter has no stored layout
+    /// for (and it never has one for these, each gets a new serial number), Mutter lays all
+    /// monitors out afresh in a row at each one's preferred mode: a 240 Hz screen drops to
+    /// 60 Hz and screens may change sides. So the computer's own displays are always put back
+    /// exactly as they were (place, mode, scale, rotation, colour mode), with this one added.
     ///
     /// The change is a temporary configuration for exactly this set of monitors. When this
     /// display goes, the set changes back and Mutter returns to the layout it has stored for
@@ -98,7 +104,8 @@ impl VirtualDisplay {
     pub fn place(&self, placement: Placement) -> impl Future<Output = Result<()>> + Send + 'static {
         let (conn, before) = (self.conn.clone(), self.before.clone());
         async move {
-            if placement == Placement::Extend {
+            // Nothing of the computer's own to put back or to place this one among.
+            if before.layout.is_empty() {
                 return Ok(());
             }
             // The layout may change under us between reading it and applying ours (the serial
@@ -192,15 +199,64 @@ mod tests {
     }
 }
 
+/// One of the computer's own displays (or several showing the same) as it was.
+#[derive(Clone)]
+struct Was {
+    x: i32,
+    y: i32,
+    scale: f64,
+    transform: u32,
+    primary: bool,
+    /// The size of its mode in pixels.
+    size: (i32, i32),
+    /// Each monitor in it: connector, mode, colour mode, underscanning.
+    outputs: Vec<(String, String, Option<u32>, bool)>,
+}
+
+/// The displays as they were before the virtual monitor was made.
+#[derive(Clone, Default)]
+struct Before {
+    connectors: Vec<String>,
+    layout: Vec<Was>,
+}
+
+impl Before {
+    fn of(state: &DisplayState) -> Self {
+        let (_, monitors, logical, _) = state;
+        let mut layout = Vec::new();
+        for l in logical {
+            let mut size = (0, 0);
+            let mut outputs = Vec::new();
+            for id in &l.5 {
+                let Some(m) = monitors.iter().find(|m| m.0.0 == id.0) else { continue };
+                let Some(mode) = m.1.iter().find(|mode| mode.6.get("is-current").and_then(|v| bool::try_from(v).ok()).unwrap_or(false)) else { continue };
+                size = (mode.1, mode.2);
+                let colour = m.2.get("color-mode").and_then(|v| u32::try_from(v).ok());
+                let underscan = m.2.get("is-underscanning").and_then(|v| bool::try_from(v).ok()) == Some(true);
+                outputs.push((id.0.clone(), mode.0.clone(), colour, underscan));
+            }
+            if !outputs.is_empty() {
+                layout.push(Was { x: l.0, y: l.1, scale: l.2, transform: l.3, primary: l.4, size, outputs });
+            }
+        }
+        Self { connectors: monitors.iter().map(|m| m.0.0.clone()).collect(), layout }
+    }
+}
+
 /// One go at [`VirtualDisplay::place`].
-async fn place_once(conn: &Connection, before: &[String], placement: Placement) -> Result<()> {
-    // The monitor appears a moment after the stream's format is agreed.
+async fn place_once(conn: &Connection, before: &Before, placement: Placement) -> Result<()> {
+    // The monitor appears a moment after the stream's format is agreed, and joins the layout
+    // a moment after that.
     let mut tries = 0;
-    let (state, ours) = loop {
+    let (state, ours, ours_scale, ours_mode) = loop {
         let state = display_state(conn).await?;
-        let found = state.1.iter().map(|m| m.0.0.clone()).find(|c| c.starts_with("Meta-") && !before.contains(c));
+        let found = state.1.iter().find(|m| m.0.0.starts_with("Meta-") && !before.connectors.contains(&m.0.0)).and_then(|m| {
+            let mode = m.1.iter().find(|mode| mode.6.get("is-current").and_then(|v| bool::try_from(v).ok()).unwrap_or(false))?;
+            let scale = state.2.iter().find(|l| l.5.iter().any(|id| id.0 == m.0.0))?.2;
+            Some((m.0.0.clone(), scale, mode.0.clone()))
+        });
         match found {
-            Some(c) => break (state, c),
+            Some((c, scale, mode)) => break (state, c, scale, mode),
             None if tries < 50 => {
                 tries += 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -208,38 +264,47 @@ async fn place_once(conn: &Connection, before: &[String], placement: Placement) 
             None => bail!("the virtual monitor never appeared"),
         }
     };
-    let (serial, monitors, logical, globals) = state;
-    let current_mode = |connector: &str| {
-        monitors.iter().find(|m| m.0.0 == connector).and_then(|m| {
-            m.1.iter().find(|mode| mode.6.get("is-current").and_then(|v| bool::try_from(v).ok()).unwrap_or(false)).map(|mode| mode.0.clone())
-        })
-    };
+    let (serial, monitors, _, globals) = state;
+    // Positions are in the desktop's units: pixels divided by the scale, unless Mutter lays
+    // out in physical pixels (layout mode 2).
+    let physical = globals.get("layout-mode").and_then(|v| u32::try_from(v).ok()) == Some(2);
     let mut layout = Vec::new();
-    for l in &logical {
-        let is_ours = l.5.iter().any(|m| m.0 == ours);
-        if placement == Placement::Only && !is_ours {
-            continue;
-        }
-        let mut outputs = Vec::new();
-        for m in &l.5 {
-            let mode = current_mode(&m.0).with_context(|| format!("{} has no current mode", m.0))?;
-            // Whatever isn't said here goes back to its default, so say what each monitor
-            // has now: above all its colour mode, or an HDR screen would drop out of HDR.
-            let mut keep = HashMap::<String, Value>::new();
-            if let Some(now) = monitors.iter().find(|x| x.0.0 == m.0).map(|x| &x.2) {
-                if let Some(mode) = now.get("color-mode").and_then(|v| u32::try_from(v).ok()) {
-                    keep.insert("color-mode".into(), Value::from(mode));
-                }
-                if now.get("is-underscanning").and_then(|v| bool::try_from(v).ok()) == Some(true) {
-                    keep.insert("underscanning".into(), Value::from(true));
-                }
+    let mut right = None::<(i32, i32)>;
+    if placement != Placement::Only {
+        for was in &before.layout {
+            // Unplugged since? Then it isn't ours to place.
+            if !was.outputs.iter().all(|o| monitors.iter().any(|m| m.0.0 == o.0)) {
+                continue;
             }
-            outputs.push((m.0.clone(), mode, keep));
+            let outputs: Vec<_> = was
+                .outputs
+                .iter()
+                .map(|(connector, mode, colour, underscan)| {
+                    // Whatever isn't said goes back to its default, so say what each had:
+                    // above all its colour mode, or an HDR screen would drop out of HDR.
+                    let mut keep = HashMap::<String, Value>::new();
+                    if let Some(c) = colour {
+                        keep.insert("color-mode".into(), Value::from(*c));
+                    }
+                    if *underscan {
+                        keep.insert("underscanning".into(), Value::from(true));
+                    }
+                    (connector.clone(), mode.clone(), keep)
+                })
+                .collect();
+            let turned = matches!(was.transform, 1 | 3 | 5 | 7);
+            let width = if turned { was.size.1 } else { was.size.0 };
+            let width = if physical { width } else { (width as f64 / was.scale).round() as i32 };
+            if right.is_none_or(|r| was.x + width > r.0) {
+                right = Some((was.x + width, was.y));
+            }
+            layout.push((was.x, was.y, was.scale, was.transform, was.primary && placement == Placement::Extend, outputs));
         }
-        let (x, y) = if placement == Placement::Only { (0, 0) } else { (l.0, l.1) };
-        layout.push((x, y, l.2, l.3, is_ours, outputs));
     }
-    anyhow::ensure!(layout.iter().any(|l| l.4), "the virtual monitor isn't part of the layout yet");
+    // Ours goes to the right of the rest, level with its neighbour.
+    let (x, y) = right.unwrap_or((0, 0));
+    let main = placement != Placement::Extend || !layout.iter().any(|l| l.4);
+    layout.push((x, y, ours_scale, 0u32, main, vec![(ours, ours_mode, HashMap::<String, Value>::new())]));
     let config = Proxy::new(conn, DISPLAYS, "/org/gnome/Mutter/DisplayConfig", DISPLAYS).await?;
     // Keep the layout mode (logical or physical pixels) as it is.
     let mut properties = HashMap::<String, Value>::new();
