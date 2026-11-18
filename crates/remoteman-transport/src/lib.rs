@@ -55,6 +55,14 @@ pub async fn connect(addr: SocketAddr, identity: &Identity, expect: Expect) -> R
 }
 
 /// The fingerprint of the other side's certificate.
+/// The code the other side closed this connection with, if it did.
+pub fn closed_with(conn: &Connection) -> Option<u32> {
+    match conn.close_reason()? {
+        quinn::ConnectionError::ApplicationClosed(close) => u32::try_from(close.error_code.into_inner()).ok(),
+        _ => None,
+    }
+}
+
 pub fn peer_fingerprint(conn: &Connection) -> Option<String> {
     let certs = conn.peer_identity()?.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>().ok()?;
     certs.first().map(|c| fingerprint(c))

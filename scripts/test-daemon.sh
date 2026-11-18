@@ -37,8 +37,15 @@ grep -q 'no longer trusted' "$tmp/revoked.log" || devices="a revoked client wasn
 ctl devices | grep -q 'no device is trusted' || devices="the device is still listed after revoke"
 client refused
 [ "$(cat "$tmp/refused.exit")" != 0 ] && ! grep -q '^frames [1-9]' "$tmp/refused.log" || devices="a revoked device got back in"
-echo "devices: $devices"
-kill $a1 $a2 2>/dev/null; sleep 0.2; kill $dpid 2>/dev/null; wait 2>/dev/null
+# The daemon stopping: a connected client hears at once, not after the idle timeout.
+ctl pair on >/dev/null
+"$bin/remoteman-testclient" 127.0.0.1:7793 --pair --state "$tmp/state" --seconds 9 --size 1920x1080 >"$tmp/stopped.log" 2>&1 &
+cpid=$!
+sleep 2
+before=$(date +%s%N); kill $dpid; wait $cpid; took=$(( ($(date +%s%N) - before) / 1000000 ))
+[ "$took" -lt 1500 ] || devices="a client heard of the daemon stopping only after $took ms"
+echo "devices: $devices (told of the stop in $took ms)"
+kill $a1 $a2 2>/dev/null; wait 2>/dev/null
 runs=$(grep -a -oE '^(first|second) frame [0-9]+' "$tmp/out.bin" | awk '{ if ($1 != who || $3 != last + 1) { if (who != "") printf "%s %s-%s, ", who, from, last; who = $1; from = $3 } last = $3 } END { printf "%s %s-%s\n", who, from, last }')
 echo "frames that reached the client: $runs"
 cat "$tmp/first.log" "$tmp/second.log"

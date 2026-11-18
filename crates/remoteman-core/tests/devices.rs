@@ -87,6 +87,7 @@ fn devices_are_listed_dropped_revoked_and_forgotten() {
     // Pairing: every stage is reported, in order, before connect returns.
     let (seen_tx, seen) = mpsc::channel();
     let client = Client::connect(options(&host, &pad, "the pad", true), Screen(seen_tx)).unwrap();
+    assert_eq!(client.close_code(), None);
     let stages: Vec<Stage> = seen.try_iter().filter_map(|s| if let Seen::Stage(s) = s { Some(s) } else { None }).collect();
     assert_eq!(stages, [Stage::Lookup, Stage::Handshake, Stage::Hello, Stage::Display]);
     assert_eq!(next(&calls), "connected");
@@ -99,6 +100,7 @@ fn devices_are_listed_dropped_revoked_and_forgotten() {
     // Dropped: the client is told why, the host keeps listening and still trusts it.
     assert!(host.drop_client());
     assert!(closed(&seen).contains("the host ended the connection"));
+    assert_eq!(client.close_code(), Some(remoteman_core::CLOSE_DROPPED));
     assert_eq!(next(&calls), "left");
     client.close();
     assert_eq!(host.devices().len(), 1);
@@ -119,6 +121,7 @@ fn devices_are_listed_dropped_revoked_and_forgotten() {
     // Revoked while connected: dropped with the reason, off the list, refused afterwards.
     assert!(host.revoke(&pad_fingerprint).unwrap());
     assert!(closed(&seen).contains("no longer trusted"));
+    assert_eq!(client.close_code(), Some(remoteman_core::CLOSE_REVOKED));
     assert_eq!(next(&calls), "left");
     client.close();
     assert!(!host.revoke(&pad_fingerprint).unwrap());

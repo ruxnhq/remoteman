@@ -161,6 +161,10 @@ struct Counters {
     rtt: AtomicU32,
 }
 
+/// Why a host closed the connection: the codes of docs/PROTOCOL.md, "Connection".
+pub const CLOSE_DROPPED: u32 = 2;
+pub const CLOSE_REVOKED: u32 = 3;
+
 pub struct Client {
     runtime: Option<tokio::runtime::Runtime>,
     /// For starting work from any thread, the core's own callbacks included.
@@ -504,6 +508,13 @@ impl Client {
     }
 
     /// Leave. The handler's `closed` is called before this returns or shortly after.
+    /// The code the host closed the connection with (0 it stopped or another device took over,
+    /// 1 something failed, [`CLOSE_DROPPED`], [`CLOSE_REVOKED`]). `None` while the connection
+    /// is up, and when it ended some other way (the network, this side leaving).
+    pub fn close_code(&self) -> Option<u32> {
+        remoteman_transport::closed_with(&self.conn)
+    }
+
     pub fn close(mut self) {
         self.shutdown();
     }

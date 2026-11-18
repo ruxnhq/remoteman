@@ -245,6 +245,19 @@ pub unsafe extern "C" fn rm_client_features(client: *const Client, out: *mut c_c
     report(out, len, &unsafe { &*client }.host_features.join(","));
 }
 
+/// The code the host closed the connection with, for telling apart what `on_closed` means:
+/// 0 the host stopped or another device took over, 1 something failed there, 2 the host's
+/// owner ended this connection (reconnecting is fine), 3 this device was taken off the host's
+/// trust list (it must pair again). -1 while the connection is up, and when it ended some
+/// other way (the network, this side leaving). May be called from `on_closed`.
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_close_code(client: *const Client) -> i32 {
+    unsafe { &*client }.close_code().map_or(-1, |c| c as i32)
+}
+
 /// Frames lost, keyframes asked for, and the shortest round trip in microseconds.
 ///
 /// # Safety

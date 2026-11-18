@@ -118,6 +118,14 @@ int32_t rm_blob_write(const rm_blob *blob, const uint8_t *data, size_t len);
 int32_t rm_blob_finish(rm_blob *blob);
 void rm_blob_cancel(rm_blob *blob);
 
+// The code the host closed the connection with, for telling apart what on_closed means (its
+// reason text is for showing, not for matching): 0 the host stopped or another device took
+// over, 1 something failed there, 2 the host's owner ended this connection (reconnecting is
+// fine), 3 this device was taken off the host's trust list (it must pair again). -1 while the
+// connection is up, and when it ended some other way (the network, this side leaving). May be
+// called from on_closed, and until rm_client_close.
+int32_t rm_client_close_code(const rm_client *client);
+
 // Frames lost, keyframes asked for, and the shortest round trip in microseconds.
 void rm_client_stats(const rm_client *client, uint32_t *lost, uint32_t *keyframe_requests, uint32_t *round_trip_us);
 

@@ -70,7 +70,8 @@ pub struct Shared {
     owner: Option<(String, u32)>,
     login: Option<Login>,
     /// The listening side, once it is up: the trust list and the client's connection.
-    host: std::sync::OnceLock<Arc<remoteman_core::host::Host>>,
+    /// Not held: the daemon's main thread is the one that stops it.
+    host: std::sync::OnceLock<std::sync::Weak<remoteman_core::host::Host>>,
 }
 
 impl Shared {
@@ -78,8 +79,8 @@ impl Shared {
         Arc::new(Self { sending: Mutex::new(()), state: Mutex::default(), owner, login, host: Default::default() })
     }
 
-    pub fn listening(&self, host: Arc<remoteman_core::host::Host>) {
-        let _ = self.host.set(host);
+    pub fn listening(&self, host: &Arc<remoteman_core::host::Host>) {
+        let _ = self.host.set(Arc::downgrade(host));
     }
 
     /// The newest agent running as `uid`.
@@ -325,8 +326,9 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
             use std::io::Write;
             // SAFETY: no arguments, no state.
             let ours = uid == 0 || uid == unsafe { libc::geteuid() };
-            // Looking is for any local user; changing anything is not.
-            let looking = matches!(words.split_whitespace().next(), Some("status" | "devices") | None);
+            // Looking at the agents is for any local user; changing anything is not, and
+            // neither is the list of devices (their names are their owner's business).
+            let looking = matches!(words.split_whitespace().next(), Some("status") | None);
             let answer = if ours || looking { control(&shared, &words) } else { "only root and the daemon's own user may do that\n".into() };
             let _ = writer.lock().unwrap().write_all(answer.as_bytes());
             return;
@@ -517,7 +519,7 @@ fn control(shared: &Shared, words: &str) -> String {
             }
         }
         Some(word @ ("devices" | "revoke" | "drop" | "pair")) => {
-            let Some(host) = shared.host.get() else { return "the daemon is still starting\n".into() };
+            let Some(host) = shared.host.get().and_then(|h| h.upgrade()) else { return "the daemon isn't listening\n".into() };
             match word {
                 "devices" => {
                     let devices = host.devices();
