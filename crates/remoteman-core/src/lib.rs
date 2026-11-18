@@ -292,7 +292,7 @@ impl Client {
                     Message::Error { code, message } => {
                         let _ = failed.send(format!("{code}: {message}"));
                     }
-                    m @ (Message::SoundFormat { .. } | Message::CameraKeyframe | Message::Status { .. } | Message::FileResult { .. }) => {
+                    m @ (Message::SoundFormat { .. } | Message::CameraKeyframe | Message::Status { .. } | Message::FileResult { .. } | Message::Features { .. }) => {
                         let _ = epoch_tx.send(FromHost::Message(m));
                     }
                     _ => {}

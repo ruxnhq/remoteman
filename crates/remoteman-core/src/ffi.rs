@@ -720,6 +720,18 @@ pub unsafe extern "C" fn rm_host_drop_client(host: *const Host) -> i32 {
     unsafe { &*host }.drop_client() as i32
 }
 
+/// Change what this host can do while it runs: `features` as for `rm_host_start`
+/// ("video,input,cursor"). The next client's hello says so and the connected one gets a
+/// `features` message; nothing is restarted and the client stays.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `features` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_set_features(host: *const Host, features: *const c_char) {
+    let list = unsafe { text(features) }.split(',').map(str::trim).filter(|f| !f.is_empty()).map(str::to_owned).collect();
+    unsafe { &*host }.set_features(list);
+}
+
 /// Let the next unknown device in (it is remembered, and pairing turns itself off), or stop.
 ///
 /// # Safety

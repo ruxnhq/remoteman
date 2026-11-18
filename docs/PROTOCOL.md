@@ -96,6 +96,8 @@ Everything beside the picture and input. Three rules hold for all of it:
 - **Nothing of a feature is sent to a side that hasn't asked for it.** Each starts with a message from the client, so a client or host that knows nothing of a feature is never handed a datagram or a stream it can't read. (A client must still ignore datagram kinds it doesn't know.)
 - **When the desktop behind the connection changes** (a new stream epoch because the login screen gave way to the session), what the client had switched on stays on: the host side carries it over, and the client hears `sound_format` again.
 
+A host whose owner switches a feature on or off while a client is connected sends `{"t":"features","features":[...]}`: the whole list as it is now, replacing the hello's. A client enables and disables its controls to match, and stops what was switched off.
+
 ### Channels they use
 
 | Channel | Carried on | Direction | Content |

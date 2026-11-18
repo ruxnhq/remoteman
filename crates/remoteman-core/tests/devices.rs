@@ -25,6 +25,7 @@ impl HostHandler for Desk {
 }
 
 enum Seen {
+    Features(Vec<String>),
     Stage(Stage),
     Closed(String),
 }
@@ -36,6 +37,11 @@ impl Handler for Screen {
     fn frame(&mut self, _frame: &Frame, _age_us: Option<i64>) {}
     fn stage(&mut self, stage: Stage) {
         let _ = self.0.send(Seen::Stage(stage));
+    }
+    fn message(&mut self, message: &remoteman_core::Message) {
+        if let remoteman_core::Message::Features { features } = message {
+            let _ = self.0.send(Seen::Features(features.clone()));
+        }
     }
     fn closed(&mut self, reason: &str) {
         let _ = self.0.send(Seen::Closed(reason.to_owned()));
@@ -60,7 +66,7 @@ fn closed(seen: &mpsc::Receiver<Seen>) -> String {
     loop {
         match seen.recv_timeout(Duration::from_secs(5)).expect("the client was never told it is over") {
             Seen::Closed(reason) => return reason,
-            Seen::Stage(_) => {}
+            _ => {}
         }
     }
 }
@@ -96,6 +102,16 @@ fn devices_are_listed_dropped_revoked_and_forgotten() {
     assert_eq!(devices[0].name, "the pad");
     assert!(devices[0].connected);
     let pad_fingerprint = devices[0].fingerprint.clone();
+
+    // What the host can do changes while connected: the client is told, and stays.
+    host.set_features(vec!["video".into(), "clipboard".into()]);
+    let told = loop {
+        match seen.recv_timeout(Duration::from_secs(5)).expect("the client wasn't told of the new features") {
+            Seen::Features(f) => break f,
+            _ => {}
+        }
+    };
+    assert_eq!(told, ["video", "clipboard"]);
 
     // Dropped: the client is told why, the host keeps listening and still trusts it.
     assert!(host.drop_client());
