@@ -153,14 +153,16 @@ rm_nvenc *rm_nvenc_open(rm_cuda *cuda, const rm_nvenc_cfg *cfg, char *err, int e
     uint32_t mat = cfg->hdr_pq ? NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL : NV_ENC_VUI_MATRIX_COEFFS_BT709;
     e->av1 = cfg->codec == 1;
     // How many recent frames the encoder keeps to refer to, and so to fall back on when a newer
-    // one is invalidated. Four: AV1 in NVENC has no more, and over Wi-Fi most loss reports
-    // come three frames late, so fewer would send most of them to a long-term frame.
+    // one is invalidated. Four: AV1 in NVENC has no more.
     e->short_term = 4;
     e->long_term = cfg->long_term;
     // HEVC allows fewer frames in all the larger the picture: at level 5.x, six for pictures
     // over 6,684,672 pixels (an iPad's 3200x2400), and NVENC answers one more by moving the
-    // stream to level 6, which not every decoder takes. So there, one long-term frame.
-    if (!e->av1 && e->long_term > 1 && (uint64_t)cfg->width * cfg->height > 6684672 && (uint64_t)cfg->width * cfg->height <= 8912896) e->long_term = 1;
+    // stream to level 6, which not every decoder takes. So there, three recent frames. (Tried
+    // on an iPad: four recent and one long-term costs keyframes, because a tenth of its loss
+    // reports come too late for the recent frames and one long-term frame is often too new;
+    // three and two never does, and is no worse than four and two at level 6.)
+    if (!e->av1 && e->long_term > 1 && (uint64_t)cfg->width * cfg->height > 6684672 && (uint64_t)cfg->width * cfg->height <= 8912896) e->short_term = 3;
     // Said outright (for trying layouts out): as said, whatever level that makes.
     if (cfg->short_term) { e->short_term = cfg->short_term; e->long_term = cfg->long_term; }
     if (e->long_term > (uint32_t)cap(e, codec, NV_ENC_CAPS_NUM_MAX_LTR_FRAMES)) e->long_term = cap(e, codec, NV_ENC_CAPS_NUM_MAX_LTR_FRAMES);

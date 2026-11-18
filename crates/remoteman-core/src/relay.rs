@@ -229,3 +229,104 @@ pub fn run_agent(socket: UnixStream, features: Vec<String>, mut handler: impl Ho
     stop(&mut handler, &mut serving, &mut carrying);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Chroma, Codec, Display, Mode};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Sends numbered frames as fast as the link takes them, from inside `connected` on.
+    struct Counting {
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+        inputs: Arc<Mutex<Vec<Event>>>,
+    }
+
+    impl HostHandler for Counting {
+        fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
+            if client.name == "unwelcome" {
+                return Err("no".into());
+            }
+            self.stop = Arc::new(AtomicBool::new(false));
+            let stop = self.stop.clone();
+            self.thread = Some(std::thread::spawn(move || {
+                let mut n = 0u32;
+                while !stop.load(Ordering::Relaxed) && link.send_frame(&n.to_le_bytes(), n == 0, 7) {
+                    n += 1;
+                }
+            }));
+            // Frames are already waiting in the link by the time this returns.
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            Ok(Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: client.display.width, height: 2, refresh: 120, colour: "bt709".into() })
+        }
+        fn keyframe(&mut self) {}
+        fn input(&mut self, event: Event) {
+            self.inputs.lock().unwrap().push(event);
+        }
+        fn left(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    fn client(name: &str, width: u32) -> ToAgent {
+        let display = Display { width, height: 2, scale: 1.0, refresh: 120, placement: Default::default() };
+        ToAgent::Client { info: ClientInfo { name: name.into(), fingerprint: "f".into(), display, decoders: vec![], cursor: false }, elapsed_us: 5 }
+    }
+
+    /// The next `count` frames' numbers, having skipped nothing else.
+    fn frames(daemon: &mut UnixStream, count: u32) -> Vec<u32> {
+        (0..count)
+            .map(|_| match ToDaemon::read(daemon).unwrap() {
+                Some(ToDaemon::Frame { data, capture_us: 7, .. }) => u32::from_le_bytes(data[..4].try_into().unwrap()),
+                _ => panic!("expected a frame"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_agent_serves_clients_in_order() {
+        let (agent, mut daemon) = UnixStream::pair().unwrap();
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let handler = Counting { stop: Arc::default(), thread: None, inputs: inputs.clone() };
+        let running = std::thread::spawn(move || run_agent(agent, vec!["video".into()], handler));
+        assert!(matches!(ToDaemon::read(&mut daemon).unwrap(), Some(ToDaemon::Hello { features }) if features == ["video"]));
+
+        // A refusal comes back as one, and nothing else.
+        client("unwelcome", 2).write(&mut daemon).unwrap();
+        assert!(matches!(ToDaemon::read(&mut daemon).unwrap(), Some(ToDaemon::Refused(why)) if why == "no"));
+
+        // Accepted first, then frames from 0 with none missing, though they were made before
+        // the acceptance was written.
+        client("one", 64).write(&mut daemon).unwrap();
+        assert!(matches!(ToDaemon::read(&mut daemon).unwrap(), Some(ToDaemon::Accepted(a)) if a.width == 64));
+        assert_eq!(frames(&mut daemon, 50), (0..50).collect::<Vec<_>>());
+        ToAgent::Input(Event::Key { usage: 4, down: true }).write(&mut daemon).unwrap();
+
+        // A second client takes the first one's place: after its acceptance, only its frames,
+        // from 0 again. (Whatever the first still had in flight comes before the acceptance.)
+        client("two", 128).write(&mut daemon).unwrap();
+        loop {
+            match ToDaemon::read(&mut daemon).unwrap() {
+                Some(ToDaemon::Frame { .. }) => {}
+                Some(ToDaemon::Accepted(a)) => {
+                    assert_eq!(a.width, 128);
+                    break;
+                }
+                _ => panic!("expected frames, then an acceptance"),
+            }
+        }
+        assert_eq!(frames(&mut daemon, 50), (0..50).collect::<Vec<_>>());
+        assert_eq!(*inputs.lock().unwrap(), [Event::Key { usage: 4, down: true }]);
+
+        // The daemon going away ends it cleanly. Keep reading meanwhile, as the daemon would,
+        // so the agent isn't stuck writing a frame nobody takes.
+        ToAgent::Left.write(&mut daemon).unwrap();
+        daemon.shutdown(std::net::Shutdown::Write).unwrap();
+        while let Ok(Some(_)) = ToDaemon::read(&mut daemon) {}
+        running.join().unwrap().unwrap();
+    }
+}

@@ -240,7 +240,8 @@ fn main() -> Result<()> {
                 "mark" => println!("mark {}: {} frames so far", rest.trim(), seen.lock().unwrap().saved),
                 other => bail!("line {}: unknown step {other}", i + 1),
             }
-            std::thread::sleep(Duration::from_millis(60));
+            // Moves follow each other like a hand's; everything else gets time to land.
+            std::thread::sleep(Duration::from_millis(if word == "move" { 12 } else { 60 }));
         }
         println!("script done");
     }
