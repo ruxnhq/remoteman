@@ -37,6 +37,8 @@
 //!     microseconds on the host's clock, and the data (HEVC Annex-B, or AV1 OBUs).
 //! The first frame is always a keyframe.
 
+mod h264;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -319,6 +321,19 @@ fn main() -> Result<()> {
                         client.send_camera(&vec![f as u8; 10_000], f % 60 == 0, start.elapsed().as_micros() as u64);
                         std::thread::sleep((start + Duration::from_millis((f as u64 + 1) * 33)).saturating_duration_since(Instant::now()));
                     }
+                    client.send_message(Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 });
+                }
+                "camerafile" => {
+                    // A real picture: an Annex-B H.264 file, sent a frame at a time, 30 a second.
+                    let path = rest.trim();
+                    let frames = h264::split_access_units(&std::fs::read(path).with_context(|| format!("line {}: camerafile {path}", i + 1))?);
+                    client.send_message(Message::Camera { on: true, codec: "h264".into(), width: 1280, height: 720, fps: 30 });
+                    let start = Instant::now();
+                    for (f, frame) in frames.iter().enumerate() {
+                        client.send_camera(&frame.data, frame.key, start.elapsed().as_micros() as u64);
+                        std::thread::sleep((start + Duration::from_millis((f as u64 + 1) * 33)).saturating_duration_since(Instant::now()));
+                    }
+                    println!("camera: sent {} frames ({} keyframes) from {path}", frames.len(), frames.iter().filter(|f| f.key).count());
                     client.send_message(Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 });
                 }
                 "clip" => {

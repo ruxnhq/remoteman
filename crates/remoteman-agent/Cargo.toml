@@ -15,6 +15,7 @@ remoteman-gpu = { path = "../remoteman-gpu" }
 remoteman-encode = { path = "../remoteman-encode" }
 remoteman-desktop = { path = "../remoteman-desktop" }
 remoteman-audio = { path = "../remoteman-audio" }
+remoteman-camera = { path = "../remoteman-camera" }
 anyhow = "1"
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }

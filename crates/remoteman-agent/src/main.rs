@@ -74,7 +74,7 @@ fn main() -> Result<()> {
             other => anyhow::bail!("unknown option {other}"),
         }
     }
-    let mut features: Vec<String> = ["video", "input", "cursor", "placement", "configure", "sound", "mic"].map(String::from).to_vec();
+    let mut features: Vec<String> = ["video", "input", "cursor", "placement", "configure", "sound", "mic", "camera"].map(String::from).to_vec();
     if allowed.files {
         features.push("files".into());
     }
