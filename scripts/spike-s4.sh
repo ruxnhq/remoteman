@@ -36,10 +36,16 @@ start)
     [ -x "$root/target/release/remoteman-agent" ] || { echo "build first: cargo build --release"; exit 1; }
     id "$U" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --comment "remoteman test user" "$U"
     install -D -m 755 "$root/target/release/remoteman-agent" "$BIN"
-    echo "asking GDM for a headless session for $U ..."
-    gdbus call --system --dest org.gnome.DisplayManager --object-path /org/gnome/DisplayManager/RemoteDisplayFactory \
-        --method org.gnome.DisplayManager.RemoteDisplayFactory.CreateRemoteDisplay \
-        "{'remote-id': <objectpath '/dev/remoteman/s4'>, 'preauthenticated-user': <'$U'>}"
+    if [ -n "$(session_of)" ]; then
+        echo "$U already has a session; using it"
+    else
+        echo "asking GDM for a headless session for $U ..."
+        # GDM 51.1 answers "Display destroyed before being exported" here even when it goes on
+        # to make the session (seen 2026-11-17), so the answer isn't trusted: the session is.
+        gdbus call --system --dest org.gnome.DisplayManager --object-path /org/gnome/DisplayManager/RemoteDisplayFactory \
+            --method org.gnome.DisplayManager.RemoteDisplayFactory.CreateRemoteDisplay \
+            "{'remote-id': <objectpath '/dev/remoteman/s4'>, 'preauthenticated-user': <'$U'>}" || echo "(GDM reported an error; checking for the session anyway)"
+    fi
     i=0; while [ -z "$(session_of)" ] && [ $i -lt 40 ]; do sleep 0.5; i=$((i + 1)); done
     [ -n "$(session_of)" ] || { echo "GDM made no session for $U within 20 s"; journalctl -u gdm -n 15 --no-pager; exit 1; }
     # Give GNOME Shell a moment to come up before asking it for anything.
