@@ -49,6 +49,8 @@ final class VideoRenderer {
     private var pipelines: [MTLPixelFormat: MTLRenderPipelineState] = [:]
     private var cache: CVMetalTextureCache!
     private let lock = NSLock()
+    /// The size to draw at, in pixels: the view's. Set and used on the main thread.
+    var drawableSize = CGSize.zero
     private var pending: Frame?
     private var current: Frame?
     private var needsRedraw = false
@@ -195,10 +197,20 @@ final class VideoRenderer {
         needsRedraw = false
         lock.unlock()
         guard fresh != nil || redraw else { return }
+        // With no picture the layer is black whatever its size: a few pixels then, so that the
+        // full-size buffers behind the view go back until there is a picture again.
+        let size = frame == nil ? CGSize(width: 16, height: 16) : drawableSize
+        if size.width >= 1, size.height >= 1, layer.drawableSize != size { layer.drawableSize = size }
         guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return }
         let keep = encode(frame?.pixelBuffer, into: drawable.texture, format: layer.pixelFormat, commandBuffer: cb)
         cb.present(drawable)
-        cb.addCompletedHandler { _ in _ = keep }
+        // With no picture left to show, the decoded pictures the texture cache still holds go
+        // back once this (black) frame is done.
+        let cache = frame == nil ? self.cache : nil
+        cb.addCompletedHandler { _ in
+            _ = keep
+            if let cache { CVMetalTextureCacheFlush(cache, 0) }
+        }
         cb.commit()
         if let fresh {
             let now = DispatchTime.now().uptimeNanoseconds

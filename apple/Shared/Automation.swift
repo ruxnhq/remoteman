@@ -271,7 +271,9 @@ enum Automation {
                         usleep(100_000)
                     }
                     print("remoteman: joined: \(DispatchQueue.main.sync { "\(session.state)" })")
-                case "mem": print("remoteman: memory \(memory()), \(DispatchQueue.main.sync { session.client == nil ? "not connected" : "connected" })")
+                case "mem":
+                    let (on, size) = DispatchQueue.main.sync { (session.client != nil, session.renderer?.layer.drawableSize ?? .zero) }
+                    print("remoteman: memory \(memory()), \(on ? "connected" : "not connected"), drawing at \(Int(size.width))x\(Int(size.height))")
                 case "transfers":
                     print("remoteman: transfers \(DispatchQueue.main.sync { session.transfers })  notice \(DispatchQueue.main.sync { session.notice ?? "none" })")
                 case "shot":

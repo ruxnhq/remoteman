@@ -142,7 +142,7 @@ final class RefreshMeter {
             guard let r = session.renderer else { return }
             let scale = window?.backingScaleFactor ?? 2
             r.layer.contentsScale = scale
-            r.layer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            r.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
             r.setNeedsRedraw()
             updateCursor()
         }
@@ -452,7 +452,7 @@ final class RefreshMeter {
             CATransaction.setDisableActions(true)
             r.layer.frame = bounds
             r.layer.contentsScale = scale
-            r.layer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            r.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
             CATransaction.commit()
             r.setNeedsRedraw()
             updateCursorShape()
