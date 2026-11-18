@@ -50,8 +50,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var bitrate = 0
         /// Fill the virtual display with moving test content while a client is on.
         var testWindow = false
-        /// Offer this Mac's sound. Off until it has been heard on a device.
-        var sound = false
+        /// Offer this Mac's sound (--sound no leaves it out). The Mac's own speakers keep playing
+        /// while a device has it on, unlike the Linux host, which moves its output to the device.
+        var sound = true
         var testTone = false
         /// What this Mac's owner allows paired devices: the clipboard both ways, files into Downloads.
         var allowClipboard = false
