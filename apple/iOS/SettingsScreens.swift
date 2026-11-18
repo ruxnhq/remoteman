@@ -44,6 +44,7 @@ struct ComputerSettingsScreen: View {
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { model.connect(c) }
                                 }
                                 .buttonStyle(WideButtonStyle(small: true))
+                                .fixedSize()
                             }
                             .padding(14)
                         }
@@ -108,11 +109,13 @@ struct ComputerSettingsScreen: View {
             }
             .background(Theme.bg.ignoresSafeArea())
             .presentationCornerRadius(40)
-            .confirmationDialog("Forget \(c.name)?", isPresented: $forgetting, titleVisibility: .visible) {
-                Button("Forget This Computer", role: .destructive) {
+            .alert("Forget \(c.name)?", isPresented: $forgetting) {
+                Button("Forget", role: .destructive) {
                     store.forget(c)
+                    Haptics.warning()
                     dismiss()
                 }
+                Button("Cancel", role: .cancel) {}
             } message: {
                 Text("Its key is removed from this \(device). Revoke this \(device) on the computer too.")
             }

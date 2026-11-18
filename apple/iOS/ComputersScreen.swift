@@ -46,14 +46,17 @@ struct ComputersScreen: View {
                 store.update(renamed)
             }
         }
-        .confirmationDialog(
+        // An alert, not an action sheet: it is asked for from a menu, and an alert comes up in the
+        // middle of the screen whatever it was asked from, on iPhone and iPad alike.
+        .alert(
             "Forget \(forgetting?.name ?? "this computer")?", isPresented: Binding(get: { forgetting != nil }, set: { if !$0 { forgetting = nil } }),
-            titleVisibility: .visible, presenting: forgetting
+            presenting: forgetting
         ) { c in
-            Button("Forget This Computer", role: .destructive) {
+            Button("Forget", role: .destructive) {
                 store.forget(c)
                 Haptics.warning()
             }
+            Button("Cancel", role: .cancel) {}
         } message: { _ in
             Text("Its key is removed from this \(device). Revoke this \(device) on the computer too.")
         }
@@ -159,15 +162,21 @@ struct ComputersScreen: View {
         Button {} label: { Label("Connect in New Window", systemImage: "macwindow.on.rectangle") }
             .disabled(!Features.multiWindow)
         Divider()
-        Button { editing = c } label: { Label("Settings for This Computer…", systemImage: "slider.horizontal.3") }
+        Button { afterMenu { editing = c } } label: { Label("Settings for This Computer…", systemImage: "slider.horizontal.3") }
+        // Asked for once the menu has gone: on a device, something presented while the menu is
+        // still closing can be dropped without a trace.
         Button {
             newName = c.name
-            renaming = c
+            afterMenu { renaming = c }
         } label: {
             Label("Rename…", systemImage: "pencil")
         }
         Divider()
-        Button(role: .destructive) { forgetting = c } label: { Label("Forget This Computer…", systemImage: "trash") }
+        Button(role: .destructive) { afterMenu { forgetting = c } } label: { Label("Forget This Computer…", systemImage: "trash") }
+    }
+
+    private func afterMenu(_ present: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: present)
     }
 
     // MARK: iPhone list
