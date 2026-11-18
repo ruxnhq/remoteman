@@ -21,6 +21,7 @@ struct Cfg {
 
 unsafe extern "C" {
     fn rm_cuda_open(err: *mut c_char, errlen: c_int) -> *mut c_void;
+    fn rm_cuda_close(c: *mut c_void);
     fn rm_cuda_import(c: *mut c_void, fd: c_int, size: u64, devptr: *mut u64, err: *mut c_char, errlen: c_int) -> c_int;
     fn rm_nvenc_open(cuda: *mut c_void, cfg: *const Cfg, err: *mut c_char, errlen: c_int) -> *mut c_void;
     fn rm_nvenc_error(e: *mut c_void) -> *const c_char;
@@ -113,6 +114,7 @@ impl Encoder {
             };
             let enc = rm_nvenc_open(cuda, &c, err.as_mut_ptr(), 256);
             if enc.is_null() {
+                rm_cuda_close(cuda);
                 bail!("{}", text(&err));
             }
             Ok(Self { cuda, enc, note: text(&err) })
@@ -200,7 +202,10 @@ impl Encoder {
 
 impl Drop for Encoder {
     fn drop(&mut self) {
-        // SAFETY: ours, and not used again. (The CUDA context is left to process exit.)
-        unsafe { rm_nvenc_close(self.enc) };
+        // SAFETY: ours, and not used again; the encoder goes before the context it lives in.
+        unsafe {
+            rm_nvenc_close(self.enc);
+            rm_cuda_close(self.cuda);
+        }
     }
 }
