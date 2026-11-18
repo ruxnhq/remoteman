@@ -90,6 +90,7 @@ targets:
     sources:
       - Host
       - Shared/HIDKeys.swift
+      - Shared/Sharing.swift
       # The design's colours and card pieces, shared with the viewer.
       - Mac/Kit.swift
       - Support/Assets.xcassets

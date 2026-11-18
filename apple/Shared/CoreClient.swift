@@ -4,7 +4,7 @@ import CoreGraphics
 import Foundation
 import RemotemanCore
 
-final class CoreClient {
+final class CoreClient: SharingLink {
     struct Config {
         var host: String  // "name:port"
         var stateDir: String

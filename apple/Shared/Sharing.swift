@@ -8,6 +8,18 @@ import Foundation
     import UIKit
 #endif
 
+enum BlobKind {
+    static let clipboard: UInt8 = 0x40
+    static let file: UInt8 = 0x41
+}
+
+/// The connection as clipboard and files need it: the viewer's client, or the host's side.
+protocol SharingLink: AnyObject {
+    @discardableResult func send(_ message: [String: Any]) -> Bool
+    /// Send a blob, a piece at a time from `next` (nil: the end). Waits while the network is behind.
+    func sendBlob(kind: UInt8, header: [String: Any], next: () -> Data?) -> Bool
+}
+
 /// What is on this device's clipboard, in the two forms the protocol carries.
 private enum Clip {
     static let text = "text/plain;charset=utf-8"
@@ -85,7 +97,9 @@ struct Transfer: Identifiable, Equatable {
 /// Clipboard and files for one connection. Made on the main thread; `blob` and `fileResult`
 /// are called on the core's thread.
 final class Sharing {
-    private weak var client: CoreClient?
+    private weak var client: SharingLink?
+    /// The viewer says when the clipboard is shared; the host is told.
+    private let announces: Bool
     private let work = DispatchQueue(label: "remoteman.sharing")
     /// Called on the main thread whenever a transfer changes.
     var transferChanged: ((Transfer) -> Void)?
@@ -98,7 +112,10 @@ final class Sharing {
         #endif
     }
 
-    init(client: CoreClient) { self.client = client }
+    init(client: SharingLink, announces: Bool = true) {
+        self.client = client
+        self.announces = announces
+    }
 
     /// For tests: what clipboard sharing did and when (kinds and sizes, never content).
     private(set) var log: [String] = []
@@ -140,7 +157,7 @@ final class Sharing {
         guard on != clipboardOn else { return }
         clipboardOn = on
         note("sharing \(on ? "on" : "off")")
-        client?.send(["t": "clipboard", "on": on])
+        if announces { client?.send(["t": "clipboard", "on": on]) }
         timer?.invalidate()
         timer = nil
         guard on else { return }
@@ -173,7 +190,7 @@ final class Sharing {
         note("sending seq \(sentSeq), \(clip.type), \(clip.data.count) bytes")
         work.async { [weak self] in
             var rest: Data? = clip.data
-            let ok = client?.sendBlob(kind: CoreClient.clipboardKind, header: header) {
+            let ok = client?.sendBlob(kind: BlobKind.clipboard, header: header) {
                 defer { rest = nil }
                 return rest
             }
@@ -198,11 +215,11 @@ final class Sharing {
         switch what {
         case 0:
             var b = Incoming(kind: kind, header: header)
-            if kind == CoreClient.fileKind { openFile(&b, id: id) }
+            if kind == BlobKind.file { openFile(&b, id: id) }
             incoming[id] = b
         case 1:
             guard var b = incoming[id] else { return }
-            if b.kind == CoreClient.clipboardKind {
+            if b.kind == BlobKind.clipboard {
                 if b.data.count + data.count <= Clip.most { b.data.append(contentsOf: data) } else { b.failed = "too large" }
             } else if let f = b.file, b.failed == nil {
                 do {
@@ -216,7 +233,7 @@ final class Sharing {
             incoming[id] = b
         default:
             guard let b = incoming.removeValue(forKey: id) else { return }
-            if b.kind == CoreClient.clipboardKind {
+            if b.kind == BlobKind.clipboard {
                 if complete, b.failed == nil { takeClipboard(b) }
             } else {
                 closeFile(b, complete: complete)
@@ -323,7 +340,7 @@ final class Sharing {
             if let handle = try? FileHandle(forReadingFrom: url) {
                 var last = 0
                 sent =
-                    client?.sendBlob(kind: CoreClient.fileKind, header: ["id": id, "name": t.name, "size": size]) {
+                    client?.sendBlob(kind: BlobKind.file, header: ["id": id, "name": t.name, "size": size]) {
                         guard let piece = try? handle.read(upToCount: 256 << 10), !piece.isEmpty else { return nil }
                         t.moved += piece.count
                         if t.moved - last >= 1 << 20 {

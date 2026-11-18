@@ -53,6 +53,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         /// Offer this Mac's sound. Off until it has been heard on a device.
         var sound = false
         var testTone = false
+        /// What this Mac's owner allows paired devices: the clipboard both ways, files into Downloads.
+        var allowClipboard = false
+        var allowFiles = false
         var testDrop: Double?
         var testRevoke: Double?
     }
@@ -176,12 +179,17 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
                 else { return }
                 Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().message(m)
             },
-            // Microphone, camera and blobs: not acted on yet, so not announced.
-            on_mic: nil, on_camera: nil, on_blob: nil)
+            // Microphone and camera: not acted on yet, so not announced.
+            on_mic: nil, on_camera: nil,
+            on_blob: { ctx, what, id, kind, header, data, len, complete in
+                let me = Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue()
+                let h = header.flatMap { (try? JSONSerialization.jsonObject(with: Data(String(cString: $0).utf8))) as? [String: Any] } ?? [:]
+                me.blob(what: what, id: id, kind: kind, header: h, data: UnsafeRawBufferPointer(start: data, count: data == nil ? 0 : len), complete: complete != 0)
+            })
         var err = [CChar](repeating: 0, count: 512)
         guard
             let h = rm_host_start(
-                options.listen, options.stateDir, options.name, "macos", "video,input,cursor,placement,configure" + (options.sound ? ",sound" : ""), options.pair ? 1 : 0,
+                options.listen, options.stateDir, options.name, "macos", "video,input,cursor,placement,configure" + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "") + (options.allowFiles ? ",files" : ""), options.pair ? 1 : 0,
                 callbacks, &err, err.count)
         else { throw NSError(domain: "remoteman", code: 1, userInfo: [NSLocalizedDescriptionKey: String(cString: err)]) }
         host = h
@@ -229,6 +237,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         if let failure = begin(p) { return refuse(failure) }
         clientName = name
         picture = p
+        let s = Sharing(client: link, announces: false)
+        s.transferChanged = { t in
+            if t.state != .moving { hostLog("host: file \(t.incoming ? "from" : "to") the device: \(t.name), \(t.size) bytes: \(t.state)") }
+        }
+        sharing = s
         fill(accept, p)
         let summary = Client(name: name, width: p.width, height: p.height, refresh: p.fps, placement: min(p.placement, 2))
         DispatchQueue.main.async { self.onClient?(summary) }
@@ -294,6 +307,46 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         return failure
     }
 
+    // MARK: Clipboard and files
+
+    /// The connected device as clipboard and files reach it.
+    private final class Link: SharingLink {
+        weak var owner: MacHost?
+        init(_ owner: MacHost) { self.owner = owner }
+        func send(_ message: [String: Any]) -> Bool {
+            guard let h = owner?.host, let d = try? JSONSerialization.data(withJSONObject: message), let json = String(data: d, encoding: .utf8)
+            else { return false }
+            return rm_host_send_message(h, json) != 0
+        }
+        func sendBlob(kind: UInt8, header: [String: Any], next: () -> Data?) -> Bool {
+            guard let h = owner?.host, let d = try? JSONSerialization.data(withJSONObject: header), let json = String(data: d, encoding: .utf8),
+                let blob = rm_host_blob_open(h, kind, json)
+            else { return false }
+            while let piece = next() {
+                if piece.isEmpty { continue }
+                if piece.withUnsafeBytes({ rm_blob_write(blob, $0.bindMemory(to: UInt8.self).baseAddress, piece.count) }) == 0 {
+                    rm_blob_cancel(blob)
+                    return false
+                }
+            }
+            return rm_blob_finish(blob) != 0
+        }
+    }
+    private lazy var link = Link(self)
+    /// For one client, from its hello to its leaving. Set on the core's thread.
+    private var sharing: Sharing?
+
+    private func blob(what: UInt8, id: UInt32, kind: UInt8, header: [String: Any], data: UnsafeRawBufferPointer, complete: Bool) {
+        guard let sharing else { return }
+        // Only what the owner allowed is taken; the rest is read and thrown away.
+        if kind == BlobKind.clipboard, !options.allowClipboard { return }
+        if kind == BlobKind.file, !options.allowFiles {
+            if what == 0, let fid = header["id"] { link.send(["t": "file_result", "id": fid, "ok": false, "message": "This Mac doesn't take files."]) }
+            return
+        }
+        sharing.blob(what: what, id: id, kind: kind, header: header, data: data, complete: complete)
+    }
+
     // MARK: Sound
 
     private let soundQueue = DispatchQueue(label: "remoteman.host.sound", qos: .userInteractive)
@@ -323,6 +376,12 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     /// One of the client's feature messages: configure, sound.
     private func message(_ m: [String: Any]) {
         if m["t"] as? String == "sound" { return setSound(m["on"] as? Bool ?? false) }
+        if m["t"] as? String == "clipboard", options.allowClipboard, let sharing {
+            let on = m["on"] as? Bool ?? false
+            hostLog("host: the clipboard is \(on ? "shared with the device" : "no longer shared")")
+            return DispatchQueue.main.async { sharing.setClipboard(on, sendCurrent: true) }
+        }
+        if m["t"] as? String == "file_result" { sharing?.fileResult(m) }
         guard m["t"] as? String == "configure", let host, let old = picture else { return }
         if let b = (m["bitrate"] as? NSNumber)?.intValue {
             limit = max(0, b)
@@ -393,6 +452,13 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         hostLog("host: client left")
         picture = nil
         soundQueue.sync { sound = nil }
+        if let s = sharing {
+            sharing = nil
+            DispatchQueue.main.async {
+                for line in s.log { hostLog("host: clipboard: \(line)") }
+                s.stop()
+            }
+        }
         DispatchQueue.main.async {
             self.teardown()
             self.onClient?(nil)
