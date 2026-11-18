@@ -43,8 +43,12 @@ final class HostController: ObservableObject {
         self.unattended = unattended
         host = MacHost(options: options)
         host.onClient = { [weak self] c in
+            // The same device with another display (it changed its settings) keeps its time.
+            let before = self?.client
+            var c = c
+            if let b = before, c != nil { c?.since = b.since }
             self?.client = c
-            if let self, c != nil {
+            if let self, c != nil, before == nil {
                 hostLog("host: trusted devices: \(self.host.devices.map { "\($0.name) \($0.fingerprint.prefix(8))\($0.connected ? " (connected)" : "")" }.joined(separator: ", "))")
                 if let t = options.testDrop { DispatchQueue.main.asyncAfter(deadline: .now() + t) { self.disconnectClient() } }
                 if let t = options.testRevoke {

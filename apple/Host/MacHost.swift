@@ -168,12 +168,17 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
                 Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().inputArrived(input!.pointee)
             },
             on_client_left: { ctx in Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().clientLeft() },
-            // Feature messages, microphone, camera and blobs: not acted on yet, so not announced.
-            on_message: nil, on_mic: nil, on_camera: nil, on_blob: nil)
+            on_message: { ctx, json in
+                guard let json, let m = (try? JSONSerialization.jsonObject(with: Data(String(cString: json).utf8))) as? [String: Any]
+                else { return }
+                Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().message(m)
+            },
+            // Microphone, camera and blobs: not acted on yet, so not announced.
+            on_mic: nil, on_camera: nil, on_blob: nil)
         var err = [CChar](repeating: 0, count: 512)
         guard
             let h = rm_host_start(
-                options.listen, options.stateDir, options.name, "macos", "video,input,cursor,placement", options.pair ? 1 : 0,
+                options.listen, options.stateDir, options.name, "macos", "video,input,cursor,placement,configure", options.pair ? 1 : 0,
                 callbacks, &err, err.count)
         else { throw NSError(domain: "remoteman", code: 1, userInfo: [NSLocalizedDescriptionKey: String(cString: err)]) }
         host = h
@@ -213,45 +218,120 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         guard CGPreflightScreenCaptureAccess() else {
             return refuse("the Mac host needs Screen Recording permission (System Settings, Privacy & Security)")
         }
-        let width = min(7680, max(640, Int(c.width) & ~1))
-        let height = min(4320, max(360, Int(c.height) & ~1))
-        let fps = min(240, max(24, Int(c.refresh)))
-        // macOS draws at 1× or 2×: anything from 1.5 up gets the 2× desktop.
-        let hiDPI = c.scale >= 1.5
-        let cursorApart = c.cursor_apart != 0
         // Where the client wants its display: 0 extra, 1 main, 2 only. --main yes still forces main.
-        let placement = max(Int(c.placement), options.makeMain ? 1 : 0)
+        let p = Picture(
+            width: Int(c.width), height: Int(c.height), fps: Int(c.refresh), hiDPI: c.scale >= 1.5, cursorApart: c.cursor_apart != 0,
+            placement: max(Int(c.placement), options.makeMain ? 1 : 0))
+        limit = 0
+        if let failure = begin(p) { return refuse(failure) }
+        clientName = name
+        picture = p
+        fill(accept, p)
+        let summary = Client(name: name, width: p.width, height: p.height, refresh: p.fps, placement: min(p.placement, 2))
+        DispatchQueue.main.async { self.onClient?(summary) }
+        return 1
+    }
+
+    /// What a client's display is: its pixels, rate, whether the desktop is drawn at 2×, and where it sits.
+    private struct Picture: Equatable {
+        var width: Int, height: Int, fps: Int
+        /// macOS draws at 1× or 2×: anything from 1.5 up gets the 2× desktop.
+        var hiDPI: Bool
+        var cursorApart: Bool
+        var placement: Int
+        init(width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int) {
+            self.width = min(7680, max(640, width & ~1))
+            self.height = min(4320, max(360, height & ~1))
+            self.fps = min(240, max(24, fps))
+            self.hiDPI = hiDPI
+            self.cursorApart = cursorApart
+            self.placement = min(max(placement, 0), 2)
+        }
+    }
+    // The core's thread.
+    private var picture: Picture?
+    private var clientName = ""
+    /// The ceiling the client asked for, in bits a second (0: this host chooses).
+    private var limit = 0
+
+    private func bitrate(for p: Picture) -> Int {
+        let own = options.bitrate > 0 ? options.bitrate : (p.width * p.height >= 3840 * 2160 ? 40_000_000 : 25_000_000)
+        return limit > 0 ? max(500_000, min(own, limit)) : own
+    }
+
+    private func fill(_ accept: UnsafeMutablePointer<rm_accept>, _ p: Picture) {
+        accept.pointee.codec = 0
+        accept.pointee.depth = 10
+        accept.pointee.chroma = 420
+        accept.pointee.width = UInt32(p.width)
+        accept.pointee.height = UInt32(p.height)
+        accept.pointee.refresh = UInt32(p.fps)
+        accept.pointee.hdr = 0
+    }
+
+    /// Take down whatever picture there is and start this one. Blocks the core's thread until
+    /// it runs; returns why not, if it doesn't.
+    private func begin(_ p: Picture) -> String? {
         let done = DispatchSemaphore(value: 0)
         var failure: String? = "starting the display timed out"
+        let rate = bitrate(for: p)
         DispatchQueue.main.async { [self] in
             teardown()
             generation += 1
             let gen = generation
             Task { @MainActor in
                 failure = await self.setUp(
-                    width: width, height: height, fps: fps, hiDPI: hiDPI, cursorApart: cursorApart, placement: placement,
-                    gen: gen)
+                    width: p.width, height: p.height, fps: p.fps, hiDPI: p.hiDPI, cursorApart: p.cursorApart, placement: p.placement,
+                    bitrate: rate, gen: gen)
                 done.signal()
             }
         }
-        if done.wait(timeout: .now() + 15) == .timedOut {
-            DispatchQueue.main.async { self.teardown() }
-            return refuse("starting the display timed out")
+        if done.wait(timeout: .now() + 15) == .timedOut { failure = "starting the display timed out" }
+        if failure != nil { DispatchQueue.main.async { self.teardown() } }
+        return failure
+    }
+
+    /// One of the client's feature messages. So far: configure.
+    private func message(_ m: [String: Any]) {
+        guard m["t"] as? String == "configure", let host, let old = picture else { return }
+        if let b = (m["bitrate"] as? NSNumber)?.intValue {
+            limit = max(0, b)
+            let rate = bitrate(for: old)
+            lock.lock()
+            let enc = encoder
+            lock.unlock()
+            enc?.setBitrate(rate)
+            hostLog("host: configure: bitrate ceiling \(limit), encoding at \(rate / 1000) kbit/s")
+            rm_host_send_message(host, "{\"t\":\"status\",\"bitrate\":\(rate)}")
         }
-        if let failure {
-            DispatchQueue.main.async { self.teardown() }
-            return refuse(failure)
+        guard let d = m["display"] as? [String: Any] else { return }
+        func int(_ k: String, _ now: Int) -> Int { (d[k] as? NSNumber)?.intValue ?? now }
+        var placement = old.placement
+        if let s = d["placement"] as? String { placement = ["extend": 0, "main": 1, "only": 2][s] ?? placement }
+        let new = Picture(
+            width: int("width", old.width), height: int("height", old.height), fps: int("refresh", old.fps),
+            hiDPI: (d["scale"] as? NSNumber).map { $0.doubleValue >= 1.5 } ?? old.hiDPI, cursorApart: old.cursorApart,
+            placement: max(placement, options.makeMain ? 1 : 0))
+        guard new != old else { return }
+        hostLog("host: configure: display \(new.width)×\(new.height) at \(new.fps) Hz, 2× \(new.hiDPI), placement \(new.placement)")
+        var now = new
+        if let failure = begin(new) {
+            // Back to what worked; if that fails too, the client is dropped.
+            hostLog("host: configure failed (\(failure)); going back to \(old.width)×\(old.height)")
+            now = old
+            if let again = begin(old) {
+                hostLog("host: and the old display didn't come back (\(again)); dropping the client")
+                rm_host_drop_client(host)
+                return
+            }
         }
-        accept.pointee.codec = 0
-        accept.pointee.depth = 10
-        accept.pointee.chroma = 420
-        accept.pointee.width = UInt32(width)
-        accept.pointee.height = UInt32(height)
-        accept.pointee.refresh = UInt32(fps)
-        accept.pointee.hdr = 0
-        let summary = Client(name: name, width: width, height: height, refresh: fps, placement: min(placement, 2))
+        picture = now
+        var accept = rm_accept()
+        fill(&accept, now)
+        if rm_host_restart(host, &accept) == 0 { hostLog("host: configure: the core didn't restart the stream") }
+        rm_host_send_message(host, "{\"t\":\"status\",\"bitrate\":\(bitrate(for: now))}")
+        let summary = Client(name: clientName, width: now.width, height: now.height, refresh: now.fps, placement: now.placement)
         DispatchQueue.main.async { self.onClient?(summary) }
-        return 1
     }
 
     private func keyframeWanted() {
@@ -279,6 +359,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func clientLeft() {
         hostLog("host: client left")
+        picture = nil
         DispatchQueue.main.async {
             self.teardown()
             self.onClient?(nil)
@@ -290,7 +371,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Returns nil when the picture is running, or why it isn't.
     @MainActor
     private func setUp(
-        width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int, gen: Int
+        width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int, bitrate: Int, gen: Int
     ) async -> String? {
         holdAwake()
         // A fixed serial first; one left behind by a crashed run can't be shared, so then a new one.
@@ -331,7 +412,6 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let d = found else { return "the virtual display didn't appear for capture" }
         guard gen == generation else { return "replaced by a newer client" }
 
-        let bitrate = options.bitrate > 0 ? options.bitrate : (width * height >= 3840 * 2160 ? 40_000_000 : 25_000_000)
         let enc: HostEncoder
         do { enc = try HostEncoder(width: width, height: height, fps: fps, bitrate: bitrate) } catch {
             return "no HEVC Main10 hardware encoder for \(width)×\(height) (\(error.localizedDescription))"

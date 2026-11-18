@@ -68,6 +68,16 @@ final class HostEncoder {
         session = s
     }
 
+    /// Another average bitrate, from the next frame on, with no keyframe.
+    func setBitrate(_ bitrate: Int) {
+        lock.lock()
+        let s = session
+        lock.unlock()
+        guard let s else { return }
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFTypeRef)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [bitrate * 3 / 16, 1] as CFArray)
+    }
+
     func invalidate() {
         lock.lock()
         let s = session
