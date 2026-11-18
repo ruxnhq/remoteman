@@ -69,11 +69,17 @@ pub struct Shared {
     /// device has an owner of its own.)
     owner: Option<(String, u32)>,
     login: Option<Login>,
+    /// The listening side, once it is up: the trust list and the client's connection.
+    host: std::sync::OnceLock<Arc<remoteman_core::host::Host>>,
 }
 
 impl Shared {
     pub fn new(owner: Option<(String, u32)>, login: Option<Login>) -> Arc<Self> {
-        Arc::new(Self { sending: Mutex::new(()), state: Mutex::default(), owner, login })
+        Arc::new(Self { sending: Mutex::new(()), state: Mutex::default(), owner, login, host: Default::default() })
+    }
+
+    pub fn listening(&self, host: Arc<remoteman_core::host::Host>) {
+        let _ = self.host.set(host);
     }
 
     /// The newest agent running as `uid`.
@@ -320,7 +326,7 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
             // SAFETY: no arguments, no state.
             let ours = uid == 0 || uid == unsafe { libc::geteuid() };
             // Looking is for any local user; changing anything is not.
-            let looking = matches!(words.split_whitespace().next(), Some("status") | None);
+            let looking = matches!(words.split_whitespace().next(), Some("status" | "devices") | None);
             let answer = if ours || looking { control(&shared, &words) } else { "only root and the daemon's own user may do that\n".into() };
             let _ = writer.lock().unwrap().write_all(answer.as_bytes());
             return;
@@ -510,6 +516,44 @@ fn control(shared: &Shared, words: &str) -> String {
                 Err(why) => format!("{why}\n"),
             }
         }
-        Some(other) => format!("unknown command {other}: status, switch N, prefer N\n"),
+        Some(word @ ("devices" | "revoke" | "drop" | "pair")) => {
+            let Some(host) = shared.host.get() else { return "the daemon is still starting\n".into() };
+            match word {
+                "devices" => {
+                    let devices = host.devices();
+                    let mut out: String = devices.iter().map(|d| format!("{}  {}{}\n", &d.fingerprint[..16.min(d.fingerprint.len())], d.name, if d.connected { "  (connected)" } else { "" })).collect();
+                    if devices.is_empty() {
+                        out += "no device is trusted\n";
+                    }
+                    out + if host.pairing() { "pairing is on: the next unknown device is let in\n" } else { "" }
+                }
+                "revoke" => {
+                    // A fingerprint, or enough of its start to mean one device.
+                    let start = words.next().unwrap_or_default();
+                    let found: Vec<_> = host.devices().into_iter().filter(|d| start.len() >= 6 && d.fingerprint.starts_with(start)).collect();
+                    match found.as_slice() {
+                        [d] => match host.revoke(&d.fingerprint) {
+                            Ok(_) => format!("{} is no longer trusted{}\n", d.name, if d.connected { " and was dropped" } else { "" }),
+                            Err(e) => format!("the list couldn't be saved: {e:#}\n"),
+                        },
+                        [] => "revoke FINGERPRINT: no trusted device starts with that (six characters or more; see devices)\n".into(),
+                        _ => "revoke FINGERPRINT: more than one device starts with that\n".into(),
+                    }
+                }
+                "drop" => if host.drop_client() { "the client was dropped\n".into() } else { "no client is connected\n".into() },
+                _ => match words.next() {
+                    Some("on") => {
+                        host.set_pairing(true);
+                        "pairing is on: the next unknown device is let in and remembered\n".into()
+                    }
+                    Some("off") => {
+                        host.set_pairing(false);
+                        "pairing is off\n".into()
+                    }
+                    _ => "pair on|off\n".into(),
+                },
+            }
+        }
+        Some(other) => format!("unknown command {other}: status, switch N, prefer N, devices, revoke FINGERPRINT, drop, pair on|off\n"),
     }
 }
