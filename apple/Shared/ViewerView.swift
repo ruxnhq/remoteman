@@ -537,8 +537,22 @@ final class RefreshMeter {
             session.input?.key(usage: usage, down: false)
         }
 
+        /// The key for a plain character, by position on a US layout (letters and digits only).
+        private func usage(for ch: Character) -> UInt16? {
+            guard let a = ch.lowercased().unicodeScalars.first?.value, ch.unicodeScalars.count == 1 else { return nil }
+            if a >= 97, a <= 122 { return UInt16(0x04 + a - 97) }
+            if a >= 49, a <= 57 { return UInt16(0x1E + a - 49) }
+            if a == 48 { return 0x27 }
+            if a == 32 { return 0x2C }
+            return nil
+        }
+
         func insertText(_ text: String) {
             flushPointer()
+            if session.modifiersLatched, text.allSatisfy({ usage(for: $0) != nil }) {
+                for ch in text { if let u = usage(for: ch) { tap(u) } }
+                return
+            }
             // Send runs of plain text as text, and the keys an input method can't express as keys.
             var run = ""
             func flush() {

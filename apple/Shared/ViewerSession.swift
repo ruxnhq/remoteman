@@ -40,6 +40,8 @@ final class ViewerSession: ObservableObject {
 
     @Published private(set) var state: State = .idle
     @Published private(set) var statsText = ""
+    /// The latest half-second of figures, for an app that draws them itself.
+    @Published private(set) var stats = Snapshot()
     @Published var showStats = true
     /// A text report filling the window instead of the stream (the decode benchmark).
     @Published var report: String?
@@ -50,6 +52,9 @@ final class ViewerSession: ObservableObject {
     private(set) var client: CoreClient?
     /// Look, don't touch: with this on, no pointer, key or touch event leaves the app.
     @Published var viewOnly = false
+    /// Set while a modifier is latched on the key strip: text typed on the on-screen keyboard
+    /// then goes as keys, so that Ctrl held and "c" typed is Ctrl-C rather than the letter c.
+    var modifiersLatched = false
     /// Where input goes: the client, unless the session is view-only.
     var input: CoreClient? { viewOnly ? nil : client }
 
@@ -74,6 +79,7 @@ final class ViewerSession: ObservableObject {
 
     private let statsLock = NSLock()
     private var received = 0
+    private var receivedBytes = 0
     private var decodeTimes: [Double] = []
     private var decodeErrors = 0
     private var lastError = ""
@@ -263,6 +269,7 @@ final class ViewerSession: ObservableObject {
     ) {
         statsLock.lock()
         received += 1
+        receivedBytes += data.count
         let arrived = DispatchTime.now().uptimeNanoseconds
         if receivedLog.count < 200_000 { receivedLog.append(arrived) }
         // A wait of 55 ms or more before this frame: remember when, to spot a rhythm.
@@ -410,6 +417,10 @@ final class ViewerSession: ObservableObject {
         var decodeErrors = 0
         var lastError = ""
         var wifiPausing = false
+        var megabitsPerSecond = Double.nan
+        /// "AV1 10-bit" and "4:2:0", once the stream is known.
+        var codec = ""
+        var chroma = ""
 
         var text: String {
             func f(_ x: Double, _ digits: Int = 1) -> String { x.isNaN ? "–" : String(format: "%.\(digits)f", x) }
@@ -433,6 +444,8 @@ final class ViewerSession: ObservableObject {
         lastTick = now
         s.receivedFps = Double(received) / dt
         received = 0
+        s.megabitsPerSecond = Double(receivedBytes) * 8 / dt / 1_000_000
+        receivedBytes = 0
         let times = decodeTimes.sorted()
         decodeTimes.removeAll(keepingCapacity: true)
         s.decodeErrors = decodeErrors
@@ -450,6 +463,10 @@ final class ViewerSession: ObservableObject {
         if counters.2 >= 0 { s.ageMs = Double(counters.2) / 1000 }
         pipeLock.lock()
         s.label = info?.label ?? "waiting for the stream"
+        if let info {
+            s.codec = "\(info.codec == .av1 ? "AV1" : "HEVC") \(info.depth)-bit"
+            s.chroma = info.chroma == 444 ? "4:4:4" : "4:2:0"
+        }
         pipeLock.unlock()
         if let c = client {
             let cs = c.stats
@@ -465,7 +482,9 @@ final class ViewerSession: ObservableObject {
         _ = takeStats()
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
-            self.statsText = self.takeStats().text
+            let snapshot = self.takeStats()
+            self.stats = snapshot
+            self.statsText = snapshot.text
         }
     }
 }
