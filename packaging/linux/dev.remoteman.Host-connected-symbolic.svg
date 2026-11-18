@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The host's top-bar icon while a device is connected: the solid screen, the picture leaving, and a dot for the device. Shapes are filled so the desktop can recolour them; the states differ in shape. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <path fill="#2e3436" d="M2.9 2.5h8.2a1 1 0 0 1 1 1.2l-1.5 7a1 1 0 0 1-1 .8H1.4a1 1 0 0 1-1-1.2l1.5-7a1 1 0 0 1 1-.8zM2.6 12.5h5V14h-5zM12.9 4.4h2v1.4h-2zM12.3 7h2.6v1.4h-2.6z"/>
+  <circle fill="#2e3436" cx="13.4" cy="12" r="2.2"/>
+</svg>
