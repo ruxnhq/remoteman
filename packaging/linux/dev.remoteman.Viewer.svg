@@ -1,22 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- The Linux viewer's icon: the approved mark (a display on a stand with a dot at its centre,
-     white on a #20324A tile shaded from top to bottom as theirs is), to the same proportions as
-     the Apple apps' icons (apple/Support/make-icons.swift), as a rounded tile on the
-     128-pixel grid with the margin desktops expect. -->
+<!-- The Linux viewer's icon: assets/icon/ inside a rounded tile, on the 128-pixel grid with the margin
+     desktops expect. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#375372"/>
-      <stop offset="1" stop-color="#20354D"/>
-    </linearGradient>
-  </defs>
-  <rect x="12" y="14" width="104" height="104" rx="24" fill="#0F1826"/>
-  <rect x="12" y="10" width="104" height="104" rx="24" fill="url(#tile)"/>
+  <rect x="12" y="14" width="104" height="104" rx="24" fill="#173BAF"/>
+  <rect x="12" y="10" width="104" height="104" rx="24" fill="#2458F5"/>
   <g transform="translate(12,10) scale(0.1015625)">
-  <g fill="none" stroke="#fff" stroke-width="53.25" stroke-linecap="round">
-    <rect x="209.92" y="230.4" width="604.16" height="409.6" rx="66.56"/>
-    <path d="M512.0 640.0V762.88M384.0 762.88H640.0"/>
+  <g transform="translate(532 512) skewX(-14) translate(-512 -512)" fill="none" stroke="#fff" stroke-width="56" stroke-linecap="round">
+    <rect x="372" y="282" width="500" height="356" rx="72"/>
+    <path d="M512 744h220"/>
+    <path d="M150 362h120" opacity=".95"/>
+    <path d="M96 460h174" opacity=".7"/>
+    <path d="M186 558h84" opacity=".45"/>
   </g>
-  <circle cx="512.0" cy="435.2" r="53.76" fill="#fff"/>
   </g>
 </svg>

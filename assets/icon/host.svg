@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The host's app icon ("Source", chosen by the owner on 2026-11-17), full bleed on a 1024
+     grid: the same leaning display, solid #2458F5 on #0B1437, with the picture leaving to the
+     right in white. The master for every platform, as viewer.svg is. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect width="1024" height="1024" fill="#0B1437"/>
+  <g transform="translate(492 512) skewX(-14) translate(-512 -512)" fill="none" stroke="#2458F5" stroke-width="56" stroke-linecap="round">
+    <rect x="152" y="282" width="500" height="356" rx="72" fill="#2458F5"/>
+    <path d="M292 744h220"/>
+    <path d="M754 362h120" stroke="#fff"/>
+    <path d="M754 460h174" stroke="#fff" opacity=".75"/>
+    <path d="M754 558h84" stroke="#fff" opacity=".5"/>
+  </g>
+</svg>
