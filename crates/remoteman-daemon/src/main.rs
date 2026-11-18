@@ -86,7 +86,9 @@ fn main() -> Result<()> {
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(if root { 0o666 } else { 0o600 }))?;
 
     let shared = broker::Shared::new();
-    let features = ["video", "input", "cursor", "placement"].map(String::from).to_vec();
+    // What the agents can do. (Each agent says what it has when it attaches; until the daemon
+    // tells clients per session, it lists what an agent started with --allow files would have.)
+    let features = ["video", "input", "cursor", "placement", "configure", "files"].map(String::from).to_vec();
     let options = HostOptions { listen, state, name, os: "linux".into(), features, pair, test_drop_one_in: drop_one_in };
     let host = Host::start(options, broker::Broker(shared.clone()))?;
     tracing::info!("listening on {}; this host's fingerprint is {}; agents attach at {}", host.address, host.fingerprint, socket.display());

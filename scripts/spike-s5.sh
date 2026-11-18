@@ -45,10 +45,16 @@ for path, ifaces in objects.items():
 ' "$PREFIX"
 }
 
-# Start an agent in a user's own systemd, where the session's Mutter is reachable.
+# Start an agent as a user, where that user's session bus (and so its Mutter) is reachable:
+# through the user's own systemd if it lets us in, else as a plain process of that user.
 agent_as() {
     systemctl --user --machine="$1"@.host is-active --quiet remoteman-s5-agent 2>/dev/null && return 0
-    systemd-run --quiet --user --machine="$1"@.host --unit remoteman-s5-agent --collect "$LIB/remoteman-agent" --daemon --socket "$SOCK"
+    pgrep -u "$1" -f "^$LIB/remoteman-agent" >/dev/null 2>&1 && return 0
+    systemd-run --quiet --user --machine="$1"@.host --unit remoteman-s5-agent --collect "$LIB/remoteman-agent" --daemon --socket "$SOCK" 2>>"$RUN/watch.log" && return 0
+    uid=$(id -u "$1") || return 1
+    echo "  (no way into $1's systemd; starting its agent as a plain process)" >>"$RUN/watch.log"
+    runuser -u "$1" -- env XDG_RUNTIME_DIR=/run/user/"$uid" DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/"$uid"/bus \
+        setsid -f "$LIB/remoteman-agent" --daemon --socket "$SOCK" >>"$RUN/agent-$1.log" 2>&1
 }
 
 # The daemon's number for the agent running as uid $1 (empty if it hasn't attached).
@@ -83,6 +89,7 @@ start)
     loginctl terminate-user "$U" 2>/dev/null || true
     id "$U" >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --comment "remoteman test user" "$U"
     install -d -m 755 "$LIB" "$RUN"
+    rm -f "$RUN/seen"; : > "$RUN/watch.log"; chmod 644 "$RUN/watch.log"
     install -m 755 "$root/target/release/remotemand" "$root/target/release/remoteman-agent" "$LIB/"
     # A password for the login screen, never shown: the test client types it from this file.
     umask 077
@@ -99,41 +106,52 @@ start)
     sleep 6
     show
     echo "ready: the test daemon listens on 127.0.0.1:$PORT (pairing on); the password file is $RUN/password"
+    echo "to follow along without sudo: tail -f $RUN/watch.log, and $LIB/remotemand ctl --socket $SOCK status"
     ;;
 login)
     new_login; sleep 6; show
     ;;
 watch)
     # Stands in for what the daemon will do itself: follow GDM's displays, put an agent in each
-    # new session, and point the daemon at it.
-    seen=""
+    # session that gets one of ours, and point the daemon at it. A display is acted on once for
+    # each (remote id, session) pair: a login on a new login screen gives the user's session a
+    # new display with that screen's id, and coming back to a session that is already running
+    # gives its existing display the new screen's id.
+    set +e
+    exec >>"$RUN/watch.log" 2>&1
+    echo "$(date +%T) watching GDM's displays"
     end=$(( $(date +%s) + 3600 ))
     while [ "$(date +%s)" -lt "$end" ]; do
         displays | while read -r path rid sid; do
             [ "$sid" = - ] && continue
-            case " $seen " in *" $sid "*) continue ;; esac
-            user=$(loginctl show-session "$sid" -p Name --value 2>/dev/null) || continue
+            grep -qxF "$rid $sid" "$RUN/seen" 2>/dev/null && continue
+            user=$(loginctl show-session "$sid" -p Name --value 2>/dev/null)
             class=$(loginctl show-session "$sid" -p Class --value 2>/dev/null)
             [ -n "$user" ] || continue
-            echo "display $rid has session $sid ($class, user $user)"
-            agent_as "$user" || { echo "  couldn't start an agent as $user"; continue; }
+            echo "$(date +%T) display $rid has session $sid ($class, user $user)"
+            if ! agent_as "$user"; then echo "  couldn't start an agent as $user"; echo "$rid $sid" >> "$RUN/seen"; continue; fi
             uid=$(id -u "$user"); i=0; aid=""
             while [ -z "$aid" ] && [ $i -lt 40 ]; do sleep 0.5; aid=$(agent_id "$uid"); i=$((i + 1)); done
-            [ -n "$aid" ] || { echo "  the agent of $user never attached"; continue; }
-            out=$(ctl switch "$aid")
-            case "$out" in
-                moving*) echo "  moved the connected client to agent $aid ($user)" ;;
-                *) ctl prefer "$aid" >/dev/null; echo "  the next client goes to agent $aid ($user) [$out]" ;;
-            esac
-            echo "$sid" >> "$RUN/seen"
+            echo "$rid $sid" >> "$RUN/seen"
+            if [ -z "$aid" ]; then echo "  the agent of $user never attached"; continue; fi
+            if [ "$class" = user ]; then
+                # A session someone logged in to: the client that was at the login screen follows.
+                out=$(ctl switch "$aid")
+                case "$out" in
+                    moving*) echo "  moved the connected client to agent $aid ($user)" ;;
+                    *) ctl prefer "$aid" >/dev/null; echo "  the next client goes to agent $aid ($user) [$out]" ;;
+                esac
+            else
+                # A login screen: for the next client to connect, never for one already at a desktop.
+                ctl prefer "$aid" >/dev/null; echo "  the next client goes to agent $aid (login screen, $user)"
+            fi
         done
-        seen=$(cat "$RUN/seen" 2>/dev/null | tr '\n' ' ')
         sleep 0.5
     done
     ;;
 status)
     show
-    echo "the watcher's log:"; journalctl -u remoteman-s5-watch -n 12 --no-pager -o cat 2>/dev/null | sed 's/^/  /'
+    echo "the watcher's log:"; tail -n 20 "$RUN/watch.log" 2>/dev/null | sed 's/^/  /'
     echo "the daemon's log:"; journalctl -u remoteman-s5-daemon -n 12 --no-pager -o cat 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g; s/^/  /'
     echo "GDM's journal, last lines:"; journalctl -u gdm -n 8 --no-pager -o cat | sed 's/^/  /'
     ;;

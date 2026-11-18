@@ -1264,6 +1264,7 @@ dependencies = [
  "remoteman-desktop",
  "remoteman-encode",
  "remoteman-gpu",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1296,6 +1297,7 @@ dependencies = [
  "anyhow",
  "libc",
  "remoteman-core",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1345,6 +1347,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "remoteman-core",
+ "serde_json",
 ]
 
 [[package]]

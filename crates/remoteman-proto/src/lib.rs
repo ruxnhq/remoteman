@@ -4,6 +4,7 @@
 pub mod control;
 pub mod input;
 pub mod keys;
+pub mod media;
 pub mod video;
 
 /// The protocol version this crate speaks.

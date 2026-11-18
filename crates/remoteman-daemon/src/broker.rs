@@ -11,8 +11,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use remoteman_core::Event;
 use remoteman_core::host::{Accept, ClientInfo, HostHandler, Link};
+use remoteman_core::{BlobEvent, BlobSender, Event, Frame, Message, Packet};
 use remoteman_core::relay::{ToAgent, ToDaemon};
 
 type Writer = Arc<Mutex<UnixStream>>;
@@ -44,6 +44,9 @@ struct State {
     client: Option<ClientInfo>,
     /// The agent the next client goes to, if it was said.
     preferred: Option<u32>,
+    /// The client's last word on each feature (sound on, microphone on, ...), for telling an
+    /// agent that takes the client over.
+    said: Vec<Message>,
 }
 
 pub struct Shared {
@@ -121,12 +124,42 @@ impl HostHandler for Broker {
         self.to_current(ToAgent::Input(event));
     }
 
+    fn message(&mut self, message: &Message) {
+        {
+            let mut st = self.0.state.lock().unwrap();
+            // What the client wants holds across a move to another agent: remember it, and
+            // have the next agent make the display as last asked for.
+            if let (Message::Configure { display: Some(display), .. }, Some(client)) = (message, st.client.as_mut()) {
+                client.display = *display;
+            }
+            if !matches!(message, Message::FileResult { .. }) {
+                st.said.retain(|m| std::mem::discriminant(m) != std::mem::discriminant(message));
+                st.said.push(message.clone());
+            }
+        }
+        self.to_current(ToAgent::Message(message.clone()));
+    }
+
+    fn mic(&mut self, packet: &Packet) {
+        self.to_current(ToAgent::Mic(packet.clone()));
+    }
+
+    fn camera(&mut self, frame: &Frame) {
+        self.to_current(ToAgent::Camera(frame.clone()));
+    }
+
+    fn blob(&mut self, event: &BlobEvent) {
+        tracing::debug!(id = event.id(), "a blob event from the client");
+        self.to_current(ToAgent::Blob(event.clone()));
+    }
+
     fn left(&mut self) {
         let _sending = self.0.sending.lock().unwrap();
         let writers: Vec<Writer> = {
             let mut st = self.0.state.lock().unwrap();
             let ids = [st.current.take(), st.waiting.take().map(|w| w.agent)];
             (st.link, st.client) = (None, None);
+            st.said.clear();
             ids.into_iter().flatten().filter_map(|id| st.agents.get(&id)).map(|a| a.writer.clone()).collect()
         };
         for w in writers {
@@ -165,7 +198,9 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
             use std::io::Write;
             // SAFETY: no arguments, no state.
             let ours = uid == 0 || uid == unsafe { libc::geteuid() };
-            let answer = if ours { control(&shared, &words) } else { "only root and the daemon's own user may do that\n".into() };
+            // Looking is for any local user; changing anything is not.
+            let looking = matches!(words.split_whitespace().next(), Some("status") | None);
+            let answer = if ours || looking { control(&shared, &words) } else { "only root and the daemon's own user may do that\n".into() };
             let _ = writer.lock().unwrap().write_all(answer.as_bytes());
             return;
         }
@@ -179,6 +214,8 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
         id
     };
     tracing::info!(agent = id, uid, pid, "an agent attached");
+    // Blobs this agent is sending to the client, by the agent's number for each.
+    let mut sending: BTreeMap<u32, BlobSender> = BTreeMap::new();
 
     while let Ok(Some(message)) = ToDaemon::read(&mut reader) {
         match message {
@@ -202,9 +239,16 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
                     None => {
                         let old = st.current.replace(id).and_then(|o| st.agents.get(&o)).map(|a| a.writer.clone());
                         let link = st.link.clone();
+                        let said = st.said.clone();
                         drop(st);
                         if let Some(link) = link {
                             link.restart(accept);
+                        }
+                        // What the client had switched on carries over.
+                        for message in said {
+                            if !matches!(message, Message::Configure { .. }) {
+                                tell(&writer, ToAgent::Message(message));
+                            }
                         }
                         if let Some(old) = old {
                             tell(&old, ToAgent::Left);
@@ -239,6 +283,13 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
                     }
                 }
             }
+            // In order with this agent's frames, like them.
+            ToDaemon::Restart(accept) => {
+                let _sending = shared.sending.lock().unwrap();
+                if let Some(link) = current_link(&shared, id) {
+                    link.restart(accept);
+                }
+            }
             ToDaemon::CursorShape(shape) => {
                 if let Some(link) = current_link(&shared, id) {
                     link.cursor_shape(shape);
@@ -247,6 +298,34 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
             ToDaemon::CursorAt { x, y, visible } => {
                 if let Some(link) = current_link(&shared, id) {
                     link.cursor_at(x, y, visible);
+                }
+            }
+            ToDaemon::Message(message) => {
+                if let Some(link) = current_link(&shared, id) {
+                    link.send_message(message);
+                }
+            }
+            ToDaemon::Sound(p) => {
+                if let Some(link) = current_link(&shared, id) {
+                    link.send_sound(p.start, p.seq, p.time_us, &p.data);
+                }
+            }
+            // A blob for the client. Its content waits here while the network is behind,
+            // which holds the agent back.
+            ToDaemon::Blob(BlobEvent::Open { id: blob, kind, header }) => {
+                tracing::debug!(agent = id, blob, kind, "a blob from the agent");
+                if let Some(link) = current_link(&shared, id) {
+                    sending.insert(blob, link.open_blob(kind, header));
+                }
+            }
+            ToDaemon::Blob(BlobEvent::Data { id: blob, bytes }) => {
+                if sending.get(&blob).is_some_and(|s| !s.write(&bytes)) {
+                    sending.remove(&blob);
+                }
+            }
+            ToDaemon::Blob(BlobEvent::Close { id: blob, complete }) => {
+                if let (Some(sender), true) = (sending.remove(&blob), complete) {
+                    sender.finish();
                 }
             }
             ToDaemon::Hello { .. } | ToDaemon::Control(_) => {}

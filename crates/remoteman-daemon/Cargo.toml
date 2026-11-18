@@ -16,6 +16,7 @@ path = "src/main.rs"
 remoteman-core = { path = "../remoteman-core" }
 anyhow = "1"
 libc = "0.2"
+serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "signal"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"

@@ -5,7 +5,7 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
 
-use crate::{Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Mode, Options, Placement, StreamInfo, TouchPhase};
+use crate::{BlobEvent, BlobSender, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, StreamInfo, TouchPhase};
 
 /// The app's callbacks. They are called from the core's threads, one at a time, with `ctx`.
 #[repr(C)]
@@ -25,10 +25,39 @@ pub struct RmCallbacks {
     pub on_cursor_shape: Option<extern "C" fn(ctx: *mut c_void, rgba: *const u8, width: u32, height: u32, hot_x: i32, hot_y: i32)>,
     /// Where the host's cursor is, as fractions of the display; `visible` 0 when it has left it.
     pub on_cursor_at: Option<extern "C" fn(ctx: *mut c_void, x: f32, y: f32, visible: u8)>,
+    /// One of the host's feature messages, as its JSON (docs/PROTOCOL.md, "Features"), valid
+    /// only during the call.
+    pub on_message: Option<extern "C" fn(ctx: *mut c_void, json: *const c_char)>,
+    /// One packet of the desktop's sound (Opus), valid only during the call. `start` 1: the
+    /// first after a pause.
+    pub on_sound: Option<extern "C" fn(ctx: *mut c_void, data: *const u8, len: usize, start: u8, seq: u32, time_us: u64)>,
+    /// A blob from the host. `what` 0: opened (`kind`, `header` as JSON); 1: a piece of its
+    /// content (`data`, `len`); 2: closed (`complete` 1 if it is all there). `id` tells blobs
+    /// apart. Pointers are valid only during the call.
+    pub on_blob: Option<extern "C" fn(ctx: *mut c_void, what: u8, id: u32, kind: u8, header: *const c_char, data: *const u8, len: usize, complete: u8)>,
 }
 
 // SAFETY: the app promises its context may be used from another thread, one call at a time.
 unsafe impl Send for RmCallbacks {}
+
+type OnBlob = extern "C" fn(ctx: *mut c_void, what: u8, id: u32, kind: u8, header: *const c_char, data: *const u8, len: usize, complete: u8);
+
+fn give_blob(f: OnBlob, ctx: *mut c_void, event: &BlobEvent) {
+    match event {
+        BlobEvent::Open { id, kind, header } => {
+            let header = CString::new(header.replace('\0', " ")).unwrap_or_default();
+            f(ctx, 0, *id, *kind, header.as_ptr(), std::ptr::null(), 0, 0);
+        }
+        BlobEvent::Data { id, bytes } => f(ctx, 1, *id, 0, std::ptr::null(), bytes.as_ptr(), bytes.len(), 0),
+        BlobEvent::Close { id, complete } => f(ctx, 2, *id, 0, std::ptr::null(), std::ptr::null(), 0, *complete as u8),
+    }
+}
+
+fn give_message(f: extern "C" fn(ctx: *mut c_void, json: *const c_char), ctx: *mut c_void, message: &Message) {
+    if let Ok(json) = CString::new(serde_json::to_string(message).unwrap_or_default()) {
+        f(ctx, json.as_ptr());
+    }
+}
 
 impl Handler for RmCallbacks {
     fn stream(&mut self, s: &StreamInfo) {
@@ -53,6 +82,24 @@ impl Handler for RmCallbacks {
     fn cursor_at(&mut self, x: f32, y: f32, visible: bool) {
         if let Some(f) = self.on_cursor_at {
             f(self.ctx, x, y, visible as u8);
+        }
+    }
+
+    fn message(&mut self, message: &Message) {
+        if let Some(f) = self.on_message {
+            give_message(f, self.ctx, message);
+        }
+    }
+
+    fn sound(&mut self, p: &Packet) {
+        if let Some(f) = self.on_sound {
+            f(self.ctx, p.data.as_ptr(), p.data.len(), p.start as u8, p.seq, p.time_us);
+        }
+    }
+
+    fn blob(&mut self, event: &BlobEvent) {
+        if let Some(f) = self.on_blob {
+            give_blob(f, self.ctx, event);
         }
     }
 
@@ -164,6 +211,79 @@ pub unsafe extern "C" fn rm_client_stats(client: *const Client, lost: *mut u32, 
         *keyframe_requests = s.keyframe_requests;
         *round_trip_us = s.round_trip_us;
     }
+}
+
+/// Send one feature message, as JSON (docs/PROTOCOL.md, "Features": `sound`, `mic`, `camera`,
+/// `configure`, `clipboard`, `file_result`). Returns 1, or 0 if it isn't a message the core knows.
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`; `json` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_send_message(client: *const Client, json: *const c_char) -> i32 {
+    match Message::parse(unsafe { text(json) }.as_bytes()) {
+        Ok(Message::Unknown) | Err(_) => 0,
+        Ok(m) => {
+            unsafe { &*client }.send_message(m);
+            1
+        }
+    }
+}
+
+/// Send one packet of this device's microphone (Opus). Never blocks.
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`; `data` must be readable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_send_mic(client: *const Client, data: *const u8, len: usize, start: u8, seq: u32, time_us: u64) {
+    unsafe { &*client }.send_mic(start != 0, seq, time_us, unsafe { std::slice::from_raw_parts(data, len) });
+}
+
+/// Send one whole frame of this device's camera (H.264 or HEVC, Annex-B). Never blocks.
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`; `data` must be readable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_send_camera(client: *const Client, data: *const u8, len: usize, key: u8, time_us: u64) {
+    unsafe { &*client }.send_camera(unsafe { std::slice::from_raw_parts(data, len) }, key != 0, time_us);
+}
+
+/// Start sending a blob to the host: `kind` 0x40 clipboard, 0x41 file; `header` its JSON.
+/// Write the content with `rm_blob_write`, then `rm_blob_finish` (or `rm_blob_cancel`).
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`; `header` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_blob_open(client: *const Client, kind: u8, header: *const c_char) -> *mut BlobSender {
+    Box::into_raw(Box::new(unsafe { &*client }.open_blob(kind, unsafe { text(header) })))
+}
+
+/// Send the next piece of a blob. Waits while the network is behind, so never call it from
+/// the main thread or from one of the core's callbacks. Returns 0 once the other side is gone.
+///
+/// # Safety
+/// `blob` must come from a `*_blob_open` and not have been finished or cancelled; `data` must
+/// be readable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_blob_write(blob: *const BlobSender, data: *const u8, len: usize) -> i32 {
+    unsafe { &*blob }.write(unsafe { std::slice::from_raw_parts(data, len) }) as i32
+}
+
+/// That was all of the blob. Frees it.
+///
+/// # Safety
+/// `blob` must come from a `*_blob_open` and isn't used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_blob_finish(blob: *mut BlobSender) -> i32 {
+    unsafe { Box::from_raw(blob) }.finish() as i32
+}
+
+/// Give the blob up: the receiver throws away what it has. Frees it.
+///
+/// # Safety
+/// `blob` must come from a `*_blob_open` and isn't used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_blob_cancel(blob: *mut BlobSender) {
+    drop(unsafe { Box::from_raw(blob) });
 }
 
 macro_rules! input {
@@ -285,6 +405,14 @@ pub struct RmHostCallbacks {
     pub on_keyframe: Option<extern "C" fn(ctx: *mut c_void)>,
     pub on_input: Option<extern "C" fn(ctx: *mut c_void, input: *const RmInput)>,
     pub on_client_left: Option<extern "C" fn(ctx: *mut c_void)>,
+    /// One of the client's feature messages, as its JSON, valid only during the call.
+    pub on_message: Option<extern "C" fn(ctx: *mut c_void, json: *const c_char)>,
+    /// One packet of the client's microphone (Opus), valid only during the call.
+    pub on_mic: Option<extern "C" fn(ctx: *mut c_void, data: *const u8, len: usize, start: u8, seq: u32, time_us: u64)>,
+    /// One whole frame of the client's camera, in order and decodable, valid only during the call.
+    pub on_camera: Option<extern "C" fn(ctx: *mut c_void, data: *const u8, len: usize, key: u8, number: u32, time_us: u64)>,
+    /// A blob from the client: as the client's `on_blob`.
+    pub on_blob: Option<OnBlob>,
 }
 
 // SAFETY: the host program promises its context may be used from the core's handler thread.
@@ -322,13 +450,7 @@ impl HostHandler for RmHostCallbacks {
             let why = unsafe { CStr::from_ptr(a.refuse.as_ptr()) }.to_string_lossy().into_owned();
             return Err(if why.is_empty() { "the host refused".into() } else { why });
         }
-        Ok(Accept {
-            mode: Mode { codec: if a.codec == 1 { Codec::Av1 } else { Codec::Hevc }, chroma: if a.chroma == 444 { Chroma::C444 } else { Chroma::C420 }, depth: a.depth },
-            width: a.width,
-            height: a.height,
-            refresh: a.refresh,
-            colour: if a.hdr != 0 { "bt2020-pq" } else { "bt709" }.into(),
-        })
+        Ok(accepted(&a))
     }
 
     fn keyframe(&mut self) {
@@ -359,10 +481,98 @@ impl HostHandler for RmHostCallbacks {
         f(self.ctx, &i);
     }
 
+    fn message(&mut self, message: &Message) {
+        if let Some(f) = self.on_message {
+            give_message(f, self.ctx, message);
+        }
+    }
+
+    fn mic(&mut self, p: &Packet) {
+        if let Some(f) = self.on_mic {
+            f(self.ctx, p.data.as_ptr(), p.data.len(), p.start as u8, p.seq, p.time_us);
+        }
+    }
+
+    fn camera(&mut self, frame: &Frame) {
+        if let Some(f) = self.on_camera {
+            f(self.ctx, frame.data.as_ptr(), frame.data.len(), frame.key as u8, frame.number, frame.capture_us);
+        }
+    }
+
+    fn blob(&mut self, event: &BlobEvent) {
+        if let Some(f) = self.on_blob {
+            give_blob(f, self.ctx, event);
+        }
+    }
+
     fn left(&mut self) {
         if let Some(f) = self.on_client_left {
             f(self.ctx);
         }
+    }
+}
+
+fn accepted(a: &RmAccept) -> Accept {
+    Accept {
+        mode: Mode { codec: if a.codec == 1 { Codec::Av1 } else { Codec::Hevc }, chroma: if a.chroma == 444 { Chroma::C444 } else { Chroma::C420 }, depth: a.depth },
+        width: a.width,
+        height: a.height,
+        refresh: a.refresh,
+        colour: if a.hdr != 0 { "bt2020-pq" } else { "bt709" }.into(),
+    }
+}
+
+/// Send one feature message to the client, as JSON (`sound_format`, `camera_keyframe`,
+/// `status`, `file_result`). Returns 1, or 0 if no client is connected or the core doesn't
+/// know the message.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `json` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_send_message(host: *const Host, json: *const c_char) -> i32 {
+    match (unsafe { &*host }.link(), Message::parse(unsafe { text(json) }.as_bytes())) {
+        (_, Ok(Message::Unknown) | Err(_)) | (None, _) => 0,
+        (Some(l), Ok(m)) => {
+            l.send_message(m);
+            1
+        }
+    }
+}
+
+/// Send one packet of the desktop's sound (Opus). Never blocks.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `data` must be readable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_send_sound(host: *const Host, data: *const u8, len: usize, start: u8, seq: u32, time_us: u64) {
+    if let Some(l) = unsafe { &*host }.link() {
+        l.send_sound(start != 0, seq, time_us, unsafe { std::slice::from_raw_parts(data, len) });
+    }
+}
+
+/// Start sending a blob to the client; as `rm_client_blob_open`. Null if no client is connected.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `header` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_blob_open(host: *const Host, kind: u8, header: *const c_char) -> *mut BlobSender {
+    match unsafe { &*host }.link() {
+        Some(l) => Box::into_raw(Box::new(l.open_blob(kind, unsafe { text(header) }))),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// The picture starts afresh as `accept` says (another size after a `configure`, another
+/// codec): the next frame sent must be a keyframe, and frames count from 0 again. Returns 1 if
+/// a client is connected.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `accept` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_restart(host: *const Host, accept: *const RmAccept) -> i32 {
+    match unsafe { &*host }.link() {
+        Some(l) => l.restart(accepted(unsafe { &*accept })) as i32,
+        None => 0,
     }
 }
 

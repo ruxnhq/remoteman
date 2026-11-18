@@ -5,6 +5,7 @@
 //! decodes and shows the frames it is handed, and passes input in. The host role is in
 //! [`host`], and both as a C interface in [`ffi`].
 
+pub mod blob;
 pub mod ffi;
 pub mod host;
 #[cfg(unix)]
@@ -18,11 +19,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 pub use remoteman_proto::control::{Chroma, Codec, Display, Mode, Placement};
-use remoteman_proto::control::Message;
 pub use remoteman_proto::input::{Button, Event, TouchPhase};
 pub use remoteman_proto::keys;
 pub use remoteman_proto::{PORT, PROTO};
-use remoteman_proto::video::{CursorAt, KIND_CURSOR, Reassembler};
+use remoteman_proto::video::{CursorAt, KIND_CURSOR, KIND_VIDEO, Reassembler};
+pub use blob::{BlobEvent, BlobSender};
+pub use remoteman_proto::control::Message;
+pub use remoteman_proto::media::{self, Packet};
 pub use remoteman_proto::video::Frame;
 use remoteman_transport::{Connection, Endpoint, Expect, Identity, connect, read_message, write_message};
 
@@ -84,6 +87,15 @@ pub trait Handler: Send + 'static {
     /// left this display. The host reports every move, the app's own included, so an app that
     /// draws the cursor at its own pointer uses this only when it hasn't moved it itself.
     fn cursor_at(&mut self, _x: f32, _y: f32, _visible: bool) {}
+    /// One of the feature messages from the host (`sound_format`, `camera_keyframe`, `status`,
+    /// `file_result`, ...): see docs/PROTOCOL.md, "Features".
+    fn message(&mut self, _message: &Message) {}
+    /// One packet of the desktop's sound, as it arrives (after [`Client::send_message`] with
+    /// `Message::Sound { on: true }`). Gaps in `seq` are packets that were lost; the app
+    /// conceals them and keeps a small playout buffer.
+    fn sound(&mut self, _packet: &Packet) {}
+    /// A blob from the host (what was copied there, a file): opened, its content, closed.
+    fn blob(&mut self, _event: &BlobEvent) {}
     /// The connection is over.
     fn closed(&mut self, reason: &str);
 }
@@ -91,6 +103,7 @@ pub trait Handler: Send + 'static {
 enum FromHost {
     Stream(StreamInfo),
     Cursor(CursorShape),
+    Message(Message),
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -112,6 +125,11 @@ struct Counters {
 
 pub struct Client {
     runtime: Option<tokio::runtime::Runtime>,
+    /// For starting work from any thread, the core's own callbacks included.
+    tasks: tokio::runtime::Handle,
+    control: tokio::sync::mpsc::Sender<Message>,
+    /// The camera: how many times it was switched on, and the next frame's number.
+    camera: std::sync::Mutex<(u16, u32)>,
     conn: Connection,
     _endpoint: Endpoint,
     input: tokio::sync::mpsc::UnboundedSender<Event>,
@@ -164,6 +182,7 @@ impl Client {
 
         let counters = Arc::new(Counters::default());
         let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::channel::<Message>(16);
+        let control = ctl_tx.clone();
         let (epoch_tx, mut epoch_rx) = tokio::sync::mpsc::unbounded_channel::<FromHost>();
         let (offset_tx, offset_rx) = tokio::sync::watch::channel(None::<i64>);
 
@@ -215,8 +234,33 @@ impl Client {
                     Message::Error { code, message } => {
                         let _ = failed.send(format!("{code}: {message}"));
                     }
+                    m @ (Message::SoundFormat { .. } | Message::CameraKeyframe | Message::Status { .. } | Message::FileResult { .. }) => {
+                        let _ = epoch_tx.send(FromHost::Message(m));
+                    }
                     _ => {}
                 }
+            }
+        });
+        // Blobs in: each on a stream the host opens. The channel is short, so a slow app holds
+        // the sender back rather than filling memory.
+        let (blob_tx, mut blob_rx) = tokio::sync::mpsc::channel::<BlobEvent>(16);
+        let blob_conn = conn.clone();
+        tokio::spawn(async move {
+            let mut id = 0u32;
+            while let Ok(mut stream) = blob_conn.accept_uni().await {
+                id = id.wrapping_add(1);
+                let (tx, id) = (blob_tx.clone(), id);
+                tokio::spawn(async move {
+                    let mut kind = [0u8; 1];
+                    if stream.read_exact(&mut kind).await.is_err() || kind[0] < media::BLOB_FIRST {
+                        return;
+                    }
+                    blob::receive(stream, kind[0], id, move |event| {
+                        let tx = tx.clone();
+                        async move { tx.send(event).await.is_ok() }
+                    })
+                    .await;
+                });
             }
         });
         // Input out.
@@ -258,7 +302,9 @@ impl Client {
                             handler.stream(&info);
                         }
                         FromHost::Cursor(shape) => handler.cursor_shape(&shape),
+                        FromHost::Message(m) => handler.message(&m),
                     },
+                    Some(event) = blob_rx.recv() => handler.blob(&event),
                     d = video.read_datagram() => {
                         let d = match d {
                             Ok(d) => d,
@@ -267,11 +313,22 @@ impl Client {
                         if !started {
                             continue;
                         }
-                        if d.first() == Some(&KIND_CURSOR) {
-                            if let Ok(c) = CursorAt::parse(&d) {
-                                handler.cursor_at(c.x, c.y, c.visible);
+                        match d.first() {
+                            Some(&KIND_VIDEO) => {}
+                            Some(&KIND_CURSOR) => {
+                                if let Ok(c) = CursorAt::parse(&d) {
+                                    handler.cursor_at(c.x, c.y, c.visible);
+                                }
+                                continue;
                             }
-                            continue;
+                            Some(&media::KIND_SOUND) => {
+                                if let Ok(p) = Packet::parse(&d) {
+                                    handler.sound(&p);
+                                }
+                                continue;
+                            }
+                            // Something a later version sends: not for us.
+                            _ => continue,
                         }
                         if let Some(n) = o_drop {
                             dropped += 1;
@@ -326,7 +383,69 @@ impl Client {
             handler.closed(&reason);
         });
 
-        Ok(Self { runtime: None, conn, _endpoint: endpoint, input, counters, host_name, host_os, host_features, host_fingerprint: fingerprint })
+        Ok(Self {
+            runtime: None,
+            tasks: tokio::runtime::Handle::current(),
+            control,
+            camera: std::sync::Mutex::new((0, 0)),
+            conn,
+            _endpoint: endpoint,
+            input,
+            counters,
+            host_name,
+            host_os,
+            host_features,
+            host_fingerprint: fingerprint,
+        })
+    }
+
+    /// Send one of the feature messages (`sound`, `mic`, `camera`, `configure`, `clipboard`,
+    /// `file_result`): see docs/PROTOCOL.md, "Features". Never blocks.
+    pub fn send_message(&self, message: Message) {
+        if let Message::Camera { on: true, .. } = &message {
+            // A camera switched on starts its frames from 0 in a new epoch.
+            let mut camera = self.camera.lock().unwrap();
+            *camera = (camera.0.wrapping_add(1), 0);
+        }
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(message)) = self.control.try_send(message) {
+            let control = self.control.clone();
+            self.tasks.spawn(async move {
+                let _ = control.send(message).await;
+            });
+        }
+    }
+
+    /// Send one packet of this device's microphone (after `Message::Mic { on: true, .. }`).
+    /// `seq` counts up by one per packet; `start` marks the first after a pause. Never blocks:
+    /// a packet the network can't take is dropped.
+    pub fn send_mic(&self, start: bool, seq: u32, time_us: u64, data: &[u8]) {
+        let packet = Packet { kind: media::KIND_MIC, start, seq, time_us, data: data.to_vec() };
+        let _ = self.conn.send_datagram(packet.write().into());
+    }
+
+    /// Send one whole frame of this device's camera (after `Message::Camera { on: true, .. }`):
+    /// H.264 or HEVC in Annex-B form, parameter sets in front of every keyframe, no B-frames.
+    /// Never blocks: fragments the network can't take are dropped, and the host asks for a
+    /// keyframe ([`Handler::message`] with `Message::CameraKeyframe`).
+    pub fn send_camera(&self, data: &[u8], key: bool, time_us: u64) {
+        let Some(max) = self.conn.max_datagram_size() else { return };
+        let (epoch, number) = {
+            let mut camera = self.camera.lock().unwrap();
+            let now = *camera;
+            camera.1 = camera.1.wrapping_add(1);
+            now
+        };
+        for d in remoteman_proto::video::fragment_as(media::KIND_CAMERA, data, key, false, epoch, number, time_us, max) {
+            let _ = self.conn.send_datagram(d.into());
+        }
+    }
+
+    /// Start sending a blob (`media::BLOB_CLIPBOARD` or `media::BLOB_FILE`) with this JSON
+    /// header; write its content to what comes back.
+    pub fn open_blob(&self, kind: u8, header: String) -> BlobSender {
+        let (sender, rx) = BlobSender::pair();
+        self.tasks.spawn(blob::send(self.conn.clone(), kind, header, rx));
+        sender
     }
 
     /// Send one input event. Never blocks.

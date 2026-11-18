@@ -13,9 +13,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use remoteman_proto::control::{Message, encode_bytes};
 use remoteman_proto::input::Event;
-use remoteman_proto::video::{CursorAt, fragment};
+use remoteman_proto::media::{self, Packet};
+use remoteman_proto::video::{CursorAt, Reassembler, fragment};
 use remoteman_transport::{Connection, Identity, RecvStream, Trust, listen, peer_fingerprint, read_message, write_message};
 
+use crate::blob::{self, BlobEvent, BlobSender, Chunk};
 use crate::{CursorShape, Display, Mode};
 
 pub struct HostOptions {
@@ -78,6 +80,19 @@ pub trait HostHandler: Send + 'static {
     }
     /// The client's input, in order.
     fn input(&mut self, event: Event);
+    /// One of the feature messages from the client (`sound`, `mic`, `camera`, `configure`,
+    /// `clipboard`, `file_result`): see docs/PROTOCOL.md, "Features". A host that lists a
+    /// feature in its hello acts on that feature's messages; the rest it leaves alone.
+    fn message(&mut self, _message: &Message) {}
+    /// One packet of the client's microphone, as it arrives (after `Message::Mic { on: true }`).
+    fn mic(&mut self, _packet: &Packet) {}
+    /// One whole frame of the client's camera, in order (after `Message::Camera { on: true }`).
+    /// After a loss the core asks the client for a keyframe and holds frames back until it
+    /// comes, so every frame handed over is decodable.
+    fn camera(&mut self, _frame: &remoteman_proto::video::Frame) {}
+    /// A blob from the client (what was copied on it, a file): opened, its content, closed.
+    /// Blobs still open when the client goes are over, with no `Close`.
+    fn blob(&mut self, _event: &BlobEvent) {}
     /// The client is gone (or was replaced): stop the picture and take the display away.
     fn left(&mut self);
 }
@@ -97,9 +112,16 @@ pub enum Out {
     Restart(Accept),
 }
 
+/// What a [`Link`] carries that isn't the picture.
 pub enum CursorMsg {
     Shape(CursorShape),
     At { x: f32, y: f32, visible: bool },
+    /// A feature message for the client.
+    Message(Message),
+    /// One packet of the desktop's sound.
+    Sound(Packet),
+    /// A blob for the client: its kind, its header, and where its content comes from.
+    Blob { kind: u8, header: String, content: tokio::sync::mpsc::Receiver<Chunk> },
 }
 
 /// The far end of a [`Link`] made with [`Link::pipe`]: what the host program sent, to be
@@ -164,6 +186,27 @@ impl Link {
     pub fn cursor_at(&self, x: f32, y: f32, visible: bool) {
         let _ = self.cursor.send(CursorMsg::At { x, y, visible });
     }
+
+    /// Send one of the feature messages (`sound_format`, `camera_keyframe`, `status`,
+    /// `file_result`): see docs/PROTOCOL.md, "Features". Never blocks.
+    pub fn send_message(&self, message: Message) {
+        let _ = self.cursor.send(CursorMsg::Message(message));
+    }
+
+    /// Send one packet of the desktop's sound (after the client's `Message::Sound { on: true }`
+    /// and this host's `Message::SoundFormat`). `seq` counts up by one per packet; `start`
+    /// marks the first after a pause. Never blocks: a packet the network can't take is dropped.
+    pub fn send_sound(&self, start: bool, seq: u32, time_us: u64, data: &[u8]) {
+        let _ = self.cursor.send(CursorMsg::Sound(Packet { kind: media::KIND_SOUND, start, seq, time_us, data: data.to_vec() }));
+    }
+
+    /// Start sending a blob (`media::BLOB_CLIPBOARD` or `media::BLOB_FILE`) with this JSON
+    /// header; write its content to what comes back.
+    pub fn open_blob(&self, kind: u8, header: String) -> BlobSender {
+        let (sender, content) = BlobSender::pair();
+        let _ = self.cursor.send(CursorMsg::Blob { kind, header, content });
+        sender
+    }
 }
 
 enum Call {
@@ -171,6 +214,11 @@ enum Call {
     Keyframe,
     Lost(u32, u32),
     Input(Event),
+    Message(Message),
+    Mic(Packet),
+    Camera(remoteman_proto::video::Frame),
+    /// With what holds the sender back until the handler has dealt with it.
+    Blob(BlobEvent, Option<tokio::sync::OwnedSemaphorePermit>),
     Left,
 }
 
@@ -210,6 +258,13 @@ impl Host {
                     Call::Keyframe => handler.keyframe(),
                     Call::Lost(first, last) => handler.lost(first, last),
                     Call::Input(event) => handler.input(event),
+                    Call::Message(message) => handler.message(&message),
+                    Call::Mic(packet) => handler.mic(&packet),
+                    Call::Camera(frame) => handler.camera(&frame),
+                    Call::Blob(event, held) => {
+                        handler.blob(&event);
+                        drop(held);
+                    }
                     Call::Left => handler.left(),
                 }
             }
@@ -396,6 +451,9 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     }
                 }
                 Message::Ping { id, client_us } => write_message(&mut *send.lock().await, &Message::Pong { id, client_us, host_us: clock.elapsed().as_micros() as u64 }).await?,
+                m @ (Message::Sound { .. } | Message::Mic { .. } | Message::Camera { .. } | Message::Configure { .. } | Message::Clipboard { .. } | Message::FileResult { .. }) => {
+                    let _ = calls.send(Call::Message(m));
+                }
                 _ => {}
             }
         }
@@ -418,28 +476,110 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                         let _ = conn.send_datagram(at.write().into());
                     }
                 }
+                CursorMsg::Message(m) => write_message(&mut *send.lock().await, &m).await?,
+                CursorMsg::Sound(packet) => {
+                    let _ = conn.send_datagram(packet.write().into());
+                }
+                CursorMsg::Blob { kind, header, content } => {
+                    tokio::spawn(blob::send(conn.clone(), kind, header, content));
+                }
             }
         }
         std::future::pending::<()>().await;
         anyhow::Ok(())
     };
-    let input = async {
-        let stream = conn.accept_uni().await?;
-        read_input(stream, calls).await
+    // Streams the client opens: its input (the first, which begins with an input event's
+    // type) and blobs (which begin with a kind of 0x40 or more). Ended with this session.
+    let streams = async {
+        let mut readers = tokio::task::JoinSet::new();
+        // At most this many pieces of blob content wait for the handler at once.
+        let room = Arc::new(tokio::sync::Semaphore::new(32));
+        let mut blob_id = 0u32;
+        loop {
+            let mut stream = conn.accept_uni().await?;
+            blob_id = blob_id.wrapping_add(1);
+            let (calls, room, id) = (calls.clone(), room.clone(), blob_id);
+            // Each stream is read by a task of its own from its very first byte: a stream is
+            // announced as soon as a later one carries data, so the input stream can turn up
+            // here long before the client has typed anything.
+            readers.spawn(async move {
+                let mut first = [0u8; 1];
+                if stream.read_exact(&mut first).await.is_err() {
+                    return;
+                }
+                if first[0] >= media::BLOB_FIRST {
+                    blob::receive(stream, first[0], id, move |event| {
+                        let (calls, room) = (calls.clone(), room.clone());
+                        async move {
+                            let held = room.acquire_owned().await.ok();
+                            calls.send(Call::Blob(event, held)).is_ok()
+                        }
+                    })
+                    .await;
+                } else {
+                    let _ = read_input(stream, first[0], &calls).await;
+                }
+            });
+        }
+        #[allow(unreachable_code)]
+        anyhow::Ok(())
+    };
+    // Datagrams the client sends: its microphone and its camera.
+    let media_in = async {
+        let mut camera = Reassembler::of(media::KIND_CAMERA);
+        // After a loss, nothing of the camera is handed on until a keyframe.
+        let (mut need_key, mut asked) = (true, None::<Instant>);
+        loop {
+            let d = conn.read_datagram().await?;
+            match d.first() {
+                Some(&media::KIND_MIC) => {
+                    if let Ok(packet) = Packet::parse(&d) {
+                        let _ = calls.send(Call::Mic(packet));
+                    }
+                }
+                Some(&media::KIND_CAMERA) => {
+                    // The camera switched on again counts as a new epoch, from frame 0.
+                    if let Ok((f, _)) = remoteman_proto::video::Fragment::parse_as(media::KIND_CAMERA, &d) {
+                        if f.epoch != camera.epoch() {
+                            camera.reset(f.epoch);
+                            need_key = true;
+                        }
+                    }
+                    let Ok(Some(frame)) = camera.push(&d) else { continue };
+                    if camera.take_lost().is_some() {
+                        need_key = true;
+                    }
+                    if need_key && !frame.key {
+                        if asked.is_none_or(|t| t.elapsed() > Duration::from_millis(250)) {
+                            asked = Some(Instant::now());
+                            write_message(&mut *send.lock().await, &Message::CameraKeyframe).await?;
+                        }
+                        continue;
+                    }
+                    need_key = false;
+                    let _ = calls.send(Call::Camera(frame));
+                }
+                _ => {}
+            }
+        }
+        #[allow(unreachable_code)]
+        anyhow::Ok(())
     };
     let result = tokio::select! {
         r = video => r.context("video"),
         r = control => r.context("control"),
         r = cursor => r.context("cursor"),
-        r = input => r.context("input"),
+        r = streams => r.context("streams"),
+        r = media_in => r.context("microphone and camera"),
         _ = conn.closed() => Ok(()),
     };
     // The client leaving ends whichever part was waiting on it; that isn't a failure.
     if conn.close_reason().is_some() { Ok(true) } else { result.map(|()| true).map_err(yes) }
 }
 
-async fn read_input(mut stream: RecvStream, calls: &mpsc::Sender<Call>) -> Result<()> {
-    let mut buf = Vec::new();
+async fn read_input(mut stream: RecvStream, first: u8, calls: &mpsc::Sender<Call>) -> Result<()> {
+    // `first` was read off the stream to see what it was.
+    let mut buf = vec![first];
     let mut chunk = [0u8; 4096];
     while let Some(n) = stream.read(&mut chunk).await? {
         buf.extend_from_slice(&chunk[..n]);

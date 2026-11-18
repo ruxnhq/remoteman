@@ -3,6 +3,9 @@
 //!     remoteman-agent [--listen ADDR:PORT] [--pair] [--state DIR] [--bitrate MBIT]
 //!     remoteman-agent --daemon [--socket PATH] [--bitrate MBIT]
 //!
+//! `--allow files` lets paired devices put files into this user's Downloads folder (off unless
+//! said: any paired device could otherwise write here).
+//!
 //! By itself it listens and serves one client at a time (a new one takes over); `--pair` lets
 //! one unknown device in and remembers it. With `--daemon` it listens for nothing: it attaches
 //! to `remotemand`, which owns the port and the trust list and hands it clients.
@@ -31,6 +34,7 @@ fn main() -> Result<()> {
     let (mut pair, mut state, mut bitrate, mut drop_one_in) = (false, state_dir(), 40u32, None::<u32>);
     let (mut daemon, mut socket) = (false, None::<PathBuf>);
     let mut refs = None::<(u32, u32)>;
+    let mut allowed = session::Allowed::default();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
@@ -40,6 +44,14 @@ fn main() -> Result<()> {
             "--bitrate" => bitrate = value()?.parse().context("--bitrate in Mbit/s")?,
             "--pair" => pair = true,
             "--daemon" => daemon = true,
+            "--allow" => {
+                for what in value()?.split(',') {
+                    match what.trim() {
+                        "files" => allowed.files = true,
+                        other => anyhow::bail!("--allow {other}: only files so far"),
+                    }
+                }
+            }
             // For tests: how many recent and long-term frames the encoder keeps, as "4+2".
             "--test-refs" => {
                 let v = value()?;
@@ -52,7 +64,10 @@ fn main() -> Result<()> {
             other => anyhow::bail!("unknown option {other}"),
         }
     }
-    let features: Vec<String> = ["video", "input", "cursor", "placement"].map(String::from).to_vec();
+    let mut features: Vec<String> = ["video", "input", "cursor", "placement", "configure"].map(String::from).to_vec();
+    if allowed.files {
+        features.push("files".into());
+    }
     if daemon {
         // The system service's socket if it is there, else one run by hand as this user.
         let socket = socket.unwrap_or_else(|| {
@@ -66,7 +81,7 @@ fn main() -> Result<()> {
                 Ok(stream) => {
                     tracing::info!("attached to the daemon at {}", socket.display());
                     said = false;
-                    if let Err(e) = remoteman_core::relay::run_agent(stream, features.clone(), session::Agent::new(bitrate * 1_000_000, refs)?) {
+                    if let Err(e) = remoteman_core::relay::run_agent(stream, features.clone(), session::Agent::new(bitrate * 1_000_000, refs, allowed)?) {
                         tracing::warn!("{e:#}");
                     }
                     tracing::info!("the daemon went away");
@@ -82,7 +97,7 @@ fn main() -> Result<()> {
     }
     let name = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "linux".into());
     let options = HostOptions { listen, state, name, os: "linux".into(), features, pair, test_drop_one_in: drop_one_in };
-    let host = Host::start(options, session::Agent::new(bitrate * 1_000_000, refs)?)?;
+    let host = Host::start(options, session::Agent::new(bitrate * 1_000_000, refs, allowed)?)?;
     tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
     if pair {
         tracing::info!("pairing: the next unknown device to connect will be trusted");

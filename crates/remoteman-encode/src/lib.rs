@@ -52,8 +52,8 @@ pub struct Config {
     /// when told, to build a later frame from when everything recent was lost on the way.
     pub long_term: u32,
     /// How many recent frames the encoder keeps to refer to. `None`: the usual four, and for
-    /// large HEVC pictures one long-term frame fewer so the stream's level stays where
-    /// decoders expect it. Said outright, both numbers are taken as they are.
+    /// large HEVC pictures three, so the stream's level stays where decoders expect it. Said
+    /// outright, both numbers are taken as they are.
     pub short_term: Option<u32>,
 }
 

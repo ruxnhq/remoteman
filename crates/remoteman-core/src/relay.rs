@@ -12,9 +12,13 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
+use remoteman_proto::control::Message;
 use remoteman_proto::input::Event;
+use remoteman_proto::media::Packet;
+use remoteman_proto::video::Frame;
 
 use crate::CursorShape;
+use crate::blob::{BlobEvent, Chunk};
 use crate::host::{Accept, ClientInfo, CursorMsg, HostHandler, Link, Out};
 
 /// Where the daemon listens for agents: `/run/remoteman/agent.sock` for the system service,
@@ -40,6 +44,14 @@ pub enum ToAgent {
     Input(Event),
     /// The client is gone, or was given to another agent: stop and take the display away.
     Left,
+    /// One of the client's feature messages.
+    Message(Message),
+    /// One packet of the client's microphone.
+    Mic(Packet),
+    /// One whole frame of the client's camera.
+    Camera(Frame),
+    /// A blob from the client.
+    Blob(BlobEvent),
 }
 
 /// Agent to daemon.
@@ -53,6 +65,36 @@ pub enum ToDaemon {
     CursorAt { x: f32, y: f32, visible: bool },
     /// For the daemon's own command (`remotemand ctl ...`), not from agents.
     Control(String),
+    /// A feature message for the client.
+    Message(Message),
+    /// One packet of the desktop's sound.
+    Sound(Packet),
+    /// A blob for the client; its `id` is this agent's own number for it.
+    Blob(BlobEvent),
+    /// The picture starts afresh as this (another size, another codec): the frames that
+    /// follow count from 0 again and begin with a keyframe.
+    Restart(Accept),
+}
+
+fn put_blob(w: &mut impl Write, kind: u8, event: &BlobEvent) -> io::Result<()> {
+    match event {
+        BlobEvent::Open { id, kind: what, header } => put(w, kind, &[&[0], &id.to_le_bytes(), &[*what], header.as_bytes()]),
+        BlobEvent::Data { id, bytes } => put(w, kind, &[&[1], &id.to_le_bytes(), bytes]),
+        BlobEvent::Close { id, complete } => put(w, kind, &[&[2], &id.to_le_bytes(), &[*complete as u8]]),
+    }
+}
+
+fn get_blob(b: &[u8]) -> io::Result<BlobEvent> {
+    if b.len() < 5 {
+        return Err(bad("short blob message"));
+    }
+    let id = u32::from_le_bytes(b[1..5].try_into().unwrap());
+    Ok(match (b[0], b.len()) {
+        (0, 6..) => BlobEvent::Open { id, kind: b[5], header: String::from_utf8(b[6..].to_vec()).map_err(|_| bad("blob header"))? },
+        (1, _) => BlobEvent::Data { id, bytes: b[5..].to_vec() },
+        (2, 6..) => BlobEvent::Close { id, complete: b[5] != 0 },
+        _ => return Err(bad("unknown blob message")),
+    })
 }
 
 fn put(w: &mut impl Write, kind: u8, parts: &[&[u8]]) -> io::Result<()> {
@@ -104,6 +146,10 @@ impl ToAgent {
                 put(w, 0x14, &[&bytes])
             }
             ToAgent::Left => put(w, 0x15, &[]),
+            ToAgent::Message(m) => put(w, 0x16, &[&serde_json::to_vec(m)?]),
+            ToAgent::Mic(p) => put(w, 0x17, &[&p.write()]),
+            ToAgent::Camera(f) => put(w, 0x18, &[&[f.key as u8], &f.epoch.to_le_bytes(), &f.number.to_le_bytes(), &f.capture_us.to_le_bytes(), &f.data]),
+            ToAgent::Blob(event) => put_blob(w, 0x19, event),
         }
     }
 
@@ -118,6 +164,17 @@ impl ToAgent {
                 _ => return Err(bad("bad input event")),
             },
             0x15 => ToAgent::Left,
+            0x16 => ToAgent::Message(serde_json::from_slice(&b)?),
+            0x17 => ToAgent::Mic(Packet::parse(&b).map_err(|_| bad("microphone packet"))?),
+            0x18 if b.len() >= 15 => ToAgent::Camera(Frame {
+                key: b[0] & 1 != 0,
+                recovery: false,
+                epoch: u16::from_le_bytes(b[1..3].try_into().unwrap()),
+                number: u32::from_le_bytes(b[3..7].try_into().unwrap()),
+                capture_us: u64::from_le_bytes(b[7..15].try_into().unwrap()),
+                data: b[15..].to_vec(),
+            }),
+            0x19 => ToAgent::Blob(get_blob(&b)?),
             _ => return Err(bad("unknown message for an agent")),
         }))
     }
@@ -133,6 +190,10 @@ impl ToDaemon {
             ToDaemon::CursorShape(s) => put(w, 0x05, &[&s.width.to_le_bytes(), &s.height.to_le_bytes(), &s.hot_x.to_le_bytes(), &s.hot_y.to_le_bytes(), &s.rgba]),
             ToDaemon::CursorAt { x, y, visible } => put(w, 0x06, &[&x.to_le_bytes(), &y.to_le_bytes(), &[*visible as u8]]),
             ToDaemon::Control(text) => put(w, 0x20, &[text.as_bytes()]),
+            ToDaemon::Message(m) => put(w, 0x07, &[&serde_json::to_vec(m)?]),
+            ToDaemon::Sound(p) => put(w, 0x08, &[&p.write()]),
+            ToDaemon::Blob(event) => put_blob(w, 0x09, event),
+            ToDaemon::Restart(accept) => put(w, 0x0A, &[&serde_json::to_vec(accept)?]),
         }
     }
 
@@ -150,6 +211,10 @@ impl ToDaemon {
             }
             0x06 if b.len() == 9 => ToDaemon::CursorAt { x: f32::from_le_bytes(b[..4].try_into().unwrap()), y: f32::from_le_bytes(b[4..8].try_into().unwrap()), visible: b[8] != 0 },
             0x20 => ToDaemon::Control(text(b)?),
+            0x07 => ToDaemon::Message(serde_json::from_slice(&b)?),
+            0x08 => ToDaemon::Sound(Packet::parse(&b).map_err(|_| bad("sound packet"))?),
+            0x09 => ToDaemon::Blob(get_blob(&b)?),
+            0x0A => ToDaemon::Restart(serde_json::from_slice(&b)?),
             _ => return Err(bad("unknown message for the daemon")),
         }))
     }
@@ -196,19 +261,54 @@ pub fn run_agent(socket: UnixStream, features: Vec<String>, mut handler: impl Ho
                         let w = writer.clone();
                         carrying.push(std::thread::Builder::new().name("to daemon: frames".into()).spawn(move || {
                             while let Some(out) = end.frames.blocking_recv() {
-                                let Out::Frame(f) = out else { continue };
-                                let m = ToDaemon::Frame { key: f.key, recovery: f.recovery, capture_us: f.capture_us, data: f.data };
+                                let m = match out {
+                                    Out::Frame(f) => ToDaemon::Frame { key: f.key, recovery: f.recovery, capture_us: f.capture_us, data: f.data },
+                                    Out::Restart(accept) => ToDaemon::Restart(accept),
+                                };
                                 if m.write(&mut *w.lock().unwrap()).is_err() {
                                     break;
                                 }
                             }
                         })?);
                         let w = writer.clone();
-                        carrying.push(std::thread::Builder::new().name("to daemon: cursor".into()).spawn(move || {
+                        carrying.push(std::thread::Builder::new().name("to daemon: the rest".into()).spawn(move || {
+                            let mut blobs = 0u32;
                             while let Some(c) = end.cursor.blocking_recv() {
                                 let m = match c {
                                     CursorMsg::Shape(s) => ToDaemon::CursorShape(s),
                                     CursorMsg::At { x, y, visible } => ToDaemon::CursorAt { x, y, visible },
+                                    CursorMsg::Message(m) => ToDaemon::Message(m),
+                                    CursorMsg::Sound(p) => ToDaemon::Sound(p),
+                                    CursorMsg::Blob { kind, header, mut content } => {
+                                        // Carried by a thread of its own, so a long file
+                                        // doesn't hold up the cursor or the sound.
+                                        blobs = blobs.wrapping_add(1);
+                                        let (id, w) = (blobs, w.clone());
+                                        let _ = std::thread::Builder::new().name("to daemon: blob".into()).spawn(move || {
+                                            let say = |event: BlobEvent| ToDaemon::Blob(event).write(&mut *w.lock().unwrap()).is_ok();
+                                            if !say(BlobEvent::Open { id, kind, header }) {
+                                                return;
+                                            }
+                                            loop {
+                                                match content.blocking_recv() {
+                                                    Some(Chunk::Data(bytes)) => {
+                                                        if !say(BlobEvent::Data { id, bytes }) {
+                                                            return;
+                                                        }
+                                                    }
+                                                    Some(Chunk::End) => {
+                                                        say(BlobEvent::Close { id, complete: true });
+                                                        return;
+                                                    }
+                                                    None => {
+                                                        say(BlobEvent::Close { id, complete: false });
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        continue;
+                                    }
                                 };
                                 if m.write(&mut *w.lock().unwrap()).is_err() {
                                     break;
@@ -222,10 +322,115 @@ pub fn run_agent(socket: UnixStream, features: Vec<String>, mut handler: impl Ho
             ToAgent::Keyframe if serving => handler.keyframe(),
             ToAgent::Lost { first, last } if serving => handler.lost(first, last),
             ToAgent::Input(event) if serving => handler.input(event),
+            ToAgent::Message(message) if serving => handler.message(&message),
+            ToAgent::Mic(packet) if serving => handler.mic(&packet),
+            ToAgent::Camera(frame) if serving => handler.camera(&frame),
+            ToAgent::Blob(event) if serving => handler.blob(&event),
             ToAgent::Left => stop(&mut handler, &mut serving, &mut carrying),
             _ => {}
         }
     }
     stop(&mut handler, &mut serving, &mut carrying);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Chroma, Codec, Display, Mode};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Sends numbered frames as fast as the link takes them, from inside `connected` on.
+    struct Counting {
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+        inputs: Arc<Mutex<Vec<Event>>>,
+    }
+
+    impl HostHandler for Counting {
+        fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
+            if client.name == "unwelcome" {
+                return Err("no".into());
+            }
+            self.stop = Arc::new(AtomicBool::new(false));
+            let stop = self.stop.clone();
+            self.thread = Some(std::thread::spawn(move || {
+                let mut n = 0u32;
+                while !stop.load(Ordering::Relaxed) && link.send_frame(&n.to_le_bytes(), n == 0, 7) {
+                    n += 1;
+                }
+            }));
+            // Frames are already waiting in the link by the time this returns.
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            Ok(Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: client.display.width, height: 2, refresh: 120, colour: "bt709".into() })
+        }
+        fn keyframe(&mut self) {}
+        fn input(&mut self, event: Event) {
+            self.inputs.lock().unwrap().push(event);
+        }
+        fn left(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        }
+    }
+
+    fn client(name: &str, width: u32) -> ToAgent {
+        let display = Display { width, height: 2, scale: 1.0, refresh: 120, placement: Default::default() };
+        ToAgent::Client { info: ClientInfo { name: name.into(), fingerprint: "f".into(), display, decoders: vec![], cursor: false }, elapsed_us: 5 }
+    }
+
+    /// The next `count` frames' numbers, having skipped nothing else.
+    fn frames(daemon: &mut UnixStream, count: u32) -> Vec<u32> {
+        (0..count)
+            .map(|_| match ToDaemon::read(daemon).unwrap() {
+                Some(ToDaemon::Frame { data, capture_us: 7, .. }) => u32::from_le_bytes(data[..4].try_into().unwrap()),
+                _ => panic!("expected a frame"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_agent_serves_clients_in_order() {
+        let (agent, mut daemon) = UnixStream::pair().unwrap();
+        let inputs = Arc::new(Mutex::new(Vec::new()));
+        let handler = Counting { stop: Arc::default(), thread: None, inputs: inputs.clone() };
+        let running = std::thread::spawn(move || run_agent(agent, vec!["video".into()], handler));
+        assert!(matches!(ToDaemon::read(&mut daemon).unwrap(), Some(ToDaemon::Hello { features }) if features == ["video"]));
+
+        // A refusal comes back as one, and nothing else.
+        client("unwelcome", 2).write(&mut daemon).unwrap();
+        assert!(matches!(ToDaemon::read(&mut daemon).unwrap(), Some(ToDaemon::Refused(why)) if why == "no"));
+
+        // Accepted first, then frames from 0 with none missing, though they were made before
+        // the acceptance was written.
+        client("one", 64).write(&mut daemon).unwrap();
+        assert!(matches!(ToDaemon::read(&mut daemon).unwrap(), Some(ToDaemon::Accepted(a)) if a.width == 64));
+        assert_eq!(frames(&mut daemon, 50), (0..50).collect::<Vec<_>>());
+        ToAgent::Input(Event::Key { usage: 4, down: true }).write(&mut daemon).unwrap();
+
+        // A second client takes the first one's place: after its acceptance, only its frames,
+        // from 0 again. (Whatever the first still had in flight comes before the acceptance.)
+        client("two", 128).write(&mut daemon).unwrap();
+        loop {
+            match ToDaemon::read(&mut daemon).unwrap() {
+                Some(ToDaemon::Frame { .. }) => {}
+                Some(ToDaemon::Accepted(a)) => {
+                    assert_eq!(a.width, 128);
+                    break;
+                }
+                _ => panic!("expected frames, then an acceptance"),
+            }
+        }
+        assert_eq!(frames(&mut daemon, 50), (0..50).collect::<Vec<_>>());
+        assert_eq!(*inputs.lock().unwrap(), [Event::Key { usage: 4, down: true }]);
+
+        // The daemon going away ends it cleanly. Keep reading meanwhile, as the daemon would,
+        // so the agent isn't stuck writing a frame nobody takes.
+        ToAgent::Left.write(&mut daemon).unwrap();
+        daemon.shutdown(std::net::Shutdown::Write).unwrap();
+        while let Ok(Some(_)) = ToDaemon::read(&mut daemon) {}
+        running.join().unwrap().unwrap();
+    }
 }

@@ -87,6 +87,71 @@ f32  x, y     fractions (0 to 1) of the display from its top left
 
 The host reports every move, the client's own included, a pipeline's delay later. A client drawing the cursor at its own pointer uses these only when it hasn't moved the pointer itself for a moment, which is how it notices the host moving it.
 
+## Features
+
+Everything beside the picture and input. Three rules hold for all of it:
+
+- **A host lists what it has** in its hello's `features`: `sound`, `mic`, `camera`, `configure`, `clipboard`, `files`. A client offers only those.
+- **Nothing of a feature is sent to a side that hasn't asked for it.** Each starts with a message from the client, so a client or host that knows nothing of a feature is never handed a datagram or a stream it can't read. (A client must still ignore datagram kinds it doesn't know.)
+- **When the desktop behind the connection changes** (a new stream epoch because the login screen gave way to the session), what the client had switched on stays on: the host side carries it over, and the client hears `sound_format` again.
+
+### Channels they use
+
+| Channel | Carried on | Direction | Content |
+|---|---|---|---|
+| Feature messages | The control stream | both | JSON, as below |
+| Sound | Datagrams, kind 3 | host → client | One Opus packet each |
+| Microphone | Datagrams, kind 4 | client → host | One Opus packet each |
+| Camera | Datagrams, kind 5 | client → host | Fragments of H.264 or HEVC frames |
+| Blobs | A one-way stream each, opened by the sender | both | Clipboard contents, files |
+
+A sound or microphone datagram:
+
+```
+u8   kind       3 sound, 4 microphone
+u8   flags      bit 0: the first packet after a pause; start the playout buffer afresh
+u16  0
+u32  seq        counts up by one per packet
+u64  time_us    when it was captured, on the sender's session clock (the host's is the picture's)
+...  payload    one Opus packet
+```
+
+A camera datagram has the picture's layout (see Video) with kind 5; its `epoch` counts the times the camera was switched on, and frames count from 0 in each.
+
+A blob is a stream that begins with a kind byte, then a `u32` length and that many bytes of JSON (the header), then the content to the end of the stream. A stream that is reset was given up by its sender, and what came of it is thrown away. Kinds: `0x40` clipboard, `0x41` file. (The client's input stream is told apart by its first byte, an input event's type, which is below `0x40`. Streams are read from their first byte independently of one another: a stream is announced as soon as a later one carries data, so one that has sent nothing yet must not hold up the rest.)
+
+### Sound (`sound`)
+
+- Client → host: `{"t":"sound","on":true}`, and `false` to stop.
+- Host → client: `{"t":"sound_format","codec":"opus","rate":48000,"channels":2,"frame_us":10000}` before the first packet and whenever it changes. Then sound datagrams.
+- The host stops sending while there is nothing but silence, and marks the first packet afterwards (flag bit 0). A missing `seq` is a lost packet: the client conceals it (an Opus decoder does, given an empty packet in its place) and plays through a buffer of 20 to 40 ms.
+
+### Microphone (`mic`)
+
+- Client → host: `{"t":"mic","on":true,"codec":"opus","rate":48000,"channels":1,"frame_us":10000}`, then microphone datagrams; `{"t":"mic","on":false}` to stop. The host presents it as a microphone that programs on the desktop can pick.
+
+### Camera (`camera`)
+
+- Client → host: `{"t":"camera","on":true,"codec":"h264","width":1280,"height":720,"fps":30}`, then camera datagrams; `{"t":"camera","on":false}` to stop. `h264` at 1280×720 and 30 a second is the mode every host takes; `hevc` is for hosts that say so later. Frames are Annex-B with the parameter sets in front of every keyframe and no B-frames; the size may change at a keyframe (a device turned on its side).
+- Host → client: `{"t":"camera_keyframe"}` when it lost a frame; the client's next frame is a keyframe. (The client also sends one every 2 s or so, which makes most losses heal by themselves.) The host presents the camera as one that programs on the desktop can pick.
+
+### Settings (`configure`)
+
+- Client → host: `{"t":"configure","display":{...},"bitrate":25000000,"decoders":[...]}`. Every field is optional and what is left out stays as it is. `display` is as in the hello (size, scale, refresh, placement); a new one, or other `decoders`, starts a new stream epoch. `bitrate` is the most the picture may use, in bits a second; 0 gives the choice back to the host.
+- Host → client, now and then: `{"t":"status","bitrate":25000000}`: what the picture is being encoded at, for the device to show.
+
+### Clipboard (`clipboard`)
+
+- Client → host: `{"t":"clipboard","on":true}` shares the clipboard both ways; `false` stops it.
+- While on, whenever something is copied on either side, that side sends a clipboard blob: header `{"seq":7,"type":"text/plain;charset=utf-8","size":21}`, then the bytes. `type` is `text/plain;charset=utf-8` or `image/png` (text if there is any). `seq` counts up on the sender; a blob with a lower number than the last one taken is stale. Nothing over 8 MiB is sent or taken.
+- A host should have the clipboard off for a device until its user allows it for that device, and never on at a login screen.
+
+### Files (`files`)
+
+- The sender opens a file blob: header `{"id":3,"name":"report.pdf","size":3000000}`, then the bytes. `name` is a bare file name; the receiver cleans it up all the same (no folders, no leading dots, no control characters) and decides by itself where the file goes, never overwriting one that is there.
+- The receiver answers on the control stream when it has the file or has given up: `{"t":"file_result","id":3,"ok":true,"message":"..."}`, where `message` says where it was put, or why not.
+- Either side may send; a host should take files only from devices its user allowed, and never at a login screen.
+
 ## Input
 
 A sequence of events on the input stream, each a `u8` type and then its fields:
@@ -109,4 +174,4 @@ The client sends `ping` now and then and takes the answer with the shortest roun
 
 ## Not in version 0
 
-Sound, clipboard, files, re-requesting lost fragments, parity, bitrate following the network, resume tokens, QR pairing, more than one display, HDR.
+Re-requesting lost fragments, parity, bitrate following the network, resume tokens, QR pairing, more than one display, HDR, a camera or microphone switched on from the host's side (when a program there opens it).

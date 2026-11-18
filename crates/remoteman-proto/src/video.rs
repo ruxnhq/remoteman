@@ -64,7 +64,12 @@ pub struct Fragment {
 
 impl Fragment {
     pub fn write(&self, out: &mut Vec<u8>) {
-        out.push(KIND_VIDEO);
+        self.write_as(KIND_VIDEO, out);
+    }
+
+    /// As [`Self::write`], for another stream in the same layout (the device's camera).
+    pub fn write_as(&self, kind: u8, out: &mut Vec<u8>) {
+        out.push(kind);
         out.push(if self.key { FLAG_KEY } else { 0 } | if self.recovery { FLAG_RECOVERY } else { 0 });
         out.extend_from_slice(&self.epoch.to_le_bytes());
         out.extend_from_slice(&self.frame.to_le_bytes());
@@ -75,10 +80,15 @@ impl Fragment {
 
     /// Split a datagram into its header and payload.
     pub fn parse(d: &[u8]) -> Result<(Self, &[u8]), Error> {
+        Self::parse_as(KIND_VIDEO, d)
+    }
+
+    /// As [`Self::parse`], for another stream in the same layout.
+    pub fn parse_as(kind: u8, d: &[u8]) -> Result<(Self, &[u8]), Error> {
         if d.len() < HEADER {
             return Err(Error::Truncated("video datagram"));
         }
-        if d[0] != KIND_VIDEO {
+        if d[0] != kind {
             return Err(Error::Unknown("datagram kind", d[0] as u32));
         }
         let u16_at = |i: usize| u16::from_le_bytes([d[i], d[i + 1]]);
@@ -100,6 +110,12 @@ impl Fragment {
 
 /// Cut `frame` into datagrams of at most `max` bytes each (header included).
 pub fn fragment(frame: &[u8], key: bool, recovery: bool, epoch: u16, number: u32, capture_us: u64, max: usize) -> Vec<Vec<u8>> {
+    fragment_as(KIND_VIDEO, frame, key, recovery, epoch, number, capture_us, max)
+}
+
+/// As [`fragment`], for another stream in the same layout (the device's camera).
+#[allow(clippy::too_many_arguments)]
+pub fn fragment_as(kind: u8, frame: &[u8], key: bool, recovery: bool, epoch: u16, number: u32, capture_us: u64, max: usize) -> Vec<Vec<u8>> {
     let room = max.saturating_sub(HEADER).max(1);
     let count = frame.len().div_ceil(room).max(1);
     assert!(count <= u16::MAX as usize, "frame too large for the fragment counter");
@@ -107,7 +123,7 @@ pub fn fragment(frame: &[u8], key: bool, recovery: bool, epoch: u16, number: u32
         .map(|i| {
             let part = &frame[(i * room).min(frame.len())..((i + 1) * room).min(frame.len())];
             let mut d = Vec::with_capacity(HEADER + part.len());
-            Fragment { key, recovery, epoch, frame: number, index: i as u16, count: count as u16, capture_us }.write(&mut d);
+            Fragment { key, recovery, epoch, frame: number, index: i as u16, count: count as u16, capture_us }.write_as(kind, &mut d);
             d.extend_from_slice(part);
             d
         })
@@ -136,8 +152,8 @@ struct Partial {
 
 /// Puts fragments back into frames. Frames come out in order; a frame that is still incomplete
 /// when a later one completes is given up and counted as lost.
-#[derive(Default)]
 pub struct Reassembler {
+    kind: u8,
     epoch: u16,
     partial: BTreeMap<u32, Partial>,
     /// The number after the last frame delivered or given up.
@@ -146,9 +162,20 @@ pub struct Reassembler {
     lost: Option<(u32, u32)>,
 }
 
+impl Default for Reassembler {
+    fn default() -> Self {
+        Self::of(KIND_VIDEO)
+    }
+}
+
 impl Reassembler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// For another stream in the picture's layout (the device's camera).
+    pub fn of(kind: u8) -> Self {
+        Self { kind, epoch: 0, partial: BTreeMap::new(), next: 0, lost: None }
     }
 
     /// The epoch being put together.
@@ -170,7 +197,7 @@ impl Reassembler {
 
     /// Take in one datagram; returns a frame if this completed one.
     pub fn push(&mut self, datagram: &[u8]) -> Result<Option<Frame>, Error> {
-        let (f, payload) = Fragment::parse(datagram)?;
+        let (f, payload) = Fragment::parse_as(self.kind, datagram)?;
         if f.epoch != self.epoch || f.frame < self.next {
             return Ok(None);
         }
