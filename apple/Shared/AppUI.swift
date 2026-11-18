@@ -7,6 +7,7 @@
 //   --snapshot out.png  save the picture at the end
 //   --script "move:.5,.5;wait:1;shot:a.png"   drive input and take pictures (see runScript)
 //   --placement extend|main|only   where this display sits among the host's own
+//   --frame-log out.csv   every frame's number, size and arrival time, and the longest waits
 //   --view-only yes     send no input            --bench dir       time decode of the .rmrec files there (--exit yes to quit after)
 //   --size WxH --scale S --refresh HZ --decoders av1,hevc444,hevc   override what the hello says
 // Every option takes a value: AppKit reads the arguments too, as "-key value" pairs, and takes
@@ -225,6 +226,7 @@ enum Automation {
         var exitAfter = false
         var script: String?
         var verbose = false
+        var frameLog: String?
         var placement = ViewerSession.Placement.extend
         while !args.isEmpty {
             let a = args.removeFirst()
@@ -243,6 +245,7 @@ enum Automation {
             case "--decoders": decoders = value()
             case "--view-only": session.viewOnly = ["yes", "1", "true"].contains(value())
             case "--script": script = value()
+            case "--frame-log": frameLog = value()
             case "--placement": placement = ViewerSession.Placement(rawValue: value()) ?? .extend
             case "--verbose": verbose = ["yes", "1", "true"].contains(value())
             case "--bench": bench = value()
@@ -297,6 +300,11 @@ enum Automation {
                 print("remoteman: host \(h.name) (\(h.os)) \(h.fingerprint)")
             }
             print("remoteman: \(session.summary(skip: 3))")
+            if let frameLog {
+                let r = session.frameReport()
+                try? r.csv.write(to: resolve(frameLog), atomically: true, encoding: .utf8)
+                print("remoteman: frame log \(frameLog)\n\(r.text)")
+            }
             session.disconnect()
             // Give the goodbye a moment to leave.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }

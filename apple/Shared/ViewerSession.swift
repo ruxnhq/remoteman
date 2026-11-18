@@ -261,6 +261,9 @@ final class ViewerSession: ObservableObject {
         received += 1
         if receivedLog.count < 200_000 { receivedLog.append(DispatchTime.now().uptimeNanoseconds) }
         if key { keyframesReceived += 1 }
+        if frameLog.count < 200_000 {
+            frameLog.append((number, data.count, key, DispatchTime.now().uptimeNanoseconds))
+        }
         statsLock.unlock()
         pipeLock.lock()
         defer { pipeLock.unlock() }
@@ -275,6 +278,31 @@ final class ViewerSession: ObservableObject {
     // MARK: Run summary (for unattended measurements)
 
     private var keyframesReceived = 0
+    /// Every frame handed over by the core: its number, size, whether a keyframe, and when.
+    private var frameLog: [(UInt32, Int, Bool, UInt64)] = []
+
+    /// The frame log as CSV, and the frames around the longest waits between two frames.
+    func frameReport(stalls: Int = 4) -> (csv: String, text: String) {
+        statsLock.lock()
+        let log = frameLog
+        statsLock.unlock()
+        guard let t0 = log.first?.3 else { return ("", "no frames") }
+        var csv = "number,bytes,key,ms\n"
+        for f in log { csv += "\(f.0),\(f.1),\(f.2 ? 1 : 0),\(String(format: "%.2f", Double(f.3 - t0) / 1e6))\n" }
+        let sizes = log.map { $0.1 }.sorted()
+        var text = "frames \(log.count), bytes median \(sizes[sizes.count / 2]) p95 \(sizes[sizes.count * 95 / 100]) max \(sizes.last ?? 0)\n"
+        // The longest waits before a frame, after the first three seconds.
+        let waits = (1..<log.count).filter { log[$0].3 - t0 > 3_000_000_000 }
+            .map { ($0, Double(log[$0].3 - log[$0 - 1].3) / 1e6) }.sorted { $0.1 > $1.1 }.prefix(stalls)
+        for (i, ms) in waits.sorted(by: { $0.0 < $1.0 }) {
+            text += String(format: "wait of %.1f ms before frame %d (numbers skipped: %d):\n", ms, log[i].0, Int(log[i].0) - Int(log[i - 1].0) - 1)
+            for j in max(0, i - 4)...min(log.count - 1, i + 6) {
+                let dt = j > 0 ? Double(log[j].3 - log[j - 1].3) / 1e6 : 0
+                text += String(format: "  %@ #%d  %6d B  +%.1f ms%@\n", j == i ? ">" : " ", log[j].0, log[j].1, dt, log[j].2 ? "  KEY" : "")
+            }
+        }
+        return (csv, text)
+    }
     private var receivedLog: [UInt64] = []
     private var decodeLog: [(UInt64, Double)] = []
 
