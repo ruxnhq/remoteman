@@ -109,6 +109,9 @@ final class ViewerSession: ObservableObject {
             : "no sound_format received (or sound is off)"
     }
 
+    func lookAtClipboardNow() { sharing?.lookNow() }
+    var clipboardLog: [String] { (sharing?.log ?? []) + [sharing?.tickReport ?? ""] }
+
     func has(_ feature: String) -> Bool { features.contains(feature) }
 
     private func remembered(_ what: String) -> Bool { UserDefaults.standard.bool(forKey: "\(what).\(target)") }

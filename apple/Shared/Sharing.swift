@@ -100,8 +100,24 @@ final class Sharing {
 
     init(client: CoreClient) { self.client = client }
 
+    /// For tests: what clipboard sharing did and when (kinds and sizes, never content).
+    private(set) var log: [String] = []
+    private let logLock = NSLock()
+    private let began = Date()
+    private func note(_ s: String) {
+        logLock.lock()
+        log.append(String(format: "+%.2f s %@", Date().timeIntervalSince(began), s))
+        logLock.unlock()
+    }
+
     /// For tests: put text on this device's clipboard, and say what is on it without showing it.
-    static func copyForTest(_ text: String) { _ = Clip.write(type: Clip.text, data: Data(text.utf8)) }
+    static var testText: Data?
+    static func copyForTest(_ text: String) {
+        testText = Data(text.utf8)
+        _ = Clip.write(type: Clip.text, data: Data(text.utf8))
+    }
+    private var ticks = 0, idleTicks = 0
+    var tickReport: String { "looked at the clipboard \(ticks) times, \(idleTicks) of them while the app wasn't active; change count \(Clip.changeCount), last seen \(seenCount)" }
     static func clipboardSummary(expecting: String?) -> String {
         guard let c = Clip.read() else { return "nothing readable" }
         let same = expecting.map { c.data == Data($0.utf8) ? ", equal to the test text" : ", not the test text" } ?? ""
@@ -123,6 +139,7 @@ final class Sharing {
     func setClipboard(_ on: Bool, sendCurrent: Bool) {
         guard on != clipboardOn else { return }
         clipboardOn = on
+        note("sharing \(on ? "on" : "off")")
         client?.send(["t": "clipboard", "on": on])
         timer?.invalidate()
         timer = nil
@@ -131,24 +148,36 @@ final class Sharing {
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.lookAtClipboard() }
     }
 
+    /// For tests: look now instead of at the next half second.
+    func lookNow() { if clipboardOn { lookAtClipboard() } }
+
     private func lookAtClipboard() {
+        ticks += 1
         #if os(iOS)
-            guard UIApplication.shared.applicationState == .active else { return }
+            guard UIApplication.shared.applicationState == .active else {
+                idleTicks += 1
+                return
+            }
         #endif
         let count = Clip.changeCount
         guard count != seenCount else { return }
         seenCount = count
-        guard let clip = Clip.read(), clip.data.count <= Clip.most, clip.data != lastSent, clip.data != lastTaken else { return }
+        guard let clip = Clip.read() else { return note("the clipboard changed here; nothing readable on it") }
+        guard clip.data.count <= Clip.most, clip.data != lastSent, clip.data != lastTaken else {
+            return note("the clipboard changed here, \(clip.data.count) bytes; not sent (too large, or what was last sent or taken)")
+        }
         lastSent = clip.data
         sentSeq += 1
         let header: [String: Any] = ["seq": sentSeq, "type": clip.type, "size": clip.data.count]
         let client = self.client
-        work.async {
+        note("sending seq \(sentSeq), \(clip.type), \(clip.data.count) bytes")
+        work.async { [weak self] in
             var rest: Data? = clip.data
-            _ = client?.sendBlob(kind: CoreClient.clipboardKind, header: header) {
+            let ok = client?.sendBlob(kind: CoreClient.clipboardKind, header: header) {
                 defer { rest = nil }
                 return rest
             }
+            self?.note("seq \(header["seq"] ?? 0) \(ok == true ? "sent whole" : ok == false ? "NOT sent (open, write or finish failed)" : "not sent, no connection")")
         }
     }
 
@@ -201,7 +230,10 @@ final class Sharing {
         let data = b.data
         DispatchQueue.main.async { [self] in
             // Stale, or this device's own copy coming back after sharing was switched on again.
-            guard clipboardOn, seq > takenSeq, data != lastSent else { return }
+            guard clipboardOn, seq > takenSeq, data != lastSent else {
+                return note("from the computer: seq \(seq), \(data.count) bytes; ignored (\(!clipboardOn ? "sharing is off" : seq <= takenSeq ? "stale" : "what this device sent"))")
+            }
+            note("from the computer: seq \(seq), \(type), \(data.count) bytes\(data == Sharing.testText ? " (equal to the last test text)" : ""); put on the clipboard")
             takenSeq = seq
             lastTaken = data
             if Clip.write(type: type, data: data) { seenCount = Clip.changeCount }

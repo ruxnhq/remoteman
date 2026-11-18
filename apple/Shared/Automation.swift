@@ -234,7 +234,12 @@ enum Automation {
                 case "clipboard": DispatchQueue.main.sync { session.setClipboard(arg.contains("on")) }
                 case "file": DispatchQueue.main.sync { session.send(file: resolve(arg.trimmingCharacters(in: .whitespaces))) }
                 case "soundreport": print("remoteman: sound: \(DispatchQueue.main.sync { session.soundReport })")
-                case "copy": DispatchQueue.main.sync { Sharing.copyForTest(arg) }
+                case "cliplog": print("remoteman: clipboard log\n  " + DispatchQueue.main.sync { session.clipboardLog }.joined(separator: "\n  "))
+                case "copy":
+                    DispatchQueue.main.sync {
+                        Sharing.copyForTest(arg)
+                        session.lookAtClipboardNow()
+                    }
                 case "clip": print("remoteman: clipboard here: \(DispatchQueue.main.sync { Sharing.clipboardSummary(expecting: arg.isEmpty ? nil : arg) })")
                 case "makefile":
                     let p = arg.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
