@@ -27,6 +27,8 @@ final class ViewerSession: ObservableObject {
     @Published var report: String?
 
     let renderer = VideoRenderer()
+    /// The display link's real rate, measured while the connect form is showing.
+    let refreshMeter = RefreshMeter()
     private(set) var client: CoreClient?
     /// Look, don't touch: with this on, no pointer, key or touch event leaves the app.
     @Published var viewOnly = false

@@ -67,13 +67,18 @@ struct ContentView: View {
                     ViewerRepresentable(session: session, keyboardShown: keyboardShown)
                     overlay
                 } else {
+                    RefreshProbe(meter: session.refreshMeter).frame(width: 1, height: 1).opacity(0)
                     connectForm(size: geo.size)
                 }
             }
             .onAppear {
                 guard !started else { return }
                 started = true
-                Automation.run(session: session, display: display(for: geo.size))
+                // Give the refresh meter a moment before an unattended connect reads it.
+                let size = geo.size
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    Automation.run(session: session, display: display(for: size))
+                }
             }
         }
         .ignoresSafeArea()
@@ -81,10 +86,14 @@ struct ContentView: View {
 
     private func display(for size: CGSize) -> ViewerSession.Display {
         #if os(macOS)
-            let refresh = NSScreen.main?.maximumFramesPerSecond ?? 60
+            let nominal = NSScreen.main?.maximumFramesPerSecond ?? 60
         #else
-            let refresh = UIScreen.main.maximumFramesPerSecond
+            let nominal = UIScreen.main.maximumFramesPerSecond
         #endif
+        // What the display link really ticks at, when it has been measured and is no more than
+        // the mode claims.
+        let measured = session.refreshMeter.rate
+        let refresh = measured.map { $0 >= 24 && $0 <= nominal ? $0 : nominal } ?? nominal
         // The panel's real pixels: with "More Space" an iPad lays out at a scale that isn't its
         // panel's, and SwiftUI's displayScale would ask for more pixels than exist.
         #if os(macOS)

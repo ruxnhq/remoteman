@@ -4,8 +4,53 @@
 import QuartzCore
 import SwiftUI
 
+/// What a display link on this screen really delivers, measured before connecting: a mode's
+/// nominal rate can be more than the link ticks at (a virtual display saying 144 Hz and
+/// ticking at 120), and frames the host sends beyond that are only thrown away.
+final class RefreshMeter {
+    private var stamps: [CFTimeInterval] = []
+    private(set) var rate: Int?
+
+    func tick(_ t: CFTimeInterval) {
+        stamps.append(t)
+        if stamps.count > 90 { stamps.removeFirst(stamps.count - 90) }
+        guard stamps.count >= 45, let first = stamps.first, let last = stamps.last, last > first else { return }
+        let hz = Double(stamps.count - 1) / (last - first)
+        // Snap to the rate it is evidently aiming for.
+        let common = [24, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240]
+        rate = common.first { abs(Double($0) - hz) / Double($0) < 0.03 } ?? Int(hz.rounded())
+    }
+}
+
 #if os(macOS)
     import AppKit
+
+    /// An invisible view that runs a display link to feed the meter while the connect form is up.
+    final class RefreshProbeView: NSView {
+        let meter: RefreshMeter
+        private var link: CADisplayLink?
+        init(meter: RefreshMeter) {
+            self.meter = meter
+            super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { fatalError() }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            link?.invalidate()
+            link = nil
+            guard window != nil else { return }
+            let l = displayLink(target: self, selector: #selector(tick(_:)))
+            l.add(to: .main, forMode: .common)
+            link = l
+        }
+        @objc private func tick(_ l: CADisplayLink) { meter.tick(l.timestamp) }
+    }
+
+    struct RefreshProbe: NSViewRepresentable {
+        let meter: RefreshMeter
+        func makeNSView(context: Context) -> RefreshProbeView { RefreshProbeView(meter: meter) }
+        func updateNSView(_ v: RefreshProbeView, context: Context) {}
+    }
 
     final class ViewerView: NSView {
         let session: ViewerSession
@@ -213,6 +258,36 @@ import SwiftUI
     }
 #else
     import UIKit
+
+    /// An invisible view that runs a display link to feed the meter while the connect form is up.
+    final class RefreshProbeView: UIView {
+        let meter: RefreshMeter
+        private var link: CADisplayLink?
+        init(meter: RefreshMeter) {
+            self.meter = meter
+            super.init(frame: .zero)
+            isUserInteractionEnabled = false
+        }
+        required init?(coder: NSCoder) { fatalError() }
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            link?.invalidate()
+            link = nil
+            guard let window else { return }
+            let l = CADisplayLink(target: self, selector: #selector(tick(_:)))
+            let top = Float(window.screen.maximumFramesPerSecond)
+            l.preferredFrameRateRange = CAFrameRateRange(minimum: top, maximum: top, preferred: top)
+            l.add(to: .main, forMode: .common)
+            link = l
+        }
+        @objc private func tick(_ l: CADisplayLink) { meter.tick(l.timestamp) }
+    }
+
+    struct RefreshProbe: UIViewRepresentable {
+        let meter: RefreshMeter
+        func makeUIView(context: Context) -> RefreshProbeView { RefreshProbeView(meter: meter) }
+        func updateUIView(_ v: RefreshProbeView, context: Context) {}
+    }
 
     final class ViewerView: UIView, UIKeyInput, UIPointerInteractionDelegate {
         let session: ViewerSession
