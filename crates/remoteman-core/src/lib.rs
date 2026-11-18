@@ -173,6 +173,30 @@ impl MicSender {
     }
 }
 
+/// Sends camera frames on a client's connection, from any thread: as [`Client::send_camera`].
+/// Sending after the client has closed does nothing.
+#[derive(Clone)]
+pub struct CameraSender(Connection, Arc<std::sync::Mutex<(u16, u32)>>);
+
+impl CameraSender {
+    pub fn send(&self, data: &[u8], key: bool, time_us: u64) {
+        send_camera(&self.0, &self.1, data, key, time_us);
+    }
+}
+
+fn send_camera(conn: &Connection, camera: &std::sync::Mutex<(u16, u32)>, data: &[u8], key: bool, time_us: u64) {
+    let Some(max) = conn.max_datagram_size() else { return };
+    let (epoch, number) = {
+        let mut camera = camera.lock().unwrap();
+        let now = *camera;
+        camera.1 = camera.1.wrapping_add(1);
+        now
+    };
+    for d in remoteman_proto::video::fragment_as(media::KIND_CAMERA, data, key, false, epoch, number, time_us, max) {
+        let _ = conn.send_datagram(d.into());
+    }
+}
+
 /// Why a host closed the connection: the codes of docs/PROTOCOL.md, "Connection".
 pub const CLOSE_DROPPED: u32 = 2;
 pub const CLOSE_REVOKED: u32 = 3;
@@ -183,7 +207,7 @@ pub struct Client {
     tasks: tokio::runtime::Handle,
     control: tokio::sync::mpsc::Sender<Message>,
     /// The camera: how many times it was switched on, and the next frame's number.
-    camera: std::sync::Mutex<(u16, u32)>,
+    camera: Arc<std::sync::Mutex<(u16, u32)>>,
     conn: Connection,
     _endpoint: Endpoint,
     input: tokio::sync::mpsc::UnboundedSender<Event>,
@@ -445,7 +469,7 @@ impl Client {
             runtime: None,
             tasks: tokio::runtime::Handle::current(),
             control,
-            camera: std::sync::Mutex::new((0, 0)),
+            camera: Arc::new(std::sync::Mutex::new((0, 0))),
             conn,
             _endpoint: endpoint,
             input,
@@ -491,16 +515,12 @@ impl Client {
     /// Never blocks: fragments the network can't take are dropped, and the host asks for a
     /// keyframe ([`Handler::message`] with `Message::CameraKeyframe`).
     pub fn send_camera(&self, data: &[u8], key: bool, time_us: u64) {
-        let Some(max) = self.conn.max_datagram_size() else { return };
-        let (epoch, number) = {
-            let mut camera = self.camera.lock().unwrap();
-            let now = *camera;
-            camera.1 = camera.1.wrapping_add(1);
-            now
-        };
-        for d in remoteman_proto::video::fragment_as(media::KIND_CAMERA, data, key, false, epoch, number, time_us, max) {
-            let _ = self.conn.send_datagram(d.into());
-        }
+        send_camera(&self.conn, &self.camera, data, key, time_us);
+    }
+
+    /// For sending this device's camera from the thread that encodes it.
+    pub fn camera_sender(&self) -> CameraSender {
+        CameraSender(self.conn.clone(), self.camera.clone())
     }
 
     /// Start sending a blob (`media::BLOB_CLIPBOARD` or `media::BLOB_FILE`) with this JSON

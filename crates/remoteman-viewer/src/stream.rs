@@ -41,6 +41,10 @@ pub struct Shared {
     pub sound: Mutex<Option<remoteman_audio::Player>>,
     /// What records this device's microphone for the computer, while it is on.
     pub microphone: Mutex<Option<remoteman_audio::MicCapture>>,
+    /// What reads this device's camera for the computer, while it is on, and how many frames
+    /// it has sent.
+    pub camera: Mutex<Option<remoteman_camera::Source>>,
+    pub camera_frames: AtomicU32,
     /// What was copied on the computer, whole, until the window takes it: its type and bytes.
     pub copies: Mutex<Vec<(String, Vec<u8>)>>,
     /// What became of files sent to the computer, until the window says so: whether it
@@ -115,6 +119,12 @@ impl Handler for Feed {
     fn message(&mut self, message: &Message) {
         match message {
             Message::FileResult { ok, message, .. } => self.shared.results.lock().unwrap().push((*ok, message.clone())),
+            // The computer lost a frame of the camera: the next one is whole.
+            Message::CameraKeyframe => {
+                if let Some(camera) = self.shared.camera.lock().unwrap().as_ref() {
+                    camera.keyframe();
+                }
+            }
             Message::Features { features } => {
                 *self.shared.features.lock().unwrap() = features.clone();
                 self.shared.features_changed.store(true, Ordering::Relaxed);
@@ -202,6 +212,43 @@ impl Session {
             }
         })?;
         Ok(name)
+    }
+
+    /// Let the computer use this device's camera, or stop. `from`: a PipeWire camera node to
+    /// read and no other, instead of the default camera.
+    pub fn set_camera(&self, on: bool, from: Option<&str>) -> Result<()> {
+        // (Never held while a camera starts or stops: the computer's requests for a keyframe
+        // take it too, on the connection's own thread.)
+        let had = if on { None } else { self.shared.camera.lock().unwrap().take() };
+        if !on {
+            if had.is_some() {
+                drop(had);
+                self.client.send_message(Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 });
+                println!("camera: {} frames sent", self.shared.camera_frames.swap(0, Ordering::Relaxed));
+            }
+            return Ok(());
+        }
+        if self.shared.camera.lock().unwrap().is_some() {
+            return Ok(());
+        }
+        // Said first: frames that reach the computer before it are thrown away there.
+        self.client.send_message(Message::Camera { on: true, codec: "h264".into(), width: 1280, height: 720, fps: 30 });
+        let began = std::time::Instant::now();
+        let (sender, shared) = (self.client.camera_sender(), self.shared.clone());
+        let opened = remoteman_camera::Source::start(from, move |data, key| {
+            shared.camera_frames.fetch_add(1, Ordering::Relaxed);
+            sender.send(data, key, began.elapsed().as_micros() as u64);
+        });
+        match opened {
+            Ok(source) => {
+                *self.shared.camera.lock().unwrap() = Some(source);
+                Ok(())
+            }
+            Err(e) => {
+                self.client.send_message(Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 });
+                Err(e)
+            }
+        }
     }
 
     /// Let the computer use this device's microphone, or stop. `from`: a PipeWire node to

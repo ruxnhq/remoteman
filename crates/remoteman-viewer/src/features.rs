@@ -66,7 +66,7 @@ pub const FEATURES: Features = Features {
     sound_setting: false,
     microphone: true,
     microphone_setting: false,
-    camera: false,
+    camera: true,
     clipboard: true,
     files: true,
     sharing_settings: false,

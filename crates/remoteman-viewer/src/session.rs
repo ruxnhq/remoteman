@@ -140,6 +140,8 @@ pub struct View {
     show_figures: Item,
     /// Plays the computer's sound here while it is pressed in.
     pub sound: gtk::ToggleButton,
+    /// Lets the computer use this device's camera while it is pressed in.
+    pub camera: gtk::ToggleButton,
     /// Lets the computer use this device's microphone while it is pressed in.
     pub microphone: gtk::ToggleButton,
     pub figures: Figures,
@@ -251,6 +253,7 @@ pub fn build(video: &Video) -> View {
         mirror,
         show_figures,
         sound,
+        camera,
         microphone,
         figures,
     }
@@ -311,6 +314,17 @@ impl View {
     pub fn show_clipboard(&self, on: bool) {
         if let Some(mark) = &self.share_clipboard.mark {
             mark.set_active(on);
+        }
+    }
+
+    /// Whether this computer takes a device's camera: the button is there for those that do.
+    pub fn offer_camera(&self, offered: bool) {
+        if FEATURES.camera {
+            self.camera.set_sensitive(offered);
+            self.camera.set_tooltip_text(Some(if offered { "Camera" } else { "This computer doesn't take a camera" }));
+        }
+        if !offered {
+            self.camera.set_active(false);
         }
     }
 
@@ -446,6 +460,20 @@ pub fn wire(app: &Rc<App>) {
                     app.send_file(&path);
                 }
             });
+        }
+    });
+    view.camera.connect_toggled({
+        let app = app.clone();
+        move |button| {
+            let on = button.is_active();
+            let failed = match app.session.borrow().as_ref() {
+                Some(session) => session.set_camera(on, app.args.camera_from.as_deref()).err(),
+                None => None,
+            };
+            if let Some(e) = failed {
+                app.toast(&format!("The camera can't be used: {e:#}"));
+                button.set_active(false);
+            }
         }
     });
     view.microphone.connect_toggled({

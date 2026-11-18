@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 remoteman-core = { path = "../remoteman-core" }
 remoteman-audio = { path = "../remoteman-audio" }
+remoteman-camera = { path = "../remoteman-camera" }
 anyhow = "1"
 serde_json = "1"
 gtk = { package = "gtk4", version = "0.11", features = ["v4_20"] }

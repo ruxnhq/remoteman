@@ -64,6 +64,10 @@ pub struct Args {
     mic: bool,
     /// Record this PipeWire node only, instead of the default microphone (for tests).
     mic_from: Option<String>,
+    /// Start with this device's camera on.
+    camera: bool,
+    /// Read this PipeWire camera node only, instead of the default camera (for tests).
+    camera_from: Option<String>,
 }
 
 /// The placements, as they are written on the command line and in the state folder.
@@ -73,7 +77,7 @@ fn parse_args() -> anyhow::Result<Args> {
     use anyhow::Context;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/state")).join("remoteman");
-    let mut a = Args { host: None, pair: false, size: None, scale: None, refresh: None, decoders: Vec::new(), state, quit_after: None, dump: None, placement: None, hover_bar: None, ui: None, sound: false, sound_to: None, mic: false, mic_from: None };
+    let mut a = Args { host: None, pair: false, size: None, scale: None, refresh: None, decoders: Vec::new(), state, quit_after: None, dump: None, placement: None, hover_bar: None, ui: None, sound: false, sound_to: None, mic: false, mic_from: None, camera: false, camera_from: None };
     let mut decoders = "av1,hevc444,hevc".to_owned();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -102,6 +106,8 @@ fn parse_args() -> anyhow::Result<Args> {
             "--sound-to" => a.sound_to = Some(value()?),
             "--mic" => a.mic = true,
             "--mic-from" => a.mic_from = Some(value()?),
+            "--camera" => a.camera = true,
+            "--camera-from" => a.camera_from = Some(value()?),
             other if other.starts_with("--") => anyhow::bail!("unknown option {other}"),
             host => a.host = Some(host.to_owned()),
         }

@@ -1694,6 +1694,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "remoteman-audio",
+ "remoteman-camera",
  "remoteman-core",
  "serde_json",
 ]
