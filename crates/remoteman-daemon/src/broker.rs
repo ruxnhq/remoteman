@@ -165,7 +165,9 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
             use std::io::Write;
             // SAFETY: no arguments, no state.
             let ours = uid == 0 || uid == unsafe { libc::geteuid() };
-            let answer = if ours { control(&shared, &words) } else { "only root and the daemon's own user may do that\n".into() };
+            // Looking is for any local user; changing anything is not.
+            let looking = matches!(words.split_whitespace().next(), Some("status") | None);
+            let answer = if ours || looking { control(&shared, &words) } else { "only root and the daemon's own user may do that\n".into() };
             let _ = writer.lock().unwrap().write_all(answer.as_bytes());
             return;
         }
