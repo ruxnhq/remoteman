@@ -77,7 +77,7 @@ struct ComputerSettingsScreen: View {
                         }
                         InsetGroup(header: "During a session") {
                             Row(title: "Picture quality") { RowValue(text: "Automatic", chevron: true) }.available(Features.pictureQuality)
-                            Row(title: "Sound") { RowValue(text: "Plays on this \(device)", chevron: true) }.available(Features.sound)
+                            Row(title: "Sound") { RowValue(text: "Plays on this \(device)", chevron: true) }.available(Features.soundChoice)
                             Row(title: "Camera and microphone", last: true) { RowValue(text: "Off until I turn them on", chevron: true) }
                                 .available(Features.camera)
                         }
@@ -170,8 +170,8 @@ struct SettingsScreen: View {
                     }
                     InsetGroup(header: "Picture and sound") {
                         Row(title: "Default quality") { RowValue(text: "Automatic", chevron: true) }.available(Features.pictureQuality)
-                        Row(title: "On mobile data") { RowValue(text: "Save data", chevron: true) }.available(Features.bitrateLimit)
-                        Row(title: "Play the computer's sound") { Toggle("", isOn: .constant(false)).labelsHidden() }.available(Features.sound)
+                        Row(title: "On mobile data") { RowValue(text: "Save data", chevron: true) }.available(Features.mobileData)
+                        Row(title: "Play the computer's sound") { Toggle("", isOn: .constant(false)).labelsHidden() }.available(Features.soundChoice)
                         Row(title: "Show figures in new sessions", last: true) { Toggle("", isOn: $figures).labelsHidden() }
                     }
                     InsetGroup(

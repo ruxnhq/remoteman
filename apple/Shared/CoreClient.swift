@@ -36,6 +36,16 @@ final class CoreClient {
     var onCursorShape: ((CGImage?, _ hotX: Int, _ hotY: Int) -> Void)?
     /// Where the host's cursor is, as fractions of the display, and whether it is on it.
     var onCursorAt: ((Float, Float, Bool) -> Void)?
+    /// One of the host's feature messages (sound_format, status, file_result, camera_keyframe).
+    var onMessage: (([String: Any]) -> Void)?
+    /// One Opus packet of the desktop's sound: the packet, whether it is the first after a
+    /// pause, its number, and the host's clock at capture.
+    var onSound: ((UnsafeRawBufferPointer, _ start: Bool, _ seq: UInt32, _ timeUs: UInt64) -> Void)?
+    /// A blob from the host. what 0: opened (kind, header). 1: a piece. 2: closed (complete).
+    var onBlob: ((_ what: UInt8, _ id: UInt32, _ kind: UInt8, _ header: [String: Any], UnsafeRawBufferPointer, _ complete: Bool) -> Void)?
+
+    static let clipboardKind: UInt8 = 0x40
+    static let fileKind: UInt8 = 0x41
 
     private var handle: OpaquePointer?
     private let lock = NSLock()
@@ -96,8 +106,20 @@ final class CoreClient {
                     let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
                     me.onCursorAt?(x, y, visible != 0)
                 },
-            // Feature messages, sound and blobs: not used yet.
-            on_message: nil, on_sound: nil, on_blob: nil)
+            on_message: { ctx, json in
+                let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
+                guard let json, let m = CoreClient.object(String(cString: json)) else { return }
+                me.onMessage?(m)
+            },
+            on_sound: { ctx, data, len, start, seq, timeUs in
+                let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
+                me.onSound?(UnsafeRawBufferPointer(start: data, count: len), start != 0, seq, timeUs)
+            },
+            on_blob: { ctx, what, id, kind, header, data, len, complete in
+                let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
+                let h = header.flatMap { CoreClient.object(String(cString: $0)) } ?? [:]
+                me.onBlob?(what, id, kind, h, UnsafeRawBufferPointer(start: data, count: data == nil ? 0 : len), complete != 0)
+            })
         var err = [CChar](repeating: 0, count: 512)
         let h = rm_client_connect(
             c.host, c.stateDir, c.name, c.pair ? 1 : 0, UInt32(c.width), UInt32(c.height), c.scale,
@@ -124,6 +146,50 @@ final class CoreClient {
         with { rm_client_host($0, &out, out.count) }
         let parts = String(cString: out).split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
         return (parts.first ?? "", parts.count > 1 ? parts[1] : "", parts.count > 2 ? parts[2] : "")
+    }
+
+    /// What the host can do ("video", "input", "cursor", "placement", "configure", "sound", ...).
+    var features: Set<String> {
+        var out = [CChar](repeating: 0, count: 512)
+        with { rm_client_features($0, &out, out.count) }
+        return Set(String(cString: out).split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
+    }
+
+    static func object(_ json: String) -> [String: Any]? {
+        (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+    }
+
+    /// One feature message. False if the core doesn't know it or the connection is gone.
+    @discardableResult
+    func send(_ message: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: message), let json = String(data: data, encoding: .utf8)
+        else { return false }
+        var ok = false
+        with { ok = rm_client_send_message($0, json) != 0 }
+        return ok
+    }
+
+    func sendMic(_ packet: UnsafeRawBufferPointer, start: Bool, seq: UInt32, timeUs: UInt64) {
+        with { rm_client_send_mic($0, packet.bindMemory(to: UInt8.self).baseAddress, packet.count, start ? 1 : 0, seq, timeUs) }
+    }
+
+    /// Send a blob, a piece at a time from `next` (nil: the end). Waits while the network is
+    /// behind: never call it on the main thread or from a callback. False if it didn't all go.
+    func sendBlob(kind: UInt8, header: [String: Any], next: () -> Data?) -> Bool {
+        guard let h = try? JSONSerialization.data(withJSONObject: header), let json = String(data: h, encoding: .utf8)
+        else { return false }
+        var blob: OpaquePointer?
+        with { blob = rm_client_blob_open($0, kind, json) }
+        guard let blob else { return false }
+        while let piece = next() {
+            if piece.isEmpty { continue }
+            let ok = piece.withUnsafeBytes { rm_blob_write(blob, $0.bindMemory(to: UInt8.self).baseAddress, piece.count) }
+            if ok == 0 {
+                rm_blob_cancel(blob)
+                return false
+            }
+        }
+        return rm_blob_finish(blob) != 0
     }
 
     var stats: Stats {

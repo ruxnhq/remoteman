@@ -19,10 +19,22 @@ struct SessionScreen: View {
                 Color.black
                 if case .streaming = session.state {
                     ViewerRepresentable(session: session)
+                        // Files dropped on the picture go to the computer.
+                        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+                            guard Features.fileTransfer, session.has("files") else { return false }
+                            for p in providers {
+                                _ = p.loadObject(ofClass: URL.self) { url, _ in
+                                    if let url { DispatchQueue.main.async { session.send(file: url) } }
+                                }
+                            }
+                            return true
+                        }
                 }
                 if model.hasPicture {
                     if session.showStats {
-                        FiguresOverlay(facts: facts)
+                        FiguresOverlay(
+                            facts: facts,
+                            bitrate: session.stats.megabitsPerSecond.isNaN ? "–" : String(format: "%.0f Mb/s", session.stats.megabitsPerSecond))
                             .padding(.leading, 14).padding(.top, 42)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .allowsHitTesting(false)
@@ -39,6 +51,7 @@ struct SessionScreen: View {
                 } else {
                     ConnectingView(session: session, computer: computer)
                 }
+                if model.hasPicture { SessionNotes(session: session).frame(maxHeight: .infinity, alignment: .bottom).padding(.bottom, 18) }
             }
             .animation(.easeOut(duration: 0.18), value: model.barShown)
             .onAppear { model.pictureSize = geo.size }
@@ -108,16 +121,60 @@ struct StreamFacts {
     }
 }
 
+/// What the user should hear about without asking: a file on its way, or something that didn't work.
+struct SessionNotes: View {
+    @ObservedObject var session: ViewerSession
+
+    var body: some View {
+        VStack(spacing: 6) {
+            if let t = session.transfers.last { note(line(t), failed: { if case .failed = t.state { return true } else { return false } }()) }
+            if let n = session.notice { note(n, failed: true) }
+        }
+        .task(id: session.notice) {
+            guard session.notice != nil else { return }
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if !Task.isCancelled { session.notice = nil }
+        }
+        .task(id: session.transfers) {
+            guard let t = session.transfers.last, t.state != .moving else { return }
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if !Task.isCancelled { session.clearFinishedTransfers() }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func line(_ t: Transfer) -> String {
+        switch t.state {
+        case .moving:
+            let part = t.size > 0 ? " · \(min(100, t.moved * 100 / t.size))%" : ""
+            return (t.incoming ? "Receiving " : "Sending ") + t.name + part
+        case .done(let place):
+            return t.incoming ? "Saved \(place) in Downloads" : "\(t.name) is on the computer: \(place)"
+        case .failed(let why):
+            return "\(t.name): \(why)"
+        }
+    }
+
+    private func note(_ text: String, failed: Bool) -> some View {
+        Text(text).font(.system(size: 12, weight: .medium)).foregroundStyle(failed ? Tokens.orange : .white)
+            .lineLimit(2).multilineTextAlignment(.center)
+            .padding(.vertical, 7).padding(.horizontal, 12).frame(maxWidth: 520)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(red: 18 / 255, green: 18 / 255, blue: 22 / 255, opacity: 0.82)))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(.white.opacity(0.16), lineWidth: 1))
+    }
+}
+
 /// "Session figures": six numbers over the top-left of the picture.
 struct FiguresOverlay: View {
     let facts: StreamFacts
+    var bitrate = "–"
 
     var body: some View {
         Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
             GridRow {
                 cell("Frames", facts.frames)
                 cell("Picture age", facts.age)
-                cell("Bitrate", "–").opacity(Features.bitrateFigure ? 1 : 0.5)
+                cell("Bitrate", bitrate).opacity(Features.bitrateFigure ? 1 : 0.5)
             }
             GridRow {
                 cell("Codec", facts.codec)
@@ -237,14 +294,30 @@ struct SessionControls {
     }
 
     @ViewBuilder var media: some View {
-        ControlButton(symbol: "speaker.slash", name: "Sound, off", kind: kind, enabled: Features.sound) { _ in }
-        ControlButton(symbol: "mic.slash", name: "Microphone, off", kind: kind, enabled: Features.microphone) { _ in }
+        ControlButton(
+            symbol: session.soundOn ? "speaker.wave.2" : "speaker.slash", name: session.soundOn ? "Sound, on" : "Sound, off", kind: kind,
+            on: session.soundOn, enabled: Features.sound && session.has("sound")
+        ) { _ in session.setSound(!session.soundOn) }
+        ControlButton(
+            symbol: session.micOn ? "mic" : "mic.slash", name: session.micOn ? "Microphone, on" : "Microphone, off", kind: kind,
+            on: session.micOn, enabled: Features.microphone && session.has("mic")
+        ) { _ in session.setMic(!session.micOn) }
         ControlButton(symbol: "video.slash", name: "Camera, off", kind: kind, enabled: Features.camera) { _ in }
     }
 
     @ViewBuilder var sharing: some View {
-        ControlButton(symbol: "doc.on.clipboard", name: "Clipboard", kind: kind, enabled: Features.clipboard) { _ in }
-        ControlButton(symbol: "folder", name: "Send files", kind: kind, enabled: Features.fileTransfer) { _ in }
+        ControlButton(
+            symbol: "doc.on.clipboard", name: session.clipboardOn ? "Clipboard, shared" : "Clipboard, not shared", kind: kind,
+            on: session.clipboardOn, enabled: Features.clipboard && session.has("clipboard")
+        ) { _ in session.setClipboard(!session.clipboardOn) }
+        ControlButton(symbol: "folder", name: "Send files", kind: kind, enabled: Features.fileTransfer && session.has("files")) { _ in
+            let panel = NSOpenPanel()
+            panel.allowsMultipleSelection = true
+            panel.canChooseDirectories = false
+            panel.prompt = "Send"
+            panel.message = "Choose files to send to \(computer.name)"
+            if panel.runModal() == .OK { panel.urls.forEach { session.send(file: $0) } }
+        }
         ControlButton(
             symbol: "gauge", name: session.showStats ? "Show figures, on" : "Show figures", kind: kind, on: session.showStats
         ) { _ in session.showStats.toggle() }
@@ -525,7 +598,17 @@ enum SessionMenus {
             menu.addItem(ActionItem("60 Hz", enabled: Features.refreshRateChoice, width: width) {})
         }
         menu.addItem(.separator())
-        menu.addItem(ActionItem("Limit Bitrate…", enabled: Features.bitrateLimit, width: width) {})
+        menu.header("The most the picture may use")
+        let can = Features.bitrateLimit && session.has("configure")
+        for bits in [0, 80_000_000, 40_000_000, 20_000_000, 10_000_000, 5_000_000] {
+            let now = bits == 0 && session.hostBitrate > 0 ? String(format: "%.0f Mb/s now", Double(session.hostBitrate) / 1_000_000) : ""
+            menu.addItem(
+                ActionItem(
+                    bits == 0 ? "Automatic" : "Up to \(bits / 1_000_000) Mb/s", hint: now, checked: session.bitrateLimit == bits,
+                    enabled: can, width: width
+                ) { session.setBitrateLimit(bits) })
+        }
+        menu.addItem(.separator())
         let figures = ActionItem("Show Figures", checked: session.showStats, width: width) { session.showStats.toggle() }
         figures.keyEquivalent = "i"
         figures.keyEquivalentModifierMask = [.option, .command]

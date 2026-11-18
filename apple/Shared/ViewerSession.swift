@@ -13,7 +13,7 @@ final class ViewerSession: ObservableObject {
         case failed(String)
     }
 
-    struct Display {
+    struct Display: Equatable {
         var width: Int
         var height: Int
         var scale: Float
@@ -71,6 +71,141 @@ final class ViewerSession: ObservableObject {
     var cursorShapeChanged: (() -> Void)?
     var cursorMoved: ((Float, Float, Bool) -> Void)?
 
+    // MARK: Features (what the host lists; see docs/PROTOCOL.md, "Features")
+
+    /// What the connected host can do. Empty when not connected.
+    @Published private(set) var features: Set<String> = []
+    @Published private(set) var soundOn = false
+    @Published private(set) var micOn = false
+    @Published private(set) var clipboardOn = false
+    /// Files on their way to or from the computer, newest last.
+    @Published private(set) var transfers: [Transfer] = []
+    /// What the host says the picture is encoded at, in bits a second (0: not told).
+    @Published private(set) var hostBitrate = 0
+    /// The ceiling this device asked for (0: the host chooses).
+    @Published private(set) var bitrateLimit = 0
+    /// Something for the user to read about a feature that didn't work.
+    @Published var notice: String?
+    /// What the host was last asked for.
+    private(set) var display: Display?
+    private(set) var placement = Placement.extend
+    private var target = ""
+    private let sound = SoundPlayer()
+    private var mic: MicSender?
+    private var sharing: Sharing?
+
+    func has(_ feature: String) -> Bool { features.contains(feature) }
+
+    private func remembered(_ what: String) -> Bool { UserDefaults.standard.bool(forKey: "\(what).\(target)") }
+    private func remember(_ what: String, _ on: Bool) { UserDefaults.standard.set(on, forKey: "\(what).\(target)") }
+
+    /// Play the computer's sound here. While on, the computer's own speakers are silent.
+    func setSound(_ on: Bool) {
+        guard let client, has("sound"), on != soundOn else { return }
+        soundOn = on
+        remember("sound", on)
+        client.send(["t": "sound", "on": on])
+        if !on { sound.stop() }
+    }
+
+    /// This device's microphone as a microphone on the computer. Never switched on by itself.
+    func setMic(_ on: Bool) {
+        guard let client, has("mic"), on != micOn else { return }
+        if !on {
+            micOn = false
+            mic?.stop()
+            mic = nil
+            client.send(["t": "mic", "on": false])
+            return
+        }
+        MicSender.allowed { [weak self] ok in
+            guard let self, let client = self.client, !self.micOn else { return }
+            guard ok else {
+                self.notice = "remoteman isn't allowed to use the microphone. Allow it in Settings, under Privacy & Security."
+                return
+            }
+            let m = MicSender()
+            m.send = { [weak client] data, start, seq, timeUs in client?.sendMic(data, start: start, seq: seq, timeUs: timeUs) }
+            client.send(["t": "mic", "on": true, "codec": "opus", "rate": 48000, "channels": 1, "frame_us": 10000])
+            if let why = m.start() {
+                client.send(["t": "mic", "on": false])
+                self.notice = why
+                return
+            }
+            self.mic = m
+            self.micOn = true
+        }
+    }
+
+    /// Share the clipboard both ways.
+    func setClipboard(_ on: Bool) {
+        guard let sharing, has("clipboard"), on != clipboardOn else { return }
+        clipboardOn = on
+        remember("clipboard", on)
+        // On a Mac what is on the clipboard now goes along. On iPadOS and iOS reading it makes
+        // the system ask each time, so only what is copied from here on is sent.
+        #if os(macOS)
+            sharing.setClipboard(on, sendCurrent: true)
+        #else
+            sharing.setClipboard(on, sendCurrent: false)
+        #endif
+    }
+
+    func send(file url: URL) {
+        guard has("files") else { return }
+        sharing?.send(file: url)
+    }
+
+    func clearFinishedTransfers() { transfers.removeAll { $0.state != .moving } }
+
+    /// The most the picture may use, in bits a second; 0 gives the choice back to the host.
+    func setBitrateLimit(_ bits: Int) {
+        guard let client, has("configure") else { return }
+        bitrateLimit = bits
+        client.send(["t": "configure", "bitrate": bits])
+    }
+
+    /// Ask for another size, scale, refresh rate or placement without leaving. False if this
+    /// host can't (the caller then leaves and connects again).
+    @discardableResult
+    func reconfigure(display new: Display? = nil, placement newPlacement: Placement? = nil) -> Bool {
+        guard let client, has("configure"), case .streaming = state else { return false }
+        let d = new ?? display
+        let p = newPlacement ?? placement
+        guard let d else { return false }
+        if d == display, p == placement { return true }
+        display = d
+        placement = p
+        return client.send([
+            "t": "configure",
+            "display": ["width": d.width, "height": d.height, "scale": Double(d.scale), "refresh": d.refresh, "placement": p.rawValue],
+        ])
+    }
+
+    /// One of the host's feature messages (core thread).
+    private func message(_ m: [String: Any], sharing: Sharing, generation gen: Int) {
+        switch m["t"] as? String {
+        case "sound_format":
+            let channels = (m["channels"] as? NSNumber)?.intValue ?? 2
+            let frameUs = (m["frame_us"] as? NSNumber)?.intValue ?? 10000
+            let why = (m["codec"] as? String ?? "opus") == "opus" ? sound.start(channels: channels, frameUs: frameUs) : "The computer's sound is in a form this device can't play."
+            if let why { DispatchQueue.main.async { if self.generation == gen { self.notice = why } } }
+        case "status":
+            if let b = (m["bitrate"] as? NSNumber)?.intValue {
+                DispatchQueue.main.async { if self.generation == gen { self.hostBitrate = b } }
+            }
+        case "file_result":
+            sharing.fileResult(m)
+        default:
+            break
+        }
+    }
+
+    private func transferChanged(_ t: Transfer) {
+        if let i = transfers.firstIndex(where: { $0.id == t.id }) { transfers[i] = t } else { transfers.append(t) }
+        if case .failed(let why) = t.state { notice = "\(t.name): \(why)" }
+    }
+
     private let pipeLock = NSLock()
     private var decoder: VideoDecoder?
     private var info: StreamInfo?
@@ -123,13 +258,24 @@ final class ViewerSession: ObservableObject {
         state = .connecting(target)
         generation += 1
         let gen = generation
+        self.target = target
+        self.display = display
+        self.placement = placement
         let config = CoreClient.Config(
             host: target, stateDir: Self.stateDir, name: name, pair: pair, width: display.width,
             height: display.height, scale: display.scale, refresh: display.refresh, decoders: decoders,
             options: placement == .extend ? "" : "placement=\(placement.rawValue)")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
+                var shared: Sharing?
                 let client = try CoreClient.connect(config) { c in
+                    let sharing = Sharing(client: c)
+                    shared = sharing
+                    c.onMessage = { [weak self] m in self?.message(m, sharing: sharing, generation: gen) }
+                    c.onSound = { [weak self] data, start, seq, _ in self?.sound.packet(data, start: start, seq: seq) }
+                    c.onBlob = { what, id, kind, header, data, complete in
+                        sharing.blob(what: what, id: id, kind: kind, header: header, data: data, complete: complete)
+                    }
                     c.onStream = { [weak self] info in self?.streamStarted(info) }
                     c.onFrame = { [weak self] data, flags, number, captureUs, ageUs in
                         self?.frame(
@@ -155,14 +301,24 @@ final class ViewerSession: ObservableObject {
                     }
                 }
                 let hostName = client.host.name
+                let features = client.features
                 DispatchQueue.main.async {
                     guard let self, self.generation == gen, case .connecting = self.state else {
                         client.close()
                         return
                     }
                     self.client = client
+                    self.features = features
+                    self.sharing = shared
+                    shared?.transferChanged = { [weak self] t in
+                        guard let self, self.generation == gen else { return }
+                        self.transferChanged(t)
+                    }
                     self.state = .streaming(hostName.isEmpty ? target : hostName)
                     self.startStats()
+                    // What was on for this computer last time comes back on; the microphone never does.
+                    if self.remembered("sound") { self.setSound(true) }
+                    if self.remembered("clipboard") { self.setClipboard(true) }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -233,6 +389,18 @@ final class ViewerSession: ObservableObject {
         pipeLock.unlock()
         d?.invalidate()
         renderer?.clear()
+        sound.stop()
+        mic?.stop()
+        mic = nil
+        sharing?.stop()
+        sharing = nil
+        features = []
+        soundOn = false
+        micOn = false
+        clipboardOn = false
+        transfers = []
+        hostBitrate = 0
+        bitrateLimit = 0
         hostCursor = nil
         hostCursorAt = nil
         cursorShapeChanged?()
@@ -421,6 +589,14 @@ final class ViewerSession: ObservableObject {
         /// "AV1 10-bit" and "4:2:0", once the stream is known.
         var codec = ""
         var chroma = ""
+        /// The picture's size, "2752 × 2064", and what the host encodes it at (0: not told).
+        var size = ""
+        var hostBitrate = 0
+        /// Sound, while it plays: what is waiting to be played, and what was patched over.
+        var soundOn = false
+        var soundBufferMs = 0.0
+        var soundConcealed = 0
+        var soundDropped = 0
 
         var text: String {
             func f(_ x: Double, _ digits: Int = 1) -> String { x.isNaN ? "–" : String(format: "%.\(digits)f", x) }
@@ -428,6 +604,7 @@ final class ViewerSession: ObservableObject {
             s += "shown \(f(shownFps, 0)) fps · received \(f(receivedFps, 0)) fps · replaced unseen \(replaced)\n"
             s += "decode \(f(decodeMedianMs, 2)) ms (max \(f(decodeMaxMs, 2))) · age \(f(ageMs)) ms\n"
             s += "lost \(lost) · loss reports \(keyframeRequests) · round trip \(f(roundTripMs, 2)) ms"
+            if soundOn { s += "\nsound buffer \(f(soundBufferMs, 0)) ms · concealed \(soundConcealed) · left out \(soundDropped)" }
             if decodeErrors > 0 { s += "\ndecode errors \(decodeErrors): \(lastError)" }
             if wifiPausing { s += "\nWi-Fi is pausing about twice a second (not the stream)" }
             return s
@@ -466,6 +643,7 @@ final class ViewerSession: ObservableObject {
         if let info {
             s.codec = "\(info.codec == .av1 ? "AV1" : "HEVC") \(info.depth)-bit"
             s.chroma = info.chroma == 444 ? "4:4:4" : "4:2:0"
+            s.size = "\(info.width) × \(info.height)"
         }
         pipeLock.unlock()
         if let c = client {
@@ -473,6 +651,16 @@ final class ViewerSession: ObservableObject {
             s.lost = cs.lost
             s.keyframeRequests = cs.keyframeRequests
             if cs.roundTripUs > 0 { s.roundTripMs = Double(cs.roundTripUs) / 1000 }
+        }
+        s.hostBitrate = hostBitrate
+        s.soundOn = soundOn
+        if soundOn {
+            // A link that pauses at intervals gets a deeper buffer, so the pauses aren't heard.
+            sound.deep = s.wifiPausing
+            let c = sound.takeCounters()
+            s.soundBufferMs = c.queuedMs
+            s.soundConcealed = c.concealed
+            s.soundDropped = c.dropped
         }
         return s
     }

@@ -32,11 +32,13 @@ targets:
         LSApplicationCategoryType: public.app-category.utilities
         NSLocalNetworkUsageDescription: remoteman connects to your PC on the local network to show and control its desktop.
         NSHighResolutionCapable: true
+        NSMicrophoneUsageDescription: remoteman can pass this Mac's microphone to the computer you are connected to, when you switch that on.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman.viewer
         PRODUCT_NAME: remoteman
         ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: Support/Mac.entitlements
   Remoteman:
     type: application
     platform: iOS
@@ -59,6 +61,9 @@ targets:
         UIRequiresFullScreen: true
         UIStatusBarHidden: true
         UIFileSharingEnabled: true
+        # Files received from a computer show in the Files app, under remoteman.
+        LSSupportsOpeningDocumentsInPlace: true
+        NSMicrophoneUsageDescription: remoteman can pass this device's microphone to the computer you are connected to, when you switch that on.
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight

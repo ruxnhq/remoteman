@@ -12,6 +12,8 @@ struct SessionScreen: View {
     @State private var barShown = GCKeyboard.coalesced == nil
     @State private var displayMenu = false
     @State private var phoneControls = false
+    @State private var pictureMenu = false
+    @State private var pickingFiles = false
     @StateObject private var keys = KeyStrip()
 
     private var pad: Bool { sizeClass == .regular }
@@ -30,6 +32,21 @@ struct SessionScreen: View {
         .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidConnect)) { _ in barShown = false }
         .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidDisconnect)) { _ in barShown = true }
         .sheet(isPresented: $phoneControls) { phoneSheet }
+        .overlay(alignment: .bottom) { if model.current != nil { SessionNotes().padding(.bottom, keyboardShown ? 76 : 30) } }
+        // Above the sheet too, so that the iPhone's Files tile can open it.
+        .background(
+            Color.clear.fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+                if case .success(let urls) = result { urls.forEach { session.send(file: $0) } }
+            })
+    }
+
+    private func pickFiles() {
+        if phoneControls {
+            phoneControls = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { pickingFiles = true }
+        } else {
+            pickingFiles = true
+        }
     }
 
     @ViewBuilder
@@ -79,15 +96,28 @@ struct SessionScreen: View {
             icon("keyboard", "Keyboard", active: keyboardShown) { keyboardShown.toggle() }
             text("Display", "display", active: displayMenu) { displayMenu = true }
                 .popover(isPresented: $displayMenu) { DisplayMenu().presentationCompactAdaptation(.popover) }
-            text("Picture", "sparkles.tv", active: false) {}.available(Features.pictureQuality)
+            text("Picture", "sparkles.tv", active: pictureMenu) { pictureMenu = true }
+                .popover(isPresented: $pictureMenu) { PictureMenu().presentationCompactAdaptation(.popover) }
+                .available(Features.bitrateLimit && session.has("configure"))
             text("Touch", "hand.point.up.left", active: false) {}.available(Features.trackpadMode)
             separator
-            icon("speaker.wave.2", "Sound", active: false) {}.available(Features.sound)
-            icon("mic", "Microphone", active: false) {}.available(Features.microphone)
+            icon(session.soundOn ? "speaker.wave.2.fill" : "speaker.wave.2", session.soundOn ? "Sound, on" : "Sound, off", active: session.soundOn) {
+                session.setSound(!session.soundOn)
+            }
+            .available(Features.sound && session.has("sound"))
+            icon(session.micOn ? "mic.fill" : "mic", session.micOn ? "Microphone, on" : "Microphone, off", active: session.micOn) {
+                session.setMic(!session.micOn)
+            }
+            .available(Features.microphone && session.has("mic"))
             icon("camera", "Camera", active: false) {}.available(Features.camera)
             separator
-            icon("doc.on.clipboard", "Clipboard", active: false) {}.available(Features.clipboard)
-            icon("arrow.up.arrow.down", "Send or fetch files", active: false) {}.available(Features.files)
+            icon(
+                session.clipboardOn ? "doc.on.clipboard.fill" : "doc.on.clipboard",
+                session.clipboardOn ? "Clipboard, shared" : "Clipboard, not shared", active: session.clipboardOn
+            ) { session.setClipboard(!session.clipboardOn) }
+            .available(Features.clipboard && session.has("clipboard"))
+            icon("arrow.up.arrow.down", "Send files to the computer", active: false) { pickFiles() }
+                .available(Features.files && session.has("files"))
             icon("gauge.with.dots.needle.33percent", "Show performance figures", active: session.showStats) { session.showStats.toggle() }
             separator
             Button("Disconnect") { model.disconnect() }
@@ -173,11 +203,14 @@ struct SessionScreen: View {
                     keyboardShown.toggle()
                     phoneControls = false
                 }
-                tile("speaker.wave.2", "Sound", on: false) {}.available(Features.sound)
-                tile("mic", "Microphone", on: false) {}.available(Features.microphone)
+                tile("speaker.wave.2", "Sound", on: session.soundOn) { session.setSound(!session.soundOn) }
+                    .available(Features.sound && session.has("sound"))
+                tile("mic", "Microphone", on: session.micOn) { session.setMic(!session.micOn) }
+                    .available(Features.microphone && session.has("mic"))
                 tile("camera", "Camera", on: false) {}.available(Features.camera)
-                tile("doc.on.clipboard", "Clipboard", on: false) {}.available(Features.clipboard)
-                tile("arrow.up.arrow.down", "Files", on: false) {}.available(Features.files)
+                tile("doc.on.clipboard", "Clipboard", on: session.clipboardOn) { session.setClipboard(!session.clipboardOn) }
+                    .available(Features.clipboard && session.has("clipboard"))
+                tile("arrow.up.arrow.down", "Files", on: false) { pickFiles() }.available(Features.files && session.has("files"))
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) { ForEach(KeyStrip.groups.flatMap { $0 }) { k in keyButton(k) } }
@@ -190,7 +223,14 @@ struct SessionScreen: View {
                 } label: {
                     Row(title: "Display") { RowValue(text: placement.wrappedValue.label, chevron: true) }
                 }
-                Row(title: "Picture") { RowValue(text: "Automatic", chevron: true) }.available(Features.pictureQuality)
+                Menu {
+                    Picker("The most the picture may use", selection: Binding(get: { session.bitrateLimit }, set: { session.setBitrateLimit($0) })) {
+                        ForEach(PictureMenu.limits, id: \.self) { Text(PictureMenu.label($0)).tag($0) }
+                    }
+                } label: {
+                    Row(title: "Picture") { RowValue(text: PictureMenu.label(session.bitrateLimit), chevron: true) }
+                }
+                .available(Features.bitrateLimit && session.has("configure"))
                 Row(title: "Touch") { RowValue(text: "Direct", chevron: false) }.available(Features.trackpadMode)
                 Row(title: "Show figures", last: true) { Toggle("", isOn: $session.showStats).labelsHidden() }
             }
@@ -221,24 +261,98 @@ struct SessionScreen: View {
         .buttonStyle(.plain)
     }
 
-    /// The placement is part of the hello, so choosing another one reconnects.
     private var placement: Binding<ViewerSession.Placement> {
         Binding(
             get: { model.current?.placementChoice ?? .extend },
-            set: { new in
-                guard var c = model.current, c.placementChoice != new else { return }
-                c.placementChoice = new
-                model.store.update(c)
-                phoneControls = false
-                model.disconnect()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { model.connect(c) }
-            })
+            set: { new in if model.setPlacement(new) { phoneControls = false } })
+    }
+}
+
+/// "Picture" on the iPad's bar: the most the picture may use.
+struct PictureMenu: View {
+    @EnvironmentObject private var session: ViewerSession
+    @Environment(\.dismiss) private var dismiss
+
+    static let limits = [0, 80_000_000, 40_000_000, 20_000_000, 10_000_000, 5_000_000]
+    static func label(_ bits: Int) -> String { bits == 0 ? "Automatic" : "Up to \(bits / 1_000_000) Mb/s" }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("The most the picture may use").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.secondary)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+            ForEach(Self.limits, id: \.self) { bits in
+                Button {
+                    session.setBitrateLimit(bits)
+                    dismiss()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark").font(.system(size: 15, weight: .bold)).foregroundStyle(Theme.tint)
+                            .opacity(session.bitrateLimit == bits ? 1 : 0).frame(width: 20)
+                        Text(Self.label(bits)).font(Theme.body).foregroundStyle(Theme.label)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 12).frame(minHeight: 46)
+                }
+                .buttonStyle(.plain)
+            }
+            if session.hostBitrate > 0 {
+                Text(String(format: "The computer is encoding at %.0f Mb/s now.", Double(session.hostBitrate) / 1_000_000))
+                    .font(.system(size: 13)).foregroundStyle(Theme.secondary).padding(.horizontal, 12).padding(.vertical, 8)
+            }
+        }
+        .padding(8).frame(width: 320)
+        .environment(\.colorScheme, .dark)
+    }
+}
+
+/// What the user should hear about without asking: a file on its way, or something that didn't work.
+struct SessionNotes: View {
+    @EnvironmentObject private var session: ViewerSession
+
+    var body: some View {
+        VStack(spacing: 6) {
+            if let t = session.transfers.last { note(line(t), failed: { if case .failed = t.state { return true } else { return false } }()) }
+            if let n = session.notice { note(n, failed: true) }
+        }
+        .animation(.snappy, value: session.transfers)
+        .animation(.snappy, value: session.notice)
+        .task(id: session.notice) {
+            guard session.notice != nil else { return }
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            if !Task.isCancelled { session.notice = nil }
+        }
+        .task(id: session.transfers) {
+            guard let t = session.transfers.last, t.state != .moving else { return }
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            if !Task.isCancelled { session.clearFinishedTransfers() }
+        }
+    }
+
+    private func line(_ t: Transfer) -> String {
+        switch t.state {
+        case .moving:
+            let part = t.size > 0 ? " · \(min(100, t.moved * 100 / t.size))%" : ""
+            return (t.incoming ? "Receiving " : "Sending ") + t.name + part
+        case .done(let where_):
+            return t.incoming ? "Saved \(where_) in Files, under remoteman" : "\(t.name) is on the computer: \(where_)"
+        case .failed(let why):
+            return "\(t.name): \(why)"
+        }
+    }
+
+    private func note(_ text: String, failed: Bool) -> some View {
+        Text(text).font(.system(size: 14, weight: .medium)).foregroundStyle(failed ? Color(hex: 0xFFA53D) : .white)
+            .lineLimit(2).multilineTextAlignment(.center)
+            .padding(.horizontal, 16).padding(.vertical, 10).frame(maxWidth: 520)
+            .sessionGlass(radius: 20)
+            .environment(\.colorScheme, .dark)
     }
 }
 
 /// "Display" on the iPad's bar: where this iPad sits among the computer's own screens.
 struct DisplayMenu: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var session: ViewerSession
     @Environment(\.dismiss) private var dismiss
 
     private static let notes: [ViewerSession.Placement: String] = [
@@ -255,8 +369,10 @@ struct DisplayMenu: View {
             }
             Divider().padding(.vertical, 6)
             header("Size")
-            item("Match this iPad", "This iPad's own pixels and refresh rate", checked: true) {}.available(Features.displaySize)
-            item("More space", "Smaller text, same pixels", checked: false) {}.available(Features.displaySize)
+            item("Match this iPad", "This iPad's own pixels and refresh rate", checked: !model.moreSpace) { size(false) }
+                .available(Features.displaySize && session.has("configure"))
+            item("More space", "Smaller text, same pixels", checked: model.moreSpace) { size(true) }
+                .available(Features.displaySize && session.has("configure"))
             Divider().padding(.vertical, 6)
             header("More displays")
             item("Add a display on the external monitor", "A monitor connected to this iPad", checked: false) {}
@@ -289,12 +405,13 @@ struct DisplayMenu: View {
     }
 
     private func choose(_ p: ViewerSession.Placement) {
-        guard var c = model.current, c.placementChoice != p else { return dismiss() }
-        c.placementChoice = p
-        model.store.update(c)
         dismiss()
-        model.disconnect()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { model.connect(c) }
+        model.setPlacement(p)
+    }
+
+    private func size(_ more: Bool) {
+        dismiss()
+        model.setMoreSpace(more)
     }
 }
 
@@ -309,13 +426,17 @@ struct HUD: View {
                 GridRow {
                     cell(number(s.shownFps, 0), "frames/s")
                     cell(number(s.ageMs, 0, " ms"), "picture age")
-                    cell(number(s.megabitsPerSecond, 0, " Mb/s"), "bitrate")
+                    cell(number(s.megabitsPerSecond, 0, " Mb/s"), session.bitrateLimit > 0 ? "bitrate, up to \(session.bitrateLimit / 1_000_000)" : "bitrate")
                 }
                 GridRow {
                     cell(s.codec.isEmpty ? "–" : s.codec, "codec, \(s.chroma.isEmpty ? "–" : s.chroma)")
                     cell("\(s.lost)", "lost frames")
                     cell(number(s.roundTripMs, 0, " ms"), "round trip")
                 }
+            }
+            if s.soundOn {
+                Text("Sound: \(Int(s.soundBufferMs)) ms waiting" + (s.soundConcealed + s.soundDropped > 0 ? " · \(s.soundConcealed) patched · \(s.soundDropped) left out" : ""))
+                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.8))
             }
             if s.wifiPausing {
                 Text("Wi-Fi is pausing about twice a second").font(.system(size: 11)).foregroundStyle(Color(hex: 0xFFA53D))

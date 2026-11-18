@@ -13,21 +13,24 @@ enum Features {
     /// The last picture as a thumbnail in the detail header.
     static let thumbnails = false
     /// The computer's sound on this Mac.
-    static let sound = false
-    static let microphone = false
+    static let sound = true
+    static let microphone = true
     static let camera = false
-    static let clipboard = false
+    static let clipboard = true
     /// "Send files", "Save received files to".
-    static let fileTransfer = false
+    static let fileTransfer = true
+    /// The settings that say what sound, clipboard and received files do by default (in a
+    /// session each is switched from its control, and remembered for that computer).
+    static let defaultsForSharing = false
     /// Automatic / Sharp Text (4:4:4) as a choice ("Picture", "Default quality").
     static let pictureQuality = false
     static let hdr = false
     /// 120 Hz / 60 Hz as a choice, "Use this display's full refresh rate".
     static let refreshRateChoice = false
     /// "Limit Bitrate…".
-    static let bitrateLimit = false
+    static let bitrateLimit = true
     /// The stream's bitrate among the figures.
-    static let bitrateFigure = false
+    static let bitrateFigure = true
     /// "Require Touch ID to connect" and the Touch ID prompt while connecting.
     static let touchID = false
     /// The computer's own login screen when nobody is logged in, and "Fill Password with Touch ID".

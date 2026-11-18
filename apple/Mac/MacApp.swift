@@ -147,6 +147,11 @@ final class AppModel: ObservableObject {
         let size = pictureSize.width > 0 ? pictureSize : CGSize(width: 1280, height: 748)
         let display = DeviceDisplay.current(
             for: size, displayScale: window?.backingScaleFactor ?? 2, measured: session.refreshMeter.rate)
+        // A computer that can change it in place does; the picture starts afresh by itself.
+        if session.reconfigure(display: display, placement: c.place) {
+            requested = display
+            return
+        }
         reconnecting = true
         hasPicture = false
         barShown = false

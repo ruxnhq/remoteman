@@ -85,13 +85,13 @@ struct GeneralSettings: View {
             }
             CardGroup("Sound and sharing") {
                 Row("Play the computer's sound on this Mac") {
-                    FixedSwitch(title: "Play the computer's sound on this Mac", value: false, flag: Features.sound)
+                    FixedSwitch(title: "Play the computer's sound on this Mac", value: false, flag: Features.defaultsForSharing)
                 }
                 Row("Clipboard") {
-                    FixedPopUp(title: "Clipboard", value: "Shared both ways", flag: Features.clipboard)
+                    FixedPopUp(title: "Clipboard", value: "Shared both ways", flag: Features.defaultsForSharing)
                 }
                 Row("Save received files to") {
-                    FixedPopUp(title: "Save received files to", value: "Downloads", flag: Features.fileTransfer)
+                    FixedPopUp(title: "Save received files to", value: "Downloads", flag: Features.defaultsForSharing)
                 }
             }
             CardGroup("Security") {

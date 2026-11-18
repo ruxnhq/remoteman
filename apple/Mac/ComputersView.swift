@@ -233,7 +233,7 @@ struct ComputerDetail: View {
             }
             Row("Play its sound on this Mac") {
                 Toggle("Play its sound on this Mac", isOn: .constant(false))
-                    .labelsHidden().toggleStyle(.switch).available(Features.sound)
+                    .labelsHidden().toggleStyle(.switch).available(Features.defaultsForSharing)
             }
             Row(
                 "Paired", caption: "Recognised by its key. No password is stored on this Mac.",

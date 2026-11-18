@@ -16,16 +16,19 @@ enum Features {
     /// The computer's login screen when nobody is logged in, and the choice of way in.
     static let remoteLogin = false
     /// The computer's sound on this device, and this device's microphone and camera on it.
-    static let sound = false
-    static let microphone = false
+    static let sound = true
+    static let microphone = true
     static let camera = false
-    static let clipboard = false
-    static let files = false
+    static let clipboard = true
+    static let files = true
     /// Picture quality, bitrate limit, size ("More space"), HDR.
     static let pictureQuality = false
-    static let bitrateLimit = false
-    static let displaySize = false
+    static let bitrateLimit = true
+    static let displaySize = true
     static let hdr = false
+    /// Choosing where the sound plays and whether it starts by itself; a lower limit on mobile data.
+    static let soundChoice = false
+    static let mobileData = false
     /// A display on an external monitor, and mirroring one of the computer's monitors.
     static let moreDisplays = false
     /// The finger as a trackpad, and the pointer options that go with it.
@@ -41,6 +44,8 @@ enum Features {
     /// Choosing several computers at once.
     static let multiSelect = false
 
+    // sound, microphone, clipboard, files, bitrateLimit and displaySize are built here; each is
+    // offered only when the connected computer lists it (ViewerSession.has).
     // What works: adding a computer by address, pairing on first contact, the picture, touch,
     // trackpad and mouse, hardware and on-screen keyboard, the key strip, display placement,
     // performance figures, renaming and forgetting a computer, last-picture thumbnails.

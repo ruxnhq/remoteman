@@ -161,6 +161,8 @@ enum Automation {
     /// Drive a session from a script, for testing input against a live host, then leave and quit.
     /// Steps are separated by ";": move:x,y  down:b  up:b  click:b  scroll:dx,dy  key:usage
     /// keydown:usage  keyup:usage  text:words  touch:phase,slot,x,y  wait:seconds  shot:file.png  cursor (print the host's)
+    /// features  stats  bitrate:bits  resize:w,h[,scale[,refresh]]  placement:extend|main|only
+    /// sound:on|off  mic:on|off  clipboard:on|off  file:path  transfers
     static func runScript(_ script: String, session: ViewerSession) {
         DispatchQueue.global().async {
             // Wait for the stream and its first picture.
@@ -204,6 +206,35 @@ enum Automation {
                     let (at, shape) = DispatchQueue.main.sync { (session.hostCursorAt, session.hostCursor) }
                     let s = shape.map { $0.map { "\($0.image.width)x\($0.image.height) hot \($0.hotX),\($0.hotY)" } ?? "none" } ?? "not sent"
                     print("remoteman: host cursor at \(at.map { String(format: "%.3f, %.3f visible %@", $0.x, $0.y, $0.visible ? "yes" : "no") } ?? "unknown"), shape \(s)")
+                // Features. stats: the figures since the last one (prints the picture's size and rate).
+                case "features": print("remoteman: host features \(c.features.sorted().joined(separator: ","))")
+                case "stats":
+                    let t = DispatchQueue.main.sync { () -> String in
+                        let st = session.takeStats()
+                        return "\(st.text)\n\(String(format: "%.1f", st.megabitsPerSecond)) Mb/s received · host says \(session.hostBitrate) bit/s · limit \(session.bitrateLimit)"
+                    }
+                    print("remoteman: stats\n\(t)")
+                case "bitrate" where n.count == 1: DispatchQueue.main.sync { session.setBitrateLimit(Int(n[0])) }
+                case "resize" where n.count >= 2:
+                    DispatchQueue.main.sync {
+                        var d = session.display ?? ViewerSession.Display(width: 1920, height: 1080, scale: 1, refresh: 60)
+                        d.width = Int(n[0])
+                        d.height = Int(n[1])
+                        if n.count > 2 { d.scale = n[2] }
+                        if n.count > 3 { d.refresh = Int(n[3]) }
+                        print("remoteman: resize to \(d.width)x\(d.height) scale \(d.scale) @\(d.refresh): \(session.reconfigure(display: d) ? "asked" : "host can't")")
+                    }
+                case "placement":
+                    DispatchQueue.main.sync {
+                        let p = ViewerSession.Placement(rawValue: arg.trimmingCharacters(in: .whitespaces)) ?? .extend
+                        print("remoteman: placement \(p.rawValue): \(session.reconfigure(placement: p) ? "asked" : "host can't")")
+                    }
+                case "sound": DispatchQueue.main.sync { session.setSound(arg.contains("on")) }
+                case "mic": DispatchQueue.main.sync { session.setMic(arg.contains("on")) }
+                case "clipboard": DispatchQueue.main.sync { session.setClipboard(arg.contains("on")) }
+                case "file": DispatchQueue.main.sync { session.send(file: resolve(arg.trimmingCharacters(in: .whitespaces))) }
+                case "transfers":
+                    print("remoteman: transfers \(DispatchQueue.main.sync { session.transfers })  notice \(DispatchQueue.main.sync { session.notice ?? "none" })")
                 case "shot":
                     if let image = session.renderer?.snapshot() {
                         let ok = writePNG(image, to: resolve(arg))
