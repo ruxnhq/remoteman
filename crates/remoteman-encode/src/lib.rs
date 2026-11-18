@@ -45,6 +45,7 @@ unsafe extern "C" {
     #[allow(clippy::too_many_arguments)]
     fn rm_nvenc_encode(e: *mut c_void, idx: c_int, ts: u64, force_idr: c_int, mark: c_int, refer: u32, data: *mut *const u8, size: *mut u32, key: *mut c_int, long_term: *mut u32) -> c_int;
     fn rm_nvenc_short_term(e: *mut c_void) -> u32;
+    fn rm_nvenc_last_qp(e: *mut c_void) -> u32;
     fn rm_nvenc_long_term(e: *mut c_void) -> u32;
     fn rm_nvenc_set_bitrate(e: *mut c_void, bitrate: u32) -> c_int;
     fn rm_nvenc_invalidate(e: *mut c_void, ts: u64) -> c_int;
@@ -93,6 +94,9 @@ pub struct Made<'a> {
     pub marked: Option<u32>,
     /// The long-term frames it was built from (bit i: frame i).
     pub referred: u32,
+    /// The frame's average quantiser as the encoder reports it (lower is finer; HEVC's scale
+    /// runs to 51, AV1's to 255). For logs: it shows whether the encoder is spending its rate.
+    pub qp: u32,
 }
 
 /// What a host asks of an encoder, whichever it is. Inputs are registered with the encoder in
@@ -254,6 +258,7 @@ impl Encoder {
                 key: key != 0,
                 marked: (long_term >> 31 != 0).then_some(long_term >> 16 & 0xff),
                 referred: long_term & 0xffff,
+                qp: rm_nvenc_last_qp(self.enc),
             })
         }
     }

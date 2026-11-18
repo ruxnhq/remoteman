@@ -48,6 +48,7 @@ typedef struct rm_nvenc {
     NV_ENC_OUTPUT_PTR bitstream;
     uint8_t *out;
     size_t out_cap;
+    uint32_t last_qp;     // the last frame's average quantiser, as the encoder reported it
     char err[256];
 } rm_nvenc;
 
@@ -312,6 +313,7 @@ int rm_nvenc_register(rm_nvenc *e, uint64_t devptr, uint32_t pitch) {
 }
 #endif
 
+uint32_t rm_nvenc_last_qp(rm_nvenc *e) { return e->last_qp; }
 uint32_t rm_nvenc_short_term(rm_nvenc *e) { return e->short_term; }
 uint32_t rm_nvenc_long_term(rm_nvenc *e) { return e->long_term; }
 
@@ -361,6 +363,7 @@ int rm_nvenc_encode(rm_nvenc *e, int idx, uint64_t timestamp, int force_idr, int
     *data = e->out;
     *size = lock.bitstreamSizeInBytes;
     *key = lock.pictureType == NV_ENC_PIC_TYPE_IDR || lock.pictureType == NV_ENC_PIC_TYPE_I;
+    e->last_qp = lock.frameAvgQP;
     *long_term = (lock.ltrFrame ? 0x80000000u | (lock.ltrFrameIdx & 0xff) << 16 : 0) | (lock.ltrFrameBitmap & 0xffff);
     e->f.nvEncUnlockBitstream(e->enc, e->bitstream);
     e->f.nvEncUnmapInputResource(e->enc, map.mappedResource);

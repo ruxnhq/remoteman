@@ -299,6 +299,10 @@ fn age_us(meta: &Metadata) -> u64 {
 fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<()> {
     let mut rate = s.bitrate;
     let (mut frames, mut keys, mut repeats) = (0u64, 0u64, 0u64);
+    // What the encoder made of its rate: bytes in all, the largest frame, and its quantiser
+    // summed (for the average) and at the last frame.
+    let (mut bytes, mut largest, mut qp_sum, mut qp_last) = (0u64, 0usize, 0u64, 0u32);
+    let began = Instant::now();
     // When a frame last came, and when the channel was last checked for having been replaced.
     let (mut quiet_since, mut checked) = (Instant::now(), Instant::now());
     // The stream must begin with a keyframe after it starts afresh.
@@ -415,6 +419,10 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         let sent = recovery.made(&plan, made.key, made.marked, made.referred);
         frames += 1;
         keys += made.key as u64;
+        bytes += made.data.len() as u64;
+        largest = largest.max(made.data.len());
+        qp_sum += made.qp as u64;
+        qp_last = made.qp;
         let delivered = match sent {
             Sent::Key => link.send_frame(made.data, true, capture_us),
             Sent::Recovery => link.send_recovery_frame(made.data, capture_us),
@@ -429,6 +437,13 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         frames,
         keyframes = keys,
         encoded_again = repeats,
+        seconds = began.elapsed().as_secs(),
+        kilobytes = bytes / 1000,
+        mbit_per_s = format!("{:.1}", bytes as f64 * 8.0 / 1e6 / began.elapsed().as_secs_f64().max(0.001)),
+        target_mbit = format!("{:.1}", rate as f64 / 1e6),
+        largest_frame_bytes = largest,
+        qp_average = format!("{:.1}", qp_sum as f64 / frames.max(1) as f64),
+        qp_last,
         driver_frames = driver.map(|d| d.0),
         driver_replaced_unread = driver.map(|d| d.1),
         driver_dropped_held = driver.map(|d| d.2),
