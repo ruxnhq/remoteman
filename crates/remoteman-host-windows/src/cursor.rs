@@ -7,8 +7,8 @@
 //! That holds for cursors with see-through pixels only. The driver declares no support for
 //! cursors that invert what is under them (the text cursor, as a rule), and Windows is taken
 //! to draw those into the frames itself; for them the client is sent an empty image, so that
-//! it doesn't draw a second one. Whether Windows really splits cursors that way is to be seen
-//! on a run.
+//! it doesn't draw a second one. Seen on a run in a Guesthouse guest (2026-11-18): the arrow
+//! is not in the captured frames, the text cursor is.
 //!
 //! The other side of it: a client that does not ask for the cursor gets a picture without one
 //! (except the inverting kind). Drawing it into the picture for such clients is not built.
@@ -41,6 +41,7 @@ impl Cursor {
         let thread = std::thread::Builder::new().name("cursor".into()).spawn(move || {
             // The image last sent, by Windows' handle for it.
             let mut shown = None::<isize>;
+            let mut sent = None::<CursorShape>;
             let mut failed = false;
             while !stopped.load(Ordering::Relaxed) {
                 let mut info = CURSORINFO { cbSize: size_of::<CURSORINFO>() as u32, ..Default::default() };
@@ -52,7 +53,14 @@ impl Cursor {
                         if showing && shown != Some(handle) {
                             shown = Some(handle);
                             let shape = shape(HICON(info.hCursor.0)).unwrap_or_else(|| CursorShape { width: 0, height: 0, hot_x: 0, hot_y: 0, rgba: Vec::new() });
-                            link.cursor_shape(shape);
+                            // Another handle isn't always another image. Seen with a viewer
+                            // running on the desktop it shows: it wears the image it is sent
+                            // as a cursor of its own making, which comes back here under a new
+                            // handle, and sending that on went round 250 times a second.
+                            if sent.as_ref() != Some(&shape) {
+                                link.cursor_shape(shape.clone());
+                                sent = Some(shape);
+                            }
                         }
                         let a = *area.lock().unwrap();
                         let (x, y) = (info.ptScreenPos.x - a.left, info.ptScreenPos.y - a.top);

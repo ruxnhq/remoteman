@@ -19,6 +19,10 @@
 //! and in the user's own desktop session (input, the cursor and mode changes work nowhere
 //! else): see `input.rs`.
 //!
+//! The first time it listens on anything but loopback, Windows Firewall asks the user whether
+//! to let it, and until the answer is "Allow" it keeps a rule that blocks it from other
+//! computers. Tests on the same machine can listen on 127.0.0.1 and are never asked.
+//!
 //! Everything here is Windows-only; on other systems this builds to a stub so that the
 //! workspace builds whole.
 
