@@ -88,6 +88,8 @@ pub struct Agent {
     /// The client's camera, as one the desktop's programs can pick, and when it last had to
     /// ask the client for a keyframe.
     camera: Option<(remoteman_camera::Camera, Option<std::time::Instant>)>,
+    /// A mark of the last copy sent from the desktop to the client, to tell a repeat.
+    last_copy: Arc<std::sync::Mutex<Option<u64>>>,
     /// Make the client's speaker the desktop's output while it is on (`--keep-output`: don't).
     take_output: bool,
     /// Counts what was copied here and sent, for the client to tell new from stale.
@@ -112,7 +114,7 @@ impl Agent {
         if login_screen.is_some() {
             tracing::info!("this is a login screen's session: no files, no clipboard, and it ends when its client goes");
         }
-        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, camera: None, take_output, copies: Arc::default(), live: None })
+        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, camera: None, last_copy: Arc::default(), take_output, copies: Arc::default(), live: None })
     }
 
     /// What the picture is encoded at when the client's ceiling is `ceiling`.
@@ -263,6 +265,8 @@ impl Agent {
         };
         let clipboard = Arc::new(clipboard);
         let (desktop, link, copies) = (clipboard.clone(), l.link.clone(), self.copies.clone());
+        *self.last_copy.lock().unwrap() = None;
+        let last_copy = self.last_copy.clone();
         // Whatever is copied on the desktop goes to the client: text if there is any, else a
         // picture.
         let watching = self.runtime.spawn(async move {
@@ -274,6 +278,17 @@ impl Agent {
                 };
                 match desktop.read(&read_as).await {
                     Ok(bytes) if !bytes.is_empty() => {
+                        // The desktop announces one copy more than once (twice, as a rule):
+                        // the same thing again is not sent again.
+                        let mark = {
+                            use std::hash::{Hash, Hasher};
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            (send_as, &bytes).hash(&mut h);
+                            h.finish()
+                        };
+                        if last_copy.lock().unwrap().replace(mark) == Some(mark) {
+                            continue;
+                        }
                         // What was copied is never logged, only what kind of thing and how much.
                         tracing::info!(kind = send_as, bytes = bytes.len(), "a copy on the desktop goes to the device");
                         let header = ClipboardHeader { seq: copies.fetch_add(1, Ordering::Relaxed) + 1, mime: send_as.into(), size: bytes.len() as u64 };
@@ -313,6 +328,9 @@ impl Agent {
             BlobEvent::Close { id, complete } => {
                 let (Some((mime, bytes)), Some((clipboard, _)), true) = (l.copied.remove(id), l.clipboard.as_ref(), *complete) else { return };
                 let clipboard = clipboard.clone();
+                // The desktop's clipboard is the device's copy now: the next copy on the
+                // desktop is news even if it is what was sent before.
+                *self.last_copy.lock().unwrap() = None;
                 self.runtime.spawn(async move {
                     let (kind, size) = (mime.clone(), bytes.len());
                     match clipboard.offer(vec![(mime, bytes)]).await {

@@ -30,6 +30,10 @@ pub struct Shared {
     pub decode_us_max: AtomicU32,
     /// Set by the window when GTK refuses a DMA-BUF picture: copy them down from now on.
     pub no_dmabuf: std::sync::atomic::AtomicBool,
+    /// The stream's size in pixels and its rate, once the host has said (for the window's bar).
+    pub format: Mutex<Option<(u32, u32, u32)>>,
+    /// Bytes of video received since it was last read (for the figures).
+    pub bytes: AtomicU64,
 }
 
 enum Msg {
@@ -44,12 +48,14 @@ struct Feed {
 
 impl Handler for Feed {
     fn stream(&mut self, info: &StreamInfo) {
+        *self.shared.format.lock().unwrap() = Some((info.width, info.height, info.refresh));
         let _ = self.tx.send(Msg::Stream(info.clone()));
     }
 
     fn frame(&mut self, frame: &Frame, age_us: Option<i64>) {
         // Every frame leans on the one before, so none may be skipped here: if the decoder
         // falls behind, this waits, and the loss shows up upstream as a keyframe request.
+        self.shared.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
         let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us));
     }
 
