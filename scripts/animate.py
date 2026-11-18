@@ -60,9 +60,25 @@ class Anim(Gtk.Widget):
         snap.append_layout(self.layout, white); snap.restore()
 
 def on_activate(app):
+    import sys
     win = Gtk.ApplicationWindow(application=app)
     anim = Anim()
-    win.set_child(anim); win.fullscreen(); win.present(); anim.grab_focus()
+    win.set_child(anim)
+    # `--monitor NAME` (a connector such as Meta-0) puts it on that monitor; otherwise wherever
+    # the compositor likes.
+    target = None
+    if "--monitor" in sys.argv:
+        name = sys.argv[sys.argv.index("--monitor") + 1]
+        monitors = Gdk.Display.get_default().get_monitors()
+        target = next((m for m in monitors if m.get_connector() == name), None)
+        if target is None:
+            print(f"no monitor called {name}", flush=True)
+            sys.exit(1)
+    if target:
+        win.fullscreen_on_monitor(target)
+    else:
+        win.fullscreen()
+    win.present(); anim.grab_focus()
 app = Gtk.Application(application_id="dev.remoteman.spike.animate")
 app.connect("activate", on_activate)
-app.run(None)
+app.run([])
