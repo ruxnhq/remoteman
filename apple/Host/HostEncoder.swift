@@ -1,6 +1,6 @@
 // The Mac host's encoder: HEVC Main10 in hardware, no reordering, no frame delay, no periodic
-// keyframes, and never a queue. A frame offered while the previous one is still being encoded
-// or sent is dropped, which is how a slow network holds the picture back. Each frame comes out
+// keyframes, and never a queue. A frame offered while two are still being encoded or sent is
+// dropped, which is how a slow network (or a slow encoder) holds the picture back. Each frame comes out
 // in Annex-B, with the parameter sets in front of every keyframe.
 // Adapted from espalier's ScreenEncoder.
 import CoreMedia
@@ -20,7 +20,11 @@ final class HostEncoder {
     let width: Int, height: Int
     private var session: VTCompressionSession?
     private let lock = NSLock()
-    private var busy = false
+    /// Frames inside the encoder or being sent. The hardware works on more than one at a time
+    /// (a 5.7 MP frame takes 13.5 ms alone, but two overlapping come out 9 ms apart), so a
+    /// second may go in while the first is still inside; a third is dropped.
+    private var inFlight = 0
+    var maxInFlight = 2
     private var forceKey = true
     /// Called on VideoToolbox's thread; the encoder takes no new frame until it returns.
     var onFrame: ((Output) -> Void)?
@@ -43,8 +47,7 @@ final class HostEncoder {
             // has it finish each frame as fast as it can.
             (kVTCompressionPropertyKey_RealTime, false),
             (kVTCompressionPropertyKey_AllowFrameReordering, false),
-            (kVTCompressionPropertyKey_MaxFrameDelayCount, 0),
-            (kVTCompressionPropertyKey_ExpectedFrameRate, fps),
+                        (kVTCompressionPropertyKey_ExpectedFrameRate, fps),
             (kVTCompressionPropertyKey_AverageBitRate, bitrate),
             // Bytes per second over one second: 1.5× the average, as a ceiling for bursts.
             (kVTCompressionPropertyKey_DataRateLimits, [bitrate * 3 / 16, 1] as CFArray),
@@ -83,11 +86,11 @@ final class HostEncoder {
     @discardableResult
     func encode(_ pb: CVPixelBuffer, pts: CMTime) -> Bool {
         lock.lock()
-        guard let session, !busy else {
+        guard let session, inFlight < maxInFlight else {
             lock.unlock()
             return false
         }
-        busy = true
+        inFlight += 1
         let force = forceKey
         forceKey = false
         lock.unlock()
@@ -100,7 +103,7 @@ final class HostEncoder {
             guard let self else { return }
             defer {
                 self.lock.lock()
-                self.busy = false
+                self.inFlight -= 1
                 self.lock.unlock()
             }
             guard status == noErr, let sb else {
@@ -113,7 +116,7 @@ final class HostEncoder {
         }
         if status != noErr {
             lock.lock()
-            busy = false
+            inFlight -= 1
             if force { forceKey = true }
             lock.unlock()
             return false

@@ -42,8 +42,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var pair = false
         /// Make the virtual display the main one (menu bar and new windows) while a client is on.
         var makeMain = false
-        /// What ScreenCaptureKit delivers: "l10r" (10-bit RGB) or "420v" (8-bit YCbCr).
-        var capture = "l10r"
+        /// What ScreenCaptureKit delivers: "x420" (10-bit YCbCr, what the encoder takes as it is),
+        /// "l10r" (10-bit RGB) or "420v" (8-bit YCbCr); the last two cost the encoder a conversion.
+        var capture = "x420"
+        /// How many frames may be inside the encoder at once.
+        var inFlight = 2
         var bitrate = 0
         /// Fill the virtual display with moving test content while a client is on.
         var testWindow = false
@@ -248,6 +251,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         do { enc = try HostEncoder(width: width, height: height, fps: fps, bitrate: bitrate) } catch {
             return "no HEVC Main10 hardware encoder for \(width)×\(height) (\(error.localizedDescription))"
         }
+        enc.maxInFlight = max(1, options.inFlight)
         enc.onFrame = { [weak self] o in self?.send(o) }
 
         let config = captureConfiguration(width: width, height: height, cursorApart: cursorApart)
@@ -285,8 +289,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         config.width = width
         config.height = height
         config.pixelFormat =
-            options.capture == "420v"
-            ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange : kCVPixelFormatType_ARGB2101010LEPacked
+            switch options.capture {
+            case "420v": kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            case "l10r": kCVPixelFormatType_ARGB2101010LEPacked
+            default: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            }
         config.colorSpaceName = CGColorSpace.sRGB
         config.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
         config.showsCursor = !cursorApart
@@ -418,8 +425,14 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         else { return }
         lock.lock()
         let enc = encoder
+        let first = lastBuffer == nil
         lastBuffer = pb
         lock.unlock()
+        if first {
+            let f = CVPixelBufferGetPixelFormatType(pb)
+            let cc = String(bytes: [24, 16, 8, 0].map { UInt8((f >> $0) & 0xff) }, encoding: .ascii) ?? "?"
+            hostLog("host: capture delivers \(CVPixelBufferGetWidth(pb))×\(CVPixelBufferGetHeight(pb)) '\(cc)'")
+        }
         // The timestamp is the capture time on the host clock; a busy encoder drops the frame.
         if let enc, !enc.encode(pb, pts: sb.presentationTimeStamp) {
             lock.lock()

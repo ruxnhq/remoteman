@@ -1,6 +1,6 @@
 // remoteman-host: the Mac as a remoteman host. An app with no window; start it with
 //   open -n remoteman-host.app --args [--listen 0.0.0.0:7791] [--name NAME] [--pair yes]
-//        [--state DIR] [--main yes] [--capture l10r|420v] [--bitrate BITS_PER_SECOND]
+//        [--state DIR] [--main yes] [--capture x420|l10r|420v] [--in-flight N] [--bitrate BITS_PER_SECOND]
 //        [--test-window yes]
 // and read ~/Library/Logs/remoteman-host.log. Every option takes a value. It needs Screen
 // Recording (to capture) and Accessibility (to put input in), granted to "remoteman-host" in
@@ -29,6 +29,7 @@ while !args.isEmpty {
     case "--capture": options.capture = value()
     case "--bitrate": options.bitrate = Int(value()) ?? 0
     case "--test-window": options.testWindow = yes()
+    case "--in-flight": options.inFlight = Int(value()) ?? 2
     default:
         // AppKit passes arguments of its own (-NSDocumentRevisionsDebugMode and the like).
         if a.hasPrefix("--") { hostLog("host: unknown option \(a)") }

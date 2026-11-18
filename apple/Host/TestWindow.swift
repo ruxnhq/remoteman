@@ -4,6 +4,29 @@
 import AppKit
 import QuartzCore
 
+/// Takes clicks and keys and writes them to the log, so input can be checked end to end
+/// without touching anything of the user's.
+private final class TestView: NSView {
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    private func note(_ what: String, _ e: NSEvent) {
+        let p = convert(e.locationInWindow, from: nil)
+        hostLog(String(format: "test window: %@ at %.3f, %.3f (clicks %d)", what, p.x / bounds.width, 1 - p.y / bounds.height, e.clickCount))
+    }
+    override func mouseDown(with e: NSEvent) {
+        window?.makeKey()
+        note("left down", e)
+    }
+    override func mouseUp(with e: NSEvent) { note("left up", e) }
+    override func rightMouseDown(with e: NSEvent) { note("right down", e) }
+    override func scrollWheel(with e: NSEvent) { hostLog(String(format: "test window: scroll %.1f, %.1f", e.scrollingDeltaX, e.scrollingDeltaY)) }
+    override func keyDown(with e: NSEvent) { hostLog("test window: key down code \(e.keyCode) characters \"\(e.characters ?? "")\" flags \(e.modifierFlags.intersection(.deviceIndependentFlagsMask).rawValue)") }
+}
+
+private final class KeyableWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+}
+
 final class TestWindow {
     private var window: NSWindow?
     private var link: CADisplayLink?
@@ -19,11 +42,11 @@ final class TestWindow {
             })
         else { return }
         let f = screen.frame
-        let w = NSWindow(contentRect: f, styleMask: [.borderless], backing: .buffered, defer: false, screen: screen)
+        let w = KeyableWindow(contentRect: f, styleMask: [.borderless], backing: .buffered, defer: false, screen: screen)
         w.setFrame(f, display: true)
         w.isReleasedWhenClosed = false
         w.level = .normal
-        let view = NSView(frame: NSRect(origin: .zero, size: f.size))
+        let view = TestView(frame: NSRect(origin: .zero, size: f.size))
         view.wantsLayer = true
         view.layer?.backgroundColor = CGColor(red: 0.07, green: 0.08, blue: 0.11, alpha: 1)
         size = f.size
@@ -44,8 +67,18 @@ final class TestWindow {
         link = l
     }
 
+    private var rateFrom = CACurrentMediaTime()
+    private var rateCount = 0
+
     @objc private func tick() {
         n += 1
+        rateCount += 1
+        let now = CACurrentMediaTime()
+        if now - rateFrom >= 5 {
+            hostLog(String(format: "test window: redrawing %.1f times a second", Double(rateCount) / (now - rateFrom)))
+            rateFrom = now
+            rateCount = 0
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         text.string = "remoteman Mac host test  frame \(n)\nthe quick brown fox jumps over the lazy dog 0123456789"
