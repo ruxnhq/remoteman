@@ -54,7 +54,7 @@ private struct FixedPopUp: View {
     }
 }
 
-private struct GeneralSettings: View {
+struct GeneralSettings: View {
     @AppStorage(AppModel.WindowControls.key) private var controls = AppModel.WindowControls.titleBar.rawValue
     @AppStorage(AppModel.showFiguresKey) private var showFigures = false
 
@@ -106,7 +106,7 @@ private struct GeneralSettings: View {
     }
 }
 
-private struct KeyboardPointerSettings: View {
+struct KeyboardPointerSettings: View {
     var body: some View {
         SettingsPage {
             CardGroup("Keyboard", footnote: "When connected to a Mac, the keys are sent unchanged.") {
@@ -162,7 +162,7 @@ private struct KeyboardPointerSettings: View {
     }
 }
 
-private struct ComputerSettings: View {
+struct ComputerSettings: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject var store: ComputerStore
     @State private var selection: SavedComputer.ID?

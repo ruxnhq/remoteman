@@ -19,7 +19,7 @@ enum Launch {
 
 @main
 struct RemotemanApp: App {
-    @StateObject private var model = AppModel()
+    @StateObject private var model = AppModel(store: UIShots.directory != nil ? UIShots.sampleStore : ComputerStore())
 
     init() {
         // Unattended runs end with exit(); without this the next launch stops at "reopen windows?".
@@ -89,7 +89,7 @@ final class AppModel: ObservableObject {
     private var monitor: Any?
     private var observers: [NSObjectProtocol] = []
 
-    init(store: ComputerStore = ComputerStore()) {
+    init(store: ComputerStore) {
         self.store = store
         selection = store.computers.first?.id
         stateSink = session.$state.sink { [weak self] s in
@@ -120,6 +120,16 @@ final class AppModel: ObservableObject {
         requested = display
         session.showStats = UserDefaults.standard.bool(forKey: Self.showFiguresKey)
         session.connect(host: c.address, pair: c.pairOnConnect, name: DeviceDisplay.name, display: display, placement: c.place)
+        watchForPicture()
+    }
+
+    /// The session's chrome with no computer behind it (UIShots plays a recording into it).
+    func beginPreview(_ c: SavedComputer) {
+        selection = c.id
+        active = c.id
+        hasPicture = false
+        started = nil
+        requested = sessionDisplay()
         watchForPicture()
     }
 
@@ -239,19 +249,13 @@ final class AppModel: ObservableObject {
     /// The session's controls are drawn over the picture, not in a title bar.
     var bare: Bool { active != nil && hasPicture && (fullScreen || WindowControls.current == .slideIn) }
 
-    /// Without a title bar the window is only the picture: no title, and the window buttons
-    /// come and go with the bar that slides in.
+    /// Without a title bar the window is only the picture, edge to edge.
     func applyChrome() {
         guard let w = window, !automated else { return }
         let hidden = bare && !fullScreen
         w.titlebarAppearsTransparent = hidden
         w.titleVisibility = hidden ? .hidden : .visible
         if hidden { w.styleMask.insert(.fullSizeContentView) }
-        // A drag on the top strip must reach the computer, not move the window.
-        w.isMovable = !hidden || barShown
-        for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            w.standardWindowButton(b)?.isHidden = hidden && !barShown
-        }
     }
 
     private func watchWindow() {
@@ -339,6 +343,7 @@ struct RootView: View {
                 // Give the refresh meter a moment before an unattended connect reads it.
                 let size = geo.size
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    if UIShots.directory != nil { return UIShots.run(model: model) }
                     Automation.run(
                         session: session,
                         display: DeviceDisplay.current(for: size, displayScale: displayScale, measured: session.refreshMeter.rate))

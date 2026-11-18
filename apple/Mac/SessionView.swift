@@ -52,6 +52,8 @@ struct SessionScreen: View {
                 SessionToolbar(model: model, session: session, computer: computer)
             }
         }
+        // Without the toolbar the title bar goes too, and every click reaches the picture; the
+        // bar that slides in draws window buttons of its own.
         .toolbar(bare ? .hidden : .visible, for: .windowToolbar)
         .onChange(of: controls) { _, _ in
             model.barShown = false
@@ -300,8 +302,7 @@ struct SlideInBar: View {
     var body: some View {
         let c = SessionControls(model: model, session: session, computer: computer, kind: .slideIn)
         HStack(spacing: 10) {
-            // The window's own buttons show through here.
-            Color.clear.frame(width: 64, height: 1)
+            WindowButtons(window: model.window).padding(.leading, 4).padding(.trailing, 8)
             VStack(alignment: .leading, spacing: 0) {
                 Text(computer.name).font(.system(size: 13, weight: .bold))
                 Text(caption).font(.system(size: 11)).foregroundStyle(.secondary)
@@ -323,6 +324,37 @@ struct SlideInBar: View {
         .overlay(alignment: .bottom) { Rectangle().fill(.white.opacity(0.12)).frame(height: 1) }
         .shadow(color: .black.opacity(0.35), radius: 12, y: 8)
         .environment(\.colorScheme, .dark)
+        // The bar is the window's title bar while it shows: dragging it moves the window.
+        .gesture(
+            DragGesture(minimumDistance: 3).onChanged { _ in
+                if let e = NSApp.currentEvent, e.type == .leftMouseDragged { model.window?.performDrag(with: e) }
+            })
+    }
+}
+
+/// Close, minimise and zoom, drawn as the design draws them, for a window whose title bar is hidden.
+private struct WindowButtons: View {
+    weak var window: NSWindow?
+    @State private var hover = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            light(0xFF5F57, "xmark", "Close") { window?.performClose(nil) }
+            light(0xFEBC2E, "minus", "Minimise") { window?.miniaturize(nil) }
+            light(0x28C840, "arrow.up.left.and.arrow.down.right", "Full screen") { window?.toggleFullScreen(nil) }
+        }
+        .onHover { hover = $0 }
+    }
+
+    private func light(_ hex: UInt32, _ symbol: String, _ name: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Circle().fill(Tokens.fixed(hex)).frame(width: 13, height: 13)
+                .overlay(Image(systemName: symbol).font(.system(size: 7, weight: .bold)).foregroundStyle(.black.opacity(hover ? 0.55 : 0)))
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+        .help(name)
+        .accessibilityLabel(name)
     }
 }
 
