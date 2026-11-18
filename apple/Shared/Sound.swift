@@ -71,6 +71,8 @@ final class SoundPlayer {
     /// A deeper buffer, for a link that pauses at intervals (the iPad's Wi-Fi does, see
     /// ViewerSession): what a pause holds back then plays instead of being cut.
     var deep = false
+    /// For tests on one Mac, where the host would hear the viewer: decode and count, play nothing.
+    static var silent = false
 
     /// Frames kept ahead when starting or after running dry, and the most that may wait.
     private var prime: Int { deep ? 4800 : 1200 }  // 100 ms or 25 ms
@@ -79,7 +81,7 @@ final class SoundPlayer {
     var running: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return engine != nil
+        return decoder != nil
     }
 
     /// Set up for the format the host announced. Returns why not, if it can't be played.
@@ -90,15 +92,21 @@ final class SoundPlayer {
         guard let pcm = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: UInt32(channels), interleaved: false),
             let opus = opusFormat(channels: UInt32(channels), framesPerPacket: fpp), let decoder = AVAudioConverter(from: opus, to: pcm)
         else { return "This device has no decoder for the computer's sound." }
-        #if os(iOS)
-            AudioSession.set(playing: true)
-        #endif
-        let engine = AVAudioEngine()
-        let node = AVAudioPlayerNode()
-        engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: pcm)
-        do { try engine.start() } catch { return "The sound output couldn't be started: \(error.localizedDescription)" }
-        node.play()
+        var engine: AVAudioEngine?
+        var node: AVAudioPlayerNode?
+        if !Self.silent {
+            #if os(iOS)
+                AudioSession.set(playing: true)
+            #endif
+            let e = AVAudioEngine()
+            let n = AVAudioPlayerNode()
+            e.attach(n)
+            e.connect(n, to: e.mainMixerNode, format: pcm)
+            do { try e.start() } catch { return "The sound output couldn't be started: \(error.localizedDescription)" }
+            n.play()
+            engine = e
+            node = n
+        }
         lock.lock()
         self.engine = engine
         self.node = node
@@ -174,7 +182,7 @@ final class SoundPlayer {
 
     /// Decode one packet (nil: a lost one) and queue what comes out. Call with the lock held.
     private func decode(_ data: UnsafeRawBufferPointer?) {
-        guard let decoder, let opus, let pcm, let node else { return }
+        guard let decoder, let opus, let pcm else { return }
         let size = data?.count ?? 0
         let packet = AVAudioCompressedBuffer(format: opus, packetCapacity: 1, maximumPacketSize: max(size, 1))
         if let data, size > 0 { packet.data.copyMemory(from: data.baseAddress!, byteCount: size) }
@@ -202,6 +210,7 @@ final class SoundPlayer {
             }
             measured += Int(out.frameLength)
         }
+        guard let node else { return }  // silent: decoded and counted, not played
         if queued > most {
             // More is waiting than should be (a burst after a pause, or the clocks drifting):
             // leave this one out, so the delay comes back down.
@@ -231,6 +240,29 @@ final class SoundPlayer {
             if self.node === node { self.queued = max(0, self.queued - frames) }
             self.lock.unlock()
         }
+    }
+}
+
+/// For tests: a quiet 440 Hz tone from this device's own output, for so many seconds.
+enum TestTone {
+    private static var engine: AVAudioEngine?
+    static func play(seconds: Double) -> String {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48000, channels: 2, interleaved: false)!
+        let n = AVAudioFrameCount(48000 * seconds)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: n) else { return "no buffer" }
+        buffer.frameLength = n
+        for c in 0..<2 {
+            let p = buffer.floatChannelData![c]
+            for i in 0..<Int(n) { p[i] = 0.05 * Float(sin(2 * Double.pi * 440 * Double(i) / 48000)) }
+        }
+        let e = AVAudioEngine(), node = AVAudioPlayerNode()
+        e.attach(node)
+        e.connect(node, to: e.mainMixerNode, format: format)
+        do { try e.start() } catch { return "the output couldn't be started: \(error.localizedDescription)" }
+        node.scheduleBuffer(buffer)
+        node.play()
+        engine = e
+        return "playing 440 Hz for \(seconds) s"
     }
 }
 

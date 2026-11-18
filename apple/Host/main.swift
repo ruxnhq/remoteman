@@ -36,6 +36,8 @@ while !args.isEmpty {
     case "--test-window": options.testWindow = yes()
     case "--in-flight": options.inFlight = Int(value()) ?? 2
     // For tests: so many seconds after a device connects, drop it or stop trusting it.
+    case "--sound": options.sound = yes()
+    case "--test-tone": options.testTone = yes()
     case "--test-drop": options.testDrop = Double(value())
     case "--test-revoke": options.testRevoke = Double(value())
     default:

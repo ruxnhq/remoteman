@@ -100,6 +100,7 @@ final class ViewerSession: ObservableObject {
     private(set) var placement = Placement.extend
     private var target = ""
     private let sound = SoundPlayer()
+    private let soundSetup = DispatchQueue(label: "remoteman.sound.setup")
     private var mic: MicSender?
     private var sharing: Sharing?
 
@@ -125,7 +126,7 @@ final class ViewerSession: ObservableObject {
         soundOn = on
         remember("sound", on)
         client.send(["t": "sound", "on": on])
-        if !on { sound.stop() }
+        if !on { soundSetup.async { [sound] in sound.stop() } }
     }
 
     /// This device's microphone as a microphone on the computer. Never switched on by itself.
@@ -244,8 +245,12 @@ final class ViewerSession: ObservableObject {
         case "sound_format":
             let channels = (m["channels"] as? NSNumber)?.intValue ?? 2
             let frameUs = (m["frame_us"] as? NSNumber)?.intValue ?? 10000
-            let why = (m["codec"] as? String ?? "opus") == "opus" ? sound.start(channels: channels, frameUs: frameUs) : "The computer's sound is in a form this device can't play."
-            if let why { DispatchQueue.main.async { if self.generation == gen { self.notice = why } } }
+            // Off the core's thread: a sound output that is slow to start (or stuck) must not
+            // hold up the picture. Packets that come before it is ready are let go.
+            soundSetup.async { [self] in
+                let why = (m["codec"] as? String ?? "opus") == "opus" ? sound.start(channels: channels, frameUs: frameUs) : "The computer's sound is in a form this device can't play."
+                if let why { DispatchQueue.main.async { if self.generation == gen { self.notice = why } } }
+            }
         case "status":
             if let b = (m["bitrate"] as? NSNumber)?.intValue {
                 DispatchQueue.main.async { if self.generation == gen { self.hostBitrate = b } }
@@ -460,7 +465,7 @@ final class ViewerSession: ObservableObject {
         pipeLock.unlock()
         d?.invalidate()
         renderer?.clear()
-        sound.stop()
+        soundSetup.async { [sound] in sound.stop() }
         mic?.stop()
         mic = nil
         camera?.stop()

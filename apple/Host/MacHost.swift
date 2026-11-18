@@ -50,6 +50,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var bitrate = 0
         /// Fill the virtual display with moving test content while a client is on.
         var testWindow = false
+        /// Offer this Mac's sound. Off until it has been heard on a device.
+        var sound = false
+        var testTone = false
         var testDrop: Double?
         var testRevoke: Double?
     }
@@ -178,7 +181,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var err = [CChar](repeating: 0, count: 512)
         guard
             let h = rm_host_start(
-                options.listen, options.stateDir, options.name, "macos", "video,input,cursor,placement,configure", options.pair ? 1 : 0,
+                options.listen, options.stateDir, options.name, "macos", "video,input,cursor,placement,configure" + (options.sound ? ",sound" : ""), options.pair ? 1 : 0,
                 callbacks, &err, err.count)
         else { throw NSError(domain: "remoteman", code: 1, userInfo: [NSLocalizedDescriptionKey: String(cString: err)]) }
         host = h
@@ -291,8 +294,35 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         return failure
     }
 
-    /// One of the client's feature messages. So far: configure.
+    // MARK: Sound
+
+    private let soundQueue = DispatchQueue(label: "remoteman.host.sound", qos: .userInteractive)
+    /// On the sound queue: there while the client wants this Mac's sound.
+    private var sound: HostSound?
+
+    private func setSound(_ on: Bool) {
+        guard let host else { return }
+        soundQueue.sync {
+            if let s = sound, !on {
+                hostLog("host: sound off after \(s.buffers) buffers captured, \(s.totals.packets) packets, \(s.totals.bytes) bytes, \(s.totals.pauses) pauses")
+            }
+            sound = nil
+            guard on else { return }
+            guard let s = HostSound() else { return hostLog("host: no Opus encoder for sound") }
+            s.send = { [weak self] data, start, seq in
+                guard let h = self?.host else { return }
+                rm_host_send_sound(h, data.bindMemory(to: UInt8.self).baseAddress, data.count, start ? 1 : 0, seq, rm_host_now_us(h))
+            }
+            s.testTone = options.testTone
+            sound = s
+            rm_host_send_message(host, HostSound.format)
+            hostLog("host: sound on for the device (this Mac's own speakers keep playing)")
+        }
+    }
+
+    /// One of the client's feature messages: configure, sound.
     private func message(_ m: [String: Any]) {
+        if m["t"] as? String == "sound" { return setSound(m["on"] as? Bool ?? false) }
         guard m["t"] as? String == "configure", let host, let old = picture else { return }
         if let b = (m["bitrate"] as? NSNumber)?.intValue {
             limit = max(0, b)
@@ -330,6 +360,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         fill(&accept, now)
         if rm_host_restart(host, &accept) == 0 { hostLog("host: configure: the core didn't restart the stream") }
         rm_host_send_message(host, "{\"t\":\"status\",\"bitrate\":\(bitrate(for: now))}")
+        // What was on stays on across the new picture, and the device hears the format again.
+        soundQueue.sync { if sound != nil { rm_host_send_message(host, HostSound.format) } }
         let summary = Client(name: clientName, width: now.width, height: now.height, refresh: now.fps, placement: now.placement)
         DispatchQueue.main.async { self.onClient?(summary) }
     }
@@ -360,6 +392,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private func clientLeft() {
         hostLog("host: client left")
         picture = nil
+        soundQueue.sync { sound = nil }
         DispatchQueue.main.async {
             self.teardown()
             self.onClient?(nil)
@@ -425,6 +458,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: config, delegate: self)
         do {
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: frames)
+            try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: soundQueue)
             try await s.startCapture()
         } catch {
             return "screen capture failed: \(error.localizedDescription)"
@@ -462,6 +496,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         config.colorSpaceName = CGColorSpace.sRGB
         config.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
         config.showsCursor = !cursorApart
+        // Everything this Mac plays, bar this app; listened to all the time, sent only on request.
+        config.capturesAudio = true
+        config.sampleRate = 48000
+        config.channelCount = 2
+        config.excludesCurrentProcessAudio = true
         return config
     }
 
@@ -611,6 +650,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: Frames (the frames queue, then VideoToolbox's thread)
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
+        if type == .audio { return sound?.take(sb) ?? () }  // on the sound queue
         guard type == .screen,
             let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false)
                 as? [[SCStreamFrameInfo: Any]],

@@ -94,6 +94,7 @@ enum Automation {
                 }
             case "--frame-log": frameLog = value()
             case "--placement": placement = ViewerSession.Placement(rawValue: value()) ?? .extend
+            case "--mute": SoundPlayer.silent = ["yes", "1", "true"].contains(value())
             case "--verbose": verbose = ["yes", "1", "true"].contains(value())
             case "--bench": bench = value()
             case "--exit": exitAfter = ["yes", "1", "true"].contains(value())
@@ -235,6 +236,7 @@ enum Automation {
                 case "file": DispatchQueue.main.sync { session.send(file: resolve(arg.trimmingCharacters(in: .whitespaces))) }
                 case "camera": DispatchQueue.main.sync { session.setCamera(arg.contains("on")) }
                 case "camerareport": print("remoteman: camera: \(DispatchQueue.main.sync { session.cameraReport })")
+                case "tone" where n.count == 1: print("remoteman: tone: \(DispatchQueue.main.sync { TestTone.play(seconds: Double(n[0])) })")
                 case "soundreport": print("remoteman: sound: \(DispatchQueue.main.sync { session.soundReport })")
                 case "cliplog": print("remoteman: clipboard log\n  " + DispatchQueue.main.sync { session.clipboardLog }.joined(separator: "\n  "))
                 case "copy":
