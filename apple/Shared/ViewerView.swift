@@ -325,6 +325,12 @@ final class RefreshMeter {
             // The iPad's own pointer is hidden over the stream; the host's cursor is drawn in
             // its place, at the pointer's position (see below).
             addInteraction(UIPointerInteraction(delegate: self))
+            // Three fingers tapped anywhere: the session's controls. One and two fingers belong
+            // to the computer; the three that made the tap are taken back from it.
+            let three = UITapGestureRecognizer(target: self, action: #selector(threeFingers))
+            three.numberOfTouchesRequired = 3
+            three.cancelsTouchesInView = true
+            addGestureRecognizer(three)
             cursorView.isHidden = true
             cursorView.isUserInteractionEnabled = false
             addSubview(cursorView)
@@ -390,6 +396,40 @@ final class RefreshMeter {
         required init?(coder: NSCoder) { fatalError() }
 
         override var canBecomeFirstResponder: Bool { true }
+
+        @objc private func threeFingers() { session.toggleControls?() }
+
+        /// The system's own three-finger gestures for text (undo, copy, paste) stay out of it.
+        override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
+
+        // MARK: Shortcuts that stay on this device (shown when Command is held)
+
+        /// Control-Option-Command with M shows or hides the controls, with D disconnects: three
+        /// modifiers together are nothing a desktop is likely to want, and nothing iPadOS takes.
+        private static let localKeys: [UIKeyboardHIDUsage: Int] = [.keyboardM: 0, .keyboardD: 1]
+        private var keysDown: Set<UInt16> = []
+        private var lastLocal: CFTimeInterval = 0
+
+        override var keyCommands: [UIKeyCommand]? {
+            let flags: UIKeyModifierFlags = [.control, .alternate, .command]
+            let show = UIKeyCommand(title: "Show or Hide Session Controls", action: #selector(localShortcut(_:)), input: "m", modifierFlags: flags)
+            let leave = UIKeyCommand(title: "Disconnect", action: #selector(localShortcut(_:)), input: "d", modifierFlags: flags)
+            for c in [show, leave] { c.wantsPriorityOverSystemBehavior = true }
+            return [show, leave]
+        }
+
+        @objc private func localShortcut(_ command: UIKeyCommand) { runLocal(command.input == "d" ? 1 : 0) }
+
+        private func runLocal(_ which: Int) {
+            // The key press and the key command both lead here: once is enough.
+            let now = CACurrentMediaTime()
+            guard now - lastLocal > 0.3 else { return }
+            lastLocal = now
+            // The modifiers went to the computer as they were pressed: let them go there.
+            for usage in keysDown { session.input?.key(usage: usage, down: false) }
+            keysDown = []
+            if which == 0 { session.toggleControls?() } else { session.leaveRequested?() }
+        }
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
@@ -580,8 +620,16 @@ final class RefreshMeter {
             var handled = false
             for p in presses {
                 guard let k = p.key else { continue }
+                // A shortcut of this app's own: it doesn't go to the computer.
+                if k.modifierFlags.isSuperset(of: [.control, .alternate, .command]), let which = Self.localKeys[k.keyCode] {
+                    if down { runLocal(which) }
+                    handled = true
+                    continue
+                }
                 flushPointer()
-                session.input?.key(usage: UInt16(k.keyCode.rawValue), down: down)
+                let usage = UInt16(k.keyCode.rawValue)
+                if down { keysDown.insert(usage) } else if keysDown.remove(usage) == nil { handled = true; continue }
+                session.input?.key(usage: usage, down: down)
                 handled = true
             }
             return handled

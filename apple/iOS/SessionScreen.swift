@@ -7,16 +7,20 @@ import SwiftUI
 struct SessionScreen: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var session: ViewerSession
-    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var keyboardShown = false
-    @State private var barShown = GCKeyboard.coalesced == nil
+    /// The controls are folded into the handle until asked for.
+    @State private var expanded = false
     @State private var displayMenu = false
-    @State private var phoneControls = false
     @State private var pictureMenu = false
     @State private var pickingFiles = false
+    @State private var leaving = false
+    @State private var hint = false
     @StateObject private var keys = KeyStrip()
+    @AppStorage(SessionHandle.shownKey) private var showHandle = true
+    @AppStorage(SessionHandle.edgeKey) private var handleEdge = ""
 
-    private var pad: Bool { sizeClass == .regular }
+    // By the kind of device, not the width: a large iPhone on its side is still an iPhone.
+    private var pad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
     private var name: String { model.current?.name ?? session.client?.host.name ?? "Computer" }
 
     var body: some View {
@@ -27,22 +31,51 @@ struct SessionScreen: View {
             if model.current != nil { chrome }
         }
         .environment(\.colorScheme, .dark)
-        .onAppear { keys.session = session }
-        .onDisappear { keys.releaseAll() }
-        .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidConnect)) { _ in barShown = false }
-        .onReceive(NotificationCenter.default.publisher(for: .GCKeyboardDidDisconnect)) { _ in barShown = true }
-        .sheet(isPresented: $phoneControls) { phoneSheet }
+        .onAppear {
+            keys.session = session
+            // A three-finger tap, or the keyboard, asks for the controls from the picture itself.
+            session.toggleControls = { withAnimation(.snappy) { expanded.toggle() } }
+            session.leaveRequested = { leave() }
+            if model.current != nil, !UserDefaults.standard.bool(forKey: SessionHandle.hintKey) {
+                UserDefaults.standard.set(true, forKey: SessionHandle.hintKey)
+                hint = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6) { withAnimation { hint = false } }
+            }
+        }
+        .onDisappear {
+            keys.releaseAll()
+            session.toggleControls = nil
+            session.leaveRequested = nil
+        }
+        .sheet(isPresented: Binding(get: { expanded && !pad }, set: { if !$0 { expanded = false } })) { phoneSheet }
         .overlay(alignment: .bottom) { if model.current != nil { SessionNotes().padding(.bottom, keyboardShown ? 76 : 30) } }
         // Above the sheet too, so that the iPhone's Files tile can open it.
         .background(
             Color.clear.fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
                 if case .success(let urls) = result { urls.forEach { session.send(file: $0) } }
             })
+        .alert("A file is still on its way", isPresented: $leaving) {
+            Button("Disconnect", role: .destructive) { model.disconnect() }
+            Button("Stay", role: .cancel) {}
+        } message: {
+            Text("Disconnecting now stops it.")
+        }
+    }
+
+    /// Back to the list of computers. Asks only when something would be lost.
+    private func leave() {
+        if session.transfers.contains(where: { $0.state == .moving }) {
+            expanded = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { leaving = true }
+        } else {
+            expanded = false
+            model.disconnect()
+        }
     }
 
     private func pickFiles() {
-        if phoneControls {
-            phoneControls = false
+        if expanded, !pad {
+            expanded = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { pickingFiles = true }
         } else {
             pickingFiles = true
@@ -51,35 +84,23 @@ struct SessionScreen: View {
 
     @ViewBuilder
     private var chrome: some View {
-        if pad {
+        let low = handleEdge == SessionHandle.Edge.bottom.rawValue
+        ZStack {
+            // A touch outside the open bar folds it away (and goes no further).
+            if expanded, pad {
+                Color.black.opacity(0.001).ignoresSafeArea().onTapGesture { withAnimation(.snappy) { expanded = false } }
+            }
             VStack(spacing: 0) {
-                if barShown {
-                    padBar.padding(.top, 14).transition(.move(edge: .top).combined(with: .opacity))
-                } else {
-                    Button { withAnimation(.snappy) { barShown = true } } label: {
-                        Capsule().fill(.white.opacity(0.45)).frame(width: 40, height: 5).padding(.vertical, 14).padding(.horizontal, 30)
-                    }
-                    .accessibilityLabel("Show session controls")
-                }
+                if pad, expanded, !low { padBar.padding(.top, 14).transition(.move(edge: .top).combined(with: .opacity)) }
                 Spacer()
-                if keyboardShown { keyStrip.padding(.bottom, 8) }
+                if session.showStats, !pad { HUD().padding(.bottom, keyboardShown ? 8 : 104) }
+                if pad, keyboardShown { keyStrip.padding(.bottom, 8) }
+                if pad, expanded, low { padBar.padding(.bottom, 14).transition(.move(edge: .bottom).combined(with: .opacity)) }
             }
-            .overlay(alignment: .topTrailing) { if session.showStats { HUD().padding(.top, barShown ? 88 : 20).padding(.trailing, 20) } }
-        } else {
-            VStack {
-                Button { phoneControls = true } label: {
-                    HStack(spacing: 8) {
-                        Circle().fill(Color(hex: 0x45D166)).frame(width: 9, height: 9)
-                        Text(name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
-                        Image(systemName: "chevron.down").font(.system(size: 12, weight: .bold)).foregroundStyle(.white.opacity(0.7))
-                    }
-                    .foregroundStyle(.white).padding(.horizontal, 16).frame(height: 44).sessionGlass(radius: 22)
-                }
-                .accessibilityLabel("Show session controls")
-                .padding(.top, 54)
-                Spacer()
-                if session.showStats { HUD().padding(.bottom, keyboardShown ? 8 : 104) }
+            .overlay(alignment: .topTrailing) {
+                if session.showStats, pad { HUD().padding(.top, expanded && !low ? 88 : 20).padding(.trailing, 20) }
             }
+            if showHandle { SessionHandle(expanded: $expanded, pad: pad, hint: hint) }
         }
     }
 
@@ -87,6 +108,9 @@ struct SessionScreen: View {
 
     private var padBar: some View {
         HStack(spacing: 6) {
+            Button("Disconnect") { leave() }
+                .font(.system(size: 15, weight: .medium)).foregroundStyle(Theme.sessionRed).padding(.horizontal, 12).frame(height: 44)
+            separator
             VStack(alignment: .leading, spacing: 0) {
                 Text(name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
                 Text(subtitle).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.78)).lineLimit(1)
@@ -123,12 +147,7 @@ struct SessionScreen: View {
             icon("arrow.up.arrow.down", "Send files to the computer", active: false) { pickFiles() }
                 .available(Features.files && session.has("files"))
             icon("gauge.with.dots.needle.33percent", "Show performance figures", active: session.showStats) { session.showStats.toggle() }
-            separator
-            Button("Disconnect") { model.disconnect() }
-                .font(.system(size: 15, weight: .medium)).foregroundStyle(Theme.sessionRed).padding(.horizontal, 12).frame(height: 44)
-            if GCKeyboard.coalesced != nil {
-                icon("chevron.up", "Hide session controls", active: false) { withAnimation(.snappy) { barShown = false } }
-            }
+            icon("chevron.up", "Hide session controls", active: false) { withAnimation(.snappy) { expanded = false } }
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 8).frame(height: 60)
@@ -154,11 +173,13 @@ struct SessionScreen: View {
         Button(action: action) {
             HStack(spacing: 7) {
                 Image(systemName: symbol).font(.system(size: 17))
-                Text(title).font(.system(size: 15, weight: .medium))
+                // The words go when the iPad is upright and the bar would not fit with them.
+                if UIScreen.main.bounds.width >= 1150 { Text(title).font(.system(size: 15, weight: .medium)).lineLimit(1).fixedSize() }
             }
             .padding(.horizontal, 12).frame(height: 44)
             .background(active ? .white.opacity(0.20) : .clear, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         }
+        .accessibilityLabel(title)
     }
 
     // MARK: Key strip
@@ -193,19 +214,25 @@ struct SessionScreen: View {
     // MARK: iPhone controls sheet
 
     private var phoneSheet: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
+            HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(name).font(Theme.headline)
+                    Text(name).font(Theme.headline).lineLimit(1)
                     Text(subtitle).font(Theme.footnote).foregroundStyle(Theme.secondary)
                 }
-                Spacer()
-                CircleButton(icon: "xmark", label: "Close controls") { phoneControls = false }
+                Spacer(minLength: 4)
+                // First among the controls: back to the list of computers in two taps.
+                Button("Disconnect") { leave() }
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(Theme.sessionRed)
+                    .padding(.horizontal, 14).frame(height: 44)
+                    .background(Theme.fill, in: Capsule())
+                CircleButton(icon: "xmark", label: "Close controls") { expanded = false }
             }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                 tile("keyboard", "Keyboard", on: keyboardShown) {
                     keyboardShown.toggle()
-                    phoneControls = false
+                    expanded = false
                 }
                 tile("speaker.wave.2", "Sound", on: session.soundOn) { Haptics.toggle(!session.soundOn); session.setSound(!session.soundOn) }
                     .available(Features.sound && session.has("sound"))
@@ -240,16 +267,16 @@ struct SessionScreen: View {
                 Row(title: "Show figures", last: true) { Toggle("", isOn: $session.showStats).labelsHidden() }
             }
             .background(Theme.fill, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
-            Button("Disconnect") {
-                phoneControls = false
-                model.disconnect()
-            }
-            .buttonStyle(WideButtonStyle(kind: .destructive))
         }
         .padding(20)
+        }
         .presentationDetents([.medium, .large])
         .presentationCornerRadius(38)
         .presentationDragIndicator(.visible)
+        // A dark, solid sheet whichever way the phone is held (on its side the sheet fills the
+        // screen, and the system's own light background made the white labels unreadable).
+        .presentationBackground(Color(hex: 0x1C1C1E))
+        .preferredColorScheme(.dark)
         .environment(\.colorScheme, .dark)
     }
 
@@ -269,7 +296,139 @@ struct SessionScreen: View {
     private var placement: Binding<ViewerSession.Placement> {
         Binding(
             get: { model.current?.placementChoice ?? .extend },
-            set: { new in if model.setPlacement(new) { phoneControls = false } })
+            set: { new in if model.setPlacement(new) { expanded = false } })
+    }
+}
+
+/// The session's handle: a small pill at an edge of the picture, always there during a
+/// session (unless switched off in Settings). A tap opens the controls; a drag moves it along
+/// the edges, and it stays where it was put on this device. It fades when left alone, and its
+/// touches never reach the computer.
+struct SessionHandle: View {
+    enum Edge: String { case top, bottom, leading, trailing }
+    static let shownKey = "showSessionHandle", edgeKey = "sessionHandleEdge", alongKey = "sessionHandleAlong", hintKey = "sessionHandleHintShown"
+
+    @Binding var expanded: Bool
+    let pad: Bool
+    let hint: Bool
+    @AppStorage(SessionHandle.edgeKey) private var edgeRaw = ""
+    @AppStorage(SessionHandle.alongKey) private var along = -1.0
+    @State private var finger: CGPoint?
+    @State private var moved = false
+    @State private var touched = Date()
+    @State private var faded = false
+
+    // The top edge's middle on iPad; the trailing edge on iPhone, a third of the way down.
+    private var edge: Edge { Edge(rawValue: edgeRaw) ?? (pad ? .top : .trailing) }
+    private var fraction: Double { along >= 0 ? along : (pad ? 0.5 : 0.33) }
+
+    /// The screen's own margins (the notch, the home indicator): the session's picture ignores
+    /// them, the handle keeps clear of them.
+    private var insets: UIEdgeInsets {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        return scene?.windows.first(where: { $0.isKeyWindow })?.safeAreaInsets ?? scene?.windows.first?.safeAreaInsets ?? .zero
+    }
+
+    /// The rectangle the handle's centre runs along.
+    private func track(_ size: CGSize) -> CGRect {
+        let i = insets
+        let m: CGFloat = 16
+        return CGRect(
+            x: i.left + m, y: i.top + m, width: max(1, size.width - i.left - i.right - 2 * m), height: max(1, size.height - i.top - i.bottom - 2 * m))
+    }
+
+    private func point(_ size: CGSize) -> CGPoint {
+        let r = track(size)
+        switch edge {
+        case .top: return CGPoint(x: r.minX + r.width * fraction, y: r.minY)
+        case .bottom: return CGPoint(x: r.minX + r.width * fraction, y: r.maxY)
+        case .leading: return CGPoint(x: r.minX, y: r.minY + r.height * fraction)
+        case .trailing: return CGPoint(x: r.maxX, y: r.minY + r.height * fraction)
+        }
+    }
+
+    /// Let go at `p`: the nearest edge takes the handle, at the place along it nearest `p`.
+    private func drop(_ p: CGPoint, _ size: CGSize) {
+        let r = track(size)
+        let d: [(Edge, CGFloat)] = [(.top, abs(p.y - r.minY)), (.bottom, abs(p.y - r.maxY)), (.leading, abs(p.x - r.minX)), (.trailing, abs(p.x - r.maxX))]
+        let nearest = d.min { $0.1 < $1.1 }!.0
+        let f = nearest == .top || nearest == .bottom ? (p.x - r.minX) / r.width : (p.y - r.minY) / r.height
+        edgeRaw = nearest.rawValue
+        along = Double(min(max(f, 0.06), 0.94))
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let at = finger ?? point(geo.size)
+            let upright = finger == nil && (edge == .leading || edge == .trailing)
+            ZStack {
+                Capsule()
+                    .fill(.white.opacity(0.92))
+                    .overlay(Capsule().strokeBorder(.black.opacity(0.35), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.5), radius: 3)
+                    .frame(width: upright ? 7 : 40, height: upright ? 40 : 7)
+            }
+            // What the finger has to hit is larger than what is drawn.
+            .frame(width: upright ? 44 : 60, height: upright ? 60 : 44)
+            .contentShape(Rectangle())
+            .opacity(faded && finger == nil && !expanded ? 0.3 : 1)
+            .position(at)
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .named("handle"))
+                    .onChanged { g in
+                        touched = Date()
+                        faded = false
+                        if hypot(g.translation.width, g.translation.height) > 10 { moved = true }
+                        if moved { finger = g.location }
+                    }
+                    .onEnded { g in
+                        if moved {
+                            withAnimation(.snappy) {
+                                drop(g.location, geo.size)
+                                finger = nil
+                            }
+                            Haptics.choice()
+                        } else {
+                            Haptics.key()
+                            withAnimation(.snappy) { expanded.toggle() }
+                        }
+                        moved = false
+                        touched = Date()
+                    })
+            .accessibilityLabel(expanded ? "Hide session controls" : "Show session controls")
+            .accessibilityAddTraits(.isButton)
+            .overlay {
+                if hint {
+                    Text("Tap for controls · a three-finger tap also works")
+                        .font(.system(size: 13, weight: .medium)).foregroundStyle(.white)
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .sessionGlass(radius: 16)
+                        .fixedSize()
+                        .position(hintPoint(at, geo.size))
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+        }
+        .coordinateSpace(name: "handle")
+        .ignoresSafeArea()
+        .task(id: touched) {
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            if !Task.isCancelled { withAnimation(.easeOut(duration: 0.6)) { faded = true } }
+        }
+    }
+
+    /// Beside the handle, towards the middle of the screen, and inside it.
+    private func hintPoint(_ at: CGPoint, _ size: CGSize) -> CGPoint {
+        var p = at
+        switch edge {
+        case .top: p.y += 44
+        case .bottom: p.y -= 44
+        case .leading: p.x += 190
+        case .trailing: p.x -= 190
+        }
+        p.x = min(max(p.x, 180), size.width - 180)
+        return p
     }
 }
 

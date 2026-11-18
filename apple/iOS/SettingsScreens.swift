@@ -135,6 +135,7 @@ struct SettingsScreen: View {
     @EnvironmentObject private var store: ComputerStore
     @Environment(\.dismiss) private var dismiss
     @AppStorage("figuresInNewSessions") private var figures = false
+    @AppStorage(SessionHandle.shownKey) private var showHandle = true
     @State private var editing: Computer?
     private var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
 
@@ -170,6 +171,12 @@ struct SettingsScreen: View {
                         Row(title: "Pinch to zoom the view") { Toggle("", isOn: .constant(true)).labelsHidden() }
                             .available(Features.pointerOptions)
                         Row(title: "Pointer speed", last: true) { RowValue(text: "Medium", chevron: true) }.available(Features.pointerOptions)
+                    }
+                    InsetGroup(
+                        header: "During a session",
+                        footer: "The handle is the small bar at the edge of the picture; tap it for the controls, drag it to move it. With it off, tap with three fingers, or press Control-Option-Command-M on a keyboard."
+                    ) {
+                        Row(title: "Show the session handle", last: true) { Toggle("", isOn: $showHandle).labelsHidden() }
                     }
                     InsetGroup(header: "Picture and sound") {
                         Row(title: "Default quality") { RowValue(text: "Automatic", chevron: true) }.available(Features.pictureQuality)

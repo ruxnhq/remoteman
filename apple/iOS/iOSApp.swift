@@ -180,6 +180,16 @@ struct RootView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             let d = DeviceDisplay.current(for: full, displayScale: UIScreen.main.scale, measured: session.refreshMeter.rate)
             model.display = d
+            if CommandLine.arguments.contains("--demo-session") {
+                // The session screen with its controls and no computer behind it.
+                model.current = Computer(name: "Demo computer", address: "demo")
+                session.demo(name: "Demo computer")
+                // --demo-expanded: with the controls open, for a picture where nothing can tap.
+                if CommandLine.arguments.contains("--demo-expanded") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { session.toggleControls?() }
+                }
+                return
+            }
             Automation.run(session: session, display: d)
         }
     }

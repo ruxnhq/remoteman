@@ -57,6 +57,11 @@ final class ViewerSession: ObservableObject {
     /// The display link's real rate, measured while the connect form is showing.
     let refreshMeter = RefreshMeter()
     private(set) var client: CoreClient?
+    /// Asked from the picture itself (a three-finger tap, a keyboard shortcut): show or hide the
+    /// session's controls, and leave the session. Set by the screen that has the controls.
+    var toggleControls: (() -> Void)?
+    var leaveRequested: (() -> Void)?
+
     /// Look, don't touch: with this on, no pointer, key or touch event leaves the app.
     @Published var viewOnly = false
     /// Set while a modifier is latched on the key strip: text typed on the on-screen keyboard
@@ -435,6 +440,14 @@ final class ViewerSession: ObservableObject {
                 }
             }
         }
+    }
+
+    /// For trying the session's controls where there is no picture to show (the simulator has
+    /// no hardware decoder): a session with nothing behind it.
+    func demo(name: String) {
+        guard !isActive else { return }
+        generation += 1
+        state = .streaming(name)
     }
 
     /// Play a recording at its own rate, over and over.
