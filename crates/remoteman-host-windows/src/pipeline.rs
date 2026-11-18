@@ -347,6 +347,13 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
                 quiet_since = Instant::now();
                 Some(us)
             }
+            // Asked for the newest frame whatever its state and didn't get it: the driver
+            // is writing into that very texture. Ask again in a moment.
+            Take::Nothing if again => {
+                p.again = true;
+                std::thread::sleep(Duration::from_millis(5));
+                None
+            }
             Take::Nothing => None,
             Take::Stale => {
                 afresh |= p.reopen(s, link, rate)?;

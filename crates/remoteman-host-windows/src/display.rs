@@ -227,10 +227,14 @@ impl Screen {
     }
 
     /// Have the driver offer one more mode. It takes a whole new list, so it is given what the
-    /// monitor offers now with the new mode at the end (the first stays the preferred one), and
-    /// re-creates the monitor to tell Windows; wait until Windows lists the mode.
+    /// monitor offers now with the new mode at the end, and re-creates the monitor to tell
+    /// Windows; wait until Windows lists the mode. The list's first mode is the monitor's
+    /// preferred one, which Windows may fall back to when the monitor comes back: that is made
+    /// the mode it is in now, so that nothing changes by itself. The driver keeps the list in
+    /// memory only; restarting the driver brings back the one from its settings file.
     fn add_mode(&mut self, want: Mode, offered: &[Mode]) -> Result<()> {
-        let mut list: Vec<(u32, u32, u32)> = offered.iter().map(|m| (m.width, m.height, m.refresh)).collect();
+        let (now, _) = self.now()?;
+        let mut list: Vec<(u32, u32, u32)> = std::iter::once(&now).chain(offered.iter().filter(|m| **m != now)).map(|m| (m.width, m.height, m.refresh)).collect();
         // The driver keeps the first and the newest 95; drop from the middle ourselves so that
         // what is sent is what it keeps.
         if list.len() > 95 {
