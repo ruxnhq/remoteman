@@ -116,7 +116,7 @@ fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id("dev.remoteman.Viewer").flags(gio::ApplicationFlags::NON_UNIQUE).build();
     // The desktop takes the window's icon from the launcher entry of the same name; this is for
     // the places that ask the window itself (the About dialog, X11).
-    gtk::Window::set_default_icon_name("dev.remoteman.Viewer");
+    app.connect_startup(|_| gtk::Window::set_default_icon_name("dev.remoteman.Viewer"));
     app.connect_activate(move |app| window::build(app, args.clone()));
     app.run_with_args::<&str>(&[])
 }
