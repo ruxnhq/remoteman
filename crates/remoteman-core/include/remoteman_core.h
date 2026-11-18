@@ -62,7 +62,19 @@ typedef struct rm_callbacks {
     // flight apart. Pointers are valid only during the call.
     void (*on_blob)(void *ctx, uint8_t what, uint32_t id, uint8_t kind, const char *header,
                     const uint8_t *data, size_t len, uint8_t complete);
+    // How far connecting has got: 0 looking the host up, 1 reaching it and checking identities
+    // (pairing happens here), 2 saying hello, 3 the host is making the display. Called on the
+    // thread inside rm_client_connect, before it returns; if it fails, the last stage given is
+    // the one that failed. After 3 come on_stream and the first on_frame.
+    void (*on_stage)(void *ctx, uint8_t stage);
 } rm_callbacks;
+
+// Forget a host this device paired with (`host` as given to rm_client_connect): its key is
+// thrown away, so connecting again needs pairing again. 1 forgotten, 0 it wasn't known, -1 it
+// couldn't be removed. The host still trusts this device until it is revoked there.
+int32_t rm_forget_host(const char *state_dir, const char *host);
+// Whether this device has paired with `host`: 1 or 0.
+int32_t rm_knows_host(const char *state_dir, const char *host);
 
 // Connect to `host` ("name:port") and say hello. Blocks until the host answers, so call it off
 // the main thread. `state_dir` holds this device's identity and the hosts it knows; `name` is
@@ -205,6 +217,19 @@ void rm_host_info(const rm_host *host, char *out, size_t len);
 // Pairing: let the next unknown device in (it is remembered and pairing turns itself off).
 void rm_host_set_pairing(const rm_host *host, int32_t on);
 int32_t rm_host_pairing(const rm_host *host);
+
+// The devices this host trusts, as JSON copied into `out`, in the order they were paired:
+// [{"fingerprint":"...","name":"...","connected":false}]. `name` is what the device called
+// itself in its last hello (the address it paired from until then). Returns the length of the
+// whole text; if that is `len` or more it was cut short: call again with a larger buffer.
+size_t rm_host_devices(const rm_host *host, char *out, size_t len);
+// Stop trusting a device. It is dropped if it is the one connected (its on_closed reason says
+// so) and refused from now on until paired again. 1 done, 0 it wasn't trusted, -1 the list
+// couldn't be saved.
+int32_t rm_host_revoke(const rm_host *host, const char *fingerprint);
+// Drop the connected client and keep listening; it stays trusted. 1 if there was one. The
+// host's on_left follows as for any client that goes.
+int32_t rm_host_drop_client(const rm_host *host);
 
 // The connected client's session clock in microseconds: stamp each frame with it at capture.
 // 0 when no client is connected.

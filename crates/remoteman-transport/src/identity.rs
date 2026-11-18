@@ -100,11 +100,44 @@ impl Trust {
         if !e.iter().any(|(f, _)| f == fp) {
             e.push((fp.to_owned(), name.replace('\n', " ")));
         }
+        self.save(&e)
+    }
+
+    /// Every trusted fingerprint with the name it is kept under, oldest first.
+    pub fn list(&self) -> Vec<(String, String)> {
+        self.entries.lock().unwrap().clone()
+    }
+
+    /// Keep `fp` under `name` from now on. Says whether `fp` is trusted at all.
+    pub fn rename(&self, fp: &str, name: &str) -> Result<bool> {
+        let mut e = self.entries.lock().unwrap();
+        let Some(entry) = e.iter_mut().find(|(f, _)| f == fp) else { return Ok(false) };
+        let name = name.replace('\n', " ");
+        if entry.1 != name {
+            entry.1 = name;
+            self.save(&e)?;
+        }
+        Ok(true)
+    }
+
+    /// Stop trusting `fp`: its next handshake is refused. Says whether it was trusted.
+    pub fn remove(&self, fp: &str) -> Result<bool> {
+        let mut e = self.entries.lock().unwrap();
+        let before = e.len();
+        e.retain(|(f, _)| f != fp);
+        if e.len() == before {
+            return Ok(false);
+        }
+        self.save(&e)?;
+        Ok(true)
+    }
+
+    fn save(&self, entries: &[(String, String)]) -> Result<()> {
         if let Some(path) = &self.path {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            let text: String = e.iter().map(|(f, n)| format!("{f} {n}\n")).collect();
+            let text: String = entries.iter().map(|(f, n)| format!("{f} {n}\n")).collect();
             std::fs::write(path, text).with_context(|| format!("write {}", path.display()))?;
         }
         Ok(())

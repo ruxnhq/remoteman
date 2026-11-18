@@ -35,6 +35,11 @@ pub struct RmCallbacks {
     /// content (`data`, `len`); 2: closed (`complete` 1 if it is all there). `id` tells blobs
     /// apart. Pointers are valid only during the call.
     pub on_blob: Option<extern "C" fn(ctx: *mut c_void, what: u8, id: u32, kind: u8, header: *const c_char, data: *const u8, len: usize, complete: u8)>,
+    /// How far connecting has got: 0 looking the host up, 1 reaching it and checking
+    /// identities, 2 saying hello, 3 the host is making the display. Called on the thread
+    /// inside `rm_client_connect`, before it returns; if it fails, the last stage given is the
+    /// one that failed. After 3 come `on_stream` and the first `on_frame`.
+    pub on_stage: Option<extern "C" fn(ctx: *mut c_void, stage: u8)>,
 }
 
 // SAFETY: the app promises its context may be used from another thread, one call at a time.
@@ -103,12 +108,43 @@ impl Handler for RmCallbacks {
         }
     }
 
+    fn stage(&mut self, stage: crate::Stage) {
+        if let Some(f) = self.on_stage {
+            f(self.ctx, stage as u8);
+        }
+    }
+
     fn closed(&mut self, reason: &str) {
         if let Some(f) = self.on_closed {
             let reason = CString::new(reason.replace('\0', " ")).unwrap_or_default();
             f(self.ctx, reason.as_ptr());
         }
     }
+}
+
+/// Forget a host this device paired with: `host` as it was given to `rm_client_connect`. Its
+/// key is thrown away, so connecting again needs pairing again. 1 forgotten, 0 it wasn't
+/// known, -1 it couldn't be removed. The host still trusts this device until revoked there.
+///
+/// # Safety
+/// Both must be valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_forget_host(state_dir: *const c_char, host: *const c_char) -> i32 {
+    let (state, host) = unsafe { (text(state_dir), text(host)) };
+    match crate::forget_host(std::path::Path::new(&state), &host) {
+        Ok(known) => known as i32,
+        Err(_) => -1,
+    }
+}
+
+/// Whether this device has paired with `host`: 1 or 0.
+///
+/// # Safety
+/// Both must be valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_knows_host(state_dir: *const c_char, host: *const c_char) -> i32 {
+    let (state, host) = unsafe { (text(state_dir), text(host)) };
+    crate::knows_host(std::path::Path::new(&state), &host) as i32
 }
 
 unsafe fn text(p: *const c_char) -> String {
@@ -631,6 +667,44 @@ pub unsafe extern "C" fn rm_host_start(
 pub unsafe extern "C" fn rm_host_info(host: *const Host, out: *mut c_char, len: usize) {
     let h = unsafe { &*host };
     report(out, len, &format!("{}\t{}", h.address, h.fingerprint));
+}
+
+/// The devices this host trusts, as JSON copied into `out`:
+/// `[{"fingerprint":"...","name":"...","connected":false}]`, in the order they were paired.
+/// Returns the length of the whole text; if that is `len` or more, it was cut short: call
+/// again with a larger buffer.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `out` must be writable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_devices(host: *const Host, out: *mut c_char, len: usize) -> usize {
+    let json = serde_json::to_string(&unsafe { &*host }.devices()).unwrap_or_else(|_| "[]".into());
+    report(out, len, &json);
+    json.len()
+}
+
+/// Stop trusting the device with this fingerprint. It is dropped if it is the one connected
+/// and refused from now on until paired again. 1 done, 0 it wasn't trusted, -1 the list
+/// couldn't be saved.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `fingerprint` must be a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_revoke(host: *const Host, fingerprint: *const c_char) -> i32 {
+    let fingerprint = unsafe { text(fingerprint) };
+    match unsafe { &*host }.revoke(&fingerprint) {
+        Ok(was) => was as i32,
+        Err(_) => -1,
+    }
+}
+
+/// Drop the connected client and keep listening. It stays trusted. 1 if there was one.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_drop_client(host: *const Host) -> i32 {
+    unsafe { &*host }.drop_client() as i32
 }
 
 /// Let the next unknown device in (it is remembered, and pairing turns itself off), or stop.
