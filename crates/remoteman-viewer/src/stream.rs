@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::Result;
-use remoteman_core::{Client, CursorShape, Display, Frame, Handler, Mode, Options, StreamInfo};
+use remoteman_core::{Client, CursorShape, Display, Frame, Handler, Message, Mode, Options, Packet, StreamInfo};
 
 use crate::decode::{Decoder, Picture};
 
@@ -34,6 +34,8 @@ pub struct Shared {
     pub format: Mutex<Option<(u32, u32, u32)>>,
     /// Bytes of video received since it was last read (for the figures).
     pub bytes: AtomicU64,
+    /// What plays the computer's sound here, while it is on.
+    pub sound: Mutex<Option<remoteman_audio::Player>>,
 }
 
 enum Msg {
@@ -63,6 +65,13 @@ impl Handler for Feed {
         *self.shared.cursor.lock().unwrap() = Some(shape.clone());
     }
 
+    fn sound(&mut self, packet: &Packet) {
+        // The player keeps a few packets ahead and conceals the ones that never come.
+        if let Some(player) = self.shared.sound.lock().unwrap().as_ref() {
+            player.push(remoteman_audio::Packet { seq: packet.seq, capture_us: packet.time_us, data: packet.data.clone() });
+        }
+    }
+
     fn closed(&mut self, reason: &str) {
         *self.shared.closed.lock().unwrap() = Some(reason.to_owned());
     }
@@ -82,6 +91,28 @@ pub struct Request {
 }
 
 impl Session {
+    /// Whether the computer offers a feature (`sound`, `clipboard`, `files`, ...).
+    pub fn offers(&self, feature: &str) -> bool {
+        self.client.host_features.iter().any(|f| f == feature)
+    }
+
+    /// Play the computer's sound on this device's default output, or stop. While it plays
+    /// here the computer's own speakers are silent, if the computer is set up that way.
+    /// `to`: a PipeWire node to play on and no other, instead of the default output.
+    pub fn set_sound(&self, on: bool, to: Option<&str>) -> Result<()> {
+        let mut player = self.shared.sound.lock().unwrap();
+        if on && player.is_none() {
+            *player = Some(remoteman_audio::Player::open("remoteman", to)?);
+        } else if !on {
+            if let Some(p) = player.take() {
+                let s = p.stats();
+                println!("sound: {} packets played, {} concealed, {} late, {} skipped", s.played, s.concealed, s.late, s.skipped);
+            }
+        }
+        self.client.send_message(Message::Sound { on });
+        Ok(())
+    }
+
     /// Connect (this blocks) and start decoding.
     pub fn start(r: Request) -> Result<Self> {
         let shared = Arc::new(Shared::default());

@@ -145,7 +145,7 @@ pub fn preferences(app: &Rc<App>) {
     page.add(&picture);
 
     let media = adw::PreferencesGroup::builder().title("Sound, microphone and camera").description("What a newly paired computer may use. Each computer has its own setting, and every session has its own switches").build();
-    media.add(&gate(switch("Play the computer's sound here", "", false), FEATURES.sound));
+    media.add(&gate(switch("Play the computer's sound here", "", false), FEATURES.sound_setting));
     media.add(&gate(switch("Let the computer use this microphone", "", false), FEATURES.microphone));
     media.add(&gate(switch("Let the computer use this camera", "For calls made on the computer. An indicator shows on both sides while it is in use", false), FEATURES.camera));
     page.add(&media);
@@ -258,7 +258,7 @@ pub fn computer(app: &Rc<App>, address: &str, addresses: bool) {
     page.add(&display);
 
     let media = adw::PreferencesGroup::builder().title("Sound, microphone and camera").description("What this computer may use from this device when a session starts").build();
-    media.add(&gate(switch("Sound", "The computer's sound plays on this device", false), FEATURES.sound));
+    media.add(&gate(switch("Sound", "The computer's sound plays on this device", false), FEATURES.sound_setting));
     media.add(&gate(switch("Microphone", "The computer can use this device's microphone", false), FEATURES.microphone));
     media.add(&gate(switch("Camera", "The computer can use this device's camera, for calls made there", false), FEATURES.camera));
     page.add(&media);

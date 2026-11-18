@@ -15,8 +15,10 @@ pub struct Features {
     pub wake: bool,
     /// Pairing by comparing a six-digit code that both sides show.
     pub pairing_code: bool,
-    /// The computer's sound played here.
+    /// The computer's sound played here: the button in the session's bar.
     pub sound: bool,
+    /// Remembering, for all computers and for each, whether sound starts with the session.
+    pub sound_setting: bool,
     /// This device's microphone used by the computer.
     pub microphone: bool,
     /// This device's camera used by the computer.
@@ -56,7 +58,8 @@ pub const FEATURES: Features = Features {
     presence: false,
     wake: false,
     pairing_code: false,
-    sound: false,
+    sound: true,
+    sound_setting: false,
     microphone: false,
     camera: false,
     clipboard: false,

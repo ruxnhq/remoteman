@@ -136,6 +136,8 @@ pub struct View {
     qualities: [(Quality, Item); 2],
     mirror: Item,
     show_figures: Item,
+    /// Plays the computer's sound here while it is pressed in.
+    pub sound: gtk::ToggleButton,
     pub figures: Figures,
 }
 
@@ -236,6 +238,7 @@ pub fn build(video: &Video) -> View {
         qualities: [(Quality::Automatic, automatic), (Quality::Sharp, sharp)],
         mirror,
         show_figures,
+        sound,
         figures,
     }
 }
@@ -267,6 +270,18 @@ impl View {
     }
 
     /// The stream's size and rate, once known.
+    /// Whether this computer sends its sound: the button is there for those that do. A button
+    /// left pressed in from the session before (the same computer, joined again) stays so.
+    pub fn offer_sound(&self, offered: bool) {
+        if FEATURES.sound {
+            self.sound.set_sensitive(offered);
+            self.sound.set_tooltip_text(Some(if offered { "Sound" } else { "This computer doesn't send its sound" }));
+        }
+        if !offered {
+            self.sound.set_active(false);
+        }
+    }
+
     pub fn set_format(&self, format: Option<(u32, u32, u32)>) {
         if let Some((w, h, hz)) = format {
             self.title.set_subtitle(&format!("{w} × {h} at {hz} Hz"));
@@ -358,6 +373,20 @@ pub fn wire(app: &Rc<App>) {
             }
         });
     }
+    view.sound.connect_toggled({
+        let app = app.clone();
+        move |button| {
+            let on = button.is_active();
+            let failed = match app.session.borrow().as_ref() {
+                Some(session) => session.set_sound(on, app.args.sound_to.as_deref()).err(),
+                None => None,
+            };
+            if let Some(e) = failed {
+                app.toast(&format!("The sound can't be played here: {e:#}"));
+                button.set_active(false);
+            }
+        }
+    });
     view.show_figures.button.connect_clicked({
         let app = app.clone();
         move |_| {

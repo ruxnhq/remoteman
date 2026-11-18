@@ -280,6 +280,16 @@ impl App {
         self.view.show_figures(self.store.borrow().settings.figures);
         self.video.attach(session.shared.clone());
         self.shown_before.set(self.video.shown_total.get());
+        // Sound that was on carries over when the same computer is joined again.
+        self.view.offer_sound(session.offers("sound"));
+        if self.args.sound && session.offers("sound") {
+            self.view.sound.set_active(true);
+        }
+        if self.view.sound.is_active() {
+            if let Err(e) = session.set_sound(true, self.args.sound_to.as_deref()) {
+                self.toast(&format!("The sound can't be played here: {e:#}"));
+            }
+        }
         *self.session.borrow_mut() = Some(session);
         *self.target.borrow_mut() = Some(Target { address: target.address.clone(), name });
         self.ended.borrow_mut().clear();
@@ -332,7 +342,11 @@ impl App {
     fn end(self: &Rc<Self>, stay: bool) -> bool {
         let Some(session) = self.session.borrow_mut().take() else { return false };
         self.video.free_gl();
+        let _ = session.set_sound(false, None);
         session.client.close();
+        if !stay {
+            self.view.sound.set_active(false);
+        }
         if let Some(top) = self.window.surface().and_downcast::<gdk::Toplevel>() {
             top.restore_system_shortcuts();
         }

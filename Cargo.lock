@@ -1413,6 +1413,7 @@ dependencies = [
  "ffmpeg-next",
  "gtk4",
  "libadwaita",
+ "remoteman-audio",
  "remoteman-core",
 ]
 
