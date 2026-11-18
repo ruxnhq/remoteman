@@ -1,0 +1,21 @@
+[package]
+name = "remoteman-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# `remotemand`: the system service of a Linux host. It owns the port, the trust list and every
+# client's connection, and passes each client to the agent in the right desktop session over a
+# Unix socket. It never touches pictures or a session's bus.
+[[bin]]
+name = "remotemand"
+path = "src/main.rs"
+
+[dependencies]
+remoteman-core = { path = "../remoteman-core" }
+anyhow = "1"
+libc = "0.2"
+tokio = { version = "1", features = ["rt", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"

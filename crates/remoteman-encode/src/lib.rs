@@ -16,6 +16,7 @@ struct Cfg {
     preset: u32,
     hdr_pq: u32,
     long_term: u32,
+    short_term: u32,
 }
 
 unsafe extern "C" {
@@ -50,6 +51,10 @@ pub struct Config {
     /// How many long-term reference frames to keep room for: frames the encoder holds on to
     /// when told, to build a later frame from when everything recent was lost on the way.
     pub long_term: u32,
+    /// How many recent frames the encoder keeps to refer to. `None`: the usual four, and for
+    /// large HEVC pictures one long-term frame fewer so the stream's level stays where
+    /// decoders expect it. Said outright, both numbers are taken as they are.
+    pub short_term: Option<u32>,
 }
 
 /// How to encode one frame.
@@ -104,6 +109,7 @@ impl Encoder {
                 preset: cfg.preset,
                 hdr_pq: 0,
                 long_term: cfg.long_term,
+                short_term: cfg.short_term.unwrap_or(0),
             };
             let enc = rm_nvenc_open(cuda, &c, err.as_mut_ptr(), 256);
             if enc.is_null() {

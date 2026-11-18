@@ -27,13 +27,14 @@ pub struct Agent {
     /// For talking to Mutter over D-Bus.
     runtime: tokio::runtime::Runtime,
     bitrate: u32,
+    refs: Option<(u32, u32)>,
     live: Option<Live>,
 }
 
 impl Agent {
-    pub fn new(bitrate: u32) -> anyhow::Result<Self> {
+    pub fn new(bitrate: u32, refs: Option<(u32, u32)>) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name("desktop").enable_all().build()?;
-        Ok(Self { runtime, bitrate, live: None })
+        Ok(Self { runtime, bitrate, refs, live: None })
     }
 }
 
@@ -58,6 +59,7 @@ impl HostHandler for Agent {
             mode,
             bitrate: self.bitrate,
             cursor: client.cursor,
+            refs: self.refs,
         };
         let pipeline = match Pipeline::start(settings, link) {
             Ok(p) => p,

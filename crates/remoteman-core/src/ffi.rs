@@ -14,7 +14,8 @@ pub struct RmCallbacks {
     pub ctx: *mut c_void,
     /// codec: 0 HEVC, 1 AV1. chroma: 420 or 444. hdr: 0 BT.709, 1 BT.2020 PQ.
     pub on_stream: Option<extern "C" fn(ctx: *mut c_void, epoch: u16, codec: u8, chroma: u16, depth: u8, width: u32, height: u32, refresh: u32, hdr: u8)>,
-    /// `data` is valid only during the call. `age_us` is -1 until the clocks have been compared.
+    /// `data` is valid only during the call. `key`: bit 0 a keyframe, bit 1 a recovery point.
+    /// `age_us` is -1 until the clocks have been compared.
     pub on_frame: Option<extern "C" fn(ctx: *mut c_void, data: *const u8, len: usize, key: u8, number: u32, capture_us: u64, age_us: i64)>,
     /// `reason` is valid only during the call. Nothing is called after this.
     pub on_closed: Option<extern "C" fn(ctx: *mut c_void, reason: *const c_char)>,
@@ -39,7 +40,7 @@ impl Handler for RmCallbacks {
 
     fn frame(&mut self, frame: &Frame, age_us: Option<i64>) {
         if let Some(f) = self.on_frame {
-            f(self.ctx, frame.data.as_ptr(), frame.data.len(), frame.key as u8, frame.number, frame.capture_us, age_us.unwrap_or(-1));
+            f(self.ctx, frame.data.as_ptr(), frame.data.len(), frame.key as u8 | (frame.recovery as u8) << 1, frame.number, frame.capture_us, age_us.unwrap_or(-1));
         }
     }
 

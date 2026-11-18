@@ -15,4 +15,6 @@ crate-type = ["lib", "staticlib"]
 remoteman-proto = { path = "../remoteman-proto" }
 remoteman-transport = { path = "../remoteman-transport" }
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }

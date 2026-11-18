@@ -29,7 +29,7 @@ Each message is a `u32` length followed by that many bytes of UTF-8 JSON, an obj
 
 - `{"t":"client_hello","proto":0,"name":"Anna's iPad","display":{"width":2752,"height":2064,"scale":2.0,"refresh":120},"decoders":[{"codec":"av1","chroma":"420","depth":10},{"codec":"hevc","chroma":"444","depth":10},{"codec":"hevc","chroma":"420","depth":10}]}`
   The first message. `display` is the client's screen in pixels, with the scale it wants the desktop drawn at and its refresh rate in Hz. `decoders` lists what it decodes in hardware, most preferred first. An optional `"cursor":true` says the client draws the cursor itself (see Cursor). An optional `"placement"` inside `display` says where the display sits among the host's own screens: `"extend"` (the default: an extra display beside them), `"main"` (the main display, the host's own screens kept on beside it) or `"only"` (the host's own screens off while the client is connected). A host that can do this lists `placement` in its features; one that can't gives an extra display whatever is asked. The host's own layout comes back when the client leaves.
-- `{"t":"lost","first":812,"last":813}`: frames 812 to 813 never arrived whole (`last` is the newest frame number the client has seen). See Video, "Loss".
+- `{"t":"lost","first":812,"last":813,"epoch":1}`: frames 812 to 813 never arrived whole (`last` is the newest frame number the client has seen; `epoch` is the stream epoch the numbers belong to, and a host drops a report about an epoch that is over). See Video, "Loss".
 - `{"t":"keyframe"}`: the client needs a keyframe, with no way round it (at the start of a stream).
 - `{"t":"ping","id":7,"client_us":123456}`: answered at once with `pong`. `client_us` is the client's clock in microseconds.
 
@@ -38,7 +38,7 @@ Each message is a `u32` length followed by that many bytes of UTF-8 JSON, an obj
 - `{"t":"host_hello","proto":0,"name":"blackbox","os":"linux","features":["video","input"]}`
   The answer to `client_hello`. `features` says what this host can do; a client offers only those.
 - `{"t":"stream","epoch":1,"codec":"av1","chroma":"420","depth":10,"width":2752,"height":2064,"refresh":120,"colour":"bt709"}`
-  Sent before the first frame, and again with a higher `epoch` whenever any of it changes. On a new epoch the client drops what it has, sets its decoder up afresh and waits for a keyframe. `colour` is `bt709` (limited range) or `bt2020-pq`.
+  Sent before the first frame, and again with a higher `epoch` whenever any of it changes. On a new epoch the client drops what it has, sets its decoder up afresh and waits for a keyframe. A new epoch can also be a different desktop behind the same connection (a login screen giving way to the session the user logged in to); frame numbers start from 0 again. `colour` is `bt709` (limited range) or `bt2020-pq`.
 - `{"t":"pong","id":7,"client_us":123456,"host_us":987654}`: `host_us` is the host's clock, the same one video capture times use.
 - `{"t":"error","code":"not_paired"|"unsupported"|"busy"|"failed","message":"..."}`, then the host closes.
 

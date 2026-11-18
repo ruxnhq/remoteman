@@ -24,6 +24,8 @@ pub struct Settings {
     pub bitrate: u32,
     /// The client draws the cursor itself: report it apart from the picture.
     pub cursor: bool,
+    /// For trying things out: how many recent and long-term frames the encoder keeps.
+    pub refs: Option<(u32, u32)>,
 }
 
 pub struct Pipeline {
@@ -51,7 +53,7 @@ impl Pipeline {
     /// the one before).
     pub fn start(settings: Settings, link: Link) -> Result<Self> {
         const SLOTS: usize = 4;
-        let Settings { node, width, height, fps, scale, mode, bitrate, cursor } = settings;
+        let Settings { node, width, height, fps, scale, mode, bitrate, cursor, refs } = settings;
         let chroma = match mode.chroma {
             control::Chroma::C420 => Chroma::C420,
             control::Chroma::C444 => Chroma::C444,
@@ -79,7 +81,7 @@ impl Pipeline {
         let out = link.clone();
         let encoder = std::thread::Builder::new().name("encode".into()).spawn(move || {
             let opened = (|| {
-                let mut enc = Encoder::new(&Config { codec, chroma444: chroma == Chroma::C444, width, height, fps, bitrate, preset: 1, long_term: 2 })?;
+                let mut enc = Encoder::new(&Config { codec, chroma444: chroma == Chroma::C444, width, height, fps, bitrate, preset: 1, long_term: refs.map_or(2, |r| r.1), short_term: refs.map(|r| r.0) })?;
                 for (fd, size) in inputs {
                     enc.add_input(fd, size, pitch)?;
                 }

@@ -151,6 +151,11 @@ impl Reassembler {
         Self::default()
     }
 
+    /// The epoch being put together.
+    pub fn epoch(&self) -> u16 {
+        self.epoch
+    }
+
     /// Start a new epoch: everything pending is dropped.
     pub fn reset(&mut self, epoch: u16) {
         self.epoch = epoch;

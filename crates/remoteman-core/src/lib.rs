@@ -7,6 +7,8 @@
 
 pub mod ffi;
 pub mod host;
+#[cfg(unix)]
+pub mod relay;
 
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
@@ -294,7 +296,7 @@ impl Client {
                             // has had time to answer and hasn't).
                             if asked.is_none_or(|t| t.elapsed() > Duration::from_millis(40)) {
                                 let m = match missed {
-                                    Some(first) if !need_key => Message::Lost { first, last: frame.number },
+                                    Some(first) if !need_key => Message::Lost { first, last: frame.number, epoch: Some(r.epoch()) },
                                     _ => Message::Keyframe,
                                 };
                                 let sent = match o_delay {
