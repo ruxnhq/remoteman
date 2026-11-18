@@ -1,0 +1,42 @@
+{
+  "v": 3,
+  "createdOnFiles": {"v": 1, "at": "2026-11-18T12:00:00Z"},
+  "title": "remoteman for Windows",
+  "launch": {"view": "canvas", "page": "viewer"},
+  "pages": [
+    {"id": "viewer", "name": "Viewer"},
+    {"id": "host", "name": "Host"}
+  ],
+  "boards": {
+    "Main.dc.html": {"x": 0, "y": 0, "w": 1040, "h": 700, "title": "Computers", "page": "viewer"},
+    "ViewerPair.dc.html": {"x": 1120, "y": 0, "w": 1040, "h": 700, "title": "Pair a computer", "page": "viewer"},
+    "ViewerStates.dc.html": {"x": 2240, "y": 0, "w": 1280, "h": 700, "title": "Connecting and what can go wrong", "page": "viewer"},
+    "ViewerSession.dc.html": {"x": 0, "y": 820, "w": 1280, "h": 800, "title": "Session, title bar", "page": "viewer"},
+    "ViewerSessionHover.dc.html": {"x": 1360, "y": 820, "w": 1280, "h": 800, "title": "Session, full screen with hover bar", "page": "viewer"},
+    "ViewerMenus.dc.html": {"x": 2720, "y": 820, "w": 1280, "h": 800, "title": "Session menus", "page": "viewer"},
+    "ViewerPrefs.dc.html": {"x": 0, "y": 1740, "w": 960, "h": 1420, "title": "Settings", "page": "viewer"},
+    "ViewerComputer.dc.html": {"x": 1040, "y": 1740, "w": 960, "h": 1100, "title": "Settings for one computer", "page": "viewer"},
+    "HostTray.dc.html": {"x": 0, "y": 0, "w": 1280, "h": 660, "title": "Tray icon and panel", "page": "host"},
+    "HostPair.dc.html": {"x": 1360, "y": 0, "w": 1040, "h": 660, "title": "Pair a device", "page": "host"},
+    "HostFirstRun.dc.html": {"x": 2480, "y": 0, "w": 1040, "h": 660, "title": "First run", "page": "host"},
+    "HostSettings.dc.html": {"x": 0, "y": 780, "w": 960, "h": 1160, "title": "Settings, sharing", "page": "host"},
+    "HostDevices.dc.html": {"x": 1040, "y": 780, "w": 960, "h": 1160, "title": "Settings, devices", "page": "host"}
+  },
+  "order": [
+    "Main.dc.html",
+    "ViewerPair.dc.html",
+    "ViewerStates.dc.html",
+    "ViewerSession.dc.html",
+    "ViewerSessionHover.dc.html",
+    "ViewerMenus.dc.html",
+    "ViewerPrefs.dc.html",
+    "ViewerComputer.dc.html",
+    "HostTray.dc.html",
+    "HostPair.dc.html",
+    "HostFirstRun.dc.html",
+    "HostSettings.dc.html",
+    "HostDevices.dc.html"
+  ],
+  "notes": {},
+  "designSystems": []
+}

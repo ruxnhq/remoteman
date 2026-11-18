@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Settings for one computer</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.rm{--desk:#D5DEF3;--bg:#F3F3F3;--pane:#FAFAFA;--card:#FFFFFF;--line:rgba(0,0,0,.1);--tx:#1B1B1B;--t2:#5A5A5A;--ac:#2458F5;--on:#FFFFFF;--at:#1D4BDB;--sub:rgba(0,0,0,.05);--ok:#0F7B0F;--warn:#8A5200;--bad:#C42B1C;--sh:0 10px 30px rgba(0,0,0,.2);font-family:"Segoe UI Variable Text","Segoe UI",Inter,system-ui,sans-serif;font-size:14px;line-height:20px;color:var(--tx);box-sizing:border-box}
+.rm.dark{--desk:#0B1437;--bg:#202020;--pane:#2A2A2A;--card:#2D2D2D;--line:rgba(255,255,255,.11);--tx:#FFFFFF;--t2:#C8C8C8;--ac:#8AB0FF;--on:#0B1437;--at:#9DBCFF;--sub:rgba(255,255,255,.07);--ok:#6CCB5F;--warn:#F5C26B;--bad:#FF99A4;--sh:0 10px 30px rgba(0,0,0,.55)}
+.rm *{box-sizing:border-box}
+.rm button,.rm input{font:inherit;color:inherit}
+.win{background:var(--bg);border:1px solid var(--line);border-radius:8px;box-shadow:var(--sh);overflow:hidden;display:flex;flex-direction:column}
+.tb{height:40px;display:flex;align-items:center;gap:10px;padding-left:14px;font-size:12px;flex:none}
+.cap{margin-left:auto;display:flex}
+.cap span{width:46px;height:40px;display:flex;align-items:center;justify-content:center}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px}
+.row{display:flex;align-items:center;gap:14px;padding:8px 16px;min-height:52px}
+.row+.row{border-top:1px solid var(--line)}
+.g{flex:1;min-width:0}
+.c{font-size:12px;line-height:16px;color:var(--t2)}
+.h{font-size:14px;font-weight:600;margin:0}
+.btn{height:32px;padding:0 14px;border-radius:4px;border:1px solid var(--line);background:var(--card);display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.btn.bad{color:var(--bad)}
+.cb{height:32px;padding:0 10px;border-radius:4px;border:1px solid var(--line);background:var(--card);display:inline-flex;align-items:center;gap:10px;white-space:nowrap;min-width:190px;justify-content:space-between}
+.tg{width:40px;height:20px;border-radius:10px;border:1px solid var(--t2);background:transparent;position:relative;padding:0;flex:none}
+.tg::after{content:"";position:absolute;left:3px;top:3px;width:12px;height:12px;border-radius:6px;background:var(--t2)}
+.tg.on{background:var(--ac);border-color:var(--ac)}
+.tg.on::after{left:23px;background:var(--on)}
+.ic{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+.sec{display:flex;flex-direction:column;gap:8px}
+</style>
+</helmet>
+<div class="rm {{theme}}" style="width: 960px; height: 1100px; padding: 28px; background: var(--desk); display: flex">
+<div class="win" style="flex: 1">
+<div class="tb">
+<svg class="ic" viewBox="0 0 16 16" role="img" aria-label="Back"><path d="M13 8H3.5M7.5 4l-4 4 4 4"/></svg>
+<span>remoteman</span>
+<div class="cap" aria-hidden="true"><span><svg class="ic" viewBox="0 0 16 16"><path d="M3.5 8h9"/></svg></span><span><svg class="ic" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9"/></svg></span><span><svg class="ic" viewBox="0 0 16 16"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></span></div>
+</div>
+<div style="flex: 1; padding: 8px 40px 28px; display: flex; flex-direction: column; gap: 18px">
+<div><div class="c">Computers ›</div><h1 style="margin: 0; font-size: 28px; line-height: 36px; font-weight: 600">Workshop PC</h1><div class="c">Linux · paired 12 November · last used today</div></div>
+<div class="sec">
+<h2 class="h">Connection</h2>
+<div class="card">
+<div class="row"><label class="g" for="nm">Name</label><input id="nm" value="Workshop PC" style="height: 32px; width: 260px; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--card)"></div>
+<div class="row"><div class="g"><div>Address</div><div class="c">workshop.local · also tried: 192.168.1.20</div></div><button class="btn">Edit address…</button></div>
+<div class="row"><div class="g"><div>Wake it over the network</div><div class="c">When it is asleep and on the same network</div></div><button class="tg on" aria-pressed="true" aria-label="Wake it over the network"></button></div>
+<div class="row"><div class="g"><div>Getting in</div><div class="c">Joins your session there if you are logged in, otherwise shows its login screen</div></div><button class="cb">The computer decides<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+</div>
+</div>
+<div class="sec">
+<h2 class="h">Display</h2>
+<div class="card">
+<div class="row"><div class="g"><div>Where this display sits</div><div class="c">Beside the computer's own displays, which stay on</div></div><button class="cb">Extra display<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+<div class="row"><div class="g">Size</div><button class="cb">Follows the window<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+<div class="row"><div class="g">Picture quality</div><button class="cb">Same as Settings<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+<div class="row"><div class="g">Bitrate limit</div><button class="cb">Automatic<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+</div>
+</div>
+<div class="sec">
+<h2 class="h">Sound and sharing</h2>
+<div class="card">
+<div class="row"><div class="g">Play its sound here</div><button class="cb">Same as Settings<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+<div class="row"><div class="g">Share the clipboard with it</div><button class="tg" aria-pressed="false" aria-label="Share the clipboard with it"></button></div>
+<div class="row"><div class="g"><div>Receive files from it</div><div class="c">Into Downloads</div></div><button class="tg" aria-pressed="false" aria-label="Receive files from it"></button></div>
+</div>
+</div>
+<div class="sec">
+<h2 class="h">Pairing</h2>
+<div class="card">
+<div class="row"><div class="g"><div>Its key</div><div class="c" style="font-family: Consolas, ui-monospace, monospace">7F3A 91C2 04DE B6A8 · the same is shown on Workshop PC</div></div></div>
+<div class="row"><div class="g"><div>Forget this computer</div><div class="c">It has to be paired again before this PC can connect</div></div><button class="btn bad">Forget…</button></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":960,"height":1100}}'>
+class Component extends DCLogic {
+renderVals() {
+return { theme: (this.props.theme ?? 'light') === 'dark' ? 'dark' : 'light' };
+}
+}
+</script>
+</body>
+</html>
