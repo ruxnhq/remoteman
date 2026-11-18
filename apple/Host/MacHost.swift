@@ -61,6 +61,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private var display: RMVirtualDisplay?
     private var stream: SCStream?
     private var previousMain: CGDirectDisplayID?
+    private var mirrored: [CGDirectDisplayID] = []
     private var awake: IOPMAssertionID = 0
     private var statsTimer: Timer?
     private var cursorTimer: Timer?
@@ -101,7 +102,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var err = [CChar](repeating: 0, count: 512)
         guard
             let h = rm_host_start(
-                options.listen, options.stateDir, options.name, "macos", "video,input,cursor", options.pair ? 1 : 0,
+                options.listen, options.stateDir, options.name, "macos", "video,input,cursor,placement", options.pair ? 1 : 0,
                 callbacks, &err, err.count)
         else { throw NSError(domain: "remoteman", code: 1, userInfo: [NSLocalizedDescriptionKey: String(cString: err)]) }
         host = h
@@ -147,6 +148,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         // macOS draws at 1× or 2×: anything from 1.5 up gets the 2× desktop.
         let hiDPI = c.scale >= 1.5
         let cursorApart = c.cursor_apart != 0
+        // Where the client wants its display: 0 extra, 1 main, 2 only. --main yes still forces main.
+        let placement = max(Int(c.placement), options.makeMain ? 1 : 0)
         let done = DispatchSemaphore(value: 0)
         var failure: String? = "starting the display timed out"
         DispatchQueue.main.async { [self] in
@@ -154,7 +157,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             generation += 1
             let gen = generation
             Task { @MainActor in
-                failure = await self.setUp(width: width, height: height, fps: fps, hiDPI: hiDPI, cursorApart: cursorApart, gen: gen)
+                failure = await self.setUp(
+                    width: width, height: height, fps: fps, hiDPI: hiDPI, cursorApart: cursorApart, placement: placement,
+                    gen: gen)
                 done.signal()
             }
         }
@@ -208,7 +213,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Returns nil when the picture is running, or why it isn't.
     @MainActor
-    private func setUp(width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, gen: Int) async -> String? {
+    private func setUp(
+        width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int, gen: Int
+    ) async -> String? {
         holdAwake()
         // A fixed serial first; one left behind by a crashed run can't be shared, so then a new one.
         for serial in [UInt32(7791), UInt32.random(in: 10_000...60_000)] {
@@ -226,10 +233,12 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         if let m = CGDisplayCopyDisplayMode(id) {
             hostLog("host: display \(id): \(m.pixelWidth)×\(m.pixelHeight) px, \(m.width)×\(m.height) pt, \(m.refreshRate) Hz")
         }
-        if options.makeMain, CGMainDisplayID() != id {
+        if placement >= 1, CGMainDisplayID() != id {
             previousMain = CGMainDisplayID()
             MacHost.makeMain(id)
         }
+        if placement == 2 { mirrored = MacHost.mirrorOthers(onto: id) }
+        hostLog("host: placement \(["an extra display", "the main display", "the only display"][min(placement, 2)])")
         // A new display takes a moment to show up in ScreenCaptureKit.
         var found: SCDisplay?
         for _ in 0..<30 {
@@ -348,6 +357,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             stream = nil
             Task { try? await s.stopCapture() }
         }
+        if !mirrored.isEmpty {
+            MacHost.unmirror(mirrored)
+            mirrored = []
+        }
         if let prev = previousMain, prev != CGMainDisplayID() {
             var ids = [CGDirectDisplayID](repeating: 0, count: 16)
             var n: UInt32 = 0
@@ -395,6 +408,31 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         hostLog("host: display \(id): asked for \(width)×\(height)\(hiDPI ? " HiDPI" : ""), still in another mode")
+    }
+
+    /// "Only display": macOS can't switch a screen off for a session, so every other display is
+    /// made a mirror of the client's instead; there is then one desktop, and it is the client's.
+    /// Returns the displays that were changed, to be put back when the client leaves.
+    static func mirrorOthers(onto id: CGDirectDisplayID) -> [CGDirectDisplayID] {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        var n: UInt32 = 0
+        CGGetOnlineDisplayList(16, &ids, &n)
+        let others = ids.prefix(Int(n)).filter { $0 != id && CGDisplayMirrorsDisplay($0) == kCGNullDirectDisplay }
+        guard !others.isEmpty else { return [] }
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success, let config else { return [] }
+        for o in others { CGConfigureDisplayMirrorOfDisplay(config, o, id) }
+        guard CGCompleteDisplayConfiguration(config, .forSession) == .success else { return [] }
+        hostLog("host: displays \(others) now mirror display \(id)")
+        return Array(others)
+    }
+
+    static func unmirror(_ displays: [CGDirectDisplayID]) {
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success, let config else { return }
+        for o in displays { CGConfigureDisplayMirrorOfDisplay(config, o, kCGNullDirectDisplay) }
+        CGCompleteDisplayConfiguration(config, .forSession)
+        hostLog("host: displays \(displays) have their own picture again")
     }
 
     /// Main display = the one at the origin; the others keep their places relative to it.

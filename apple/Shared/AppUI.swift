@@ -6,6 +6,7 @@
 //   --play file.rmrec   play a recording          --seconds N       stop after N seconds and quit (--verbose yes: stats each second)
 //   --snapshot out.png  save the picture at the end
 //   --script "move:.5,.5;wait:1;shot:a.png"   drive input and take pictures (see runScript)
+//   --placement extend|main|only   where this display sits among the host's own
 //   --view-only yes     send no input            --bench dir       time decode of the .rmrec files there (--exit yes to quit after)
 //   --size WxH --scale S --refresh HZ --decoders av1,hevc444,hevc   override what the hello says
 // Every option takes a value: AppKit reads the arguments too, as "-key value" pairs, and takes
@@ -52,6 +53,15 @@ struct ContentView: View {
     @State private var pair = false
     @State private var started = false
     @State private var keyboardShown = false
+    @State private var placement = ViewerSession.Placement.extend
+
+    private var placementNote: String {
+        switch placement {
+        case .extend: return "Added beside the computer's own screens."
+        case .main: return "Becomes the computer's main screen (menu bar, new windows) while connected."
+        case .only: return "The computer's own screens go off while connected. Not every computer can do this."
+        }
+    }
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
@@ -128,6 +138,13 @@ struct ContentView: View {
                 #endif
                 .onSubmit(connect)
             Toggle("Pair with this host (first connection only)", isOn: $pair)
+            Picker("This device is its", selection: $placement) {
+                ForEach(ViewerSession.Placement.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: host) { _, h in placement = .saved(for: h.trimmingCharacters(in: .whitespaces)) }
+            .onAppear { placement = .saved(for: host.trimmingCharacters(in: .whitespaces)) }
+            Text(placementNote).font(.footnote).foregroundStyle(.secondary)
             HStack {
                 Button("Connect", action: connect)
                     .buttonStyle(.borderedProminent)
@@ -156,7 +173,8 @@ struct ContentView: View {
     private func connect() {
         let h = host.trimmingCharacters(in: .whitespaces)
         guard !h.isEmpty else { return }
-        session.connect(host: h, pair: pair, name: deviceName, display: display(for: lastSize))
+        placement.save(for: h)
+        session.connect(host: h, pair: pair, name: deviceName, display: display(for: lastSize), placement: placement)
     }
 
     private var overlay: some View {
@@ -207,6 +225,7 @@ enum Automation {
         var exitAfter = false
         var script: String?
         var verbose = false
+        var placement = ViewerSession.Placement.extend
         while !args.isEmpty {
             let a = args.removeFirst()
             func value() -> String { args.isEmpty ? "" : args.removeFirst() }
@@ -224,6 +243,7 @@ enum Automation {
             case "--decoders": decoders = value()
             case "--view-only": session.viewOnly = ["yes", "1", "true"].contains(value())
             case "--script": script = value()
+            case "--placement": placement = ViewerSession.Placement(rawValue: value()) ?? .extend
             case "--verbose": verbose = ["yes", "1", "true"].contains(value())
             case "--bench": bench = value()
             case "--exit": exitAfter = ["yes", "1", "true"].contains(value())
@@ -242,8 +262,8 @@ enum Automation {
         if let play {
             session.play(recording: resolve(play))
         } else if let host {
-            print("remoteman: hello \(display.width)x\(display.height) scale \(display.scale) @\(display.refresh), decoders \(decoders)")
-            session.connect(host: host, pair: pair, name: name, display: display, decoders: decoders)
+            print("remoteman: hello \(display.width)x\(display.height) scale \(display.scale) @\(display.refresh), decoders \(decoders), placement \(placement.rawValue)")
+            session.connect(host: host, pair: pair, name: name, display: display, decoders: decoders, placement: placement)
         } else {
             return
         }

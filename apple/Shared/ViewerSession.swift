@@ -20,6 +20,24 @@ final class ViewerSession: ObservableObject {
         var refresh: Int
     }
 
+    /// Where this device's display sits among the host's own.
+    enum Placement: String, CaseIterable, Identifiable {
+        case extend, main, only
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .extend: return "Extra display"
+            case .main: return "Main display"
+            case .only: return "Only display"
+            }
+        }
+        /// The choice remembered for a computer (extend when none was made).
+        static func saved(for host: String) -> Placement {
+            Placement(rawValue: UserDefaults.standard.string(forKey: "placement." + host) ?? "") ?? .extend
+        }
+        func save(for host: String) { UserDefaults.standard.set(rawValue, forKey: "placement." + host) }
+    }
+
     @Published private(set) var state: State = .idle
     @Published private(set) var statsText = ""
     @Published var showStats = true
@@ -90,7 +108,10 @@ final class ViewerSession: ObservableObject {
 
     // MARK: Sources
 
-    func connect(host: String, pair: Bool, name: String, display: Display, decoders: String = ViewerSession.decoders) {
+    func connect(
+        host: String, pair: Bool, name: String, display: Display, decoders: String = ViewerSession.decoders,
+        placement: Placement = .extend
+    ) {
         guard !isActive else { return }
         let target = host.contains(":") ? host : host + ":7791"
         state = .connecting(target)
@@ -98,7 +119,8 @@ final class ViewerSession: ObservableObject {
         let gen = generation
         let config = CoreClient.Config(
             host: target, stateDir: Self.stateDir, name: name, pair: pair, width: display.width,
-            height: display.height, scale: display.scale, refresh: display.refresh, decoders: decoders)
+            height: display.height, scale: display.scale, refresh: display.refresh, decoders: decoders,
+            options: placement == .extend ? "" : "placement=\(placement.rawValue)")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let client = try CoreClient.connect(config) { c in

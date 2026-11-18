@@ -15,6 +15,8 @@ final class CoreClient {
         var scale: Float
         var refresh: Int
         var decoders: String  // "av1,hevc444,hevc"
+        /// "key=value;..." passed to the core: so far placement=extend|main|only.
+        var options: String = ""
     }
 
     struct Stats {
@@ -95,7 +97,7 @@ final class CoreClient {
         var err = [CChar](repeating: 0, count: 512)
         let h = rm_client_connect(
             c.host, c.stateDir, c.name, c.pair ? 1 : 0, UInt32(c.width), UInt32(c.height), c.scale,
-            UInt32(c.refresh), c.decoders, callbacks, &err, err.count)
+            UInt32(c.refresh), c.decoders, c.options, callbacks, &err, err.count)
         guard let h else {
             Unmanaged<CoreClient>.fromOpaque(ctx).release()
             throw BitstreamError(String(cString: err))
