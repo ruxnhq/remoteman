@@ -3,6 +3,7 @@
 //!     remotemand [--listen ADDR:PORT] [--state DIR] [--socket PATH] [--pair] [--name NAME]
 //!                [--user NAME] [--login screen|key|off]
 //!     remotemand ctl [--socket PATH] status | switch N | prefer N
+//!     remotemand ctl [--socket PATH] devices | revoke FINGERPRINT | drop | pair on|off
 //!     remotemand test-agent [--socket PATH] [--label NAME]      (for tests: see standin.rs)
 //!
 //! It owns the UDP port, the trust list and every client's connection. The picture comes from
@@ -115,7 +116,8 @@ fn main() -> Result<()> {
     // tells clients per session, it lists what an agent allowed everything would have.)
     let features = ["video", "input", "cursor", "placement", "configure", "sound", "mic", "files", "clipboard"].map(String::from).to_vec();
     let options = HostOptions { listen, state, name, os: "linux".into(), features, pair, test_drop_one_in: drop_one_in };
-    let host = Host::start(options, broker::Broker(shared.clone()))?;
+    let host = std::sync::Arc::new(Host::start(options, broker::Broker(shared.clone()))?);
+    shared.listening(&host);
     tracing::info!("listening on {}; this host's fingerprint is {}; agents attach at {}", host.address, host.fingerprint, socket.display());
     if pair {
         tracing::info!("pairing: the next unknown device to connect will be trusted");
@@ -132,6 +134,17 @@ fn main() -> Result<()> {
         }
         anyhow::Ok(())
     })?;
+    // Stop listening and tell the client. A `ctl` request may hold the host for a moment.
+    let mut host = host;
+    let host = loop {
+        match std::sync::Arc::try_unwrap(host) {
+            Ok(host) => break host,
+            Err(held) => {
+                host = held;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    };
     host.stop();
     let _ = std::fs::remove_file(&socket);
     Ok(())
