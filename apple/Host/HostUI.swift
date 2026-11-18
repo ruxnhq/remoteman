@@ -287,6 +287,16 @@ struct HostSettings: View {
                             .labelsHidden().toggleStyle(.switch)
                     }
                     Row(
+                        "Use a device's microphone on this Mac",
+                        caption: controller.microphoneNote.isEmpty
+                            ? (controller.microphoneInstalled
+                                ? "\"remoteman Microphone\" is installed. Apps on this Mac can pick it while a device has its microphone on."
+                                : "Installs \"remoteman Microphone\", a sound driver. macOS asks for your password, and sound on this Mac stops for a moment.")
+                            : controller.microphoneNote
+                    ) {
+                        Button(controller.microphoneInstalled ? "Remove…" : "Install…") { controller.installMicrophone() }
+                    }
+                    Row(
                         "Use a device's camera on this Mac",
                         caption: controller.cameraNote.isEmpty
                             ? (controller.cameraInstalled

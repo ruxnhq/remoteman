@@ -16,11 +16,13 @@
 
 @interface CGVirtualDisplayMode : NSObject
 - (instancetype)initWithWidth:(unsigned int)width height:(unsigned int)height refreshRate:(double)refreshRate;
+- (instancetype)initWithWidth:(unsigned int)width height:(unsigned int)height refreshRate:(double)refreshRate transferFunction:(unsigned int)transferFunction;
 @end
 
 @interface CGVirtualDisplaySettings : NSObject
 @property (retain, nonatomic) NSArray *modes;
 @property (nonatomic) unsigned int hiDPI;
+@property (nonatomic) double refreshDeadline;
 @end
 
 @interface CGVirtualDisplay : NSObject
@@ -67,6 +69,26 @@
     CGVirtualDisplaySettings *s = [[NSClassFromString(@"CGVirtualDisplaySettings") alloc] init];
     s.modes = @[mode];
     s.hiDPI = hiDPI ? 1 : 0;
+    return [(CGVirtualDisplay *)_display applySettings:s];
+}
+
+- (BOOL)applyModes:(NSArray<NSArray<NSNumber *> *> *)modes transferFunction:(uint32_t)transferFunction refreshDeadline:(double)deadline {
+    if (!_display) return NO;
+    NSMutableArray *list = [NSMutableArray array];
+    Class cls = NSClassFromString(@"CGVirtualDisplayMode");
+    for (NSArray<NSNumber *> *m in modes) {
+        CGVirtualDisplayMode *mode = nil;
+        if (transferFunction != 0 && [cls instancesRespondToSelector:@selector(initWithWidth:height:refreshRate:transferFunction:)]) {
+            mode = [[cls alloc] initWithWidth:m[0].unsignedIntValue height:m[1].unsignedIntValue refreshRate:m[2].doubleValue transferFunction:transferFunction];
+        } else {
+            mode = [[cls alloc] initWithWidth:m[0].unsignedIntValue height:m[1].unsignedIntValue refreshRate:m[2].doubleValue];
+        }
+        if (mode) [list addObject:mode];
+    }
+    CGVirtualDisplaySettings *s = [[NSClassFromString(@"CGVirtualDisplaySettings") alloc] init];
+    s.modes = list;
+    s.hiDPI = 0;
+    if (deadline > 0 && [s respondsToSelector:@selector(setRefreshDeadline:)]) s.refreshDeadline = deadline;
     return [(CGVirtualDisplay *)_display applySettings:s];
 }
 

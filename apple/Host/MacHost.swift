@@ -79,10 +79,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private var options: Options
 
-    /// What this host offers now: the camera only while remoteman's camera is installed on this Mac.
+    /// What this host offers now: the camera and the microphone only while remoteman's own are installed on this Mac.
     private var featureList: String {
         "video,input,cursor,placement,configure" + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
-            + (options.allowFiles ? ",files" : "") + (HostCamera.installed ? ",camera" : "")
+            + (options.allowFiles ? ",files" : "") + (HostCamera.installed ? ",camera" : "") + (HostMicrophone.installed ? ",mic" : "")
     }
     private var announced = ""
 
@@ -206,8 +206,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
                 else { return }
                 Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().message(m)
             },
-            // The microphone: not acted on yet, so not announced.
-            on_mic: nil,
+            on_mic: { ctx, data, len, start, seq, _ in
+                Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().microphone?.packet(UnsafeRawBufferPointer(start: data, count: len), start: start != 0, seq: seq)
+            },
             on_camera: { ctx, data, len, key, _, _ in
                 Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().camera?.frame(UnsafeRawBufferPointer(start: data, count: len), key: key != 0)
             },
@@ -378,6 +379,27 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         sharing.blob(what: what, id: id, kind: kind, header: header, data: data, complete: complete)
     }
 
+    // MARK: The device's microphone
+
+    /// On the core's thread: there while the device's microphone is on.
+    private var microphone: HostMicrophone?
+
+    private func setMicrophone(_ m: [String: Any]) {
+        if let mic = microphone {
+            let t = mic.totals
+            hostLog("host: the device's microphone is off: packets=\(t.packets) concealed=\(t.concealed) seconds=\(String(format: "%.2f", Double(t.frames) / 48000)) refused=\(t.refused)")
+            mic.stop()
+            microphone = nil
+        }
+        guard m["on"] as? Bool == true else { return }
+        guard (m["codec"] as? String ?? "opus") == "opus", (m["channels"] as? NSNumber)?.intValue ?? 1 == 1 else {
+            return hostLog("host: the device's microphone sends a form this Mac doesn't take")
+        }
+        guard let mic = HostMicrophone() else { return hostLog("host: remoteman's microphone isn't installed on this Mac") }
+        microphone = mic
+        hostLog("host: the device's microphone is on this Mac as \"remoteman Microphone\"")
+    }
+
     // MARK: The device's camera
 
     /// On the core's thread: there while the device's camera is on.
@@ -434,6 +456,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private func message(_ m: [String: Any]) {
         if m["t"] as? String == "sound" { return setSound(m["on"] as? Bool ?? false) }
         if m["t"] as? String == "camera" { return setCamera(m) }
+        if m["t"] as? String == "mic" { return setMicrophone(m) }
         if m["t"] as? String == "clipboard", options.allowClipboard, let sharing {
             let on = m["on"] as? Bool ?? false
             hostLog("host: the clipboard is \(on ? "shared with the device" : "no longer shared")")
@@ -510,6 +533,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         hostLog("host: client left")
         picture = nil
         setCamera(["on": false])
+        setMicrophone(["on": false])
         soundQueue.sync { sound = nil }
         if let s = sharing {
             sharing = nil

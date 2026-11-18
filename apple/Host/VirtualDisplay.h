@@ -24,6 +24,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// half that size in points with a 2× backing store.
 - (BOOL)applyWidth:(uint32_t)width height:(uint32_t)height refreshRate:(double)refreshRate hiDPI:(BOOL)hiDPI;
 
+/// For finding out what the system offers (not used for a client yet): several modes at once,
+/// each @[width, height, refreshRate], with a transfer function (0: the ordinary initialiser)
+/// and a refresh deadline in seconds (0: left alone).
+- (BOOL)applyModes:(NSArray<NSArray<NSNumber *> *> *)modes transferFunction:(uint32_t)transferFunction refreshDeadline:(double)deadline;
+
 @end
 
 NS_ASSUME_NONNULL_END

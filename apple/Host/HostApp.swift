@@ -30,6 +30,19 @@ final class HostController: ObservableObject {
     @Published private(set) var cameraInstalled = HostCamera.installed
     @Published private(set) var cameraNote = ""
 
+    /// remoteman's microphone on this Mac.
+    @Published private(set) var microphoneInstalled = HostMicrophone.installed
+    @Published private(set) var microphoneNote = ""
+
+    func installMicrophone() {
+        microphoneNote = HostMicrophone.setInstalled(!microphoneInstalled)
+        // The audio server takes a moment to come back with (or without) the device.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.microphoneInstalled = HostMicrophone.installed
+            self?.host.refreshFeatures()
+        }
+    }
+
     func installCamera() {
         CameraInstaller.shared.changed = { [weak self] note in
             self?.cameraNote = note
@@ -209,7 +222,9 @@ final class HostController: ObservableObject {
         if list != devices { devices = list }
         let cam = HostCamera.installed
         if cam != cameraInstalled { cameraInstalled = cam }
-        host.refreshFeatures()  // the camera is offered while it is installed
+        let mic = HostMicrophone.installed
+        if mic != microphoneInstalled { microphoneInstalled = mic }
+        host.refreshFeatures()  // the camera and the microphone are offered while they are installed
         let core = host.pairing
         if pairing, !core {
             // The core turns pairing off once it has let a device in.

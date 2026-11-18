@@ -34,6 +34,23 @@ targetTemplates:
       - sdk: SystemConfiguration.framework
       - sdk: ScreenCaptureKit.framework
       - sdk: VideoToolbox.framework
+    # remoteman's microphone driver is built by its own script and carried inside the app;
+    # the owner installs it from Settings.
+    preBuildScripts:
+      - name: Build the microphone driver
+        script: |
+          "$SRCROOT/HostMicrophone/build.sh" > "$SRCROOT/build/microphone-build.log" 2>&1 || { cat "$SRCROOT/build/microphone-build.log"; exit 1; }
+          mkdir -p "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
+          rm -rf "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/RemotemanMicrophone.driver"
+          cp -R "$SRCROOT/build/microphone/RemotemanMicrophone.driver" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/"
+        # Only when the driver's sources changed: a fresh copy after signing would break the app's seal.
+        inputFiles:
+          - $(SRCROOT)/HostMicrophone/RemotemanMicrophone.c
+          - $(SRCROOT)/HostMicrophone/Info.plist
+          - $(SRCROOT)/HostMicrophone/selftest.c
+          - $(SRCROOT)/HostMicrophone/build.sh
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/RemotemanMicrophone.driver/Contents/MacOS/RemotemanMicrophone
     info:
       path: Host/Info.plist
       properties:

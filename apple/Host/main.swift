@@ -20,12 +20,22 @@ options.stateDir = support.path
 // asks for missing permissions, and a failure to start ends the app.
 var unattended = false
 var installCamera = false
+var probeDisplay = false
+var installMicrophone = false
 var args = Array(CommandLine.arguments.dropFirst())
 while !args.isEmpty {
     let a = args.removeFirst()
     func value() -> String { args.isEmpty ? "" : args.removeFirst() }
     func yes() -> Bool { ["yes", "1", "true"].contains(value()) }
     // Asking macOS to install the camera is something the owner does by hand; it starts nothing else.
+    if a == "--probe-display" {
+        probeDisplay = yes()
+        continue
+    }
+    if a == "--install-microphone" {
+        installMicrophone = yes()
+        continue
+    }
     if a == "--install-camera" {
         installCamera = yes()
         continue
@@ -84,6 +94,14 @@ app.setActivationPolicy(.accessory)
 let controller = HostController(options: options, unattended: unattended)
 let delegate = HostAppDelegate(controller: controller)
 app.delegate = delegate
+if probeDisplay { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { DisplayProbe.run() } }
+if installMicrophone {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+        hostLog("microphone: asking for the password to install remoteman Microphone")
+        controller.installMicrophone()
+        hostLog("microphone: \(controller.microphoneNote.isEmpty ? "cancelled" : controller.microphoneNote)")
+    }
+}
 if installCamera {
     DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
         hostLog("camera: asking macOS to install remoteman Camera")
