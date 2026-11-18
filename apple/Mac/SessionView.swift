@@ -302,7 +302,10 @@ struct SessionControls {
             symbol: session.micOn ? "mic" : "mic.slash", name: session.micOn ? "Microphone, on" : "Microphone, off", kind: kind,
             on: session.micOn, enabled: Features.microphone && session.has("mic")
         ) { _ in session.setMic(!session.micOn) }
-        ControlButton(symbol: "video.slash", name: "Camera, off", kind: kind, enabled: Features.camera) { _ in }
+        ControlButton(
+            symbol: session.cameraOn ? "video" : "video.slash", name: session.cameraOn ? "Camera, on" : "Camera, off", kind: kind,
+            on: session.cameraOn, enabled: Features.camera && session.has("camera")
+        ) { _ in session.setCamera(!session.cameraOn) }
     }
 
     @ViewBuilder var sharing: some View {

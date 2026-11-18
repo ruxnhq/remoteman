@@ -24,6 +24,8 @@
 	<string>1</string>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>remoteman can pass this device's camera to the computer you are connected to, when you switch that on.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>remoteman connects to your PC on the local network to show and control its desktop.</string>
 	<key>NSMicrophoneUsageDescription</key>

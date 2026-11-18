@@ -18,7 +18,7 @@ enum Features {
     /// The computer's sound on this device, and this device's microphone and camera on it.
     static let sound = true
     static let microphone = true
-    static let camera = false
+    static let camera = true
     static let clipboard = true
     static let files = true
     /// Picture quality, bitrate limit, size ("More space"), HDR.

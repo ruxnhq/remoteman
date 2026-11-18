@@ -15,7 +15,7 @@ enum Features {
     /// The computer's sound on this Mac.
     static let sound = true
     static let microphone = true
-    static let camera = false
+    static let camera = true
     static let clipboard = true
     /// "Send files", "Save received files to".
     static let fileTransfer = true

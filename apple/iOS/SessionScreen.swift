@@ -109,7 +109,10 @@ struct SessionScreen: View {
                 session.setMic(!session.micOn)
             }
             .available(Features.microphone && session.has("mic"))
-            icon("camera", "Camera", active: false) {}.available(Features.camera)
+            icon(session.cameraOn ? "camera.fill" : "camera", session.cameraOn ? "Camera, on" : "Camera, off", active: session.cameraOn) {
+                session.setCamera(!session.cameraOn)
+            }
+            .available(Features.camera && session.has("camera"))
             separator
             icon(
                 session.clipboardOn ? "doc.on.clipboard.fill" : "doc.on.clipboard",
@@ -207,7 +210,8 @@ struct SessionScreen: View {
                     .available(Features.sound && session.has("sound"))
                 tile("mic", "Microphone", on: session.micOn) { session.setMic(!session.micOn) }
                     .available(Features.microphone && session.has("mic"))
-                tile("camera", "Camera", on: false) {}.available(Features.camera)
+                tile("camera", "Camera", on: session.cameraOn) { session.setCamera(!session.cameraOn) }
+                    .available(Features.camera && session.has("camera"))
                 tile("doc.on.clipboard", "Clipboard", on: session.clipboardOn) { session.setClipboard(!session.clipboardOn) }
                     .available(Features.clipboard && session.has("clipboard"))
                 tile("arrow.up.arrow.down", "Files", on: false) { pickFiles() }.available(Features.files && session.has("files"))

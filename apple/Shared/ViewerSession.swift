@@ -85,6 +85,8 @@ final class ViewerSession: ObservableObject {
     @Published private(set) var soundOn = false
     @Published private(set) var micOn = false
     @Published private(set) var clipboardOn = false
+    @Published private(set) var cameraOn = false
+    private var camera: CameraSender?
     /// Files on their way to or from the computer, newest last.
     @Published private(set) var transfers: [Transfer] = []
     /// What the host says the picture is encoded at, in bits a second (0: not told).
@@ -155,6 +157,41 @@ final class ViewerSession: ObservableObject {
         }
     }
 
+    /// This device's camera as a camera on the computer. Never switched on by itself.
+    func setCamera(_ on: Bool) {
+        guard let client, has("camera"), on != cameraOn else { return }
+        if !on {
+            cameraOn = false
+            camera?.stop()
+            camera = nil
+            client.send(["t": "camera", "on": false])
+            return
+        }
+        CameraSender.allowed { [weak self] ok in
+            guard let self, let client = self.client, !self.cameraOn else { return }
+            guard ok else {
+                self.notice = "remoteman isn't allowed to use the camera. Allow it in Settings, under Privacy & Security."
+                return
+            }
+            let c = CameraSender()
+            c.send = { [weak client] data, key, timeUs in client?.sendCamera(data, key: key, timeUs: timeUs) }
+            client.send(["t": "camera", "on": true, "codec": "h264", "width": 1280, "height": 720, "fps": 30])
+            if let why = c.start() {
+                client.send(["t": "camera", "on": false])
+                self.notice = why
+                return
+            }
+            self.camera = c
+            self.cameraOn = true
+        }
+    }
+
+    /// For tests: what the camera has sent.
+    var cameraReport: String {
+        guard let t = camera?.totals else { return "the camera is off" }
+        return "\(t.frames) frames, \(t.bytes) bytes, \(t.keyframes) keyframes, last \(t.width)x\(t.height)"
+    }
+
     /// Share the clipboard both ways.
     func setClipboard(_ on: Bool) {
         guard let sharing, has("clipboard"), on != clipboardOn else { return }
@@ -212,6 +249,8 @@ final class ViewerSession: ObservableObject {
             if let b = (m["bitrate"] as? NSNumber)?.intValue {
                 DispatchQueue.main.async { if self.generation == gen { self.hostBitrate = b } }
             }
+        case "camera_keyframe":
+            DispatchQueue.main.async { self.camera?.keyframe() }
         case "file_result":
             sharing.fileResult(m)
         default:
@@ -423,6 +462,9 @@ final class ViewerSession: ObservableObject {
         sound.stop()
         mic?.stop()
         mic = nil
+        camera?.stop()
+        camera = nil
+        cameraOn = false
         sharing?.stop()
         sharing = nil
         features = []

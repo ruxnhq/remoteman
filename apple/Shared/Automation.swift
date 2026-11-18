@@ -233,6 +233,8 @@ enum Automation {
                 case "mic": DispatchQueue.main.sync { session.setMic(arg.contains("on")) }
                 case "clipboard": DispatchQueue.main.sync { session.setClipboard(arg.contains("on")) }
                 case "file": DispatchQueue.main.sync { session.send(file: resolve(arg.trimmingCharacters(in: .whitespaces))) }
+                case "camera": DispatchQueue.main.sync { session.setCamera(arg.contains("on")) }
+                case "camerareport": print("remoteman: camera: \(DispatchQueue.main.sync { session.cameraReport })")
                 case "soundreport": print("remoteman: sound: \(DispatchQueue.main.sync { session.soundReport })")
                 case "cliplog": print("remoteman: clipboard log\n  " + DispatchQueue.main.sync { session.clipboardLog }.joined(separator: "\n  "))
                 case "copy":

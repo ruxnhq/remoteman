@@ -79,7 +79,7 @@ struct ComputerSettingsScreen: View {
                             Row(title: "Picture quality") { RowValue(text: "Automatic", chevron: true) }.available(Features.pictureQuality)
                             Row(title: "Sound") { RowValue(text: "Plays on this \(device)", chevron: true) }.available(Features.soundChoice)
                             Row(title: "Camera and microphone", last: true) { RowValue(text: "Off until I turn them on", chevron: true) }
-                                .available(Features.camera)
+                                .available(Features.soundChoice)
                         }
                         InsetGroup(header: "Address", footer: c.fingerprint.map { "Key fingerprint \(short($0))" }) {
                             Row(title: "Address", last: true) {
@@ -182,7 +182,7 @@ struct SettingsScreen: View {
                         Row(title: "Fill login passwords with Face ID") { Toggle("", isOn: .constant(false)).labelsHidden() }
                             .available(Features.faceID)
                         Row(title: "Ask before sharing the camera", last: true) { Toggle("", isOn: .constant(true)).labelsHidden() }
-                            .available(Features.camera)
+                            .available(Features.soundChoice)
                     }
                     if !store.computers.isEmpty {
                         InsetGroup(

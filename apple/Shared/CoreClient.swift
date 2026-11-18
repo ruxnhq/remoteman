@@ -189,6 +189,10 @@ final class CoreClient {
         with { rm_client_send_mic($0, packet.bindMemory(to: UInt8.self).baseAddress, packet.count, start ? 1 : 0, seq, timeUs) }
     }
 
+    func sendCamera(_ frame: UnsafeRawBufferPointer, key: Bool, timeUs: UInt64) {
+        with { rm_client_send_camera($0, frame.bindMemory(to: UInt8.self).baseAddress, frame.count, key ? 1 : 0, timeUs) }
+    }
+
     /// Send a blob, a piece at a time from `next` (nil: the end). Waits while the network is
     /// behind: never call it on the main thread or from a callback. False if it didn't all go.
     func sendBlob(kind: UInt8, header: [String: Any], next: () -> Data?) -> Bool {
