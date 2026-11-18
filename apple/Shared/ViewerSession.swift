@@ -199,7 +199,7 @@ final class ViewerSession: ObservableObject {
     var cameraReport: String {
         guard let c = camera else { return "the camera is off" }
         let t = c.totals
-        return "\(t.frames) frames, \(t.bytes) bytes, \(t.keyframes) keyframes, last \(t.width)x\(t.height), turned \(Int(c.turned)) degrees to stay upright; forced \(c.forced), holding an IDR picture \(c.idr), the computer asked \(c.asked) times"
+        return "\(t.frames) frames, \(t.bytes) bytes, \(t.keyframes) keyframes, last \(t.width)x\(t.height), turned \(Int(c.turned)) degrees to stay upright; forced \(c.forced), holding an IDR picture \(c.idr), the computer asked \(c.asked) times; encoder:\(c.encoderNote)"
     }
 
     /// Share the clipboard both ways.

@@ -22,6 +22,7 @@ final class CameraSender: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
     /// For tests: keyframes this side forced (the first, a new size, the computer asking), frames
     /// that hold an IDR picture, and how often the computer asked.
     private(set) var forced = 0, idr = 0, asked = 0
+    private(set) var encoderNote = ""
     /// One whole frame, on the camera's queue.
     var send: ((UnsafeRawBufferPointer, _ key: Bool, _ timeUs: UInt64) -> Void)?
 
@@ -152,17 +153,31 @@ final class CameraSender: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil, refcon: nil, compressionSessionOut: &s)
         guard let s else { return nil }
         let set: [(CFString, Any)] = [
-            (kVTCompressionPropertyKey_RealTime, true),
+            // Not "real time": in that mode the encoder makes a keyframe every second whatever
+            // interval it is given (measured on an iPad). Without reordering each frame still
+            // comes out before the next goes in.
+            (kVTCompressionPropertyKey_RealTime, false),
+            (kVTCompressionPropertyKey_ExpectedFrameRate, 30),
             (kVTCompressionPropertyKey_AllowFrameReordering, false),
             (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel),
             (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 2),
-            // In frames too: by the duration alone the encoder made one about every second.
+            // In frames too.
             (kVTCompressionPropertyKey_MaxKeyFrameInterval, 60),
-            (kVTCompressionPropertyKey_ExpectedFrameRate, 30),
             (kVTCompressionPropertyKey_AverageBitRate, 2_500_000),
         ]
-        for (key, value) in set { VTSessionSetProperty(s, key: key, value: value as CFTypeRef) }
+        var note = ""
+        for (key, value) in set {
+            let status = VTSessionSetProperty(s, key: key, value: value as CFTypeRef)
+            if status != noErr { note += " \(key) refused (\(status));" }
+        }
         VTCompressionSessionPrepareToEncodeFrames(s)
+        // What the encoder says it will do, for tests.
+        for key in [kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration] {
+            var value: CFTypeRef?
+            let status = withUnsafeMutablePointer(to: &value) { VTSessionCopyProperty(s, key: key, allocator: nil, valueOut: $0) }
+            note += " \(key) = \(value.map { "\($0)" } ?? "unreadable (\(status))");"
+        }
+        encoderNote = note
         return s
     }
 
