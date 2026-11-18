@@ -1,4 +1,5 @@
-// remoteman-host: the Mac as a remoteman host. An app with no window; start it with
+// remoteman-host: the Mac as a remoteman host, a menu-bar app. Opened by hand it shares this
+// Mac unless sharing was paused, and its menu-bar item has the rest. To run it by itself:
 //   open -n remoteman-host.app --args [--listen 0.0.0.0:7791] [--name NAME] [--pair yes]
 //        [--state DIR] [--main yes] [--capture x420|l10r|420v] [--in-flight N] [--bitrate BITS_PER_SECOND]
 //        [--test-window yes]
@@ -15,11 +16,15 @@ let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .u
     .appendingPathComponent("remoteman-host", isDirectory: true)
 options.stateDir = support.path
 
+// Any of the options below makes this an unattended run: sharing starts at once, the system
+// asks for missing permissions, and a failure to start ends the app.
+var unattended = false
 var args = Array(CommandLine.arguments.dropFirst())
 while !args.isEmpty {
     let a = args.removeFirst()
     func value() -> String { args.isEmpty ? "" : args.removeFirst() }
     func yes() -> Bool { ["yes", "1", "true"].contains(value()) }
+    if a.hasPrefix("--") { unattended = true }
     switch a {
     case "--listen": options.listen = value()
     case "--name": options.name = value()
@@ -37,26 +42,30 @@ while !args.isEmpty {
 }
 try? FileManager.default.createDirectory(atPath: options.stateDir, withIntermediateDirectories: true)
 
-if !CGPreflightScreenCaptureAccess() {
-    hostLog("host: no Screen Recording permission yet; clients are refused until it is granted. If macOS doesn't ask, turn on remoteman-host in System Settings > Privacy & Security > Screen & System Audio Recording.")
-    CGRequestScreenCaptureAccess()
+if unattended {
+    if !CGPreflightScreenCaptureAccess() {
+        hostLog("host: no Screen Recording permission yet; clients are refused until it is granted. If macOS doesn't ask, turn on remoteman-host in System Settings > Privacy & Security > Screen & System Audio Recording.")
+        CGRequestScreenCaptureAccess()
+    } else {
+        hostLog("host: Screen Recording permission: granted")
+    }
+    if AXIsProcessTrusted() { hostLog("host: Accessibility permission: granted") }
+    // Asks with the system's own prompt the first time, and points at System Settings after that.
+    if !AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary) {
+        hostLog("host: no Accessibility permission: the picture will work, input will not. Turn on remoteman-host in System Settings > Privacy & Security > Accessibility.")
+    }
 } else {
-    hostLog("host: Screen Recording permission: granted")
-}
-if AXIsProcessTrusted() { hostLog("host: Accessibility permission: granted") }
-// Asks with the system's own prompt the first time, and points at System Settings after that.
-if !AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary) {
-    hostLog("host: no Accessibility permission: the picture will work, input will not. Turn on remoteman-host in System Settings > Privacy & Security > Accessibility.")
+    // Opened by hand: the first-run window and Settings say what is missing; nothing is asked unbidden.
+    hostLog("host: Screen Recording permission: \(CGPreflightScreenCaptureAccess() ? "granted" : "not granted"), Accessibility permission: \(AXIsProcessTrusted() ? "granted" : "not granted")")
 }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
-let host = MacHost(options: options)
-do { try host.start() } catch {
-    hostLog("host: failed to start: \(error.localizedDescription)")
-    exit(1)
-}
+// Sharing starts in applicationDidFinishLaunching (HostController.launch).
+let controller = HostController(options: options, unattended: unattended)
+let delegate = HostAppDelegate(controller: controller)
+app.delegate = delegate
 
 // Ctrl-C or a kill: take the display away and say goodbye before going.
 var signals: [DispatchSourceSignal] = []
@@ -65,7 +74,7 @@ for sig in [SIGINT, SIGTERM] {
     let s = DispatchSource.makeSignalSource(signal: sig, queue: .main)
     s.setEventHandler {
         hostLog("host: stopping")
-        host.stop()
+        controller.shutdown()
         exit(0)
     }
     s.resume()

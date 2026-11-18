@@ -221,3 +221,17 @@ struct WindowReader: NSViewRepresentable {
     }
     func updateNSView(_ v: V, context: Context) { v.found = found }
 }
+
+enum Fingerprint {
+    /// A key's fingerprint in groups of four, as the design shows it; long ones are cut short.
+    static func shown(_ raw: String) -> String {
+        guard !raw.isEmpty else { return "Shown after the first connection" }
+        let hex = raw.uppercased().filter { $0.isHexDigit }
+        guard hex.count >= 16, hex.count == raw.filter({ !$0.isWhitespace && $0 != ":" }).count else { return raw }
+        let groups = stride(from: 0, to: 16, by: 4).map { i -> String in
+            let s = hex.index(hex.startIndex, offsetBy: i)
+            return String(hex[s..<hex.index(s, offsetBy: 4)])
+        }
+        return groups.joined(separator: " ")
+    }
+}
