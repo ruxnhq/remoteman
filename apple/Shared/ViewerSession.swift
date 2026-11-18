@@ -263,7 +263,14 @@ final class ViewerSession: ObservableObject {
     ) {
         statsLock.lock()
         received += 1
-        if receivedLog.count < 200_000 { receivedLog.append(DispatchTime.now().uptimeNanoseconds) }
+        let arrived = DispatchTime.now().uptimeNanoseconds
+        if receivedLog.count < 200_000 { receivedLog.append(arrived) }
+        // A wait of 55 ms or more before this frame: remember when, to spot a rhythm.
+        if let last = lastArrival, arrived - last > 55_000_000 {
+            pauses.append(arrived)
+            if pauses.count > 40 { pauses.removeFirst(pauses.count - 40) }
+        }
+        lastArrival = arrived
         if key { keyframesReceived += 1 }
         if frameLog.count < 200_000 {
             frameLog.append((number, data.count, key ? 1 : recovery ? 2 : 0, DispatchTime.now().uptimeNanoseconds))
@@ -283,6 +290,22 @@ final class ViewerSession: ObservableObject {
 
     // MARK: Run summary (for unattended measurements)
 
+    private var lastArrival: UInt64?
+    private var pauses: [UInt64] = []
+
+    /// Whether frames have been arriving with a pause about every half second (512 Wi-Fi time
+    /// units) over the last several seconds: the mark of the device's radio leaving its channel
+    /// at regular intervals, which Apple's peer-to-peer Wi-Fi (AirDrop, AirPlay, Continuity) and
+    /// background scans do. Nothing is wrong with the stream when this shows; the link is pausing.
+    /// Call with `statsLock` held.
+    private func rhythmicPauses(now: UInt64) -> Int {
+        let recent = pauses.filter { now - $0 < 8_000_000_000 }
+        guard recent.count >= 6 else { return 0 }
+        let steps = zip(recent.dropFirst(), recent).map { Double($0 - $1) / 1e6 }
+        let onBeat = steps.filter { $0 > 470 && $0 < 580 }.count
+        return Double(onBeat) >= Double(steps.count) * 0.7 ? recent.count : 0
+    }
+    private var rhythmSeen = 0
     private var keyframesReceived = 0
     /// Every frame handed over by the core: its number, size, whether a keyframe, and when.
     private var frameLog: [(UInt32, Int, Int, UInt64)] = []
@@ -353,6 +376,10 @@ final class ViewerSession: ObservableObject {
         out += "  age at presentation ms: median \(pct(ages, 0.5)) p95 \(pct(ages, 0.95)) p99 \(pct(ages, 0.99)) max \(pct(ages, 1.0)) (\(ages.count) frames with a clock)\n"
         out += "  decode ms: median \(pct(dec, 0.5)) p95 \(pct(dec, 0.95)) p99 \(pct(dec, 0.99)) max \(pct(dec, 1.0))\n"
         out += "  gap between frames shown ms: median \(pct(gaps, 0.5)) p99 \(pct(gaps, 0.99)) max \(pct(gaps, 1.0))\n"
+        statsLock.lock()
+        let beats = rhythmSeen
+        statsLock.unlock()
+        out += "  half-second Wi-Fi pause rhythm seen in \(beats) of the half-second checks\n"
         if let c = client {
             let cs = c.stats
             out += "  lost \(cs.lost), loss reports \(cs.keyframeRequests), keyframes received \(keyframesReceived), recovery points \(recoveryPoints) (whole run), round trip \(String(format: "%.2f", Double(cs.roundTripUs) / 1000)) ms, decode errors \(decodeErrors)"
@@ -382,6 +409,7 @@ final class ViewerSession: ObservableObject {
         var replaced = 0
         var decodeErrors = 0
         var lastError = ""
+        var wifiPausing = false
 
         var text: String {
             func f(_ x: Double, _ digits: Int = 1) -> String { x.isNaN ? "–" : String(format: "%.\(digits)f", x) }
@@ -390,6 +418,7 @@ final class ViewerSession: ObservableObject {
             s += "decode \(f(decodeMedianMs, 2)) ms (max \(f(decodeMaxMs, 2))) · age \(f(ageMs)) ms\n"
             s += "lost \(lost) · loss reports \(keyframeRequests) · round trip \(f(roundTripMs, 2)) ms"
             if decodeErrors > 0 { s += "\ndecode errors \(decodeErrors): \(lastError)" }
+            if wifiPausing { s += "\nWi-Fi is pausing about twice a second (not the stream)" }
             return s
         }
     }
@@ -408,6 +437,8 @@ final class ViewerSession: ObservableObject {
         decodeTimes.removeAll(keepingCapacity: true)
         s.decodeErrors = decodeErrors
         s.lastError = lastError
+        s.wifiPausing = rhythmicPauses(now: now) > 0
+        if s.wifiPausing { rhythmSeen += 1 }
         s.shownFps = Double(counters.0 - lastPresented) / dt
         lastPresented = counters.0
         statsLock.unlock()
