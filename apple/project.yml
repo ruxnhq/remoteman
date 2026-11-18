@@ -16,6 +16,37 @@ settings:
     ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     CURRENT_PROJECT_VERSION: "1"
     DEAD_CODE_STRIPPING: YES
+targetTemplates:
+  HostBase:
+    type: application
+    platform: macOS
+    sources:
+      - Host
+      - Shared/HIDKeys.swift
+      - Shared/Sharing.swift
+      # The design's colours and card pieces, shared with the viewer.
+      - Mac/Kit.swift
+      - Support/Assets.xcassets
+    dependencies:
+      - framework: build/RemotemanCore.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: ScreenCaptureKit.framework
+      - sdk: VideoToolbox.framework
+    info:
+      path: Host/Info.plist
+      properties:
+        CFBundleDisplayName: remoteman host
+        LSUIElement: true
+        NSLocalNetworkUsageDescription: remoteman host lets your own devices connect to this Mac to show and control its desktop.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman.host
+        PRODUCT_NAME: remoteman-host
+        ASSETCATALOG_COMPILER_APPICON_NAME: HostIcon
+        SWIFT_OBJC_BRIDGING_HEADER: Host/Bridging.h
+        ENABLE_HARDENED_RUNTIME: YES
 targets:
   RemotemanMac:
     type: application
@@ -85,32 +116,33 @@ targets:
   # Recording and Accessibility grants under its own name; it logs to
   # ~/Library/Logs/remoteman-host.log and takes the options in Host/main.swift.
   RemotemanHost:
-    type: application
-    platform: macOS
-    sources:
-      - Host
-      - Shared/HIDKeys.swift
-      - Shared/Sharing.swift
-      # The design's colours and card pieces, shared with the viewer.
-      - Mac/Kit.swift
-      - Support/Assets.xcassets
+    templates: [HostBase]
+  # The same host with remoteman's camera inside. It needs the System Extension capability,
+  # so Xcode must be signed in to the team (Settings > Accounts) to make its profile:
+  #   xcodebuild -scheme RemotemanHostCamera -allowProvisioningUpdates ...
+  RemotemanHostCamera:
+    templates: [HostBase]
     dependencies:
-      - framework: build/RemotemanCore.xcframework
-        embed: false
-      - sdk: Security.framework
-      - sdk: SystemConfiguration.framework
-      - sdk: ScreenCaptureKit.framework
-      - sdk: VideoToolbox.framework
-    info:
-      path: Host/Info.plist
-      properties:
-        CFBundleDisplayName: remoteman host
-        LSUIElement: true
-        NSLocalNetworkUsageDescription: remoteman host lets your own devices connect to this Mac to show and control its desktop.
+      - target: RemotemanCamera
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+          subpath: ../Library/SystemExtensions
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman.host
-        PRODUCT_NAME: remoteman-host
-        ASSETCATALOG_COMPILER_APPICON_NAME: HostIcon
-        SWIFT_OBJC_BRIDGING_HEADER: Host/Bridging.h
+        CODE_SIGN_ENTITLEMENTS: Host/Host.entitlements
+  # remoteman's camera on the Mac host: a CoreMediaIO camera extension, embedded in the host app
+  # and installed from its Settings with the owner's approval. Rebuilt from espalier's.
+  RemotemanCamera:
+    type: system-extension
+    platform: macOS
+    sources: [HostCamera]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman.host.camera
+        PRODUCT_NAME: com.xnixy.remoteman.host.camera
+        CODE_SIGN_ENTITLEMENTS: HostCamera/Extension.entitlements
+        INFOPLIST_FILE: HostCamera/Info.plist
         ENABLE_HARDENED_RUNTIME: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""

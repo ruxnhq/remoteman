@@ -286,6 +286,16 @@ struct HostSettings: View {
                         Toggle("Receive files", isOn: Binding(get: { controller.allowFiles }, set: { controller.setAllowed(files: $0) }))
                             .labelsHidden().toggleStyle(.switch)
                     }
+                    Row(
+                        "Use a device's camera on this Mac",
+                        caption: controller.cameraNote.isEmpty
+                            ? (controller.cameraInstalled
+                                ? "\"remoteman Camera\" is installed. Apps on this Mac can pick it while a device has its camera on."
+                                : "Installs \"remoteman Camera\". macOS asks you to allow it once. remoteman has to be in the Applications folder.")
+                            : controller.cameraNote
+                    ) {
+                        Button(controller.cameraInstalled ? "Remove…" : "Install…") { controller.installCamera() }
+                    }
                 }
                 CardGroup("While a device is connected") {
                     Row("Lock this Mac when the device leaves") {

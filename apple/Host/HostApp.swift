@@ -26,6 +26,17 @@ final class HostController: ObservableObject {
     @Published private(set) var allowClipboard = false
     @Published private(set) var allowFiles = false
     static let clipboardKey = "allowClipboard", filesKey = "allowFiles"
+    /// remoteman's camera on this Mac: whether it is installed, and what the last request came to.
+    @Published private(set) var cameraInstalled = HostCamera.installed
+    @Published private(set) var cameraNote = ""
+
+    func installCamera() {
+        CameraInstaller.shared.changed = { [weak self] note in
+            self?.cameraNote = note
+            self?.cameraInstalled = HostCamera.installed
+        }
+        if cameraInstalled { CameraInstaller.shared.remove() } else { CameraInstaller.shared.install() }
+    }
 
     func setAllowed(clipboard: Bool? = nil, files: Bool? = nil) {
         if let clipboard { allowClipboard = clipboard }
@@ -200,6 +211,8 @@ final class HostController: ObservableObject {
         }
         let list = host.devices
         if list != devices { devices = list }
+        let cam = HostCamera.installed
+        if cam != cameraInstalled { cameraInstalled = cam }
         let core = host.pairing
         if pairing, !core {
             // The core turns pairing off once it has let a device in.

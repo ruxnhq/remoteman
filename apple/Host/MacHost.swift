@@ -185,8 +185,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
                 else { return }
                 Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().message(m)
             },
-            // Microphone and camera: not acted on yet, so not announced.
-            on_mic: nil, on_camera: nil,
+            // The microphone: not acted on yet, so not announced.
+            on_mic: nil,
+            on_camera: { ctx, data, len, key, _, _ in
+                Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().camera?.frame(UnsafeRawBufferPointer(start: data, count: len), key: key != 0)
+            },
             on_blob: { ctx, what, id, kind, header, data, len, complete in
                 let me = Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue()
                 let h = header.flatMap { (try? JSONSerialization.jsonObject(with: Data(String(cString: $0).utf8))) as? [String: Any] } ?? [:]
@@ -195,7 +198,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var err = [CChar](repeating: 0, count: 512)
         guard
             let h = rm_host_start(
-                options.listen, options.stateDir, options.name, "macos", "video,input,cursor,placement,configure" + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "") + (options.allowFiles ? ",files" : ""), options.pair ? 1 : 0,
+                options.listen, options.stateDir, options.name, "macos", "video,input,cursor,placement,configure" + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "") + (options.allowFiles ? ",files" : "")
+                    // Offered while remoteman's camera is installed on this Mac.
+                    + (HostCamera.installed ? ",camera" : ""), options.pair ? 1 : 0,
                 callbacks, &err, err.count)
         else { throw NSError(domain: "remoteman", code: 1, userInfo: [NSLocalizedDescriptionKey: String(cString: err)]) }
         host = h
@@ -353,6 +358,31 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         sharing.blob(what: what, id: id, kind: kind, header: header, data: data, complete: complete)
     }
 
+    // MARK: The device's camera
+
+    /// On the core's thread: there while the device's camera is on.
+    private var camera: HostCamera?
+
+    private func setCamera(_ m: [String: Any]) {
+        guard let host else { return }
+        if let c = camera {
+            let t = c.totals
+            hostLog("host: the device's camera is off: frames=\(t.frames) keyframes=\(t.keyframes) shown=\(t.shown) undecodable=\(t.undecodable)")
+            c.stop()
+            camera = nil
+        }
+        guard m["on"] as? Bool == true else { return }
+        guard (m["codec"] as? String ?? "h264") == "h264" else { return hostLog("host: the device's camera sends a codec this Mac doesn't take") }
+        let c = HostCamera()
+        c.wantKeyframe = { [weak self] in
+            if let h = self?.host { rm_host_send_message(h, "{\"t\":\"camera_keyframe\"}") }
+        }
+        if let why = c.start() { return hostLog("host: the device's camera: \(why)") }
+        camera = c
+        hostLog("host: the device's camera is on this Mac as \"\(HostCamera.deviceName)\"")
+        _ = host
+    }
+
     // MARK: Sound
 
     private let soundQueue = DispatchQueue(label: "remoteman.host.sound", qos: .userInteractive)
@@ -383,6 +413,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     /// One of the client's feature messages: configure, sound.
     private func message(_ m: [String: Any]) {
         if m["t"] as? String == "sound" { return setSound(m["on"] as? Bool ?? false) }
+        if m["t"] as? String == "camera" { return setCamera(m) }
         if m["t"] as? String == "clipboard", options.allowClipboard, let sharing {
             let on = m["on"] as? Bool ?? false
             hostLog("host: the clipboard is \(on ? "shared with the device" : "no longer shared")")
@@ -458,6 +489,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private func clientLeft() {
         hostLog("host: client left")
         picture = nil
+        setCamera(["on": false])
         soundQueue.sync { sound = nil }
         if let s = sharing {
             sharing = nil
