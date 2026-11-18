@@ -30,19 +30,20 @@ pub struct Mode {
     pub depth: u8,
 }
 
-/// Where the client's display sits among the host's own screens.
+/// Where the client's display sits among the host's own screens. The numbers are the C
+/// interface's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Placement {
     /// The main display: where the desktop's panel and new windows go.
-    Main,
+    Main = 1,
     /// The only display: the host's own screens are off while the client is connected.
-    Only,
+    Only = 2,
     /// An extra display beside the host's own. Also what a placement this version doesn't know
     /// is read as.
     #[default]
     #[serde(other)]
-    Extend,
+    Extend = 0,
 }
 
 impl Placement {
