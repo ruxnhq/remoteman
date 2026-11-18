@@ -118,7 +118,13 @@ impl Pipeline {
             let mut answer = None::<u64>;
             let mut tally = Tally::default();
             let mut rate = bitrate;
-            while let Ok(c) = rx.recv() {
+            loop {
+                // A still desktop sends no frames, and a new bitrate is answered all the same.
+                let c = match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok(c) => Some(c),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
                 // A new bitrate takes effect here, with no keyframe.
                 let want = wanted_r.load(Ordering::Relaxed);
                 if want != rate {
@@ -134,6 +140,7 @@ impl Pipeline {
                         }
                     }
                 }
+                let Some(c) = c else { continue };
                 let mut how = How { idr: key.swap(false, Ordering::Relaxed), ..How::default() };
                 let mut recovery = false;
                 let reported = lost_r.lock().unwrap().take();
