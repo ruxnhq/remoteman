@@ -1,14 +1,14 @@
 //! The picture path: PipeWire DMA-BUF → one Vulkan pass → NVENC. Two threads: PipeWire's, which
 //! converts each frame while the compositor's buffer is still valid, and the encoder's.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
 use remoteman_capture::{self as capture, Event, QuitSender};
-use remoteman_encode::{Codec, Config, Encoder};
+use remoteman_encode::{Codec, Config, Encoder, How};
 use remoteman_gpu::{Chroma, Converter};
 use remoteman_core::host::Link;
 use remoteman_core::{self as control, CursorShape};
@@ -29,8 +29,9 @@ pub struct Settings {
 pub struct Pipeline {
     quit: Option<QuitSender<()>>,
     keyframe: Arc<AtomicBool>,
-    /// The first frame the client reported missing, plus one (0: nothing reported).
-    lost: Arc<AtomicU32>,
+    /// A loss report not yet acted on: the first frame the client missed, and the newest it
+    /// had seen when it said so.
+    lost: Arc<Mutex<Option<(u32, u32)>>>,
     /// Frames the compositor made that were skipped because the encoder was still busy.
     pub skipped: Arc<AtomicU32>,
     /// The scale the compositor draws the monitor at, as `f32` bits (what was asked for, until
@@ -73,12 +74,12 @@ impl Pipeline {
 
         let (ready_tx, ready_rx) = mpsc::channel::<Result<String>>();
         let key = keyframe.clone();
-        let lost = Arc::new(AtomicU32::new(0));
+        let lost = Arc::new(Mutex::new(None::<(u32, u32)>));
         let lost_r = lost.clone();
         let out = link.clone();
         let encoder = std::thread::Builder::new().name("encode".into()).spawn(move || {
             let opened = (|| {
-                let mut enc = Encoder::new(&Config { codec, chroma444: chroma == Chroma::C444, width, height, fps, bitrate, preset: 1 })?;
+                let mut enc = Encoder::new(&Config { codec, chroma444: chroma == Chroma::C444, width, height, fps, bitrate, preset: 1, long_term: 2 })?;
                 for (fd, size) in inputs {
                     enc.add_input(fd, size, pitch)?;
                 }
@@ -94,27 +95,98 @@ impl Pipeline {
                     return;
                 }
             };
-            // How many earlier frames the encoder keeps to refer to (as the wrapper sets it up).
-            const REFERENCES: u64 = 4;
+            // Recent frames the encoder can fall back on, and long-term ones: frames it keeps
+            // when told, so that a loss reported too late for the recent ones still doesn't
+            // cost a keyframe.
+            let short = enc.short_term() as u64;
+            let slots = (enc.long_term() as usize).min(2);
+            // The long-term frames the client holds too, by frame number.
+            let mut kept = [None::<u64>; 2];
+            let mut kept_last = 0u64;
+            // A new one four times a second: with two, one is always older than any loss
+            // reported within a quarter of a second. With room for only one, twice a second: a
+            // late report then finds it too new now and then, and gets a keyframe.
+            let every = (fps as u64 / if slots > 1 { 4 } else { 2 }).max(8);
             let mut n = 0u64;
+            // The last frame sent that a client can restart from (a keyframe or recovery point).
+            let mut answer = None::<u64>;
+            let mut tally = Tally::default();
             while let Ok(c) = rx.recv() {
-                let mut force = key.swap(false, Ordering::Relaxed);
+                let mut how = How { idr: key.swap(false, Ordering::Relaxed), ..How::default() };
                 let mut recovery = false;
-                let reported = lost_r.swap(0, Ordering::Relaxed);
-                if reported != 0 && !force {
+                let reported = lost_r.lock().unwrap().take();
+                if let (Some((first, last)), false) = (reported, how.idr) {
                     // The client missed frames from `first` on, and nothing sent since is any
-                    // use to it either. If the encoder still holds a frame from before the loss,
-                    // drop its references to everything after and carry on from there: no
-                    // keyframe, so no burst. Otherwise start afresh.
-                    let first = (reported - 1) as u64;
-                    if first < n && n - first < REFERENCES && (first..n).all(|t| enc.invalidate(t).is_ok()) {
-                        recovery = true;
+                    // use to it either.
+                    let (first, last) = (first as u64, last as u64);
+                    let behind = n.saturating_sub(first);
+                    tally.reports += 1;
+                    tally.behind[(behind as usize).min(tally.behind.len() - 1)] += 1;
+                    if answer.is_some_and(|a| last < a) {
+                        // Said before the answer already sent could have reached the client.
+                        tally.early += 1;
                     } else {
-                        force = true;
+                        // Stop referring to anything from the loss on, long-term frames
+                        // included. Then carry on from the newest frame the client does have:
+                        // a recent one if the encoder still holds it, else a long-term one.
+                        // No keyframe, so no burst. Failing both, start afresh.
+                        let dropped = first < n && (first..n).try_for_each(|t| enc.invalidate(t)).inspect_err(|e| tracing::debug!(first, n, "invalidate: {e:#}")).is_ok();
+                        for k in &mut kept {
+                            if k.is_some_and(|f| f >= first) {
+                                *k = None;
+                            }
+                        }
+                        let old = (0..slots).filter(|&i| kept[i].is_some()).max_by_key(|&i| kept[i]);
+                        if !dropped {
+                            how.idr = true;
+                            tally.refused += 1;
+                        } else if behind < short {
+                            recovery = true;
+                            tally.recovered += 1;
+                        } else if let Some(slot) = old {
+                            how.refer = 1 << slot;
+                            recovery = true;
+                            tally.long_term += 1;
+                        } else {
+                            how.idr = true;
+                            tally.too_old += 1;
+                        }
                     }
+                    tracing::debug!(first, last, n, behind, recovery, ?how, "loss report");
                 }
-                match enc.encode(c.slot, n, force) {
-                    Ok((data, key)) => {
+                if how.idr {
+                    // A keyframe empties the encoder's store.
+                    kept = [None; 2];
+                }
+                if slots > 0 && how.refer == 0 && (kept[..slots].contains(&None) || n - kept_last >= every) {
+                    // Replace the older one (or fill an empty place).
+                    how.mark = (0..slots).min_by_key(|&i| kept[i]).map(|i| i as u32);
+                }
+                match enc.encode_how(c.slot, n, how) {
+                    Ok(made) => {
+                        let (data, key) = (made.data, made.key);
+                        if key && !how.idr {
+                            kept = [None; 2];
+                            if n > 0 {
+                                tally.unasked += 1;
+                            }
+                        }
+                        if let Some(slot) = made.marked.filter(|s| (*s as usize) < slots) {
+                            kept[slot as usize] = Some(n);
+                            kept_last = n;
+                        }
+                        if how.refer != 0 {
+                            tracing::debug!(n, asked = how.refer, got = made.referred, key, "long-term answer");
+                        }
+                        if how.refer != 0 && !key && made.referred != 0 && made.referred != how.refer {
+                            // Built from another long-term frame than the one asked for (the
+                            // HEVC encoder doesn't say which it used, so nothing to compare
+                            // there): it may lean on something the client lacks.
+                            tally.unsure += 1;
+                        }
+                        if key || recovery {
+                            answer = Some(n);
+                        }
                         n += 1;
                         let sent = if recovery && !key { out.send_recovery_frame(data, c.capture_us) } else { out.send_frame(data, key, c.capture_us) };
                         if !sent {
@@ -126,6 +198,21 @@ impl Pipeline {
                         break;
                     }
                 }
+            }
+            if tally.reports > 0 {
+                let Tally { reports, recovered, long_term, early, too_old, refused, unasked, unsure, behind } = tally;
+                tracing::info!(
+                    reports,
+                    recovered,
+                    long_term,
+                    early,
+                    too_old,
+                    refused,
+                    unasked,
+                    unsure,
+                    ?behind,
+                    "loss reports: answered from a recent frame, from a long-term frame, came before the last answer could arrive, too old (keyframe), refused by the encoder (keyframe); keyframes the encoder made unasked; long-term answers built from another frame than asked; how many frames behind each report was"
+                );
             }
         })?;
         let note = ready_rx.recv().context("encoder thread died")?.context("NVENC")?;
@@ -182,18 +269,29 @@ impl Pipeline {
         self.keyframe.store(true, Ordering::Relaxed);
     }
 
-    /// The client missed frames from `first` on: recover at the next frame.
-    pub fn report_lost(&self, first: u32) {
-        // Keep the earliest report not yet acted on.
-        let mut old = self.lost.load(Ordering::Relaxed);
-        loop {
-            let new = if old == 0 { first + 1 } else { old.min(first + 1) };
-            match self.lost.compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => break,
-                Err(now) => old = now,
-            }
-        }
+    /// The client missed frames from `first` on, and had seen up to `last` when it said so:
+    /// recover at the next frame.
+    pub fn report_lost(&self, first: u32, last: u32) {
+        // Of reports not yet acted on, keep the earliest loss and the newest sighting.
+        let mut lost = self.lost.lock().unwrap();
+        *lost = Some(lost.map_or((first, last), |(f, l)| (f.min(first), l.max(last))));
     }
+}
+
+/// What became of the client's loss reports, for the log.
+#[derive(Default)]
+struct Tally {
+    reports: u32,
+    recovered: u32,
+    long_term: u32,
+    early: u32,
+    too_old: u32,
+    refused: u32,
+    unasked: u32,
+    unsure: u32,
+    /// How many frames had been encoded since the lost one when each report came (the last
+    /// entry: that many or more).
+    behind: [u32; 12],
 }
 
 impl Drop for Pipeline {

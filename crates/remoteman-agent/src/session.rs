@@ -84,9 +84,9 @@ impl HostHandler for Agent {
         }
     }
 
-    fn lost(&mut self, first: u32, _last: u32) {
+    fn lost(&mut self, first: u32, last: u32) {
         if let Some(l) = &self.live {
-            l.pipeline.report_lost(first);
+            l.pipeline.report_lost(first, last);
         }
     }
 

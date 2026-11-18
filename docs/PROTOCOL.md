@@ -66,10 +66,10 @@ There are no B-frames and no periodic keyframes: every frame refers only to earl
 
 A frame is given up when a later one completes while it is still missing fragments. Every frame after it may lean on it, so the client shows none of them and sends `lost` with the first frame it missed. The host then does one of two things, and the client resumes at whichever arrives first:
 
-- **A recovery point:** a frame, flagged with bit 1, that refers to nothing from `first` on. Hosts whose encoder can drop references to chosen frames do this (NVENC on the Linux host); it costs no more than an ordinary frame.
+- **A recovery point:** a frame, flagged with bit 1, that refers to nothing from `first` on. Hosts whose encoder can drop references to chosen frames do this (NVENC on the Linux host); it costs no more than an ordinary frame. It may be built from a much older frame than the last one (a long-term reference), so a decoder must keep whatever the stream tells it to keep; every standard decoder does.
 - **A keyframe,** where the encoder can't, or where nothing older than `first` is left to refer to.
 
-The client repeats `lost` every 40 ms until one of them arrives. Frame numbers are per epoch, from 0.
+The client repeats `lost` every 40 ms until one of them arrives. Frame numbers are per epoch, from 0. A host should ignore a `lost` whose `last` is lower than the number of the last keyframe or recovery point it sent: the client said it before that answer could have reached it.
 
 ## Cursor
 

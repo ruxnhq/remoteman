@@ -38,6 +38,9 @@ pub struct Options {
     pub decoders: Vec<Mode>,
     /// For tests: throw away one video datagram in this many, as a lossy network would.
     pub test_drop_one_in: Option<u32>,
+    /// For tests: hold each loss report back this many milliseconds, as a slow path back to
+    /// the host would.
+    pub test_delay_lost_ms: Option<u32>,
     /// This app draws the cursor itself: the host leaves it out of the picture and reports its
     /// shape and position through [`Handler::cursor_shape`] and [`Handler::cursor_at`].
     pub cursor: bool,
@@ -138,6 +141,7 @@ impl Client {
             Err(_) => bail!("{} isn't paired yet", o.host),
         };
         let o_drop = o.test_drop_one_in.filter(|n| *n > 1);
+        let o_delay = o.test_delay_lost_ms.filter(|ms| *ms > 0);
         let (endpoint, conn, fingerprint) = connect(addr, &identity, expect).await?;
         if !known.exists() {
             std::fs::create_dir_all(known.parent().unwrap())?;
@@ -293,7 +297,18 @@ impl Client {
                                     Some(first) if !need_key => Message::Lost { first, last: frame.number },
                                     _ => Message::Keyframe,
                                 };
-                                if ctl_tx.try_send(m).is_ok() {
+                                let sent = match o_delay {
+                                    Some(ms) => {
+                                        let late = ctl_tx.clone();
+                                        tokio::spawn(async move {
+                                            tokio::time::sleep(Duration::from_millis(ms as u64)).await;
+                                            let _ = late.send(m).await;
+                                        });
+                                        true
+                                    }
+                                    None => ctl_tx.try_send(m).is_ok(),
+                                };
+                                if sent {
                                     c.requests.fetch_add(1, Ordering::Relaxed);
                                     asked = Some(Instant::now());
                                 }
