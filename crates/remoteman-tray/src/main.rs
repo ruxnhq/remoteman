@@ -491,7 +491,9 @@ fn main() -> glib::ExitCode {
         // The icon lives on while the window is closed.
         std::mem::forget(app.hold());
         let (tx, rx) = mpsc::channel::<Cmd>();
-        match (Icon { state: State::Paused, name: built.name.clone(), tx }).spawn() {
+        // Started at sign-in, the top bar's place for icons may not be up yet: wait for it
+        // then, where a start by hand says at once that there is none.
+        match (Icon { state: State::Paused, name: built.name.clone(), tx }).assume_sni_available(background).spawn() {
             Ok(handle) => *built.icon.borrow_mut() = Some(handle),
             // No place for icons on this desktop: the window is all there is.
             Err(e) => eprintln!("remoteman-tray: no icon in the top bar ({e}); use the window"),

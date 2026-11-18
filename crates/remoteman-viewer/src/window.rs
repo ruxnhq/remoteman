@@ -467,7 +467,7 @@ impl App {
     /// This computer's clipboard changed (or sharing has just begun): send text if it holds
     /// any, else a picture. What came from the other computer is not sent back.
     pub fn copied_here(self: &Rc<Self>) {
-        if !self.clipboard_on.get() || self.session.borrow().is_none() {
+        if !self.clipboard_on.get() || !self.session.borrow().as_ref().is_some_and(|s| s.offers("clipboard")) {
             return;
         }
         let clipboard = self.window.clipboard();
@@ -492,7 +492,8 @@ impl App {
         if self.from_computer.get() == Some(mark_of(kind, &bytes)) || !self.clipboard_on.get() {
             return;
         }
-        if let Some(s) = self.session.borrow().as_ref() {
+        // Only to a computer that still allows it: its owner may have switched it off since.
+        if let Some(s) = self.session.borrow().as_ref().filter(|s| s.offers("clipboard")) {
             s.send_copy(kind, bytes);
         }
     }

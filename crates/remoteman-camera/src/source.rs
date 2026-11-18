@@ -32,8 +32,8 @@ const BITRATE: usize = 2_500_000;
 const ENCODERS: [(&str, &[(&str, &str)]); 2] =
     [("h264_nvenc", &[("preset", "p1"), ("tune", "ull"), ("zerolatency", "1"), ("delay", "0"), ("forced-idr", "1"), ("rc", "cbr")]), ("libopenh264", &[("allow_skip_frames", "1")])];
 
-fn find_encoder() -> Option<(ff::Codec, &'static [(&'static str, &'static str)])> {
-    ENCODERS.iter().find_map(|(name, options)| ff::encoder::find_by_name(name).map(|c| (c, *options)))
+fn any_encoder() -> bool {
+    ENCODERS.iter().any(|(name, _)| ff::encoder::find_by_name(name).is_some())
 }
 
 /// A running camera. Dropping it lets go of the camera.
@@ -51,7 +51,9 @@ impl Source {
     pub fn start(from: Option<&str>, on_frame: impl FnMut(&[u8], bool) + Send + 'static) -> Result<Source> {
         let _ = ff::init();
         ff::util::log::set_level(ff::util::log::Level::Fatal);
-        find_encoder().context("this computer has no H.264 encoder remoteman can use (NVIDIA's or OpenH264)")?;
+        if !any_encoder() {
+            bail!("this computer has no H.264 encoder remoteman can use (NVIDIA's or OpenH264)");
+        }
         let (quit, quit_rx) = pw::channel::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
         let key = Arc::new(AtomicBool::new(true));
@@ -184,22 +186,35 @@ impl State {
         let source = (frame.format(), frame.width(), frame.height());
         if self.encoding.as_ref().is_none_or(|e| e.source != source) {
             let (width, height) = fit(source.1, source.2);
-            let (codec, options) = find_encoder().context("no H.264 encoder")?;
-            let mut context = ff::codec::Context::new_with_codec(codec).encoder().video()?;
-            context.set_width(width);
-            context.set_height(height);
-            context.set_format(Pixel::YUV420P);
-            context.set_time_base((1, FPS as i32));
-            context.set_frame_rate(Some((FPS as i32, 1)));
-            context.set_bit_rate(BITRATE);
-            context.set_max_bit_rate(BITRATE);
-            context.set_max_b_frames(0);
-            context.set_gop(FPS * 2);
-            let mut said = ff::Dictionary::new();
-            for (name, value) in options {
-                said.set(name, value);
+            // The first of them that opens: FFmpeg lists NVIDIA's encoder on computers that
+            // have no such card, and it only fails when opened.
+            let mut opened = None;
+            let mut why = anyhow!("this computer has no H.264 encoder remoteman can use");
+            for (name, options) in ENCODERS {
+                let Some(codec) = ff::encoder::find_by_name(name) else { continue };
+                let mut context = ff::codec::Context::new_with_codec(codec).encoder().video()?;
+                context.set_width(width);
+                context.set_height(height);
+                context.set_format(Pixel::YUV420P);
+                context.set_time_base((1, FPS as i32));
+                context.set_frame_rate(Some((FPS as i32, 1)));
+                context.set_bit_rate(BITRATE);
+                context.set_max_bit_rate(BITRATE);
+                context.set_max_b_frames(0);
+                context.set_gop(FPS * 2);
+                let mut said = ff::Dictionary::new();
+                for (option, value) in options {
+                    said.set(option, value);
+                }
+                match context.open_with(said) {
+                    Ok(encoder) => {
+                        opened = Some(encoder);
+                        break;
+                    }
+                    Err(e) => why = anyhow!("{name} can't be opened: {e}"),
+                }
             }
-            let encoder = context.open_with(said).context("open the H.264 encoder")?;
+            let Some(encoder) = opened else { return Err(why) };
             let scaler = scaling::Context::get(source.0, source.1, source.2, Pixel::YUV420P, width, height, scaling::Flags::BILINEAR).context("scale the camera's picture")?;
             self.encoding = Some(Encoding { source, scaler: Scaler(scaler), scaled: Video::new(Pixel::YUV420P, width, height), encoder, packet: ff::Packet::empty(), count: 0 });
             self.key.store(true, Ordering::Relaxed);
