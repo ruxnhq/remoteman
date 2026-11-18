@@ -394,7 +394,9 @@ Known gaps, found by these runs:
   | Mac viewer (wired) | 2752×1436 at 144 | 118.5 / 144 | 16.1 / 20.2 / 21.1 / 22.2 | 0 | 0.5 ms |
   | iPhone 18 Pro Max (Wi-Fi) | 1320×2868 at 120 | 104 / 115 | 15.9 / 20.4 / 21.4 / 28.3 | 10 frames, 7 keyframes asked | 3.5 ms |
 
-  The target was 25 ms at the 95th percentile and 120 fps: met on the Mac with room. At 144 Hz the Mac shows only about 118 a second because its display link (on a headless Mac) runs near 120 whatever the mode says. On the iPhone the age is fine but each lost frame froze the picture until a keyframe arrived (the longest gap was 150 ms), which is what loss recovery is for. The iPad was locked and not measured.
+  | iPad Pro 13-inch M5 (Wi-Fi) | 3200×2400 at 120 | 110 / 119 | 16.1 / 18.2 / 18.8 / 20.5 | 0 | 3.8 ms |
+
+  The target was 25 ms at the 95th percentile and 120 fps: met on the Mac with room, and on the iPad for age. On the iPad about 8% of frames are replaced before they are shown: two arrive inside one refresh and the next refresh has nothing new. The iPad asks for 3200×2400 because in its "More Space" mode iPadOS itself composes at that size. The iPhone's gap and shown-fps figures are suspect (the test's own logging held up its display); its loss counts stand. At 144 Hz the Mac shows only about 118 a second because its display link (on a headless Mac) runs near 120 whatever the mode says. On the iPhone the age is fine but each lost frame froze the picture until a keyframe arrived (the longest gap was 150 ms), which is what loss recovery is for. The iPad was locked and not measured.
 - **Not built yet from this phase's list:** QR pairing (pairing is "first unknown device while `--pair` is on"),. The stats overlay and the apps exist. Confirmed by the user on the iPad with its keyboard case (2026-11-17): hardware keys including shortcuts, and trackpad pointer, click and drag ("moving apps") all work. Not tested: the bare iPad with touch only and its on-screen keyboard (left for later by the user), the iPhone beyond viewing, and clicks, keys and scroll from the Mac viewer.
 
 ### 2. Mac host
@@ -434,6 +436,8 @@ A GTK 4 and libadwaita app in Rust on the shared core: a list of paired hosts, p
 ### 5. Picture and resilience
 Our own Vulkan conversion, direct NVENC, re-requests and parity, the rate controller, static refinement, 4:4:4 if S2 and S3 passed, rotation and resizing.
 **Done when:** 2% random loss shows no stall and puts no keyframe on the wire; the bitrate follows a throttled link within 1 s; an idle desktop sends under 100 kbit/s.
+
+**Status (2026-11-17):** recovery without keyframes is built. When a client misses a frame it says which; the Linux host has NVENC drop its references to everything from that frame on and continue from an older one, flagging the next frame as a recovery point. Tested with one packet in 300 thrown away at the client (about 8 losses a second, far worse than real Wi-Fi): in AV1, HEVC and HEVC 4:4:4 every loss was answered by a recovery point, no keyframe was sent, the longest gap in the picture was 25 to 28 ms (three frames), and the frames delivered decode in FFmpeg with no errors. Before this each loss cost a keyframe and a freeze of up to 150 ms. Still to build from this phase: re-requesting lost fragments and parity (so most losses are never seen at all), bitrate that follows the network, and static refinement. The Mac host answers a loss with a keyframe.
 
 ### 6. The rest of daily use
 Sound, clipboard, soft keyboard and text input, the key bar and remaps, iPhone trackpad mode and zoom, Wake-on-LAN.

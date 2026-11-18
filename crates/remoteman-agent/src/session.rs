@@ -74,6 +74,12 @@ impl HostHandler for Agent {
         }
     }
 
+    fn lost(&mut self, first: u32, _last: u32) {
+        if let Some(l) = &self.live {
+            l.pipeline.report_lost(first);
+        }
+    }
+
     fn input(&mut self, event: Event) {
         let Some(l) = &self.live else { return };
         let scale = f32::from_bits(l.pipeline.scale.load(std::sync::atomic::Ordering::Relaxed));

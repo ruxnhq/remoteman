@@ -11,6 +11,7 @@
 //!     --record FILE      save what the app would be handed, frame by frame (format below)
 //!     --input-demo       move the pointer, click, type and touch while running
 //!     --cursor           draw the cursor ourselves: ask for its shape and position apart
+//!     --drop-one-in N    throw away one video packet in N, as a lossy network would
 
 //!
 //! A recording (`--record`) is for testing decoders without a host. It is:
@@ -39,6 +40,7 @@ struct Seen {
     ages: Vec<f64>,
     bytes: usize,
     keys: u32,
+    recoveries: u32,
     /// Cursor shapes and positions reported, and the last of each.
     shapes: Vec<(u32, u32, i32, i32)>,
     positions: u32,
@@ -86,6 +88,7 @@ impl Handler for Watcher {
         s.arrivals.push(Instant::now());
         s.bytes += frame.data.len();
         s.keys += frame.key as u32;
+        s.recoveries += frame.recovery as u32;
         if let Some(age) = age_us {
             s.ages.push(age as f64 / 1000.0);
         }
@@ -112,6 +115,7 @@ fn main() -> Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let (mut state, mut pair, mut size, mut scale, mut refresh, mut secs) = (home.join(".local/state/remoteman"), false, (2752u32, 2064u32), 2.0f32, 120u32, 10u64);
     let (mut out, mut record, mut demo, mut cursor, mut decoders) = (None::<PathBuf>, None::<PathBuf>, false, false, "av1,hevc444,hevc".to_owned());
+    let mut drop_one_in = None::<u32>;
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -130,6 +134,7 @@ fn main() -> Result<()> {
             "--record" => record = Some(value()?.into()),
             "--input-demo" => demo = true,
             "--cursor" => cursor = true,
+            "--drop-one-in" => drop_one_in = Some(value()?.parse()?),
             other => bail!("unknown option {other}"),
         }
     }
@@ -156,7 +161,7 @@ fn main() -> Result<()> {
         None => None,
     };
     let watcher = Watcher { seen: seen.clone(), file, record, warm: Instant::now() + Duration::from_secs(2) };
-    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh }, decoders, cursor };
+    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh }, decoders, test_drop_one_in: drop_one_in, cursor };
     let client = Client::connect(options, watcher)?;
     println!("host: {} ({}), features {:?}, fingerprint {}", client.host_name, client.host_os, client.host_features, &client.host_fingerprint[..12]);
 
@@ -205,7 +210,7 @@ fn main() -> Result<()> {
         println!("cursor: {} shapes {:?}, {} positions, last {:?}", s.shapes.len(), s.shapes, s.positions, s.last_at);
     }
     let n = s.arrivals.len();
-    println!("frames {n}, lost {}, keyframes {}, keyframe requests {}", stats.lost, s.keys, stats.keyframe_requests);
+    println!("frames {n}, lost {}, keyframes {}, recovery points {}, loss reports {}", stats.lost, s.keys, s.recoveries, stats.keyframe_requests);
     if n > 2 {
         let span = (s.arrivals[n - 1] - s.arrivals[0]).as_secs_f64();
         let mut iv: Vec<f64> = s.arrivals.windows(2).map(|p| (p[1] - p[0]).as_secs_f64() * 1000.0).collect();

@@ -115,7 +115,7 @@ pub unsafe extern "C" fn rm_client_connect(
             }
         });
     }
-    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh }, decoders: modes, cursor: callbacks.on_cursor_shape.is_some() };
+    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh }, decoders: modes, test_drop_one_in: None, cursor: callbacks.on_cursor_shape.is_some() };
     match Client::connect(options, callbacks) {
         Ok(c) => Box::into_raw(Box::new(c)),
         Err(e) => {

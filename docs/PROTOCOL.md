@@ -29,7 +29,8 @@ Each message is a `u32` length followed by that many bytes of UTF-8 JSON, an obj
 
 - `{"t":"client_hello","proto":0,"name":"Anna's iPad","display":{"width":2752,"height":2064,"scale":2.0,"refresh":120},"decoders":[{"codec":"av1","chroma":"420","depth":10},{"codec":"hevc","chroma":"444","depth":10},{"codec":"hevc","chroma":"420","depth":10}]}`
   The first message. `display` is the client's screen in pixels, with the scale it wants the desktop drawn at and its refresh rate in Hz. `decoders` lists what it decodes in hardware, most preferred first. An optional `"cursor":true` says the client draws the cursor itself (see Cursor).
-- `{"t":"keyframe"}`: the client lost a frame it can't do without; the next frame should be a keyframe.
+- `{"t":"lost","first":812,"last":813}`: frames 812 to 813 never arrived whole (`last` is the newest frame number the client has seen). See Video, "Loss".
+- `{"t":"keyframe"}`: the client needs a keyframe, with no way round it (at the start of a stream).
 - `{"t":"ping","id":7,"client_us":123456}`: answered at once with `pong`. `client_us` is the client's clock in microseconds.
 
 **Host → client**
@@ -48,6 +49,7 @@ A frame is one access unit: HEVC in Annex-B form (start codes; parameter sets re
 ```
 u8   kind        1 = video
 u8   flags       bit 0: this frame is a keyframe
+                 bit 1: this frame is a recovery point (see Loss)
 u16  epoch       the stream epoch it belongs to
 u32  frame       counts up by one per frame within an epoch
 u16  index       this fragment's place in the frame, from 0
@@ -58,7 +60,16 @@ u64  capture_us  when the host captured the frame, on the host's clock
 
 The header is 20 bytes. The host sizes fragments to fit the connection's datagram limit.
 
-There are no B-frames and no periodic keyframes: every frame refers only to earlier ones. In version 0 the client asks for a keyframe (`keyframe`) when a frame is incomplete at the time a later one completes, and shows nothing until it arrives. Datagrams of an older epoch are dropped.
+There are no B-frames and no periodic keyframes: every frame refers only to earlier ones. Datagrams of an older epoch are dropped.
+
+### Loss
+
+A frame is given up when a later one completes while it is still missing fragments. Every frame after it may lean on it, so the client shows none of them and sends `lost` with the first frame it missed. The host then does one of two things, and the client resumes at whichever arrives first:
+
+- **A recovery point:** a frame, flagged with bit 1, that refers to nothing from `first` on. Hosts whose encoder can drop references to chosen frames do this (NVENC on the Linux host); it costs no more than an ordinary frame.
+- **A keyframe,** where the encoder can't, or where nothing older than `first` is left to refer to.
+
+The client repeats `lost` every 40 ms until one of them arrives. Frame numbers are per epoch, from 0.
 
 ## Cursor
 
@@ -98,4 +109,4 @@ The client sends `ping` now and then and takes the answer with the shortest roun
 
 ## Not in version 0
 
-Sound, clipboard, files, re-requesting lost fragments, parity, reference invalidation on loss, bitrate following the network, resume tokens, QR pairing, more than one display, HDR.
+Sound, clipboard, files, re-requesting lost fragments, parity, bitrate following the network, resume tokens, QR pairing, more than one display, HDR.

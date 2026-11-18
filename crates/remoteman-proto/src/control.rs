@@ -84,6 +84,12 @@ pub enum Message {
     },
     /// The client needs a keyframe.
     Keyframe,
+    /// Frames `first` to `last` never arrived whole. The host answers with a frame flagged as a
+    /// recovery point (one that leans on nothing from `first` on) or, failing that, a keyframe.
+    Lost {
+        first: u32,
+        last: u32,
+    },
     Ping {
         id: u32,
         client_us: u64,
