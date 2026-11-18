@@ -124,7 +124,7 @@ impl Session {
             }
         })?;
         let hostname = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "Linux".into());
-        let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, test_drop_one_in: None, cursor: true };
+        let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, test_drop_one_in: None, test_delay_lost_ms: None, cursor: true };
         let client = Client::connect(options, Feed { tx, shared: shared.clone() })?;
         Ok(Self { client, shared })
     }

@@ -22,6 +22,7 @@ typedef struct rm_nvenc_cfg {
     uint32_t width, height, fps, bitrate;
     uint32_t preset;      // 1..7 (P1 fastest)
     uint32_t hdr_pq;      // 0 = BT.709 SDR, 1 = BT.2020 PQ signalling
+    uint32_t long_term;   // how many long-term reference frames to keep room for (0: none)
 } rm_nvenc_cfg;
 
 #define RM_MAX_INPUTS 8
@@ -34,6 +35,9 @@ typedef struct rm_nvenc {
     NV_ENC_INITIALIZE_PARAMS init;
     NV_ENC_CONFIG config;
     NV_ENC_BUFFER_FORMAT fmt;
+    int av1;
+    uint32_t short_term;  // recent frames kept to refer to
+    uint32_t long_term;   // long-term frames: what the encoder agreed to
     uint32_t pitch;
     NV_ENC_REGISTERED_PTR inputs[RM_MAX_INPUTS];
     int n_inputs;
@@ -146,6 +150,16 @@ rm_nvenc *rm_nvenc_open(rm_cuda *cuda, const rm_nvenc_cfg *cfg, char *err, int e
     uint32_t prim = cfg->hdr_pq ? NV_ENC_VUI_COLOR_PRIMARIES_BT2020 : NV_ENC_VUI_COLOR_PRIMARIES_BT709;
     uint32_t trc = cfg->hdr_pq ? NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084 : NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
     uint32_t mat = cfg->hdr_pq ? NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL : NV_ENC_VUI_MATRIX_COEFFS_BT709;
+    e->av1 = cfg->codec == 1;
+    // How many recent frames the encoder keeps to refer to, and so to fall back on when a newer
+    // one is invalidated. Four: AV1 in NVENC has no more. HEVC allows fewer frames in all the
+    // larger the picture: at level 5.x, six for pictures over 6,684,672 pixels (an iPad's
+    // 3200x2400), and NVENC answers one more by moving the stream to level 6, which not every
+    // decoder takes. So there it is three, which with two long-term frames stays inside 5.x.
+    e->short_term = 4;
+    if (!e->av1 && cfg->long_term && (uint64_t)cfg->width * cfg->height > 6684672 && (uint64_t)cfg->width * cfg->height <= 8912896) e->short_term = 3;
+    e->long_term = cfg->long_term;
+    if (e->long_term > (uint32_t)cap(e, codec, NV_ENC_CAPS_NUM_MAX_LTR_FRAMES)) e->long_term = cap(e, codec, NV_ENC_CAPS_NUM_MAX_LTR_FRAMES);
     if (cfg->codec == 1) {
         NV_ENC_CONFIG_AV1 *a = &e->config.encodeCodecConfig.av1Config;
         if (cfg->chroma444) { snprintf(err, errlen, "AV1 4:4:4 isn't supported by NVENC"); goto fail; }
@@ -154,7 +168,11 @@ rm_nvenc *rm_nvenc_open(rm_cuda *cuda, const rm_nvenc_cfg *cfg, char *err, int e
         a->inputBitDepth = a->outputBitDepth = NV_ENC_BIT_DEPTH_10;
         a->idrPeriod = NVENC_INFINITE_GOPLENGTH;
         a->repeatSeqHdr = 1;
-        a->maxNumRefFramesInDPB = 4;
+        // The encoder refers back four frames at most whatever this says; the rest is room for
+        // the long-term ones.
+        a->maxNumRefFramesInDPB = e->short_term + e->long_term;
+        a->enableLTR = e->long_term > 0;
+        a->ltrNumFrames = e->long_term;
         a->colorPrimaries = prim; a->transferCharacteristics = trc; a->matrixCoefficients = mat;
         a->colorRange = 0;
     } else {
@@ -164,7 +182,10 @@ rm_nvenc *rm_nvenc_open(rm_cuda *cuda, const rm_nvenc_cfg *cfg, char *err, int e
         h->inputBitDepth = h->outputBitDepth = NV_ENC_BIT_DEPTH_10;
         h->idrPeriod = NVENC_INFINITE_GOPLENGTH;
         h->repeatSPSPPS = 1;
-        h->maxNumRefFramesInDPB = 4;
+        h->maxNumRefFramesInDPB = e->short_term + e->long_term;
+        h->enableLTR = e->long_term > 0;
+        h->ltrTrustMode = 0;
+        h->ltrNumFrames = e->long_term;
         h->hevcVUIParameters.videoSignalTypePresentFlag = 1;
         h->hevcVUIParameters.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
         h->hevcVUIParameters.videoFullRangeFlag = 0;
@@ -195,8 +216,8 @@ rm_nvenc *rm_nvenc_open(rm_cuda *cuda, const rm_nvenc_cfg *cfg, char *err, int e
     e->fmt = cfg->chroma444 ? NV_ENC_BUFFER_FORMAT_YUV444_10BIT : NV_ENC_BUFFER_FORMAT_YUV420_10BIT;
     if ((s = e->f.nvEncCreateBitstreamBuffer(e->enc, &bs))) FAIL("bitstream buffer");
     e->bitstream = bs.bitstreamBuffer;
-    snprintf(err, errlen, "ref invalidation %s",
-             cap(e, codec, NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION) ? "supported" : "NOT supported");
+    snprintf(err, errlen, "ref invalidation %s, %u long-term frames",
+             cap(e, codec, NV_ENC_CAPS_SUPPORT_REF_PIC_INVALIDATION) ? "supported" : "NOT supported", e->long_term);
     return e;
 fail:
     if (e->enc) e->f.nvEncDestroyEncoder(e->enc);
@@ -227,9 +248,16 @@ int rm_nvenc_register(rm_nvenc *e, uint64_t devptr, uint32_t pitch) {
     return e->n_inputs++;
 }
 
-// Encode input `idx`. On return *data/*size is this frame's bitstream (valid until the next
-// call) and *key says whether it is a keyframe.
-int rm_nvenc_encode(rm_nvenc *e, int idx, uint64_t timestamp, int force_idr, const uint8_t **data, uint32_t *size, int *key) {
+uint32_t rm_nvenc_short_term(rm_nvenc *e) { return e->short_term; }
+uint32_t rm_nvenc_long_term(rm_nvenc *e) { return e->long_term; }
+
+// Encode input `idx`. `mark` >= 0 keeps this frame as long-term frame number `mark`; `use`, if
+// not 0, is the set of long-term frames (bit i: frame i) this frame must be built from instead
+// of recent ones. On return *data/*size is this frame's bitstream (valid until the next call),
+// *key says whether it is a keyframe, and *long_term what the encoder did: bit 31 set if it kept
+// the frame as a long-term one, bits 16 to 23 which, and in the low 16 bits the long-term frames
+// it built this one from.
+int rm_nvenc_encode(rm_nvenc *e, int idx, uint64_t timestamp, int force_idr, int mark, uint32_t use, const uint8_t **data, uint32_t *size, int *key, uint32_t *long_term) {
     NV_ENC_MAP_INPUT_RESOURCE map = { NV_ENC_MAP_INPUT_RESOURCE_VER };
     NV_ENC_PIC_PARAMS pic = { NV_ENC_PIC_PARAMS_VER };
     NV_ENC_LOCK_BITSTREAM lock = { NV_ENC_LOCK_BITSTREAM_VER };
@@ -248,6 +276,15 @@ int rm_nvenc_encode(rm_nvenc *e, int idx, uint64_t timestamp, int force_idr, con
     pic.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
     pic.inputTimeStamp = timestamp;
     pic.encodePicFlags = force_idr ? NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS : 0;
+    if (e->long_term && e->av1) {
+        NV_ENC_PIC_PARAMS_AV1 *p = &pic.codecPicParams.av1PicParams;
+        if (mark >= 0) { p->ltrMarkFrame = 1; p->ltrMarkFrameIdx = mark; }
+        if (use) { p->ltrUseFrames = 1; p->ltrUseFrameBitmap = use; }
+    } else if (e->long_term) {
+        NV_ENC_PIC_PARAMS_HEVC *p = &pic.codecPicParams.hevcPicParams;
+        if (mark >= 0) { p->ltrMarkFrame = 1; p->ltrMarkFrameIdx = mark; }
+        if (use) { p->ltrUseFrames = 1; p->ltrUseFrameBitmap = use; }
+    }
     s = e->f.nvEncEncodePicture(e->enc, &pic);
     if (s) { nv_fail(e, s, "encode"); e->f.nvEncUnmapInputResource(e->enc, map.mappedResource); goto out; }
     lock.outputBitstream = e->bitstream;
@@ -260,6 +297,7 @@ int rm_nvenc_encode(rm_nvenc *e, int idx, uint64_t timestamp, int force_idr, con
     *data = e->out;
     *size = lock.bitstreamSizeInBytes;
     *key = lock.pictureType == NV_ENC_PIC_TYPE_IDR || lock.pictureType == NV_ENC_PIC_TYPE_I;
+    *long_term = (lock.ltrFrame ? 0x80000000u | (lock.ltrFrameIdx & 0xff) << 16 : 0) | (lock.ltrFrameBitmap & 0xffff);
     e->f.nvEncUnlockBitstream(e->enc, e->bitstream);
     e->f.nvEncUnmapInputResource(e->enc, map.mappedResource);
     rc = 0;

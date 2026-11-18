@@ -15,6 +15,7 @@ struct Cfg {
     bitrate: u32,
     preset: u32,
     hdr_pq: u32,
+    long_term: u32,
 }
 
 unsafe extern "C" {
@@ -23,7 +24,10 @@ unsafe extern "C" {
     fn rm_nvenc_open(cuda: *mut c_void, cfg: *const Cfg, err: *mut c_char, errlen: c_int) -> *mut c_void;
     fn rm_nvenc_error(e: *mut c_void) -> *const c_char;
     fn rm_nvenc_register(e: *mut c_void, devptr: u64, pitch: u32) -> c_int;
-    fn rm_nvenc_encode(e: *mut c_void, idx: c_int, ts: u64, force_idr: c_int, data: *mut *const u8, size: *mut u32, key: *mut c_int) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn rm_nvenc_encode(e: *mut c_void, idx: c_int, ts: u64, force_idr: c_int, mark: c_int, refer: u32, data: *mut *const u8, size: *mut u32, key: *mut c_int, long_term: *mut u32) -> c_int;
+    fn rm_nvenc_short_term(e: *mut c_void) -> u32;
+    fn rm_nvenc_long_term(e: *mut c_void) -> u32;
     fn rm_nvenc_set_bitrate(e: *mut c_void, bitrate: u32) -> c_int;
     fn rm_nvenc_invalidate(e: *mut c_void, ts: u64) -> c_int;
     fn rm_nvenc_close(e: *mut c_void);
@@ -43,6 +47,30 @@ pub struct Config {
     pub fps: u32,
     pub bitrate: u32,
     pub preset: u32,
+    /// How many long-term reference frames to keep room for: frames the encoder holds on to
+    /// when told, to build a later frame from when everything recent was lost on the way.
+    pub long_term: u32,
+}
+
+/// How to encode one frame.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct How {
+    /// As a keyframe.
+    pub idr: bool,
+    /// Keep it as long-term frame number this.
+    pub mark: Option<u32>,
+    /// Build it from these long-term frames only (bit i: frame i), not from recent ones.
+    pub refer: u32,
+}
+
+/// One encoded frame.
+pub struct Made<'a> {
+    pub data: &'a [u8],
+    pub key: bool,
+    /// The long-term frame number the encoder kept it as, if it did.
+    pub marked: Option<u32>,
+    /// The long-term frames it was built from (bit i: frame i).
+    pub referred: u32,
 }
 
 pub struct Encoder {
@@ -75,6 +103,7 @@ impl Encoder {
                 bitrate: cfg.bitrate,
                 preset: cfg.preset,
                 hdr_pq: 0,
+                long_term: cfg.long_term,
             };
             let enc = rm_nvenc_open(cuda, &c, err.as_mut_ptr(), 256);
             if enc.is_null() {
@@ -107,16 +136,41 @@ impl Encoder {
         }
     }
 
+    /// How many recent frames the encoder keeps to refer to. A frame can be invalidated and
+    /// the stream carry on without a keyframe only while an older one is still among them.
+    pub fn short_term(&self) -> u32 {
+        // SAFETY: a live encoder.
+        unsafe { rm_nvenc_short_term(self.enc) }
+    }
+
+    /// How many long-term frames the encoder agreed to keep (at most what was asked for).
+    pub fn long_term(&self) -> u32 {
+        // SAFETY: a live encoder.
+        unsafe { rm_nvenc_long_term(self.enc) }
+    }
+
     /// Encode input `idx`; returns the bitstream and whether it is a keyframe.
     pub fn encode(&mut self, idx: usize, timestamp: u64, force_idr: bool) -> Result<(&[u8], bool)> {
-        let (mut data, mut size, mut key) = (std::ptr::null(), 0u32, 0);
+        let made = self.encode_how(idx, timestamp, How { idr: force_idr, ..How::default() })?;
+        Ok((made.data, made.key))
+    }
+
+    /// Encode input `idx` as `how` says.
+    pub fn encode_how(&mut self, idx: usize, timestamp: u64, how: How) -> Result<Made<'_>> {
+        let (mut data, mut size, mut key, mut long_term) = (std::ptr::null(), 0u32, 0, 0u32);
+        let mark = how.mark.map_or(-1, |m| m as c_int);
         // SAFETY: the returned bytes are the encoder's own buffer, valid until the next call,
         // which the borrow of `self` enforces.
         unsafe {
-            if rm_nvenc_encode(self.enc, idx as c_int, timestamp, force_idr as c_int, &mut data, &mut size, &mut key) != 0 {
+            if rm_nvenc_encode(self.enc, idx as c_int, timestamp, how.idr as c_int, mark, how.refer, &mut data, &mut size, &mut key, &mut long_term) != 0 {
                 bail!("{}", self.last_error());
             }
-            Ok((std::slice::from_raw_parts(data, size as usize), key != 0))
+            Ok(Made {
+                data: std::slice::from_raw_parts(data, size as usize),
+                key: key != 0,
+                marked: (long_term >> 31 != 0).then_some(long_term >> 16 & 0xff),
+                referred: long_term & 0xffff,
+            })
         }
     }
 
