@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session, title bar</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.rm{--desk:#D5DEF3;--bg:#F3F3F3;--pane:#FAFAFA;--card:#FFFFFF;--line:rgba(0,0,0,.1);--tx:#1B1B1B;--t2:#5A5A5A;--ac:#2458F5;--on:#FFFFFF;--at:#1D4BDB;--sub:rgba(0,0,0,.05);--ok:#0F7B0F;--warn:#8A5200;--bad:#C42B1C;--sh:0 10px 30px rgba(0,0,0,.2);font-family:"Segoe UI Variable Text","Segoe UI",Inter,system-ui,sans-serif;font-size:14px;line-height:20px;color:var(--tx);box-sizing:border-box}
+.rm.dark{--desk:#0B1437;--bg:#202020;--pane:#2A2A2A;--card:#2D2D2D;--line:rgba(255,255,255,.11);--tx:#FFFFFF;--t2:#C8C8C8;--ac:#8AB0FF;--on:#0B1437;--at:#9DBCFF;--sub:rgba(255,255,255,.07);--ok:#6CCB5F;--warn:#F5C26B;--bad:#FF99A4;--sh:0 10px 30px rgba(0,0,0,.55)}
+.rm *{box-sizing:border-box}
+.rm button{font:inherit;color:inherit}
+.win{background:var(--bg);border:1px solid var(--line);border-radius:8px;box-shadow:var(--sh);overflow:hidden;display:flex;flex-direction:column}
+.cap{display:flex}
+.cap span{width:46px;height:44px;display:flex;align-items:center;justify-content:center}
+.c{font-size:12px;line-height:16px;color:var(--t2)}
+.ic{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+.tbtn{height:32px;min-width:36px;padding:0 9px;border-radius:4px;border:0;background:transparent;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}
+.tbtn.on{background:var(--sub);color:var(--at)}
+.sep{width:1px;height:20px;background:var(--line);margin:0 4px}
+.k{font-size:10px;line-height:14px;letter-spacing:.06em;color:#B9C0CC}
+.v{font-size:14px;line-height:20px;font-weight:600;color:#FFFFFF;font-variant-numeric:tabular-nums}
+</style>
+</helmet>
+<div class="rm {{theme}}" style="width: 1280px; height: 800px; padding: 28px; background: var(--desk); display: flex">
+<div class="win" style="flex: 1">
+<div style="height: 44px; flex: none; display: flex; align-items: center; gap: 2px; padding-left: 12px">
+<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect width="16" height="16" rx="3.5" fill="#2458F5"/><rect x="6" y="5" width="7" height="5" rx="1.2" fill="none" stroke="#fff" stroke-width="1.2"/><path d="M2.5 6h2M2 7.8h2.5M3 9.5h1.5" stroke="#fff" stroke-width="1.1" stroke-linecap="round"/></svg>
+<span style="font-weight: 600; margin-left: 8px">Workshop PC</span>
+<span class="c" style="margin: 0 10px 0 8px; display: flex; align-items: center; gap: 6px"><span style="width: 8px; height: 8px; border-radius: 4px; background: var(--ok)"></span>2560 × 1440 · 144 Hz</span>
+<span class="sep"></span>
+<button class="tbtn" style="color: var(--bad)">Disconnect</button>
+<span class="sep"></span>
+<button class="tbtn"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4 7h.01M6.5 7h.01M9 7h.01M11.5 7h.01M5 9.5h6"/></svg>Send keys<svg class="ic" viewBox="0 0 16 16" aria-hidden="true" style="width: 10px"><path d="M4 6l4 4 4-4"/></svg></button>
+<button class="tbtn"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8" rx="1.5"/><path d="M6 14h4M8 11v3"/></svg>Display<svg class="ic" viewBox="0 0 16 16" aria-hidden="true" style="width: 10px"><path d="M4 6l4 4 4-4"/></svg></button>
+<button class="tbtn"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5h7M13 5h1M2 11h1M7 11h7"/><circle cx="11" cy="5" r="1.6"/><circle cx="5" cy="11" r="1.6"/></svg>Picture<svg class="ic" viewBox="0 0 16 16" aria-hidden="true" style="width: 10px"><path d="M4 6l4 4 4-4"/></svg></button>
+<span class="sep"></span>
+<button class="tbtn on" aria-pressed="true" aria-label="Sound, on"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6.5h2l3-2.5v8l-3-2.5h-2zM10.5 6a3 3 0 010 4M12.3 4.3a5.5 5.5 0 010 7.4"/></svg></button>
+<button class="tbtn" aria-pressed="false" aria-label="Microphone, off"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="6" y="2" width="4" height="7" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V14"/></svg></button>
+<button class="tbtn" aria-pressed="false" aria-label="Camera, off"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="4.5" width="9" height="7" rx="1.5"/><path d="M10.5 7l4-2v6l-4-2"/></svg></button>
+<button class="tbtn" aria-label="Clipboard and files"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4.5h4l1.5 1.5h7.5v6.5h-13z"/></svg></button>
+<span style="flex: 1"></span>
+<button class="tbtn" aria-label="Full screen (F11)"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/></svg></button>
+<button class="tbtn" aria-label="More"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true" style="stroke-width: 2"><path d="M3.5 8h.01M8 8h.01M12.5 8h.01"/></svg></button>
+<div class="cap" aria-hidden="true"><span><svg class="ic" viewBox="0 0 16 16"><path d="M3.5 8h9"/></svg></span><span><svg class="ic" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9"/></svg></span><span><svg class="ic" viewBox="0 0 16 16"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></span></div>
+</div>
+<div style="flex: 1; position: relative; background: #1B2540; overflow: hidden" role="img" aria-label="The other computer's desktop">
+<div style="position: absolute; left: 0; right: 0; top: 0; height: 28px; background: #0E1424; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #D5DBE8">Tue 14:05</div>
+<div style="position: absolute; left: 90px; top: 80px; width: 560px; height: 380px; border-radius: 10px; background: #F4F5F7; overflow: hidden"><div style="height: 38px; background: #E3E5EA"></div><div style="margin: 22px 24px; height: 12px; width: 300px; background: #C9CDD6; border-radius: 6px"></div><div style="margin: 14px 24px; height: 12px; width: 420px; background: #D9DCE3; border-radius: 6px"></div><div style="margin: 14px 24px; height: 12px; width: 360px; background: #D9DCE3; border-radius: 6px"></div></div>
+<div style="position: absolute; left: 520px; top: 220px; width: 520px; height: 340px; border-radius: 10px; background: #232B3D; overflow: hidden; border: 1px solid #36405A"><div style="height: 38px; background: #2C3650"></div><div style="margin: 22px 24px; height: 10px; width: 220px; background: #5FD08A; border-radius: 5px"></div><div style="margin: 12px 24px; height: 10px; width: 340px; background: #46536F; border-radius: 5px"></div><div style="margin: 12px 24px; height: 10px; width: 280px; background: #46536F; border-radius: 5px"></div></div>
+<div style="position: absolute; right: 16px; top: 44px; width: 232px; padding: 14px 16px; border-radius: 8px; background: rgba(18,18,22,.86); border: 1px solid rgba(255,255,255,.14); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px">
+<div><div class="k">FRAMES PER SECOND</div><div class="v">144</div></div>
+<div><div class="k">PICTURE AGE</div><div class="v">14 ms</div></div>
+<div><div class="k">ROUND TRIP</div><div class="v">0.6 ms</div></div>
+<div><div class="k">BITRATE</div><div class="v">22 Mb/s</div></div>
+<div><div class="k">LOST FRAMES</div><div class="v">0</div></div>
+<div><div class="k">REPLACED UNSEEN</div><div class="v">2</div></div>
+<div style="grid-column: 1 / -1"><div class="k">DECODER</div><div class="v">AV1 10-bit, on the graphics card</div></div>
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+renderVals() {
+return { theme: (this.props.theme ?? 'light') === 'dark' ? 'dark' : 'light' };
+}
+}
+</script>
+</body>
+</html>

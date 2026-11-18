@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Computers</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.rm{--desk:#D5DEF3;--bg:#F3F3F3;--pane:#FAFAFA;--card:#FFFFFF;--line:rgba(0,0,0,.1);--tx:#1B1B1B;--t2:#5A5A5A;--ac:#2458F5;--on:#FFFFFF;--at:#1D4BDB;--sub:rgba(0,0,0,.05);--ok:#0F7B0F;--warn:#8A5200;--bad:#C42B1C;--sh:0 10px 30px rgba(0,0,0,.2);font-family:"Segoe UI Variable Text","Segoe UI",Inter,system-ui,sans-serif;font-size:14px;line-height:20px;color:var(--tx);box-sizing:border-box}
+.rm.dark{--desk:#0B1437;--bg:#202020;--pane:#2A2A2A;--card:#2D2D2D;--line:rgba(255,255,255,.11);--tx:#FFFFFF;--t2:#C8C8C8;--ac:#8AB0FF;--on:#0B1437;--at:#9DBCFF;--sub:rgba(255,255,255,.07);--ok:#6CCB5F;--warn:#F5C26B;--bad:#FF99A4;--sh:0 10px 30px rgba(0,0,0,.55)}
+.rm *{box-sizing:border-box}
+.rm button{font:inherit;color:inherit;cursor:pointer}
+.win{background:var(--bg);border:1px solid var(--line);border-radius:8px;box-shadow:var(--sh);overflow:hidden;display:flex;flex-direction:column}
+.tb{height:40px;display:flex;align-items:center;gap:10px;padding-left:14px;font-size:12px;flex:none}
+.cap{margin-left:auto;display:flex}
+.cap span{width:46px;height:40px;display:flex;align-items:center;justify-content:center}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px}
+.row{display:flex;align-items:center;gap:14px;padding:10px 16px;min-height:60px}
+.row+.row{border-top:1px solid var(--line)}
+.g{flex:1;min-width:0}
+.c{font-size:12px;line-height:16px;color:var(--t2)}
+.h{font-size:14px;font-weight:600;margin:0}
+.btn{height:32px;padding:0 14px;border-radius:4px;border:1px solid var(--line);background:var(--card);display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.btn.ac{background:var(--ac);color:var(--on);border-color:transparent;font-weight:600}
+.btn.sq{width:32px;padding:0}
+.btn.bad{color:var(--bad)}
+.tg{width:40px;height:20px;border-radius:10px;border:1px solid var(--t2);background:transparent;position:relative;padding:0;flex:none}
+.tg::after{content:"";position:absolute;left:3px;top:3px;width:12px;height:12px;border-radius:6px;background:var(--t2)}
+.tg.on{background:var(--ac);border-color:var(--ac)}
+.tg.on::after{left:23px;background:var(--on)}
+.tag{font-size:11px;line-height:16px;padding:1px 8px;border-radius:9px;border:1px solid var(--warn);color:var(--warn);white-space:nowrap}
+.ic{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+.fly{background:var(--pane);border:1px solid var(--line);border-radius:8px;box-shadow:var(--sh);padding:4px}
+.mi{display:flex;align-items:center;gap:12px;padding:0 12px;height:36px;border-radius:4px;width:100%;border:0;background:transparent;text-align:left}
+.mi.sel{background:var(--sub)}
+.kb{margin-left:auto;font-size:12px;color:var(--t2)}
+.dot{width:8px;height:8px;border-radius:4px;flex:none;background:var(--t2)}
+</style>
+</helmet>
+<div class="rm {{theme}}" style="width: 1040px; height: 700px; padding: 28px; background: var(--desk); display: flex">
+<div class="win" style="flex: 1">
+<div class="tb">
+<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect width="16" height="16" rx="3.5" fill="#2458F5"/><rect x="6" y="5" width="7" height="5" rx="1.2" fill="none" stroke="#fff" stroke-width="1.2"/><path d="M2.5 6h2M2 7.8h2.5M3 9.5h1.5" stroke="#fff" stroke-width="1.1" stroke-linecap="round"/></svg>
+<span>remoteman</span>
+<div class="cap" aria-hidden="true"><span><svg class="ic" viewBox="0 0 16 16"><path d="M3.5 8h9"/></svg></span><span><svg class="ic" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9"/></svg></span><span><svg class="ic" viewBox="0 0 16 16"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></span></div>
+</div>
+<div style="flex: 1; padding: 12px 32px 28px; display: flex; flex-direction: column; gap: 20px; min-height: 0">
+<div style="display: flex; align-items: center; gap: 8px">
+<h1 style="margin: 0; font-size: 28px; line-height: 36px; font-weight: 600; flex: 1">Computers</h1>
+<button class="btn ac"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>Pair a computer</button>
+<button class="btn sq" aria-label="Settings"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5h7M13 5h1M2 11h1M7 11h7"/><circle cx="11" cy="5" r="1.6"/><circle cx="5" cy="11" r="1.6"/></svg></button>
+</div>
+<div style="display: flex; flex-direction: column; gap: 8px">
+<h2 class="h">Paired computers</h2>
+<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px">
+<div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 12px">
+<div style="height: 112px; border-radius: 4px; background: #1E2A44; display: flex; align-items: flex-end; padding: 10px"><span style="font-size: 12px; color: #FFFFFF; background: rgba(0,0,0,.45); padding: 2px 8px; border-radius: 4px">Linux</span></div>
+<div>
+<div style="font-weight: 600">Workshop PC</div>
+<div class="c" style="display: flex; align-items: center; gap: 6px"><span class="dot" style="background: var(--ok)"></span>Online · used today</div>
+</div>
+<div style="display: flex; gap: 8px"><button class="btn ac" style="flex: 1">Connect</button><button class="btn sq" aria-label="More for Workshop PC"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true" style="stroke-width: 2"><path d="M3.5 8h.01M8 8h.01M12.5 8h.01"/></svg></button></div>
+</div>
+<div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 12px">
+<div style="height: 112px; border-radius: 4px; background: #3A3550; display: flex; align-items: flex-end; padding: 10px"><span style="font-size: 12px; color: #FFFFFF; background: rgba(0,0,0,.45); padding: 2px 8px; border-radius: 4px">Mac</span></div>
+<div>
+<div style="font-weight: 600">Studio Mac</div>
+<div class="c" style="display: flex; align-items: center; gap: 6px"><span class="dot" style="background: var(--warn); border-radius: 0"></span>Asleep · used yesterday</div>
+</div>
+<div style="display: flex; gap: 8px"><button class="btn" style="flex: 1">Wake and connect</button><button class="btn sq" aria-label="More for Studio Mac"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true" style="stroke-width: 2"><path d="M3.5 8h.01M8 8h.01M12.5 8h.01"/></svg></button></div>
+</div>
+<div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 12px">
+<div style="height: 112px; border-radius: 4px; background: var(--sub); display: flex; align-items: flex-end; padding: 10px"><span style="font-size: 12px; color: #FFFFFF; background: rgba(0,0,0,.6); padding: 2px 8px; border-radius: 4px">Windows</span></div>
+<div>
+<div style="font-weight: 600">Attic PC</div>
+<div class="c" style="display: flex; align-items: center; gap: 6px"><span class="dot" style="background: transparent; border: 1.5px solid var(--t2)"></span>Not reachable · used 3 days ago</div>
+</div>
+<div style="display: flex; gap: 8px"><button class="btn" style="flex: 1">Connect</button><button class="btn sq" aria-label="More for Attic PC"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true" style="stroke-width: 2"><path d="M3.5 8h.01M8 8h.01M12.5 8h.01"/></svg></button></div>
+</div>
+</div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 8px">
+<h2 class="h">Nearby</h2>
+<div class="card">
+<div class="row">
+<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8" rx="1.5"/><path d="M6 14h4M8 11v3"/></svg>
+<div class="g"><div>Den laptop</div><div class="c">Linux · on this network · not paired</div></div>
+<button class="btn">Pair…</button>
+</div>
+<div class="row">
+<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8" rx="1.5"/><path d="M6 14h4M8 11v3"/></svg>
+<div class="g"><div>Office Mac mini</div><div class="c">Mac · on this network · not paired</div></div>
+<button class="btn">Pair…</button>
+</div>
+</div>
+<div class="c">A computer that is not listed can be paired by its address.</div>
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1040,"height":700}}'>
+class Component extends DCLogic {
+renderVals() {
+return { theme: (this.props.theme ?? 'light') === 'dark' ? 'dark' : 'light' };
+}
+}
+</script>
+</body>
+</html>

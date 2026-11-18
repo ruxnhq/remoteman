@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Viewer settings</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.rm{--desk:#D5DEF3;--bg:#F3F3F3;--pane:#FAFAFA;--card:#FFFFFF;--line:rgba(0,0,0,.1);--tx:#1B1B1B;--t2:#5A5A5A;--ac:#2458F5;--on:#FFFFFF;--at:#1D4BDB;--sub:rgba(0,0,0,.05);--ok:#0F7B0F;--warn:#8A5200;--bad:#C42B1C;--sh:0 10px 30px rgba(0,0,0,.2);font-family:"Segoe UI Variable Text","Segoe UI",Inter,system-ui,sans-serif;font-size:14px;line-height:20px;color:var(--tx);box-sizing:border-box}
+.rm.dark{--desk:#0B1437;--bg:#202020;--pane:#2A2A2A;--card:#2D2D2D;--line:rgba(255,255,255,.11);--tx:#FFFFFF;--t2:#C8C8C8;--ac:#8AB0FF;--on:#0B1437;--at:#9DBCFF;--sub:rgba(255,255,255,.07);--ok:#6CCB5F;--warn:#F5C26B;--bad:#FF99A4;--sh:0 10px 30px rgba(0,0,0,.55)}
+.rm *{box-sizing:border-box}
+.rm button{font:inherit;color:inherit}
+.win{background:var(--bg);border:1px solid var(--line);border-radius:8px;box-shadow:var(--sh);overflow:hidden;display:flex;flex-direction:column}
+.tb{height:40px;display:flex;align-items:center;gap:10px;padding-left:14px;font-size:12px;flex:none}
+.cap{margin-left:auto;display:flex}
+.cap span{width:46px;height:40px;display:flex;align-items:center;justify-content:center}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px}
+.row{display:flex;align-items:center;gap:14px;padding:8px 16px;min-height:52px}
+.row+.row{border-top:1px solid var(--line)}
+.g{flex:1;min-width:0}
+.c{font-size:12px;line-height:16px;color:var(--t2)}
+.h{font-size:14px;font-weight:600;margin:0}
+.btn{height:32px;padding:0 14px;border-radius:4px;border:1px solid var(--line);background:var(--card);display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.cb{height:32px;padding:0 10px;border-radius:4px;border:1px solid var(--line);background:var(--card);display:inline-flex;align-items:center;gap:10px;white-space:nowrap;min-width:190px;justify-content:space-between}
+.tg{width:40px;height:20px;border-radius:10px;border:1px solid var(--t2);background:transparent;position:relative;padding:0;flex:none}
+.tg::after{content:"";position:absolute;left:3px;top:3px;width:12px;height:12px;border-radius:6px;background:var(--t2)}
+.tg.on{background:var(--ac);border-color:var(--ac)}
+.tg.on::after{left:23px;background:var(--on)}
+.ic{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+.sec{display:flex;flex-direction:column;gap:8px}
+</style>
+</helmet>
+<div class="rm {{theme}}" style="width: 960px; height: 1420px; padding: 28px; background: var(--desk); display: flex">
+<div class="win" style="flex: 1">
+<div class="tb">
+<svg class="ic" viewBox="0 0 16 16" role="img" aria-label="Back"><path d="M13 8H3.5M7.5 4l-4 4 4 4"/></svg>
+<span>remoteman</span>
+<div class="cap" aria-hidden="true"><span><svg class="ic" viewBox="0 0 16 16"><path d="M3.5 8h9"/></svg></span><span><svg class="ic" viewBox="0 0 16 16"><rect x="3.5" y="3.5" width="9" height="9"/></svg></span><span><svg class="ic" viewBox="0 0 16 16"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></span></div>
+</div>
+<div style="flex: 1; padding: 8px 40px 28px; display: flex; flex-direction: column; gap: 18px">
+<div><h1 style="margin: 0; font-size: 28px; line-height: 36px; font-weight: 600">Settings</h1><div class="c">For every computer. One computer can differ: open its own settings from the list.</div></div>
+<div class="sec">
+<h2 class="h">Session window</h2>
+<div class="card">
+<div class="row"><div class="g"><div>Controls</div><div class="c">A title bar, or nothing but the picture with a bar that appears at the top edge</div></div><button class="cb">Title bar<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+<div class="row"><div class="g">Start in full screen</div><button class="tg" aria-pressed="false" aria-label="Start in full screen"></button></div>
+</div>
+</div>
+<div class="sec">
+<h2 class="h">Picture</h2>
+<div class="card">
+<div class="row"><div class="g"><div>Default quality</div><div class="c">Automatic picks the best stream this PC decodes on its graphics card</div></div><button class="cb">Automatic<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+<div class="row"><div class="g">Match this monitor's refresh rate</div><button class="tg on" aria-pressed="true" aria-label="Match this monitor's refresh rate"></button></div>
+<div class="row"><div class="g"><div>HDR</div><div class="c">Used when the computer offers it and this monitor is in HDR</div></div><button class="tg on" aria-pressed="true" aria-label="HDR"></button></div>
+</div>
+</div>
+<div class="sec">
+<h2 class="h">Keyboard</h2>
+<div class="card">
+<div class="row"><div class="g"><div>Send system shortcuts to the computer</div><div class="c">Alt+Tab, the Windows key and others, while a session is in front. Ctrl+Alt+Delete is always in Send keys.</div></div><button class="tg on" aria-pressed="true" aria-label="Send system shortcuts to the computer"></button></div>
+<div class="row"><div class="g"><div>Release the keyboard</div><div class="c">Gives shortcuts back to this PC</div></div><button class="cb">Ctrl+Alt+Shift<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+<div class="row"><div class="g"><div>On a Mac, Ctrl acts as Command</div><div class="c">Ctrl+C on this keyboard copies on a Mac, as it does here</div></div><button class="tg on" aria-pressed="true" aria-label="On a Mac, Ctrl acts as Command"></button></div>
+<div class="row"><div class="g"><div>Windows key</div><div class="c">Opens the overview on a Linux computer, Spotlight's key on a Mac</div></div><button class="cb">Super / Command<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+</div>
+</div>
+<div class="sec">
+<h2 class="h">Pointer and touch</h2>
+<div class="card">
+<div class="row"><div class="g"><div>Pointer</div><div class="c">Captured sends raw movement, which games and 3D apps need</div></div><button class="cb">Follows this pointer<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+<div class="row"><div class="g">Scroll direction</div><button class="cb">Same as this PC<svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button></div>
+<div class="row"><div class="g"><div>Send touchscreen touches as touch</div><div class="c">Fingers arrive as fingers, so gestures on the computer work</div></div><button class="tg on" aria-pressed="true" aria-label="Send touchscreen touches as touch"></button></div>
+</div>
+</div>
+<div class="sec">
+<h2 class="h">Sound, microphone and camera</h2>
+<div class="card">
+<div class="row"><div class="g">Play the computer's sound here</div><button class="tg on" aria-pressed="true" aria-label="Play the computer's sound here"></button></div>
+<div class="row"><div class="g"><div>Let computers use this microphone</div><div class="c">Still switched on by you in each session</div></div><button class="tg" aria-pressed="false" aria-label="Let computers use this microphone"></button></div>
+<div class="row"><div class="g"><div>Let computers use this camera</div><div class="c">For calls made on the other computer</div></div><button class="tg" aria-pressed="false" aria-label="Let computers use this camera"></button></div>
+</div>
+</div>
+<div class="sec">
+<h2 class="h">Sharing</h2>
+<div class="card">
+<div class="row"><div class="g"><div>Share the clipboard</div><div class="c">Text and images copied on either side can be pasted on the other</div></div><button class="tg" aria-pressed="false" aria-label="Share the clipboard"></button></div>
+<div class="row"><div class="g"><div>Save received files to</div><div class="c">Downloads</div></div><button class="btn">Change…</button></div>
+</div>
+</div>
+<div class="c">remoteman 0.1 · About</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":960,"height":1420}}'>
+class Component extends DCLogic {
+renderVals() {
+return { theme: (this.props.theme ?? 'light') === 'dark' ? 'dark' : 'light' };
+}
+}
+</script>
+</body>
+</html>
