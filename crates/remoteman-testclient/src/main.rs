@@ -14,9 +14,15 @@
 //!     --script FILE      send input from a script while running, one step a line:
 //!                          wait SECONDS | move X Y | click X Y | key enter|tab|esc|space|HEX
 //!                          text WORDS | textfile PATH | mark NAME
+//!                          sound on|off | mic PACKETS | camera FRAMES | clip WORDS
+//!                          file PATH | bitrate BITS | resize WxH
 //!                        X and Y are fractions of the display. `textfile` types a file's
 //!                        contents without showing them. `mark` prints how many frames have
 //!                        arrived, to find that moment in a stream saved with --out.
+//!                        The last row is the features: ask for the desktop's sound; send
+//!                        made-up microphone packets (100 a second) or camera frames (30 a
+//!                        second); copy WORDS to the host's clipboard; send a file; cap the
+//!                        bitrate; change the display's size. What comes back is printed.
 //!     --cursor           draw the cursor ourselves: ask for its shape and position apart
 //!     --drop-one-in N    throw away one video packet in N, as a lossy network would
 //!     --delay-lost MS    hold each loss report back this long, as a slow path to the host would
@@ -37,7 +43,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use remoteman_core::{Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Mode, Options, Placement, StreamInfo, TouchPhase};
+use remoteman_core::media::{BLOB_CLIPBOARD, BLOB_FILE, ClipboardHeader, FileHeader};
+use remoteman_core::{BlobEvent, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, StreamInfo, TouchPhase};
 
 fn pct(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() { 0.0 } else { sorted[((sorted.len() - 1) as f64 * p) as usize] }
@@ -57,6 +64,10 @@ struct Seen {
     closed: Option<String>,
     /// Every frame handed over, the first two seconds' included (what --out has saved).
     saved: u32,
+    /// Sound packets, how many were missing in between, and the last one's number.
+    sound: (u32, u32, Option<u32>),
+    /// Blobs coming in: kind, header, content so far.
+    blobs: std::collections::BTreeMap<u32, (u8, String, Vec<u8>)>,
 }
 
 struct Watcher {
@@ -114,6 +125,39 @@ impl Handler for Watcher {
         let mut s = self.seen.lock().unwrap();
         s.positions += 1;
         s.last_at = Some((x, y, visible));
+    }
+
+    fn message(&mut self, message: &Message) {
+        println!("host says: {}", serde_json::to_string(message).unwrap_or_default());
+    }
+
+    fn sound(&mut self, packet: &Packet) {
+        let mut s = self.seen.lock().unwrap();
+        // A packet marked as a start begins a new count (after a pause, or from another agent).
+        let missing = s.sound.2.filter(|_| !packet.start).map_or(0, |last| packet.seq.saturating_sub(last).saturating_sub(1));
+        s.sound = (s.sound.0 + 1, s.sound.1 + missing, Some(packet.seq));
+    }
+
+    fn blob(&mut self, event: &BlobEvent) {
+        let mut s = self.seen.lock().unwrap();
+        match event {
+            BlobEvent::Open { id, kind, header } => {
+                s.blobs.insert(*id, (*kind, header.clone(), Vec::new()));
+            }
+            BlobEvent::Data { id, bytes } => {
+                if let Some(b) = s.blobs.get_mut(id) {
+                    b.2.extend_from_slice(bytes);
+                }
+            }
+            BlobEvent::Close { id, complete } => {
+                let Some((kind, header, content)) = s.blobs.remove(id) else { return };
+                if kind == BLOB_CLIPBOARD && *complete {
+                    println!("clipboard from the host {header}: {}", String::from_utf8_lossy(&content));
+                } else {
+                    println!("blob of kind {kind:#x} {header}: {} bytes, complete {complete}", content.len());
+                }
+            }
+        }
     }
 
     fn closed(&mut self, reason: &str) {
@@ -238,6 +282,55 @@ fn main() -> Result<()> {
                     client.send(Event::Text(text.trim_end_matches('\n').to_owned()));
                 }
                 "mark" => println!("mark {}: {} frames so far", rest.trim(), seen.lock().unwrap().saved),
+                "sound" => client.send_message(Message::Sound { on: rest.trim() == "on" }),
+                "mic" => {
+                    let n: u32 = rest.trim().parse().with_context(|| format!("line {}: mic PACKETS", i + 1))?;
+                    client.send_message(Message::Mic { on: true, codec: "opus".into(), rate: 48000, channels: 1, frame_us: 10_000 });
+                    let start = Instant::now();
+                    for seq in 0..n {
+                        client.send_mic(seq == 0, seq, start.elapsed().as_micros() as u64, format!("mic {seq}").as_bytes());
+                        std::thread::sleep((start + Duration::from_millis((seq as u64 + 1) * 10)).saturating_duration_since(Instant::now()));
+                    }
+                    client.send_message(Message::Mic { on: false, codec: String::new(), rate: 0, channels: 0, frame_us: 0 });
+                }
+                "camera" => {
+                    let n: u32 = rest.trim().parse().with_context(|| format!("line {}: camera FRAMES", i + 1))?;
+                    client.send_message(Message::Camera { on: true, codec: "h264".into(), width: 1280, height: 720, fps: 30 });
+                    let start = Instant::now();
+                    for f in 0..n {
+                        // About what a 2.5 Mbit/s camera sends: 10 kB a frame, a keyframe every 2 s.
+                        client.send_camera(&vec![f as u8; 10_000], f % 60 == 0, start.elapsed().as_micros() as u64);
+                        std::thread::sleep((start + Duration::from_millis((f as u64 + 1) * 33)).saturating_duration_since(Instant::now()));
+                    }
+                    client.send_message(Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 });
+                }
+                "clip" => {
+                    client.send_message(Message::Clipboard { on: true });
+                    let header = ClipboardHeader { seq: 1, mime: "text/plain;charset=utf-8".into(), size: rest.len() as u64 };
+                    let blob = client.open_blob(BLOB_CLIPBOARD, serde_json::to_string(&header)?);
+                    blob.write(rest.as_bytes());
+                    blob.finish();
+                }
+                "file" => {
+                    let path = std::path::Path::new(rest.trim());
+                    let content = std::fs::read(path).with_context(|| format!("line {}: read {}", i + 1, path.display()))?;
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let sum = content.iter().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(*b as u32));
+                    println!("sending {name}: {} bytes, sum {sum:08x}", content.len());
+                    let blob = client.open_blob(BLOB_FILE, serde_json::to_string(&FileHeader { id: i as u32, name, size: content.len() as u64 })?);
+                    for piece in content.chunks(64 * 1024) {
+                        if !blob.write(piece) {
+                            break;
+                        }
+                    }
+                    blob.finish();
+                }
+                "bitrate" => client.send_message(Message::Configure { display: None, bitrate: Some(rest.trim().parse().with_context(|| format!("line {}: bitrate BITS", i + 1))?), decoders: None }),
+                "resize" => {
+                    let (w, h) = rest.trim().split_once('x').with_context(|| format!("line {}: resize WxH", i + 1))?;
+                    let display = Display { width: w.parse()?, height: h.parse()?, scale, refresh, placement };
+                    client.send_message(Message::Configure { display: Some(display), bitrate: None, decoders: None });
+                }
                 other => bail!("line {}: unknown step {other}", i + 1),
             }
             // Moves follow each other like a hand's; everything else gets time to land.
@@ -293,6 +386,9 @@ fn main() -> Result<()> {
     let mut s = seen.lock().unwrap();
     if let Some(reason) = s.closed.as_deref().filter(|r| !r.contains("done") && *r != "closed") {
         println!("the host ended the session: {reason}");
+    }
+    if s.sound.0 > 0 {
+        println!("sound: {} packets, {} missing in between", s.sound.0, s.sound.1);
     }
     if cursor {
         println!("cursor: {} shapes {:?}, {} positions, last {:?}", s.shapes.len(), s.shapes, s.positions, s.last_at);

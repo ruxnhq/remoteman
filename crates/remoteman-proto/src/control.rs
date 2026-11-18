@@ -130,9 +130,93 @@ pub enum Message {
         code: String,
         message: String,
     },
+
+    // What follows is the features beyond the picture and input. A host lists the ones it has
+    // in its hello; nothing of a feature is sent to a side that hasn't asked for it, so a
+    // client or host that knows nothing of it is never handed something it can't read.
+    /// Client to host: send the desktop's sound (sound datagrams), or stop.
+    Sound {
+        on: bool,
+    },
+    /// Host to client: what the sound datagrams carry, before the first one and on any change.
+    SoundFormat {
+        /// `opus`.
+        codec: String,
+        rate: u32,
+        channels: u8,
+        /// How much sound one packet holds, in microseconds.
+        frame_us: u32,
+    },
+    /// Client to host: this device's microphone is being sent (microphone datagrams), as
+    /// described, or has stopped.
+    Mic {
+        on: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        codec: String,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        rate: u32,
+        #[serde(default, skip_serializing_if = "is_zero8")]
+        channels: u8,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        frame_us: u32,
+    },
+    /// Client to host: this device's camera is being sent (camera datagrams), as described, or
+    /// has stopped.
+    Camera {
+        on: bool,
+        /// `h264` or `hevc`.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        codec: String,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        width: u32,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        height: u32,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        fps: u32,
+    },
+    /// Host to client: the camera's next frame must be a keyframe.
+    CameraKeyframe,
+    /// Client to host: change what was asked for in the hello. Whatever is left out stays as it
+    /// is. A new display or other decoders start a new stream epoch.
+    Configure {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<Display>,
+        /// The most the picture may use, in bits a second. 0: the host's own choice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bitrate: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decoders: Option<Vec<Mode>>,
+    },
+    /// Host to client, now and then: how the stream stands, for the device to show.
+    Status {
+        /// What the picture is being encoded at, in bits a second.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bitrate: Option<u32>,
+    },
+    /// Client to host: share the clipboard, both ways, or stop. While on, each side sends what
+    /// is copied on it as a clipboard blob.
+    Clipboard {
+        on: bool,
+    },
+    /// The receiver of a file blob, once it has it or has given up: `id` is the blob header's.
+    FileResult {
+        id: u32,
+        ok: bool,
+        /// Why not; or where it was put, for showing.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        message: String,
+    },
     /// Anything this version doesn't know. Never sent.
     #[serde(other)]
     Unknown,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+fn is_zero8(n: &u8) -> bool {
+    *n == 0
 }
 
 impl Message {
@@ -196,6 +280,19 @@ mod tests {
         );
         assert_eq!(Message::parse(br#"{"t":"something_new","x":1}"#).unwrap(), Message::Unknown);
         assert_eq!(Message::parse(br#"{"t":"keyframe","later_field":true}"#).unwrap(), Message::Keyframe);
+    }
+
+    #[test]
+    fn feature_messages_leave_out_what_is_not_said() {
+        assert_eq!(serde_json::to_string(&Message::Sound { on: true }).unwrap(), r#"{"t":"sound","on":true}"#);
+        let off = Message::Mic { on: false, codec: String::new(), rate: 0, channels: 0, frame_us: 0 };
+        assert_eq!(serde_json::to_string(&off).unwrap(), r#"{"t":"mic","on":false}"#);
+        assert_eq!(Message::parse(br#"{"t":"mic","on":false}"#).unwrap(), off);
+        let c = Message::Configure { display: None, bitrate: Some(25_000_000), decoders: None };
+        assert_eq!(serde_json::to_string(&c).unwrap(), r#"{"t":"configure","bitrate":25000000}"#);
+        assert_eq!(Message::parse(br#"{"t":"configure","bitrate":25000000}"#).unwrap(), c);
+        assert_eq!(Message::parse(br#"{"t":"camera_keyframe"}"#).unwrap(), Message::CameraKeyframe);
+        assert_eq!(serde_json::to_string(&Message::FileResult { id: 4, ok: true, message: String::new() }).unwrap(), r#"{"t":"file_result","id":4,"ok":true}"#);
     }
 
     #[test]

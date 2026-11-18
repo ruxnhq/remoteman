@@ -16,6 +16,8 @@ extern "C" {
 #endif
 
 typedef struct rm_client rm_client;
+// A blob being sent (clipboard contents or a file), from rm_client_blob_open or rm_host_blob_open.
+typedef struct rm_blob rm_blob;
 
 // Called from the core's own threads, one call at a time. `ctx` is passed back untouched.
 typedef struct rm_callbacks {
@@ -45,6 +47,21 @@ typedef struct rm_callbacks {
     // caused, a pipeline's delay later. An app that draws the cursor at its own pointer should
     // use this only when it hasn't moved the pointer itself for a moment (the host warped it).
     void (*on_cursor_at)(void *ctx, float x, float y, uint8_t visible);
+    // FEATURES (docs/PROTOCOL.md, "Features"). All optional; leave NULL what the app doesn't do.
+    // One of the host's feature messages, as its JSON: sound_format, camera_keyframe, status,
+    // file_result. Valid only during the call.
+    void (*on_message)(void *ctx, const char *json);
+    // One packet of the desktop's sound (Opus; the format is in the sound_format message),
+    // as it arrives, after the app sent {"t":"sound","on":true}. `seq` counts up by one;
+    // a gap is a lost packet for the app to conceal. `start` 1: the first after a pause.
+    // `time_us` is the host's clock at capture, the same clock as the picture's.
+    void (*on_sound)(void *ctx, const uint8_t *data, size_t len, uint8_t start, uint32_t seq, uint64_t time_us);
+    // A blob from the host (what was copied there, a file). what 0: opened, with its kind
+    // (0x40 clipboard, 0x41 file) and its JSON header. what 1: a piece of its content.
+    // what 2: closed; complete 1 if it is all there, 0 if it was given up. `id` tells blobs in
+    // flight apart. Pointers are valid only during the call.
+    void (*on_blob)(void *ctx, uint8_t what, uint32_t id, uint8_t kind, const char *header,
+                    const uint8_t *data, size_t len, uint8_t complete);
 } rm_callbacks;
 
 // Connect to `host` ("name:port") and say hello. Blocks until the host answers, so call it off
@@ -62,6 +79,28 @@ rm_client *rm_client_connect(const char *host, const char *state_dir, const char
 
 // "name\tos\tfingerprint" of the host, copied into `out`.
 void rm_client_host(const rm_client *client, char *out, size_t len);
+
+// FEATURES, client side (docs/PROTOCOL.md, "Features"). A host lists what it has in its
+// features (rm_client_host gives name, os, fingerprint; the features come with the hello).
+// One feature message, as JSON: {"t":"sound","on":true}, mic, camera, configure, clipboard,
+// file_result. Returns 1, or 0 if the core doesn't know the message. Never blocks.
+int32_t rm_client_send_message(const rm_client *client, const char *json);
+// One packet of this device's microphone (Opus), after {"t":"mic","on":true,...}. `seq` counts
+// up by one; `start` 1 for the first after a pause. Never blocks.
+void rm_client_send_mic(const rm_client *client, const uint8_t *data, size_t len, uint8_t start, uint32_t seq, uint64_t time_us);
+// One whole frame of this device's camera, after {"t":"camera","on":true,...}: H.264 or HEVC,
+// Annex-B, parameter sets in front of every keyframe, no B-frames. Never blocks. Send a
+// keyframe when on_message brings {"t":"camera_keyframe"}.
+void rm_client_send_camera(const rm_client *client, const uint8_t *data, size_t len, uint8_t key, uint64_t time_us);
+// A blob for the host: kind 0x40 clipboard (header {"seq":N,"type":"text/plain;charset=utf-8",
+// "size":S}) or 0x41 file (header {"id":N,"name":"...","size":S}). rm_blob_write waits while
+// the network is behind (never call it on the main thread or in a callback) and returns 0 once
+// the other side is gone. End with rm_blob_finish (all sent) or rm_blob_cancel (given up);
+// both free the blob.
+rm_blob *rm_client_blob_open(const rm_client *client, uint8_t kind, const char *header);
+int32_t rm_blob_write(const rm_blob *blob, const uint8_t *data, size_t len);
+int32_t rm_blob_finish(rm_blob *blob);
+void rm_blob_cancel(rm_blob *blob);
 
 // Frames lost, keyframes asked for, and the shortest round trip in microseconds.
 void rm_client_stats(const rm_client *client, uint32_t *lost, uint32_t *keyframe_requests, uint32_t *round_trip_us);
@@ -133,6 +172,20 @@ typedef struct rm_host_callbacks {
     void (*on_input)(void *ctx, const rm_input *input);
     // The client is gone or was replaced: stop the picture and take the display away.
     void (*on_client_left)(void *ctx);
+    // FEATURES (docs/PROTOCOL.md, "Features"). All optional; a host lists in `features` only
+    // what it acts on.
+    // One of the client's feature messages, as its JSON: sound, mic, camera, configure,
+    // clipboard, file_result.
+    void (*on_message)(void *ctx, const char *json);
+    // One packet of the client's microphone (Opus, as its mic message said).
+    void (*on_mic)(void *ctx, const uint8_t *data, size_t len, uint8_t start, uint32_t seq, uint64_t time_us);
+    // One whole frame of the client's camera (as its camera message said), in order and
+    // decodable: after a loss the core asks the client for a keyframe and holds frames back.
+    void (*on_camera)(void *ctx, const uint8_t *data, size_t len, uint8_t key, uint32_t number, uint64_t time_us);
+    // A blob from the client: as rm_callbacks.on_blob. Blobs still open when the client goes
+    // are over, with no close.
+    void (*on_blob)(void *ctx, uint8_t what, uint32_t id, uint8_t kind, const char *header,
+                    const uint8_t *data, size_t len, uint8_t complete);
 } rm_host_callbacks;
 
 // Start listening on `listen` ("0.0.0.0:7791"). `features` lists what this host can do, comma
@@ -164,6 +217,18 @@ int32_t rm_host_send_frame(const rm_host *host, const uint8_t *data, size_t len,
 // moves (fractions of the display; visible 0 when it isn't on it).
 void rm_host_cursor_shape(const rm_host *host, const uint8_t *rgba, uint32_t width, uint32_t height, int32_t hot_x, int32_t hot_y);
 void rm_host_cursor_at(const rm_host *host, float x, float y, uint8_t visible);
+
+// FEATURES, host side. A feature message for the client, as JSON (sound_format,
+// camera_keyframe, status, file_result); 1 if sent. One packet of the desktop's sound (never
+// blocks; dropped if the network can't take it). A blob for the client (NULL if none is
+// connected); write it with rm_blob_write and end it with rm_blob_finish or rm_blob_cancel.
+int32_t rm_host_send_message(const rm_host *host, const char *json);
+void rm_host_send_sound(const rm_host *host, const uint8_t *data, size_t len, uint8_t start, uint32_t seq, uint64_t time_us);
+rm_blob *rm_host_blob_open(const rm_host *host, uint8_t kind, const char *header);
+
+// The picture starts afresh as `accept` says (another size after a configure message, another
+// codec): the client is told, the next frame sent must be a keyframe, and frames count from 0.
+int32_t rm_host_restart(const rm_host *host, const rm_accept *accept);
 
 // Stop listening, drop the client, and free the host.
 void rm_host_stop(rm_host *host);

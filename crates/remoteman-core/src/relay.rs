@@ -12,9 +12,13 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
+use remoteman_proto::control::Message;
 use remoteman_proto::input::Event;
+use remoteman_proto::media::Packet;
+use remoteman_proto::video::Frame;
 
 use crate::CursorShape;
+use crate::blob::{BlobEvent, Chunk};
 use crate::host::{Accept, ClientInfo, CursorMsg, HostHandler, Link, Out};
 
 /// Where the daemon listens for agents: `/run/remoteman/agent.sock` for the system service,
@@ -40,6 +44,14 @@ pub enum ToAgent {
     Input(Event),
     /// The client is gone, or was given to another agent: stop and take the display away.
     Left,
+    /// One of the client's feature messages.
+    Message(Message),
+    /// One packet of the client's microphone.
+    Mic(Packet),
+    /// One whole frame of the client's camera.
+    Camera(Frame),
+    /// A blob from the client.
+    Blob(BlobEvent),
 }
 
 /// Agent to daemon.
@@ -53,6 +65,36 @@ pub enum ToDaemon {
     CursorAt { x: f32, y: f32, visible: bool },
     /// For the daemon's own command (`remotemand ctl ...`), not from agents.
     Control(String),
+    /// A feature message for the client.
+    Message(Message),
+    /// One packet of the desktop's sound.
+    Sound(Packet),
+    /// A blob for the client; its `id` is this agent's own number for it.
+    Blob(BlobEvent),
+    /// The picture starts afresh as this (another size, another codec): the frames that
+    /// follow count from 0 again and begin with a keyframe.
+    Restart(Accept),
+}
+
+fn put_blob(w: &mut impl Write, kind: u8, event: &BlobEvent) -> io::Result<()> {
+    match event {
+        BlobEvent::Open { id, kind: what, header } => put(w, kind, &[&[0], &id.to_le_bytes(), &[*what], header.as_bytes()]),
+        BlobEvent::Data { id, bytes } => put(w, kind, &[&[1], &id.to_le_bytes(), bytes]),
+        BlobEvent::Close { id, complete } => put(w, kind, &[&[2], &id.to_le_bytes(), &[*complete as u8]]),
+    }
+}
+
+fn get_blob(b: &[u8]) -> io::Result<BlobEvent> {
+    if b.len() < 5 {
+        return Err(bad("short blob message"));
+    }
+    let id = u32::from_le_bytes(b[1..5].try_into().unwrap());
+    Ok(match (b[0], b.len()) {
+        (0, 6..) => BlobEvent::Open { id, kind: b[5], header: String::from_utf8(b[6..].to_vec()).map_err(|_| bad("blob header"))? },
+        (1, _) => BlobEvent::Data { id, bytes: b[5..].to_vec() },
+        (2, 6..) => BlobEvent::Close { id, complete: b[5] != 0 },
+        _ => return Err(bad("unknown blob message")),
+    })
 }
 
 fn put(w: &mut impl Write, kind: u8, parts: &[&[u8]]) -> io::Result<()> {
@@ -104,6 +146,10 @@ impl ToAgent {
                 put(w, 0x14, &[&bytes])
             }
             ToAgent::Left => put(w, 0x15, &[]),
+            ToAgent::Message(m) => put(w, 0x16, &[&serde_json::to_vec(m)?]),
+            ToAgent::Mic(p) => put(w, 0x17, &[&p.write()]),
+            ToAgent::Camera(f) => put(w, 0x18, &[&[f.key as u8], &f.epoch.to_le_bytes(), &f.number.to_le_bytes(), &f.capture_us.to_le_bytes(), &f.data]),
+            ToAgent::Blob(event) => put_blob(w, 0x19, event),
         }
     }
 
@@ -118,6 +164,17 @@ impl ToAgent {
                 _ => return Err(bad("bad input event")),
             },
             0x15 => ToAgent::Left,
+            0x16 => ToAgent::Message(serde_json::from_slice(&b)?),
+            0x17 => ToAgent::Mic(Packet::parse(&b).map_err(|_| bad("microphone packet"))?),
+            0x18 if b.len() >= 15 => ToAgent::Camera(Frame {
+                key: b[0] & 1 != 0,
+                recovery: false,
+                epoch: u16::from_le_bytes(b[1..3].try_into().unwrap()),
+                number: u32::from_le_bytes(b[3..7].try_into().unwrap()),
+                capture_us: u64::from_le_bytes(b[7..15].try_into().unwrap()),
+                data: b[15..].to_vec(),
+            }),
+            0x19 => ToAgent::Blob(get_blob(&b)?),
             _ => return Err(bad("unknown message for an agent")),
         }))
     }
@@ -133,6 +190,10 @@ impl ToDaemon {
             ToDaemon::CursorShape(s) => put(w, 0x05, &[&s.width.to_le_bytes(), &s.height.to_le_bytes(), &s.hot_x.to_le_bytes(), &s.hot_y.to_le_bytes(), &s.rgba]),
             ToDaemon::CursorAt { x, y, visible } => put(w, 0x06, &[&x.to_le_bytes(), &y.to_le_bytes(), &[*visible as u8]]),
             ToDaemon::Control(text) => put(w, 0x20, &[text.as_bytes()]),
+            ToDaemon::Message(m) => put(w, 0x07, &[&serde_json::to_vec(m)?]),
+            ToDaemon::Sound(p) => put(w, 0x08, &[&p.write()]),
+            ToDaemon::Blob(event) => put_blob(w, 0x09, event),
+            ToDaemon::Restart(accept) => put(w, 0x0A, &[&serde_json::to_vec(accept)?]),
         }
     }
 
@@ -150,6 +211,10 @@ impl ToDaemon {
             }
             0x06 if b.len() == 9 => ToDaemon::CursorAt { x: f32::from_le_bytes(b[..4].try_into().unwrap()), y: f32::from_le_bytes(b[4..8].try_into().unwrap()), visible: b[8] != 0 },
             0x20 => ToDaemon::Control(text(b)?),
+            0x07 => ToDaemon::Message(serde_json::from_slice(&b)?),
+            0x08 => ToDaemon::Sound(Packet::parse(&b).map_err(|_| bad("sound packet"))?),
+            0x09 => ToDaemon::Blob(get_blob(&b)?),
+            0x0A => ToDaemon::Restart(serde_json::from_slice(&b)?),
             _ => return Err(bad("unknown message for the daemon")),
         }))
     }
@@ -196,19 +261,54 @@ pub fn run_agent(socket: UnixStream, features: Vec<String>, mut handler: impl Ho
                         let w = writer.clone();
                         carrying.push(std::thread::Builder::new().name("to daemon: frames".into()).spawn(move || {
                             while let Some(out) = end.frames.blocking_recv() {
-                                let Out::Frame(f) = out else { continue };
-                                let m = ToDaemon::Frame { key: f.key, recovery: f.recovery, capture_us: f.capture_us, data: f.data };
+                                let m = match out {
+                                    Out::Frame(f) => ToDaemon::Frame { key: f.key, recovery: f.recovery, capture_us: f.capture_us, data: f.data },
+                                    Out::Restart(accept) => ToDaemon::Restart(accept),
+                                };
                                 if m.write(&mut *w.lock().unwrap()).is_err() {
                                     break;
                                 }
                             }
                         })?);
                         let w = writer.clone();
-                        carrying.push(std::thread::Builder::new().name("to daemon: cursor".into()).spawn(move || {
+                        carrying.push(std::thread::Builder::new().name("to daemon: the rest".into()).spawn(move || {
+                            let mut blobs = 0u32;
                             while let Some(c) = end.cursor.blocking_recv() {
                                 let m = match c {
                                     CursorMsg::Shape(s) => ToDaemon::CursorShape(s),
                                     CursorMsg::At { x, y, visible } => ToDaemon::CursorAt { x, y, visible },
+                                    CursorMsg::Message(m) => ToDaemon::Message(m),
+                                    CursorMsg::Sound(p) => ToDaemon::Sound(p),
+                                    CursorMsg::Blob { kind, header, mut content } => {
+                                        // Carried by a thread of its own, so a long file
+                                        // doesn't hold up the cursor or the sound.
+                                        blobs = blobs.wrapping_add(1);
+                                        let (id, w) = (blobs, w.clone());
+                                        let _ = std::thread::Builder::new().name("to daemon: blob".into()).spawn(move || {
+                                            let say = |event: BlobEvent| ToDaemon::Blob(event).write(&mut *w.lock().unwrap()).is_ok();
+                                            if !say(BlobEvent::Open { id, kind, header }) {
+                                                return;
+                                            }
+                                            loop {
+                                                match content.blocking_recv() {
+                                                    Some(Chunk::Data(bytes)) => {
+                                                        if !say(BlobEvent::Data { id, bytes }) {
+                                                            return;
+                                                        }
+                                                    }
+                                                    Some(Chunk::End) => {
+                                                        say(BlobEvent::Close { id, complete: true });
+                                                        return;
+                                                    }
+                                                    None => {
+                                                        say(BlobEvent::Close { id, complete: false });
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        continue;
+                                    }
                                 };
                                 if m.write(&mut *w.lock().unwrap()).is_err() {
                                     break;
@@ -222,6 +322,10 @@ pub fn run_agent(socket: UnixStream, features: Vec<String>, mut handler: impl Ho
             ToAgent::Keyframe if serving => handler.keyframe(),
             ToAgent::Lost { first, last } if serving => handler.lost(first, last),
             ToAgent::Input(event) if serving => handler.input(event),
+            ToAgent::Message(message) if serving => handler.message(&message),
+            ToAgent::Mic(packet) if serving => handler.mic(&packet),
+            ToAgent::Camera(frame) if serving => handler.camera(&frame),
+            ToAgent::Blob(event) if serving => handler.blob(&event),
             ToAgent::Left => stop(&mut handler, &mut serving, &mut carrying),
             _ => {}
         }
