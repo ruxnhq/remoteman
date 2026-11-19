@@ -233,6 +233,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private var aimedAtSecond = false
     private var sent = 0, bytes = 0, encodeMs = 0.0, dropped = 0, keyframes = 0
     private var captureMs = 0.0, captured = 0, ageMs = 0.0
+    private var sendMs = 0.0, sendMax = 0.0, largest = 0, keysSent = 0, captureGap = 0.0, lastCaptured = 0.0, refused = 0
 
     init(options: Options) {
         self.options = options
@@ -1090,6 +1091,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         lock.lock()
         captureMs += waited
         captured += 1
+        let at = CACurrentMediaTime()
+        if lastCaptured > 0 { captureGap = max(captureGap, (at - lastCaptured) * 1000) }
+        lastCaptured = at
         if !taken { dropped += 1 }
         lock.unlock()
     }
@@ -1101,11 +1105,22 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let now = rm_host_now_us(host)
         guard now != 0 else { return }
         let capture = now &- UInt64(max(0, age) * 1_000_000)
+        let before = CACurrentMediaTime()
         let taken = o.annexB.withUnsafeBytes {
             rm_host_send_frame(host, $0.bindMemory(to: UInt8.self).baseAddress, o.annexB.count, o.keyframe ? 1 : 0, capture)
         }
-        guard taken != 0 else { return }
+        let inSend = (CACurrentMediaTime() - before) * 1000
+        guard taken != 0 else {
+            lock.lock()
+            refused += 1
+            lock.unlock()
+            return
+        }
         lock.lock()
+        sendMs += inSend
+        sendMax = max(sendMax, inSend)
+        largest = max(largest, o.annexB.count)
+        if o.keyframe { keysSent += 1 }
         sent += 1
         bytes += o.annexB.count
         encodeMs += o.encodeMs
@@ -1120,10 +1135,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private func stats() {
         lock.lock()
         let line = sent > 0 || dropped > 0
-            ? String(format: "host: %d fps, %d kbit/s, capture %.2f ms, encode %.2f ms, %.2f ms old when sent, %d dropped (busy), %d keyframe requests", sent, bytes * 8 / 1000, captureMs / Double(max(captured, 1)), encodeMs / Double(max(sent, 1)), ageMs / Double(max(sent, 1)), dropped, keyframes)
+            ? String(format: "host: %d fps, %d kbit/s, capture %.2f ms, encode %.2f ms, %.2f ms old when sent, send %.2f ms (longest %.2f), largest frame %d bytes, %d keyframes sent, longest wait for the screen %.0f ms, %d dropped (busy), %d not taken by the core, %d keyframe requests", sent, bytes * 8 / 1000, captureMs / Double(max(captured, 1)), encodeMs / Double(max(sent, 1)), ageMs / Double(max(sent, 1)), sendMs / Double(max(sent, 1)), sendMax, largest, keysSent, captureGap, dropped, refused, keyframes)
             : nil
         let fps = sent, bits = bytes * 8
-        sent = 0; bytes = 0; encodeMs = 0; dropped = 0; captureMs = 0; captured = 0; ageMs = 0
+        sent = 0; bytes = 0; encodeMs = 0; dropped = 0; captureMs = 0; captured = 0; ageMs = 0; sendMs = 0; sendMax = 0; largest = 0; keysSent = 0; captureGap = 0; refused = 0
         lock.unlock()
         if let line { hostLog(line) }
         onStats?(fps, bits)
