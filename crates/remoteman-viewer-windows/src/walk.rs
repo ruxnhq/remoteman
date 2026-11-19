@@ -69,7 +69,7 @@ fn session(app: &mut App) {
     let Ok((shared, _feed)) = crate::stream::start(&app.gpu, &app.scene) else { return };
     shared.stream_size.store(crate::stream::pack(2560, 1440), std::sync::atomic::Ordering::Relaxed);
     shared.refresh.store(144, std::sync::atomic::Ordering::Relaxed);
-    let display = Display { width: 2560, height: 1440, scale: 1.0, refresh: 144, placement: Placement::Extend };
+    let display = Display { width: 2560, height: 1440, scale: 1.0, refresh: 144, placement: Placement::Extend, hdr: false, headroom: 0.0 };
     let features = ["placement", "mirror", "configure", "sound", "clipboard", "files"].map(str::to_owned).to_vec();
     app.session = Some(Session::new(None, shared, target(WORKSHOP, "Workshop PC"), features, display, Quality::Automatic, 0, "linux".into()));
     app.enter();
@@ -116,7 +116,7 @@ pub fn apply(app: &mut App, step: &str) {
         "connecting" => {
             if let Ok((shared, _feed)) = crate::stream::start(&app.gpu, &app.scene) {
                 shared.stage.store(3, std::sync::atomic::Ordering::Relaxed);
-                app.attempt = Some(Attempt { target: target(WORKSHOP, "Workshop PC"), shared, display: Display { width: 2560, height: 1440, scale: 1.0, refresh: 144, placement: Placement::Extend }, pairing: false });
+                app.attempt = Some(Attempt { target: target(WORKSHOP, "Workshop PC"), shared, display: Display { width: 2560, height: 1440, scale: 1.0, refresh: 144, placement: Placement::Extend, hdr: false, headroom: 0.0 }, pairing: false });
                 app.screen = Screen::Connecting;
             }
         }

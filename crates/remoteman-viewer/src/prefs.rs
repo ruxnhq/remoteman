@@ -380,6 +380,16 @@ pub fn computer(app: &Rc<App>, address: &str, addresses: bool) {
         }
     });
     connection.add(&size);
+    let names: Vec<String> = crate::store::BITRATES.iter().map(|b| if *b == 0 { "Automatic".to_owned() } else { format!("{b} Mbit/s") }).collect();
+    let bitrate = combo("Bitrate, at most", "How much the picture may use. A still desktop uses little whatever this says; fast movement and games look cleaner with more, on a network that carries it (wired, or good Wi-Fi). Automatic leaves it to the computer. From the next time you connect", &names.iter().map(String::as_str).collect::<Vec<_>>(), crate::store::BITRATES.iter().position(|b| *b == c.bitrate).unwrap_or(0) as u32);
+    bitrate.connect_selected_notify({
+        let (app, address) = (app.clone(), address.clone());
+        move |row| {
+            let most = crate::store::BITRATES[(row.selected() as usize).min(crate::store::BITRATES.len() - 1)];
+            app.store.borrow_mut().update(&address.borrow(), |c| c.bitrate = most);
+        }
+    });
+    connection.add(&bitrate);
     let addresses_row = adw::ActionRow::builder().title("Addresses").subtitle(&c.address).use_markup(false).activatable(true).build();
     addresses_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
     connection.add(&addresses_row);

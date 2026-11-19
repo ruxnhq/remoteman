@@ -78,6 +78,10 @@ pub struct StreamInfo {
     pub refresh: u32,
     /// `bt709` or `bt2020-pq`.
     pub colour: String,
+    /// With `bt2020-pq`: where SDR white sits in the signal and the brightest the host's
+    /// display may go, in nits.
+    pub sdr_white: u32,
+    pub peak: u32,
 }
 
 /// The app's side. Calls come from the core's own threads, one at a time.
@@ -322,8 +326,9 @@ impl Client {
             let mut best = u64::MAX;
             while let Ok(Some(m)) = read_message(&mut recv).await {
                 match m {
-                    Message::Stream { epoch, mode, width, height, refresh, colour, index } => {
-                        let info = StreamInfo { epoch, mode, width, height, refresh, colour };
+                    Message::Stream { epoch, mode, width, height, refresh, colour, index, sdr_white, peak } => {
+                        // (What a host leaves out is the usual: 203 nits for white, 1000 at most.)
+                        let info = StreamInfo { epoch, mode, width, height, refresh, colour, sdr_white: if sdr_white == 0 { 203 } else { sdr_white }, peak: if peak == 0 { 1000 } else { peak } };
                         let _ = epoch_tx.send(if index == 0 { FromHost::Stream(info) } else { FromHost::Stream2(info) });
                     }
                     Message::Cursor { width, height, hot_x, hot_y, rgba } => {

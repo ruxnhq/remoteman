@@ -65,6 +65,28 @@ HOME_=$(getent passwd "$U" | cut -d: -f6)
 # A command in that user's own systemd, if they are logged in.
 as_user() { if [ -d "/run/user/$UID_" ]; then runuser -u "$U" -- env XDG_RUNTIME_DIR="/run/user/$UID_" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$UID_/bus" "$@"; else return 0; fi; }
 
+# The host's port in this computer's firewall: `firewall allow` lets devices on the network
+# reach it, `firewall deny` takes that back. ufw and firewalld are the two that distributions
+# switch on; with neither running there is nothing to do. A failure is said and not fatal: the
+# host still works for whoever opens the port themselves.
+PORT=7791
+firewall() {
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "^Status: active"; then
+        if [ "$1" = allow ]; then
+            ufw allow "$PORT/udp" comment "remoteman host" >/dev/null && echo "the firewall (ufw) lets UDP $PORT in" || echo "couldn't open UDP $PORT in ufw: devices on the network may not reach this computer"
+        else
+            ufw delete allow "$PORT/udp" >/dev/null 2>&1 || true
+        fi
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        if [ "$1" = allow ]; then
+            firewall-cmd --quiet --permanent --add-port="$PORT/udp" && firewall-cmd --quiet --reload && echo "the firewall (firewalld) lets UDP $PORT in" || echo "couldn't open UDP $PORT in firewalld: devices on the network may not reach this computer"
+        else
+            firewall-cmd --quiet --permanent --remove-port="$PORT/udp" 2>/dev/null && firewall-cmd --quiet --reload || true
+        fi
+    fi
+}
+
 show() {
     echo "the service: $(systemctl is-active remotemand.service 2>/dev/null || true), $(systemctl is-enabled remotemand.service 2>/dev/null || true)"
     [ -x "$LIB/remotemand" ] && "$LIB/remotemand" ctl status 2>&1 | sed 's/^/  /'
@@ -89,6 +111,9 @@ install)
     # The two can't both hold the port: the user service goes first.
     as_user systemctl --user disable --now remoteman-host.service 2>/dev/null || true
     systemctl daemon-reload
+    # Devices on the network must reach the port, and nobody should have to open a terminal
+    # for it afterwards: let it through whichever firewall is switched on here.
+    firewall allow
     # Restarted, not just started: installing over a running daemon is how it is updated.
     systemctl enable remotemand.service
     systemctl restart remotemand.service
@@ -104,6 +129,7 @@ status)
 remove)
     as_user systemctl --user stop remoteman-agent.service 2>/dev/null || true
     systemctl disable --now remotemand.service 2>/dev/null || true
+    firewall deny
     rm -f "$WANTS/remoteman-agent.service" "$AGENT" "$UNIT"
     rmdir "$WANTS" 2>/dev/null || true
     rm -rf "$LIB"

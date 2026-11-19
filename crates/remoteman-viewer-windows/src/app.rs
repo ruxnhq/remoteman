@@ -531,7 +531,7 @@ impl App {
             (w, h) = self.picture_pixels();
         }
         let refresh = if self.store.settings.match_refresh { self.monitor.2.clamp(30, 240) } else { 60 };
-        Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement }
+        Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement, hdr: false, headroom: 0.0 }
     }
 
     /// While connected with "The window's size": when the window has changed size and been

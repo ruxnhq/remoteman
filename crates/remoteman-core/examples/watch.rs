@@ -92,7 +92,7 @@ fn main() -> anyhow::Result<()> {
         state,
         name: "watch".into(),
         pair,
-        display: Display { width: size.0, height: size.1, scale: 1.0, refresh, placement: Placement::default() },
+        display: Display { width: size.0, height: size.1, scale: 1.0, refresh, placement: Placement::default(), hdr: false, headroom: 0.0 },
         decoders,
         test_drop_one_in: None,
         test_delay_lost_ms: None,

@@ -92,7 +92,11 @@ int32_t rm_knows_host(const char *state_dir, const char *host);
 // shown on the host. `decoders` lists what the device decodes in hardware, most preferred
 // first, from "av1", "hevc444", "hevc" (comma-separated). With `pair` non-zero, a host not seen
 // before is accepted and remembered. `options` is a list of key=value pairs separated by ';'
-// (NULL or "" for none). So far: placement=extend|main|only, where this display sits among the
+// (NULL or "" for none). hdr=HEADROOM (for example hdr=8.0): this screen can show HDR, that many
+// times brighter than its SDR white; a second display asked for later is the same. An HDR stream
+// is announced through on_message first, as
+// {"t":"stream_light","index":0,"sdr_white":203,"peak":1000} (nits), then on_stream with hdr 1.
+// So far also: placement=extend|main|only, where this display sits among the
 // host's own: an extra display (the default), the main display, or the only display (the
 // host's own screens off while connected). Returns NULL on failure, with the reason in `err`.
 rm_client *rm_client_connect(const char *host, const char *state_dir, const char *name, int32_t pair,
@@ -184,6 +188,10 @@ typedef struct rm_client_info {
     uint8_t cursor_apart;     // non-zero: leave the cursor out of the picture and report it apart
     uint8_t placement;        // 0 an extra display, 1 the main display, 2 the only display
                               // (this computer's own screens off while it is connected)
+    // Non-zero: its screen can show HDR, `headroom` times brighter than its SDR white (a
+    // host that needs nits takes SDR white as 203). (Added last, with headroom.)
+    uint8_t hdr;
+    float headroom;
 } rm_client_info;
 
 // The host's answer, filled in by on_client.
@@ -194,6 +202,10 @@ typedef struct rm_accept {
     uint32_t width, height, refresh;
     uint8_t hdr;              // 0 BT.709 limited range, 1 BT.2020 PQ
     char refuse[200];         // when refusing: why, shown to the client
+    // With hdr 1: where SDR white sits in the signal and the brightest this display may go,
+    // in nits (0: the usual, 203 and 1000). (Added last.)
+    uint32_t sdr_white;
+    uint32_t peak;
 } rm_accept;
 
 // One input event (docs/PROTOCOL.md, Input). Fields a kind doesn't use are zero.

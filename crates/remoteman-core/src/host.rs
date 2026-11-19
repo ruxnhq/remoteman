@@ -67,6 +67,10 @@ pub struct Accept {
     pub refresh: u32,
     /// `bt709` or `bt2020-pq`.
     pub colour: String,
+    /// With `bt2020-pq`: where SDR white sits in the signal and the brightest this display
+    /// may go, in nits (0: left out, which a client reads as 203 and 1000).
+    pub sdr_white: u32,
+    pub peak: u32,
 }
 
 /// The host program's side. All calls come from one thread, one at a time, and may block.
@@ -625,7 +629,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     // Counts up each time the picture starts afresh.
     let epoch = std::sync::atomic::AtomicU32::new(1);
     let now = || epoch.load(std::sync::atomic::Ordering::Relaxed) as u16;
-    write_message(&mut send, &Message::Stream { epoch: now(), mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour, index: 0 })
+    write_message(&mut send, &Message::Stream { epoch: now(), mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour, index: 0, sdr_white: accept.sdr_white, peak: accept.peak })
         .await
         .map_err(yes)?;
     // Three things write to the control stream: answers to the client, cursor shapes, and a
@@ -678,7 +682,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                             epoch2 = epoch2.wrapping_add(1);
                             number2 = 0;
                             last[1] = None;
-                            let m = Message::Stream { epoch: epoch2, mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 1 };
+                            let m = Message::Stream { epoch: epoch2, mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 1, sdr_white: a.sdr_white, peak: a.peak };
                             write_message(&mut *send.lock().await, &m).await?;
                         }
                         Out::Frame(f) => {
@@ -699,7 +703,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     number = 0;
                     answer.store(0, std::sync::atomic::Ordering::Relaxed);
                     last[0] = None;
-                    let m = Message::Stream { epoch: now(), mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 0 };
+                    let m = Message::Stream { epoch: now(), mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 0, sdr_white: a.sdr_white, peak: a.peak };
                     write_message(&mut *send.lock().await, &m).await?;
                     continue;
                 }

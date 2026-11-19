@@ -14,7 +14,7 @@ struct Desk;
 
 impl HostHandler for Desk {
     fn connected(&mut self, _client: &ClientInfo, _link: Link) -> Result<Accept, String> {
-        Ok(Accept { mode: MODE, width: 640, height: 480, refresh: 60, colour: "bt709".into() })
+        Ok(Accept { mode: MODE, width: 640, height: 480, refresh: 60, colour: "bt709".into(), sdr_white: 0, peak: 0 })
     }
     fn keyframe(&mut self) {}
     fn input(&mut self, _event: Event) {}
@@ -45,7 +45,7 @@ fn a_new_device_waits_for_the_owners_word() {
         state: dir.join(state),
         name: name.into(),
         pair: true,
-        display: Display { width: 640, height: 480, scale: 1.0, refresh: 60, placement: Default::default() },
+        display: Display { width: 640, height: 480, scale: 1.0, refresh: 60, placement: Default::default(), hdr: false, headroom: 0.0 },
         decoders: vec![MODE],
         test_drop_one_in: None,
         test_delay_lost_ms: None,
