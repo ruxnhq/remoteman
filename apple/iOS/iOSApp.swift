@@ -6,6 +6,8 @@ import UIKit
 
 @main
 struct RemotemanApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     init() {
         setvbuf(stdout, nil, _IOLBF, 0)
     }

@@ -621,6 +621,7 @@ final class RefreshMeter {
         private func flushPointer() {
             guard let p = pendingPointer else { return }
             pendingPointer = nil
+            session.aim(session.touchDisplay)
             session.input?.pointerTo(x: p.0, y: p.1)
         }
 
@@ -635,6 +636,7 @@ final class RefreshMeter {
             guard let f = fraction(p) else { return }
             localPointer(at: p)
             pendingPointer = nil
+            session.aim(session.touchDisplay)
             session.input?.pointerTo(x: f.0, y: f.1)
         }
 
@@ -747,6 +749,7 @@ final class RefreshMeter {
 
         private func send(_ touches: Set<UITouch>, _ event: UIEvent?, phase: UInt8) {
             guard let r = session.renderer else { return }
+            session.aim(session.touchDisplay)
             let rect = r.videoRect(in: bounds.size)
             guard rect.width > 0, rect.height > 0 else { return }
             if InputSettings.trackpadTouch || !pad.isEmpty {

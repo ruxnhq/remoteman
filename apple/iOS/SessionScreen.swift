@@ -546,6 +546,7 @@ struct SessionNotes: View {
 struct DisplayMenu: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var session: ViewerSession
+    @ObservedObject private var external = ExternalDisplay.shared
     @Environment(\.dismiss) private var dismiss
 
     private static let notes: [ViewerSession.Placement: String] = [
@@ -568,8 +569,21 @@ struct DisplayMenu: View {
                 .available(Features.displaySize && session.has("configure"))
             Divider().padding(.vertical, 6)
             header("More displays")
-            item("Add a display on the external monitor", "A monitor connected to this iPad", checked: false) {}
-                .available(Features.moreDisplays)
+            item(
+                "Add a display on the external monitor",
+                external.monitor.map { m in session.has("displays") ? "\(m.width) × \(m.height) at \(m.refresh) Hz" : "This computer can't do this yet" } ?? "No monitor is connected",
+                checked: session.secondOn
+            ) {
+                Haptics.toggle(!session.secondOn)
+                external.use(!session.secondOn, for: session)
+            }
+            .available(Features.moreDisplays && session.has("displays") && external.monitor != nil)
+            if session.secondOn {
+                item("Touch and pointer go to the monitor", "This iPad's screen works as the touch surface for it", checked: session.touchDisplay == 1) {
+                    session.touchDisplay = session.touchDisplay == 1 ? 0 : 1
+                    Haptics.choice()
+                }
+            }
             item(
                 "Mirror the computer's main monitor", session.has("mirror") ? "As it is, at its own size; it stays on there" : "This computer can't do this yet",
                 checked: model.current?.placementChoice == .mirror

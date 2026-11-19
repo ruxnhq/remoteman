@@ -80,6 +80,9 @@ final class ViewerSession: ObservableObject {
     private(set) var secondDisplay: Display?
     private var decoder2: VideoDecoder?
     private var aimed: UInt8 = 0
+    /// Which display this device's own screen sends its pointer and touches to: 0 the picture
+    /// it shows, 1 the second display (an iPad as the touch surface for its external monitor).
+    @Published var touchDisplay: UInt8 = 0
 
     /// Ask the computer for a second display of this size (again: another size), or give it back.
     func setSecondDisplay(_ d: Display?) {
@@ -96,6 +99,7 @@ final class ViewerSession: ObservableObject {
 
     private func endSecond() {
         secondOn = false
+        touchDisplay = 0
         pipeLock.lock()
         let d = decoder2
         decoder2 = nil
