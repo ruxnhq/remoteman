@@ -64,6 +64,13 @@ pub struct App {
     pub log_tick: Cell<u32>,
     /// For the same line: pictures shown and input events sent since the last one.
     pub shown_window: Cell<u32>,
+    /// For finding stalls (see the log line): microseconds, the longest since last written.
+    pub last_tick: Cell<Option<std::time::Instant>>,
+    pub tick_gap_max: Cell<u32>,
+    pub wait_max: Cell<u32>,
+    pub loop_gap_max: Cell<u32>,
+    pub second_max: Cell<u32>,
+    pub drawn_window: Cell<u32>,
     pub inputs: Cell<u32>,
     /// With "The window's size": the display last asked of the computer, and the size the
     /// picture's place had at the last look.
@@ -812,6 +819,11 @@ impl App {
 
     /// Once per frame of this window: show the newest picture, and notice the session ending.
     fn tick(self: &Rc<Self>) {
+        // How long since this window's last frame: the longest is in the log.
+        let now = std::time::Instant::now();
+        if let Some(before) = self.last_tick.replace(Some(now)) {
+            self.tick_gap_max.set(self.tick_gap_max.get().max((now - before).as_micros() as u32));
+        }
         self.arrivals();
         self.tick_second();
         // A captured pointer's movement since the last frame.
@@ -821,6 +833,13 @@ impl App {
                 let so_far = self.moved.get();
                 self.moved.set((so_far.0 + dx, so_far.1 + dy));
                 self.send(Event::PointerBy { dx: dx as f32, dy: dy as f32 });
+            }
+        }
+        // A decoder that takes frames and gives no pictures gets a keyframe, this very frame.
+        if let Some(s) = self.session.borrow().as_ref() {
+            if s.shared.stuck.swap(false, Ordering::Relaxed) {
+                eprintln!("remoteman: the decoder took frames and gave no picture: asking the computer for a keyframe");
+                s.client.send_message(remoteman_core::Message::Keyframe);
             }
         }
         let (picture, closed, cursor) = match self.session.borrow().as_ref() {
@@ -861,6 +880,10 @@ impl App {
             }
         }
         if let Some(p) = picture {
+            // How long it waited for this window to take it.
+            if let Some(at) = self.session.borrow().as_ref().and_then(|s| s.shared.picture_at.lock().unwrap().take()) {
+                self.wait_max.set(self.wait_max.get().max(at.elapsed().as_micros() as u32));
+            }
             // A picture: whatever the computer was doing before it let this device in is over.
             // (Not sooner: a computer that is logging in answers the hello and then closes.)
             self.logging_in.set(0);
@@ -887,6 +910,12 @@ impl App {
 
     /// Once a second: the figures over the picture.
     fn second(&self) {
+        let began = std::time::Instant::now();
+        self.second_inner();
+        self.second_max.set(self.second_max.get().max(began.elapsed().as_micros() as u32));
+    }
+
+    fn second_inner(&self) {
         let session = self.session.borrow();
         let Some(s) = session.as_ref() else { return };
         let stats = s.client.stats();
@@ -919,12 +948,8 @@ impl App {
         // only, nothing of what is on the screen.
         let tick = self.log_tick.get() + 1;
         self.log_tick.set(tick);
-        // A decoder that takes frames and gives no pictures gets a keyframe.
-        if s.shared.stuck.swap(false, Ordering::Relaxed) {
-            eprintln!("remoteman: the decoder was given frames and gave no picture for half a second: asking the computer for a keyframe");
-            s.client.send_message(remoteman_core::Message::Keyframe);
-        }
         self.shown_window.set(self.shown_window.get() + shown);
+        self.drawn_window.set(self.drawn_window.get() + shown);
         if tick % 10 == 0 {
             eprintln!(
                 "remoteman: {decoder} via {}: in ten seconds {} frames came, {} went to the decoder, {} pictures came out, {} were shown, {} input events were sent; the last second {megabits:.1} Mbit/s, {age:.1} ms old, decode up to {decode:.1} ms; in all {} lost, {replaced} replaced unseen, {} keyframes asked; round trip {round_trip:.1} ms",
@@ -937,6 +962,24 @@ impl App {
                 stats.lost,
                 stats.keyframe_requests
             );
+            // Where a stall would show: the longest wait between two frames from the computer,
+            // the longest a decoded picture waited for the window, the longest between two
+            // frames of this window, and the longest the window's loop went without a turn.
+            eprintln!(
+                "remoteman: longest waits in those ten seconds: {:.0} ms between frames arriving, {:.1} ms from decoded to taken by the window, {:.0} ms between the window's own frames, {:.0} ms for a turn of the window's loop",
+                s.shared.frame_gap_max.swap(0, Ordering::Relaxed) as f64 / 1000.0,
+                self.wait_max.replace(0) as f64 / 1000.0,
+                self.tick_gap_max.replace(0) as f64 / 1000.0,
+                self.loop_gap_max.replace(0) as f64 / 1000.0,
+            );
+            let drawn = self.video.drawn.get().max(1) as f64;
+            eprintln!(
+                "remoteman: drawing a picture took {:.1} ms on average and {:.1} ms at most; the once-a-second work took {:.1} ms at most",
+                self.video.render_sum.replace(0) as f64 / 1000.0 / self.drawn_window.replace(0).max(1) as f64,
+                self.video.render_max.replace(0) as f64 / 1000.0,
+                self.second_max.replace(0) as f64 / 1000.0,
+            );
+            let _ = drawn;
         }
         self.view.figures.set(&[
             shown.to_string(),
@@ -1011,6 +1054,12 @@ pub fn build(application: &adw::Application, args: Args) {
         hover_bar: Cell::new(hover_bar),
         log_tick: Cell::new(0),
         shown_window: Cell::new(0),
+        last_tick: Cell::new(None),
+        tick_gap_max: Cell::new(0),
+        wait_max: Cell::new(0),
+        loop_gap_max: Cell::new(0),
+        second_max: Cell::new(0),
+        drawn_window: Cell::new(0),
         inputs: Cell::new(0),
         asked: Cell::new(None),
         wanted: Cell::new((0, 0)),
@@ -1068,6 +1117,17 @@ pub fn build(application: &adw::Application, args: Args) {
         move |w| {
             app.view.set_fullscreen(w.is_fullscreen());
             app.place_bar();
+        }
+    });
+    // A turn of the loop every 10 ms, to see when it doesn't get one.
+    glib::timeout_add_local(std::time::Duration::from_millis(10), {
+        let app = app.clone();
+        let mut before = std::time::Instant::now();
+        move || {
+            let now = std::time::Instant::now();
+            app.loop_gap_max.set(app.loop_gap_max.get().max((now - before).as_micros() as u32));
+            before = now;
+            glib::ControlFlow::Continue
         }
     });
     window.add_tick_callback({

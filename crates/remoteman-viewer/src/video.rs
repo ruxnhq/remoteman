@@ -22,6 +22,7 @@ unsafe extern "C" {
     fn rm_glview_read(w: i32, h: i32, out: *mut u8);
     fn rm_glview_error(v: *const std::ffi::c_void) -> *const std::ffi::c_char;
     fn rm_glview_free(v: *mut std::ffi::c_void);
+    fn rm_glview_finish();
 }
 
 pub struct Video {
@@ -38,6 +39,11 @@ pub struct Video {
     /// The surface last drawn; holding it keeps the decoder's GPU context alive under `gl_view`.
     gl_last: RefCell<Option<Surface>>,
     gl_dump: Cell<bool>,
+    /// The longest and the sum of the time spent drawing a picture, in microseconds, since
+    /// last read; and whether to wait for the GPU to be done so that the time is the true one.
+    pub render_max: Cell<u32>,
+    pub render_sum: Cell<u64>,
+    time_gl: bool,
     /// Times the GL widget was drawn since the figures were last read.
     pub drawn: Cell<u32>,
     /// How pictures are reaching the screen, for the figures.
@@ -84,6 +90,9 @@ impl Video {
             gl_pending: RefCell::new(None),
             gl_last: RefCell::new(None),
             gl_dump: Cell::new(false),
+            render_max: Cell::new(0),
+            render_sum: Cell::new(0),
+            time_gl: std::env::var_os("REMOTEMAN_TIME_GL").is_some(),
             drawn: Cell::new(0),
             path: Cell::new(""),
             colour,
@@ -209,6 +218,19 @@ impl Video {
     /// GTK asks for the GL widget's contents: move a waiting NVDEC picture into the textures
     /// (on the GPU) and draw.
     fn render(&self) {
+        let began = std::time::Instant::now();
+        self.render_inner();
+        // SAFETY: the widget's context is current. Waiting for the GPU here is only for the
+        // measurement asked for with REMOTEMAN_TIME_GL: it makes the drawing's real cost show.
+        if self.time_gl {
+            unsafe { rm_glview_finish() };
+        }
+        let took = began.elapsed().as_micros() as u32;
+        self.render_max.set(self.render_max.get().max(took));
+        self.render_sum.set(self.render_sum.get() + took as u64);
+    }
+
+    fn render_inner(&self) {
         let fail = |what: &str| {
             if self.stop_gpu_pictures() {
                 eprintln!("remoteman: can't draw the decoder's GPU pictures ({what}); copying them instead");

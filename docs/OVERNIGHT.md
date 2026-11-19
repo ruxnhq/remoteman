@@ -85,6 +85,23 @@ Valve's signed Steam Streaming devices.
 - Both merged into `main` when they also build on Linux (`cargo build --release --locked`).
 - Not possible tonight: a real Windows PC with a screen.
 
+## Stream 6: every GPU maker (one session on Linux; the Windows sessions for Windows)
+
+The owner, leaving: "don't forget that Nvidia/amd/intel should all work besides Mac and iOS".
+Today the Linux host encodes with NVENC only; the Linux viewer decodes with NVDEC, VA-API,
+Vulkan or in software. So:
+
+- Linux host: an encoder path for AMD and Intel (VA-API: HEVC, and AV1 where the card has it)
+  beside NVENC, chosen by what the session's GPU is, with the same loss recovery where the
+  encoder allows it and whole keyframes where it doesn't. This PC has an AMD Radeon 610M beside
+  the RTX 5090: test on it. Intel has no hardware here: build it on the same VA-API path, and
+  say plainly that it has not run on Intel.
+- Linux viewer: check decode on the AMD card (VA-API) with the picture shown, not only decoded.
+- Windows host and viewer: no NVIDIA-only assumptions. Decode through Direct3D 11 video
+  (any maker); encode through NVENC where there is NVIDIA and through the maker's own encoder
+  (AMF, Quick Sync) or Media Foundation's hardware encoders otherwise. The VM has the RTX 5090
+  only, so say what could not be run.
+
 ## Stream 5: Apple (the Mac session, on its own machine)
 
 Asked of it: its own list in the same spirit (bugs by review, what is untested, recovery after
