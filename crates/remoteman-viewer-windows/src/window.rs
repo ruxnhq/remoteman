@@ -86,6 +86,8 @@ struct Win {
     second: RefCell<Option<(isize, std::thread::JoinHandle<()>, std::sync::Arc<crate::stream::Shared>)>>,
     /// Which display of the session the pointer was last on (0: this window's).
     pointer_on: Cell<u8>,
+    /// The pointer is held in the window and its raw movement is sent.
+    captured: Cell<bool>,
 }
 
 thread_local! {
@@ -192,6 +194,25 @@ fn pick_file(hwnd: HWND) -> Option<PathBuf> {
     chosen.then(|| PathBuf::from(String::from_utf16_lossy(&name[..name.iter().position(|c| *c == 0).unwrap_or(0)])))
 }
 
+/// Ask for a folder, with Windows' own dialog. `None`: none was chosen.
+fn pick_folder(hwnd: HWND) -> Option<PathBuf> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
+    use windows::Win32::UI::Shell::{FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH};
+    // SAFETY: COM calls on this thread, which says so first; the name Windows hands back is
+    // read to its end and freed.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let _ = dialog.SetTitle(w!("Save received files to"));
+        dialog.SetOptions(dialog.GetOptions().ok()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
+        dialog.Show(Some(hwnd)).ok()?;
+        let name = dialog.GetResult().ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok().map(PathBuf::from);
+        CoTaskMemFree(Some(name.0 as *const _));
+        path
+    }
+}
+
 /// The size in pixels and the refresh rate of the monitor the window is on.
 fn monitor_of(hwnd: HWND) -> (u32, u32, u32, RECT, RECT) {
     // SAFETY: structures that say their own size and live through each call.
@@ -262,6 +283,7 @@ pub fn create(mut app: App) -> Result<HWND> {
             follow_theme,
             second: RefCell::new(None),
             pointer_on: Cell::new(0),
+            captured: Cell::new(false),
         });
         WIN.with(|w| *w.borrow_mut() = Some(state.clone()));
         state.app.borrow().scene.hwnd.store(hwnd.0 as isize, Ordering::Relaxed);
@@ -429,6 +451,11 @@ impl Win {
                     }
                 }
                 Effect::SetClipboard(text) => clipboard_set(&text),
+                Effect::PickFolder => {
+                    if let Some(folder) = pick_folder(hwnd) {
+                        self.event(|app| app.set_folder(&folder));
+                    }
+                }
                 Effect::OpenSecond(title) => {
                     self.close_second();
                     let shared = self.ask(|app| app.session.as_ref().and_then(|s| s.shared.second.clone())).flatten();
@@ -492,6 +519,35 @@ impl Win {
             let _ = DestroyWindow(HWND(hwnd as *mut _));
         }
         self.point_at(0);
+    }
+
+    /// Hold the pointer in the picture and have Windows report its raw movement, or let it go.
+    fn hold_pointer(&self, hold: bool) {
+        use windows::Win32::UI::Input::{RAWINPUTDEVICE, RIDEV_REMOVE, RAWINPUTDEVICE_FLAGS, RegisterRawInputDevices};
+        if self.captured.replace(hold) == hold {
+            return;
+        }
+        let hwnd = self.hwnd();
+        // SAFETY: structures that live through each call; the rectangle is our own client area.
+        unsafe {
+            // The mouse, as a generic desktop device.
+            let device = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: if hold { RAWINPUTDEVICE_FLAGS(0) } else { RIDEV_REMOVE }, hwndTarget: if hold { hwnd } else { HWND::default() } };
+            let _ = RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32);
+            if hold {
+                let area = self.ask(|app| app.video_pixels()).flatten().unwrap_or((0, 0, 1, 1));
+                let mut at = POINT { x: area.0, y: area.1 };
+                let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut at);
+                let _ = ClipCursor(Some(&RECT { left: at.x, top: at.y, right: at.x + area.2, bottom: at.y + area.3 }));
+                SetCursor(None);
+            } else {
+                let _ = ClipCursor(None);
+            }
+        }
+        say!("pointer: {}", if hold { "captured: its raw movement goes to the computer" } else { "let go" });
+        self.event(|app| {
+            app.captured = hold;
+            app.dirty = true;
+        });
     }
 
     /// The pointer is on this display of the session from here on (0: the first window's).
@@ -610,6 +666,11 @@ impl Win {
             } else {
                 say!("cursor: wearing the host's ({}x{}, hot spot {},{})", shape.width, shape.height, shape.hot_x, shape.hot_y);
             }
+            let image = (shape.width > 0).then(|| std::sync::Arc::new(shape));
+            self.event(|app| {
+                app.remote_cursor = image;
+                app.dirty |= app.captured;
+            });
             let old = self.cursor.replace(made);
             self.got_shape.set(true);
             self.set_cursor();
@@ -625,6 +686,10 @@ impl Win {
     }
 
     fn wanted_cursor(&self) -> Option<HCURSOR> {
+        if self.captured.get() {
+            // The computer's own is drawn over the picture instead.
+            return None;
+        }
         let (x, y) = self.mouse.get();
         let scale = self.scale();
         let pointer = self.ask(|app| (app.pointer(x as f32 / scale, y as f32 / scale), app.session.as_ref().is_some_and(|s| s.shared.cursor_gone.load(Ordering::Relaxed))));
@@ -666,6 +731,10 @@ impl Win {
                 let _ = TrackMouseEvent(&mut track);
             }
         }
+        if self.captured.get() {
+            // Its movement comes as raw input, and the interface is out of its reach.
+            return;
+        }
         let scale = self.scale();
         let taken = self.event(|app| app.mouse_move(x as f32 / scale, y as f32 / scale)).unwrap_or(true);
         // A button held on the picture keeps the pointer the other computer's, wherever it goes.
@@ -681,6 +750,11 @@ impl Win {
         let hwnd = self.hwnd();
         // SAFETY: focus and capture for our own window.
         unsafe {
+            if self.captured.get() {
+                self.send(Event::Button { button, down });
+                self.buttons.set(if down { self.buttons.get() | bit } else { self.buttons.get() & !bit });
+                return;
+            }
             if down {
                 let _ = SetFocus(Some(hwnd));
                 let taken = if self.buttons.get() != 0 {
@@ -733,6 +807,12 @@ impl Win {
             app.poll();
             app.tick();
         });
+        // A captured pointer: while the picture has this PC's attention and nothing of the
+        // app's own is open over it, and Ctrl+Alt+Shift hasn't given it back.
+        // SAFETY: a plain query.
+        let front = unsafe { GetForegroundWindow() } == self.hwnd();
+        let want = front && !self.released.get() && self.ask(|app| app.forwarding() && app.store.settings.capture).unwrap_or(false);
+        self.hold_pointer(want);
         if self.deadline.get().is_some_and(|d| Instant::now() >= d) {
             self.deadline.set(None);
             self.event(|app| app.time_up());
@@ -980,6 +1060,22 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 let (x, y) = point(l);
                 win.moved(x, y, true);
             }
+            // A captured pointer's raw movement.
+            WM_INPUT => {
+                use windows::Win32::UI::Input::{GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RID_INPUT, RIM_TYPEMOUSE};
+                let mut input = RAWINPUT::default();
+                let mut size = size_of::<RAWINPUT>() as u32;
+                let got = GetRawInputData(HRAWINPUT(l.0 as *mut _), RID_INPUT, Some(&mut input as *mut _ as *mut _), &mut size, size_of::<RAWINPUTHEADER>() as u32);
+                if win.captured.get() && got != u32::MAX && input.header.dwType == RIM_TYPEMOUSE.0 {
+                    let mouse = input.data.mouse;
+                    // (Bit 0 set: a device that says where it is, not how far it moved.)
+                    if mouse.usFlags.0 & 1 == 0 && (mouse.lLastX != 0 || mouse.lLastY != 0) {
+                        win.point_at(0);
+                        win.send(Event::PointerBy { dx: mouse.lLastX as f32, dy: mouse.lLastY as f32 });
+                    }
+                }
+                return pass();
+            }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => win.button(Button::Left, 1, true, l),
             WM_LBUTTONUP => win.button(Button::Left, 1, false, l),
             WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => win.button(Button::Right, 2, true, l),
@@ -1042,6 +1138,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 }
             }
             WM_KILLFOCUS => {
+                win.hold_pointer(false);
                 win.release_keys();
                 win.event(|app| app.blur());
             }

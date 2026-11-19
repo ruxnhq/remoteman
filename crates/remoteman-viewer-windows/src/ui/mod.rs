@@ -77,6 +77,8 @@ pub enum Op {
     Shadow { r: Rect, radius: f32, strength: f32 },
     Clip(Rect),
     Unclip,
+    /// The other computer's pointer: its image, stretched into `r`.
+    Pointer { image: std::sync::Arc<remoteman_core::CursorShape>, r: Rect },
 }
 
 /// What the draw thread is handed: the window's interface, whole.

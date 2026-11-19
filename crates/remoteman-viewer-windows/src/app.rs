@@ -79,6 +79,10 @@ pub enum Choice {
     /// How large a picture to ask a computer for.
     Size(String),
     Scroll,
+    /// Which side of the computer's displays a second display goes.
+    Side(String),
+    /// The pointer follows this one, or is captured.
+    Pointer,
 }
 
 /// The switches of the settings pages.
@@ -141,6 +145,10 @@ pub enum Msg {
     SendFile,
     /// Try the locked computer with the password that was typed.
     Unlock,
+    /// Whether the password typed is to be kept on this PC if it works.
+    ToggleRemember,
+    /// Choose where files from a computer go.
+    PickFolder,
 }
 
 /// What only the window can do.
@@ -163,6 +171,8 @@ pub enum Effect {
     SetClipboard(String),
     /// Read this PC's clipboard; text on it comes to `App::copied_here`.
     ReadClipboard,
+    /// Ask for a folder; the answer comes to `App::set_folder`.
+    PickFolder,
     /// Open the second display's window (with this title) on the session's second stream,
     /// or close it.
     OpenSecond(String),
@@ -223,6 +233,17 @@ impl Session {
     pub fn offers(&self, feature: &str) -> bool {
         self.features.iter().any(|f| f == feature)
     }
+}
+
+/// A password on its way to a locked computer.
+struct Unlocking {
+    /// The computer's key fingerprint: what a kept password is filed under.
+    computer: String,
+    password: String,
+    /// Keep it on this PC if it gets this PC in.
+    remember: bool,
+    /// It came from what is kept (so it isn't kept again, and is thrown away if wrong).
+    kept: bool,
 }
 
 /// An attempt to connect that hasn't answered yet.
@@ -332,6 +353,14 @@ pub struct App {
     pub retry_at: Option<Instant>,
     /// The stream's size and rate as the bar last said them.
     shown_format: Option<(u32, u32, u32)>,
+    /// The password being tried on a locked computer, until it is known whether it worked.
+    unlocking: Option<Unlocking>,
+    /// "Remember it on this PC" is switched on, on the locked page.
+    pub remember: bool,
+    /// The pointer is held in the window (the window says so) and the computer's own is drawn
+    /// over the picture where the computer says it is; with its image.
+    pub captured: bool,
+    pub remote_cursor: Option<Arc<remoteman_core::CursorShape>>,
     /// A line of news over the window, until it has been read.
     pub toast: Option<(String, Instant)>,
 }
@@ -391,6 +420,10 @@ impl App {
             unlock: None,
             logging_in: 0,
             retry_at: None,
+            unlocking: None,
+            remember: false,
+            captured: false,
+            remote_cursor: None,
             toast: None,
             shown_format: None,
             args,
@@ -727,8 +760,22 @@ impl App {
             self.dirty = true;
         }
         // A picture: whatever the computer was doing before it let this PC in is over.
-        if self.logging_in != 0 && self.session.as_ref().is_some_and(|s| s.shared.presented_total.load(Ordering::Relaxed) > 0) {
+        if (self.logging_in != 0 || self.unlocking.is_some()) && self.session.as_ref().is_some_and(|s| s.shared.presented_total.load(Ordering::Relaxed) > 0) {
             self.logging_in = 0;
+            // And a password that got this PC in is one worth keeping, if that was asked.
+            if let Some(used) = self.unlocking.take() {
+                if used.remember && !used.kept {
+                    let name = self.session.as_ref().map(|s| s.target.name.clone()).unwrap_or_default();
+                    match crate::creds::keep(&used.computer, &name, &used.password) {
+                        Ok(()) => say!("the password is kept in Credential Manager"),
+                        Err(e) => self.say(&format!("The password could not be kept on this PC: {e}")),
+                    }
+                }
+            }
+        }
+        // A captured pointer is drawn where the computer says its own is.
+        if self.captured && self.session.as_ref().is_some_and(|s| s.shared.cursor_moved.swap(false, Ordering::Relaxed)) {
+            self.dirty = true;
         }
         let closed = self.session.as_ref().and_then(|s| s.shared.closed.lock().unwrap().clone());
         if let Some(reason) = closed {
@@ -844,7 +891,10 @@ impl App {
             let display = Display { placement: Placement::Extend, ..self.display_for(Some(&address), Placement::Extend) };
             if let Some(client) = &client {
                 say!("second display: asked for {}x{} at {} Hz", display.width, display.height, display.refresh);
-                client.send_message(Message::Display { index: 1, on: true, display: Some(display), side: Default::default(), message: String::new() });
+                // On the side of the computer's other displays chosen for this computer.
+                let side = self.store.find(&address).map_or_else(Default::default, |c| c.second_side);
+                say!("second display: on the side {side:?}");
+                client.send_message(Message::Display { index: 1, on: true, display: Some(display), side, message: String::new() });
             }
             self.effects.push(Effect::OpenSecond(format!("{name}: second display")));
         } else {
@@ -892,6 +942,17 @@ impl App {
         say!("clipboard: {} characters of text sent to the computer", text.chars().count());
         // Writing waits while the network is behind, which the window mustn't.
         let _ = std::thread::Builder::new().name("copy".into()).spawn(move || blob.write(text.as_bytes()) && blob.finish());
+    }
+
+    /// Files from a computer go into this folder from now on.
+    pub fn set_folder(&mut self, folder: &Path) {
+        self.store.settings.folder = folder.display().to_string();
+        self.store.save_settings();
+        if let Some(s) = &self.session {
+            *s.shared.folder.lock().unwrap() = self.store.receive_folder();
+        }
+        say!("received files go to {}", folder.display());
+        self.dirty = true;
     }
 
     /// Send a file to the session's computer, which decides where it goes and answers when it
@@ -951,6 +1012,22 @@ impl App {
                 say!("the computer is locked: {said}");
                 self.fields.insert(id("locked.password"), Field::default());
                 self.focus(id("locked.password"), false);
+                let computer = self.store.key(&target.address).unwrap_or_default();
+                // What became of the password that was just tried, if one was: one kept here
+                // that the computer says is wrong is out of date.
+                let tried = self.unlocking.take();
+                if tried.as_ref().is_some_and(|t| t.kept) && said.to_ascii_lowercase().contains("not right") {
+                    say!("the password kept on this PC is not right any more: forgotten");
+                    crate::creds::forget(&computer);
+                }
+                // Asked for the first time in this try: a password kept for this computer is
+                // sent without anyone typing it.
+                if let Some(password) = (tried.is_none() && !computer.is_empty()).then(|| crate::creds::find(&computer)).flatten() {
+                    say!("unlocking with the password kept on this PC");
+                    self.unlock = Some(password.clone());
+                    self.unlocking = Some(Unlocking { computer, password, remember: false, kept: true });
+                    self.retry_at = Some(Instant::now());
+                }
                 // A test's password, typed by nobody, once.
                 if let Some(typed) = self.args.password_from.take().and_then(|p| std::fs::read_to_string(p).ok()) {
                     self.unlock = typed.lines().next().map(str::to_owned);
@@ -1180,10 +1257,14 @@ impl App {
             Msg::Unlock => {
                 let typed = self.fields.insert(id("locked.password"), Field::default()).map(|f| f.string()).unwrap_or_default();
                 if let (false, Screen::Problem(target, _)) = (typed.is_empty(), self.screen.clone()) {
+                    let computer = self.store.key(&target.address).unwrap_or_default();
+                    self.unlocking = Some(Unlocking { remember: self.remember && !computer.is_empty(), computer, password: typed.clone(), kept: false });
                     self.unlock = Some(typed);
                     self.connect(target, false);
                 }
             }
+            Msg::ToggleRemember => self.remember = !self.remember,
+            Msg::PickFolder => self.effects.push(Effect::PickFolder),
             Msg::ToggleSound => {
                 let on = self.session.as_ref().is_some_and(|s| s.sound_on);
                 self.set_sound(!on);
@@ -1346,6 +1427,11 @@ impl App {
                 (SIZES.iter().map(|s| (s.1.to_owned(), true)).collect(), SIZES.iter().position(|s| s.0 == now).unwrap_or(0))
             }
             Choice::Scroll => (vec![("Same as this PC".into(), true), ("Reversed".into(), true)], self.store.settings.scroll_reversed as usize),
+            Choice::Pointer => (vec![("Follows this pointer".into(), true), ("Captured".into(), true)], self.store.settings.capture as usize),
+            Choice::Side(address) => {
+                let now = self.store.find(address).map_or(remoteman_core::Side::Right, |c| c.second_side);
+                (crate::store::SIDES.iter().map(|s| (s.2.to_owned(), true)).collect(), crate::store::SIDES.iter().position(|s| s.0 == now).unwrap_or(0))
+            }
             Choice::Quality(address) => {
                 let now = self.store.find(address).and_then(|c| c.quality);
                 let mut list = vec![("Same as Settings".to_owned(), true)];
@@ -1380,6 +1466,11 @@ impl App {
                 self.store.settings.scroll_reversed = n == 1;
                 self.store.save_settings();
             }
+            Choice::Pointer => {
+                self.store.settings.capture = n == 1;
+                self.store.save_settings();
+            }
+            Choice::Side(address) => self.store.update(&address, |c| c.second_side = crate::store::SIDES[n.min(3)].0),
             Choice::Quality(address) => self.store.update(&address, |c| c.quality = n.checked_sub(1).map(|i| QUALITIES[i.min(3)])),
             Choice::Bitrate(address) => {
                 if let Some(megabits) = BITRATE_CHOICES.get(n).copied() {
@@ -1442,6 +1533,9 @@ impl App {
                 self.dialog = None;
                 if self.session.as_ref().is_some_and(|s| s.target.address == address) {
                     self.stop(None);
+                }
+                if let Some(computer) = self.store.key(&address) {
+                    crate::creds::forget(&computer);
                 }
                 self.store.forget(&address);
                 self.reach.remove(&address);

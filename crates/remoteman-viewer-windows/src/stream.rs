@@ -71,6 +71,8 @@ pub struct Shared {
     /// Whether the host's cursor is on this display at all, and where it last was.
     pub cursor_gone: AtomicBool,
     pub cursor_at: Mutex<(f32, f32)>,
+    /// It has moved since the window last looked (for a pointer that is drawn here).
+    pub cursor_moved: AtomicBool,
     /// How far connecting has come: a `Stage` as a number.
     pub stage: AtomicU8,
     /// Why the session ended, once it has.
@@ -138,6 +140,7 @@ impl Shared {
             cursor: Mutex::default(),
             cursor_gone: AtomicBool::default(),
             cursor_at: Mutex::default(),
+            cursor_moved: AtomicBool::default(),
             stage: AtomicU8::default(),
             closed: Mutex::default(),
             decoder: Mutex::default(),
@@ -305,7 +308,9 @@ impl Handler for Feed {
 
     fn cursor_at(&mut self, x: f32, y: f32, visible: bool) {
         *self.shared.cursor_at.lock().unwrap() = (x, y);
-        if self.shared.cursor_gone.swap(!visible, Ordering::Relaxed) == visible {
+        // The window is told of a change of presence, and once of a move it hasn't looked at.
+        let moved = !self.shared.cursor_moved.swap(true, Ordering::Relaxed);
+        if self.shared.cursor_gone.swap(!visible, Ordering::Relaxed) == visible || moved {
             self.wake_window();
         }
     }

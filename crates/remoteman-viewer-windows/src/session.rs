@@ -192,6 +192,20 @@ pub fn view(app: &App, ui: &mut Ui) {
     if app.store.settings.figures {
         figures(app, ui, if floating { if out { 54.0 } else { 0.0 } } else { BAR });
     }
+    // A captured pointer has no place of its own on this screen: the computer's is drawn
+    // where the computer says it is, at once, not in the picture a pipeline's delay later.
+    if let (true, Some(image), Some(area)) = (app.captured, &app.remote_cursor, app.video_area()) {
+        let (vw, vh) = crate::stream::unpack(s.shared.stream_size.load(std::sync::atomic::Ordering::Relaxed));
+        if vw > 0 && vh > 0 && !s.shared.cursor_gone.load(std::sync::atomic::Ordering::Relaxed) {
+            let (fx, fy) = *s.shared.cursor_at.lock().unwrap();
+            let fit = (area.w / vw as f32).min(area.h / vh as f32);
+            let (dw, dh) = (vw as f32 * fit, vh as f32 * fit);
+            let (x, y) = (area.x + (area.w - dw) / 2.0 + fx * dw, area.y + (area.h - dh) / 2.0 + fy * dh);
+            ui.clip(area);
+            ui.ops.push(Op::Pointer { image: image.clone(), r: rect(x - image.hot_x as f32 * fit, y - image.hot_y as f32 * fit, image.width as f32 * fit, image.height as f32 * fit) });
+            ui.unclip();
+        }
+    }
     if floating {
         if out {
             // Dark whatever the system says: what is under it is somebody's desktop.

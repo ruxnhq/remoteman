@@ -9,7 +9,11 @@
 
 use std::path::{Path, PathBuf};
 
-use remoteman_core::{Codec, Mode, Placement};
+use remoteman_core::{Codec, Mode, Placement, Side};
+
+/// The sides a second display can sit on, in the order they are offered, with their names in
+/// the file and in the settings.
+pub const SIDES: [(Side, &str, &str); 4] = [(Side::Right, "right", "To the right"), (Side::Left, "left", "To the left"), (Side::Above, "above", "Above"), (Side::Below, "below", "Below")];
 
 /// The placements, as they are written on the command line and in the state folder.
 pub const PLACEMENTS: [(Placement, &str); 4] = [(Placement::Extend, "extend"), (Placement::Main, "main"), (Placement::Only, "only"), (Placement::Mirror, "mirror")];
@@ -125,13 +129,15 @@ pub struct Computer {
     /// What a session with it starts with: its sound played here, one clipboard for both.
     pub sound: bool,
     pub clipboard: bool,
+    /// Which side of the computer's other displays a second display here is put on.
+    pub second_side: Side,
     /// Lines this viewer doesn't use (the Linux viewer's), kept as they were.
     pub other: Vec<(String, String)>,
 }
 
 impl Computer {
     fn new(name: &str, address: &str, os: &str, now: i64, settings: &Settings) -> Self {
-        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: 0, sound: settings.sound, clipboard: settings.clipboard, other: Vec::new() }
+        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: 0, sound: settings.sound, clipboard: settings.clipboard, second_side: Side::Right, other: Vec::new() }
     }
 }
 
@@ -153,6 +159,8 @@ pub struct Settings {
     pub scroll_reversed: bool,
     /// On a Mac, Ctrl on this keyboard is Command there (and the Windows key is Ctrl).
     pub ctrl_as_command: bool,
+    /// The pointer is held in the window and its raw movement sent.
+    pub capture: bool,
     /// What a newly paired computer's sessions start with.
     pub sound: bool,
     pub clipboard: bool,
@@ -179,7 +187,7 @@ impl Settings {
     }
 }
 
-const SETTINGS_KEYS: [&str; 12] = ["placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder"];
+const SETTINGS_KEYS: [&str; 13] = ["capture-pointer", "placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder"];
 
 pub struct Store {
     dir: PathBuf,
@@ -224,6 +232,7 @@ impl Store {
             match_refresh: yes("match-refresh", true),
             scroll_reversed: yes("scroll-reversed", false),
             ctrl_as_command: yes("ctrl-as-command", false),
+            capture: yes("capture-pointer", false),
             sound: yes("sound", false),
             clipboard: yes("clipboard", false),
             folder: get("folder").unwrap_or_default(),
@@ -249,6 +258,7 @@ impl Store {
                     "picture-lines" => c.max_height = if value == "window" { WINDOW } else { value.parse().unwrap_or(0) },
                     "sound" => c.sound = value == "yes",
                     "clipboard" => c.clipboard = value == "yes",
+                    "second-side" => c.second_side = SIDES.iter().find(|s| s.1 == value).map_or(Side::Right, |s| s.0),
                     other => c.other.push((other.to_owned(), value.to_owned())),
                 }
             }
@@ -361,7 +371,7 @@ impl Store {
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         for c in &self.computers {
             out += &format!(
-                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\npicture-lines={}\nsound={}\nclipboard={}\n",
+                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\npicture-lines={}\nsound={}\nclipboard={}\nsecond-side={}\n",
                 clean(&c.name),
                 clean(&c.address),
                 clean(&c.os),
@@ -373,6 +383,7 @@ impl Store {
                 if c.max_height == WINDOW { "window".to_owned() } else { c.max_height.to_string() },
                 if c.sound { "yes" } else { "no" },
                 if c.clipboard { "yes" } else { "no" },
+                SIDES.iter().find(|s| s.0 == c.second_side).map_or("right", |s| s.1),
             );
             for (key, value) in &c.other {
                 out += &format!("{key}={}\n", clean(value));
@@ -389,7 +400,7 @@ impl Store {
         let s = &self.settings;
         let yes = |b: bool| if b { "yes" } else { "no" };
         let mut out = format!(
-            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\nsound={}\nclipboard={}\nfolder={}\n",
+            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\ncapture-pointer={}\nsound={}\nclipboard={}\nfolder={}\n",
             placement_key(s.placement),
             yes(s.hover_bar),
             yes(s.figures),
@@ -399,6 +410,7 @@ impl Store {
             yes(s.match_refresh),
             yes(s.scroll_reversed),
             yes(s.ctrl_as_command),
+            yes(s.capture),
             yes(s.sound),
             yes(s.clipboard),
             s.folder.replace(['\n', '\r'], " "),
