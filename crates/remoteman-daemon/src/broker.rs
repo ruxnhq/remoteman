@@ -29,7 +29,7 @@ const HELLO: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 10_00
 /// How long a client whose session's agent went away is kept, for another agent of its user
 /// to attach (the agent restarting; a login screen giving way to a session), before it is
 /// dropped rather than left looking at a picture that will never move.
-const ORPHAN: Duration = Duration::from_millis(if cfg!(test) { 400 } else { 20_000 });
+const ORPHAN: Duration = Duration::from_millis(if cfg!(test) { 2_000 } else { 20_000 });
 
 type Writer = Arc<Mutex<UnixStream>>;
 
@@ -114,6 +114,9 @@ pub struct Shared {
     pairing: Mutex<Option<Pairing>>,
     /// Who the daemon runs as: with root, the one who may see and change every user's devices.
     euid: u32,
+    /// Users who may have devices of their own though the user database doesn't make them
+    /// out to be people (`--users`).
+    people: Vec<u32>,
     login: Option<Login>,
     /// The listening side, once it is up: the trust list and the client's connection.
     /// Not held: the daemon's main thread is the one that stops it.
@@ -122,11 +125,11 @@ pub struct Shared {
 
 impl Shared {
     /// `state`: the daemon's state folder, where a pause of sharing is remembered.
-    pub fn new(owner: Option<(String, u32)>, login: Option<Login>, state: Option<&std::path::Path>) -> Arc<Self> {
+    pub fn new(owner: Option<(String, u32)>, login: Option<Login>, state: Option<&std::path::Path>, people: Vec<u32>) -> Arc<Self> {
         let users = Users::load(state, owner.as_ref().map(|o| o.1));
         // SAFETY: no arguments, no state.
         let euid = unsafe { libc::geteuid() };
-        Arc::new(Self { sending: Mutex::new(()), state: Mutex::default(), owner, users, pairing: Mutex::default(), euid, login, host: Default::default() })
+        Arc::new(Self { sending: Mutex::new(()), state: Mutex::default(), owner, users, pairing: Mutex::default(), euid, people, login, host: Default::default() })
     }
 
     fn host(&self) -> Option<Arc<remoteman_core::host::Host>> {
@@ -668,8 +671,12 @@ fn current_link(shared: &Shared, id: u32) -> Option<Link> {
 }
 
 /// `remotemand ctl ...`, asked by `uid`. Root and the user the daemon runs as see and change
-/// everything. Anybody else who has a desktop session here (an agent attached), and the
-/// `--user` user, sees and changes what is theirs: their devices, their pairing, their sharing.
+/// everything. The `--user` user, and any other person with a desktop session here, sees and
+/// changes what is theirs: their devices, their pairing, their sharing. "A person with a
+/// session": an agent of theirs is attached, and the user database gives them a shell to log
+/// in with (or `--users` names them). An agent alone is not enough: the socket is open to
+/// every local account, and the accounts of services and of the login screen are not to pair
+/// devices for themselves.
 fn control(shared: &Shared, words: &str, uid: u32) -> String {
     let admin = uid == 0 || uid == shared.euid;
     let owner = shared.owner.as_ref().map(|o| o.1);
@@ -677,8 +684,9 @@ fn control(shared: &Shared, words: &str, uid: u32) -> String {
     let number = |w: Option<&str>| w.and_then(|w| w.parse::<u32>().ok());
     let word = words.next().unwrap_or("status");
     // Looking at the agents is for any local user; the rest is not.
-    if word != "status" && !(admin || owner == Some(uid) || shared.agent_of(uid).is_some()) {
-        return "only root, the daemon's own user and users with a desktop session on this computer may do that\n".into();
+    let person = || shared.agent_of(uid).is_some() && (shared.people.contains(&uid) || users::is_person(uid));
+    if word != "status" && !(admin || owner == Some(uid) || person()) {
+        return "only root, the daemon's own user and people with a desktop session on this computer may do that\n".into();
     }
     let mine = |fingerprint: &str| admin || shared.user_of(fingerprint) == Some(uid);
     // The pairing last opened is the asker's to see and answer if they opened it.
@@ -920,7 +928,7 @@ mod tests {
     #[test]
     fn a_device_is_handed_only_to_its_own_users_session() {
         // The `--user` user is alice: a device with no user kept is hers.
-        let shared = Shared::new(Some(("alice".into(), ALICE)), None, None);
+        let shared = Shared::new(Some(("alice".into(), ALICE)), None, None, vec![]);
         shared.users.set(&fp('b'), Some(BOB));
         let alice = attach(&shared, ALICE);
         let bob = attach(&shared, BOB);
@@ -950,7 +958,7 @@ mod tests {
 
     #[test]
     fn an_answer_for_a_device_that_left_is_not_taken_for_the_next_devices() {
-        let shared = Shared::new(None, None, None);
+        let shared = Shared::new(None, None, None, vec![]);
         let first = attach(&shared, ALICE);
         served(&shared, 'a', &first);
         // The device is being moved to a second session of its user's when it goes.
@@ -973,7 +981,7 @@ mod tests {
 
     #[test]
     fn an_agent_that_answers_too_late_is_not_left_marked_as_serving() {
-        let shared = Shared::new(None, None, None);
+        let shared = Shared::new(None, None, None, vec![]);
         let agent = attach(&shared, ALICE);
         let arriving = arrive(&shared, 'a');
         assert_eq!(asked(&agent), Some("device a".into()));
@@ -989,7 +997,7 @@ mod tests {
 
     #[test]
     fn an_agent_that_stops_reading_is_given_up_on() {
-        let shared = Shared::new(None, None, None);
+        let shared = Shared::new(None, None, None, vec![]);
         let agent = attach(&shared, ALICE);
         served(&shared, 'a', &agent);
         // Far more than its socket holds, on the thread everything of the client's passes
@@ -1010,7 +1018,7 @@ mod tests {
 
     #[test]
     fn a_connection_that_says_nothing_does_not_keep_its_thread() {
-        let shared = Shared::new(None, None, None);
+        let shared = Shared::new(None, None, None, vec![]);
         let (ours, theirs) = UnixStream::pair().unwrap();
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
@@ -1023,7 +1031,7 @@ mod tests {
 
     #[test]
     fn a_client_whose_agent_went_is_taken_up_by_its_users_next_agent_or_dropped() {
-        let shared = Shared::new(None, None, None);
+        let shared = Shared::new(None, None, None, vec![]);
         shared.users.set(&fp('a'), Some(ALICE));
         let agent = attach(&shared, ALICE);
         served(&shared, 'a', &agent);
@@ -1036,7 +1044,7 @@ mod tests {
         assert_eq!(asked(&again), Some("device a".into()));
         ToDaemon::Accepted(accept(1280)).write(&mut &again).unwrap();
         until(|| shared.state.lock().unwrap().current == Some(3));
-        std::thread::sleep(ORPHAN * 2);
+        std::thread::sleep(ORPHAN + Duration::from_millis(500));
         assert_eq!(shared.state.lock().unwrap().orphans_dropped, 0);
         // With nobody to take it up, it is dropped after a while.
         drop(again);
@@ -1051,7 +1059,7 @@ mod tests {
         // Three paired devices; `c` from before users were kept.
         std::fs::write(state.join("host/trusted"), format!("{} one\n{} two\n{} three\n", fp('a'), fp('b'), fp('c'))).unwrap();
         std::fs::write(state.join("device-users"), format!("{} {ALICE}\n{} {BOB}\n", fp('a'), fp('b'))).unwrap();
-        let shared = Shared::new(Some(("carol".into(), 2003)), None, Some(&state));
+        let shared = Shared::new(Some(("carol".into(), 2003)), None, Some(&state), vec![ALICE, BOB]);
         let options = HostOptions { listen: "127.0.0.1:0".parse().unwrap(), state: state.clone(), name: "test".into(), os: "linux".into(), features: vec![], pair: false, test_drop_one_in: None };
         let host = Arc::new(Host::start(options, Broker(shared.clone())).unwrap());
         shared.listening(&host);
@@ -1067,9 +1075,14 @@ mod tests {
         assert_eq!(names(2003), ["three"]);
         assert_eq!(names(shared.euid), ["one", "two", "three"]);
         assert_eq!(control(&shared, "devices", ALICE), format!("{}  one\n", &fp('a')[..16]));
-        // Somebody with no session here is told nothing.
+        // Somebody with no session here is told nothing; nor is an account that has an agent
+        // attached (anything may connect and call itself one) but is no person.
         assert!(control(&shared, "owner", 2009).starts_with("only root"));
         assert!(control(&shared, "devices", 2009).starts_with("only root"));
+        let _service = attach(&shared, 2009);
+        assert!(control(&shared, "owner", 2009).starts_with("only root"));
+        assert!(control(&shared, "pair on", 2009).starts_with("only root"));
+        assert!(!host.pairing());
 
         // Alice can't revoke bob's device, and can her own.
         assert!(control(&shared, &format!("revoke {}", fp('b')), ALICE).starts_with("revoke FINGERPRINT: no trusted device"));

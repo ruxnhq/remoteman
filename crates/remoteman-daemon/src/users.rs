@@ -159,6 +159,21 @@ pub fn name_of(uid: u32) -> Option<String> {
     }
 }
 
+/// Is `uid` somebody who logs in here, as far as the user database says: an account with a
+/// shell that isn't one of the two that turn everybody away (the accounts of services, and of
+/// GDM's login screen, have those).
+pub fn is_person(uid: u32) -> bool {
+    // SAFETY: as in `name_of`.
+    let shell = unsafe {
+        let entry = libc::getpwuid(uid);
+        if entry.is_null() || (*entry).pw_shell.is_null() {
+            return false;
+        }
+        std::ffi::CStr::from_ptr((*entry).pw_shell).to_string_lossy().into_owned()
+    };
+    !shell.is_empty() && !shell.ends_with("/nologin") && !shell.ends_with("/false")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +190,16 @@ mod tests {
         assert!(may_serve(Some(1000), 120, true));
         // No user at all: the daemon as it was before users.
         assert!(may_serve(None, 1001, false));
+    }
+
+    #[test]
+    fn who_the_user_database_makes_out_to_be_a_person() {
+        // SAFETY: no arguments, no state.
+        let me = unsafe { libc::getuid() };
+        // Whoever runs the tests logs in; `nobody` doesn't, and nor does a number with no account.
+        assert!(is_person(me) || std::env::var_os("CI").is_some());
+        assert!(!is_person(65534));
+        assert!(!is_person(2009));
     }
 
     #[test]

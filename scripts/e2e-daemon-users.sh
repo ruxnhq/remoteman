@@ -23,7 +23,11 @@ as $ALICE true 2>/dev/null || { echo "SKIP: this user can't be two more users he
 ctl() { who=$1; shift; as "$who" "$bin/remotemand" ctl --socket "$sock" "$@"; }
 admin() { "$bin/remotemand" ctl --socket "$sock" "$@"; }
 field() { python3 -I -c "import json,sys; d=json.load(sys.stdin); print($1)" 2>/dev/null; }
-daemon() { "$bin/remotemand" --listen 127.0.0.1:$RM_PORT --state "$RM_LOGS/state" --socket "$sock" --user "$(id -un)" "$@" >>"$RM_LOGS/daemon.log" 2>&1 & dpid=$!; sleep 0.7; }
+# What those two are to the kernel, and so to the daemon. The user database knows neither,
+# so the daemon is told that they are people (`--users`).
+first=$(awk -F: -v name="$(id -un)" -v uid="$(id -u)" '$1 == name || $1 == uid { print $2; exit }' /etc/subuid)
+people="$((first + ALICE - 1)),$((first + BOB - 1))"
+daemon() { "$bin/remotemand" --listen 127.0.0.1:$RM_PORT --state "$RM_LOGS/state" --socket "$sock" --user "$(id -un)" --users "$people" "$@" >>"$RM_LOGS/daemon.log" 2>&1 & dpid=$!; sleep 0.7; }
 # agent WHO LABEL: its pid is in $apid.
 agent() { as "$1" "$bin/remotemand" test-agent --socket "$sock" --label "$2" >"$RM_LOGS/agent-$2.log" 2>&1 & apid=$!; sleep 0.4; }
 # How many devices an agent has been given so far.
@@ -67,6 +71,12 @@ want "alice's list is hers alone" "$(ctl $ALICE devices | grep -c .)" 1
 like "alice can't revoke bob's device" "$(ctl $ALICE revoke "$bfp")" "no trusted device starts with that"
 cat "$RM_LOGS/state/device-users" | sed 's/^\(.\{12\}\)[0-9a-f]*/kept: \1…/'
 
+# An account that is no person (a service's, the login screen's) may attach an agent, since the
+# socket is open to all, but pairs nothing and is told nothing.
+agent 3 service; service=$apid
+like "an account that is no person can't open pairing" "$(ctl 3 pair on)" "only root"
+like "nor see anything" "$(ctl 3 owner)" "only root"
+kill $service
 # Preferring or moving across users is refused, even for the daemon's own user.
 bobs=$(admin status | awk '/^agent/ { id = $2 } END { sub(":", "", id); print id }')
 like "bob's agent is preferred for the next device" "$(admin prefer "$bobs")" "the next client goes to"
