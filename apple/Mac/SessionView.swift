@@ -454,7 +454,7 @@ struct HoverBar: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(computer.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     if let w = facts.width, let h = facts.height, let r = facts.refresh {
-                        Text("\(w) × \(h) at \(r) Hz").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                        Text(verbatim: "\(w) × \(h) at \(r) Hz").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
             }
