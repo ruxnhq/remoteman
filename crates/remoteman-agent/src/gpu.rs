@@ -206,7 +206,7 @@ impl Enc {
             Enc::Nv(e) => e.encode_how(slot, timestamp, how),
             Enc::Va(e) => {
                 let (data, key) = e.encode(slot, timestamp, how.idr)?;
-                Ok(Made { data, key, marked: None, referred: 0 })
+                Ok(Made { data, key, marked: None, referred: 0, qp: 0 })
             }
         }
     }

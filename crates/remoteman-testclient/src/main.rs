@@ -13,6 +13,7 @@
 //!     --pointer-demo     move the pointer in a circle and nothing else (safe on a desktop in use)
 //!     --script FILE      send input from a script while running, one step a line:
 //!                          wait SECONDS | move X Y | click X Y | key enter|tab|esc|space|HEX
+//!                          moveby DX DY | scroll DX DY (both in display pixels)
 //!                          text WORDS | textfile PATH | mark NAME
 //!                          sound on|off | mic PACKETS | camera FRAMES | clip WORDS
 //!                          file PATH | bitrate BITS | resize WxH | keyframe
@@ -147,6 +148,10 @@ impl Handler for Watcher {
 
     fn message(&mut self, message: &Message) {
         println!("host says: {}", serde_json::to_string(message).unwrap_or_default());
+    }
+
+    fn pairing(&mut self, code: &str, seconds: u32) {
+        println!("pairing: this device is new to the host; its owner has {seconds} s to confirm the code {code}");
     }
 
     fn sound(&mut self, packet: &Packet) {
@@ -298,6 +303,14 @@ fn main() -> Result<()> {
                     client.send(Event::Button { button: Button::Left, down: true });
                     std::thread::sleep(Duration::from_millis(60));
                     client.send(Event::Button { button: Button::Left, down: false });
+                }
+                "moveby" => {
+                    let (dx, dy) = xy()?;
+                    client.send(Event::PointerBy { dx, dy });
+                }
+                "scroll" => {
+                    let (dx, dy) = xy()?;
+                    client.send(Event::Scroll { dx, dy });
                 }
                 "key" => {
                     let usage = match rest.trim() {
