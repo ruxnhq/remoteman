@@ -534,6 +534,12 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
     }
 }
 
+/// A frame that nothing has followed for this long is sent once more. On a desktop where
+/// nothing moves no later frame comes, and a later frame is the only way a client notices that
+/// one went missing: without this, whatever the network lost of the last frame before the
+/// picture went still was never shown. A client that has the frame drops the copy unseen.
+const REPEAT_AFTER: Duration = Duration::from_millis(100);
+
 /// One client's session. The flag in the result says whether the handler's `connected` ran (and
 /// so whether `left` is owed).
 async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, trust: &Trust, features: Vec<String>, held: Option<Arc<Confirm>>) -> Result<bool, (bool, anyhow::Error)> {
@@ -634,13 +640,38 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         let mut sent = 0u32;
         // The second display's picture: how often it has started afresh, and its frame count.
         let (mut epoch2, mut number2) = (0u16, 0u32);
-        while let Some(out) = frame_rx.recv().await {
+        // The last frame sent of each picture, and when it goes out once more if nothing has
+        // followed it (see `REPEAT_AFTER`).
+        let mut last: [Option<(Frame, u16, u32, tokio::time::Instant)>; 2] = [None, None];
+        loop {
+            let due = last.iter().flatten().map(|l| l.3).min();
+            let out = match due {
+                Some(due) => match tokio::time::timeout_at(due, frame_rx.recv()).await {
+                    Ok(out) => out,
+                    Err(_) => {
+                        let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
+                        for (index, slot) in last.iter_mut().enumerate() {
+                            if slot.as_ref().is_some_and(|l| l.3 <= tokio::time::Instant::now()) {
+                                let (f, epoch, number, _) = slot.take().unwrap();
+                                let kind = if index == 0 { remoteman_proto::video::KIND_VIDEO } else { remoteman_proto::video::KIND_VIDEO2 };
+                                for d in remoteman_proto::video::fragment_as(kind, &f.data, f.key, f.recovery, epoch, number, f.capture_us, max) {
+                                    conn.send_datagram_wait(d.into()).await?;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                },
+                None => frame_rx.recv().await,
+            };
+            let Some(out) = out else { break };
             let f = match out {
                 Out::Second(second) => {
                     match *second {
                         Out::Restart(a) => {
                             epoch2 = epoch2.wrapping_add(1);
                             number2 = 0;
+                            last[1] = None;
                             let m = Message::Stream { epoch: epoch2, mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 1 };
                             write_message(&mut *send.lock().await, &m).await?;
                         }
@@ -649,6 +680,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                             for d in remoteman_proto::video::fragment_as(remoteman_proto::video::KIND_VIDEO2, &f.data, f.key, f.recovery, epoch2, number2, f.capture_us, max) {
                                 conn.send_datagram_wait(d.into()).await?;
                             }
+                            last[1] = Some((f, epoch2, number2, tokio::time::Instant::now() + REPEAT_AFTER));
                             number2 = number2.wrapping_add(1);
                         }
                         Out::Second(_) => {}
@@ -660,6 +692,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     number = 0;
                     answer.store(0, std::sync::atomic::Ordering::Relaxed);
+                    last[0] = None;
                     let m = Message::Stream { epoch: now(), mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 0 };
                     write_message(&mut *send.lock().await, &m).await?;
                     continue;
@@ -676,6 +709,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             if f.key || f.recovery {
                 answer.store(number.wrapping_add(1), std::sync::atomic::Ordering::Relaxed);
             }
+            last[0] = Some((f, now(), number, tokio::time::Instant::now() + REPEAT_AFTER));
             number = number.wrapping_add(1);
         }
         // The handler dropped its link without the client leaving: nothing more to send.
