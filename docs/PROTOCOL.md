@@ -21,6 +21,10 @@ A host lets a device it doesn't know past the handshake only while its owner has
 
 The code is made from both keys: the first four bytes of SHA-256 over the text `remoteman pairing`, a newline, the host key's fingerprint, a newline and the device key's fingerprint (both in lower-case hex), as a big-endian number modulo 1,000,000, shown as two groups of three digits. Each side makes it from the key it sees the other use, so something in between, which would have to show each side a key of its own, makes the two codes differ. A client that doesn't know the `pairing` message simply waits for its hello.
 
+### A pairing link
+
+For pairing by scanning a code instead of typing an address, a host may show a link (as a QR code): `remoteman://pair?v=0&name=<name>&addr=<addr[:port]>[,<addr[:port]>...]&fp=<the whole fingerprint of the host key, hex>`. A device adds the computer at the first address that answers, pairing as usual (the host still has to have pairing open, and still asks for the six digits where it does), and after connecting forgets the computer again if the key it met is not the one in the link. There is no secret in the link. (Defined by the Apple apps, which show and scan it; the Linux programs don't yet.)
+
 ## A locked host
 
 A host whose desktop is locked may let a paired device in all the same, if its owner has said so: by the device's key alone, or with the password of the host's user as well.
@@ -34,6 +38,18 @@ While a host is unlocked for a device this way it may give the device another pl
 ### More than one way in
 
 A host that can both bring a device into a session that is already running and show it a login screen when there is none (the Linux daemon) lists `way_in` in its features. A client may then say `"way_in":"attach"` in its hello: only a session that is already running, never a login screen. Left out, the host uses whatever way fits. With `attach` and nobody logged in, the host refuses with an ordinary error saying so. A host with one way in takes no notice.
+
+### A second display
+
+A host that can give one device two displays in one session lists `displays` in its features.
+
+- Client → host: `{"t":"display","index":1,"on":true,"display":{...}}` adds a second display of that size (the `display` of the hello), beside everything else; `"on":false` takes it away. Only index 1 exists.
+- Host → client: a `stream` message with `"index":1` says what the second picture is; its epochs count by themselves, from 1. Its frames come as datagrams of kind 6, laid out like the picture's (kind 1), with their own frame numbers. The cursor is drawn into this picture (there is no cursor channel for it), and it is in the codec of the first.
+- A client that misses part of it asks with `{"t":"display_keyframe","index":1}` and gets a keyframe (there are no loss reports for the second picture).
+- Host → client: `{"t":"display","index":1,"on":false,"message":"..."}` when the second display could not be made, or is gone.
+- Input: the input event `8, index` (two bytes) says which display the pointer and touch events that follow are on: 0 the first (and where every session starts), 1 the second. Keys go to the desktop whichever it is.
+
+The second display goes when the session ends, and when the first is made afresh (`configure`). Its bitrate is the host's own choice: the ceiling in `configure` is for the first picture only. Frames of it already on their way can still arrive just after the client gave it back; the client drops them.
 
 ### A host that logs its user in by itself
 

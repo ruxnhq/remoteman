@@ -104,6 +104,12 @@ pub trait Handler: Send + 'static {
     fn blob(&mut self, _event: &BlobEvent) {}
     /// How far connecting has got. Called on the connecting thread, before
     /// [`Client::connect`] returns; after [`Stage::Display`] come `stream` and the first `frame`.
+    /// The second display's picture starts (or starts afresh) as this, after this client asked
+    /// for one with `Message::Display`. Its frames come to [`Handler::frame2`].
+    fn stream2(&mut self, _info: &StreamInfo) {}
+    /// One whole frame of the second display, in order; the first after `stream2` is a
+    /// keyframe.
+    fn frame2(&mut self, _frame: &Frame, _age_us: Option<i64>) {}
     fn stage(&mut self, _stage: Stage) {}
     /// This device is new to the host, whose owner now has `seconds` to confirm it there.
     /// `code` is what both sides show for comparing. Called on the connecting thread, in the
@@ -150,6 +156,8 @@ pub fn knows_host(state: &std::path::Path, host: &str) -> bool {
 
 enum FromHost {
     Stream(StreamInfo),
+    /// The second display's picture starts (afresh).
+    Stream2(StreamInfo),
     Cursor(CursorShape),
     Message(Message),
 }
@@ -313,8 +321,9 @@ impl Client {
             let mut best = u64::MAX;
             while let Ok(Some(m)) = read_message(&mut recv).await {
                 match m {
-                    Message::Stream { epoch, mode, width, height, refresh, colour } => {
-                        let _ = epoch_tx.send(FromHost::Stream(StreamInfo { epoch, mode, width, height, refresh, colour }));
+                    Message::Stream { epoch, mode, width, height, refresh, colour, index } => {
+                        let info = StreamInfo { epoch, mode, width, height, refresh, colour };
+                        let _ = epoch_tx.send(if index == 0 { FromHost::Stream(info) } else { FromHost::Stream2(info) });
                     }
                     Message::Cursor { width, height, hot_x, hot_y, rgba } => {
                         let rgba = remoteman_proto::control::decode_bytes(&rgba).unwrap_or_default();
@@ -336,7 +345,7 @@ impl Client {
                     Message::Error { code, message } => {
                         let _ = failed.send(format!("{code}: {message}"));
                     }
-                    m @ (Message::SoundFormat { .. } | Message::CameraKeyframe | Message::Status { .. } | Message::FileResult { .. } | Message::Features { .. }) => {
+                    m @ (Message::SoundFormat { .. } | Message::CameraKeyframe | Message::Status { .. } | Message::FileResult { .. } | Message::Features { .. } | Message::Display { .. }) => {
                         let _ = epoch_tx.send(FromHost::Message(m));
                     }
                     _ => {}
@@ -397,6 +406,10 @@ impl Client {
             // apart and may arrive in either order): kept until it has come. Without this the
             // first frames of a picture, its keyframe among them, are thrown away, and on a
             // desktop where nothing moves no other frame follows.
+            // The second display's picture: put together apart, and mended more simply (a
+            // keyframe is asked for after any loss).
+            let mut second = Reassembler::of(remoteman_proto::video::KIND_VIDEO2);
+            let (mut started2, mut need_key2, mut asked2) = (false, true, None::<Instant>);
             let mut early = std::collections::VecDeque::new();
             let mut replay = std::collections::VecDeque::new();
             let reason = loop {
@@ -413,6 +426,12 @@ impl Client {
                             (started, need_key, missed) = (true, true, None);
                             handler.stream(&info);
                             replay.extend(early.drain(..));
+                            continue;
+                        }
+                        FromHost::Stream2(info) => {
+                            second.reset(info.epoch);
+                            (started2, need_key2, asked2) = (true, true, None);
+                            handler.stream2(&info);
                             continue;
                         }
                         FromHost::Cursor(shape) => {
@@ -452,6 +471,31 @@ impl Client {
                         }
                         match d.first() {
                             Some(&KIND_VIDEO) => {}
+                            Some(&remoteman_proto::video::KIND_VIDEO2) => {
+                                if !started2 {
+                                    continue;
+                                }
+                                let frame = match second.push(&d) {
+                                    Ok(Some(f)) => f,
+                                    Ok(None) => continue,
+                                    Err(e) => break format!("bad video datagram: {e}"),
+                                };
+                                if second.take_lost().is_some() {
+                                    need_key2 = true;
+                                }
+                                if need_key2 && !frame.key {
+                                    // Leans on something missed: ask for a whole picture
+                                    // (again, if the host has had time to answer).
+                                    if asked2.is_none_or(|t| t.elapsed() > Duration::from_millis(100)) && ctl_tx.try_send(Message::DisplayKeyframe { index: 1 }).is_ok() {
+                                        asked2 = Some(Instant::now());
+                                    }
+                                    continue;
+                                }
+                                need_key2 = false;
+                                let age = (*offset_rx.borrow()).map(|offset| now_us() as i64 + offset - frame.capture_us as i64);
+                                handler.frame2(&frame, age);
+                                continue;
+                            }
                             Some(&KIND_CURSOR) => {
                                 if let Ok(c) = CursorAt::parse(&d) {
                                     handler.cursor_at(c.x, c.y, c.visible);

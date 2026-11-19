@@ -61,6 +61,8 @@ pub struct Shared {
     pub features: Mutex<Vec<String>>,
     /// The computer changed what it offers, until the window has caught up.
     pub features_changed: std::sync::atomic::AtomicBool,
+    /// The computer said the second display is gone, and why, until the window has closed it.
+    pub second_gone: Mutex<Option<String>>,
     /// Where files from the computer go.
     pub folder: Mutex<PathBuf>,
     /// What became of files the computer sent, until the window answers it and says so: the
@@ -78,6 +80,8 @@ enum Msg {
 
 struct Feed {
     tx: mpsc::SyncSender<Msg>,
+    /// To the second display's decoder.
+    tx2: mpsc::SyncSender<Msg>,
     shared: Arc<Shared>,
     /// Copies from the computer that are still arriving.
     arriving: HashMap<u32, (String, Vec<u8>)>,
@@ -97,6 +101,14 @@ impl Handler for Feed {
         // falls behind, this waits, and the loss shows up upstream as a keyframe request.
         self.shared.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
         let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us));
+    }
+
+    fn stream2(&mut self, info: &StreamInfo) {
+        let _ = self.tx2.send(Msg::Stream(info.clone()));
+    }
+
+    fn frame2(&mut self, frame: &Frame, age_us: Option<i64>) {
+        let _ = self.tx2.send(Msg::Frame(frame.data.clone(), age_us));
     }
 
     fn pairing(&mut self, code: &str, seconds: u32) {
@@ -147,6 +159,8 @@ impl Handler for Feed {
                     camera.keyframe();
                 }
             }
+            // The computer took the second display away (or couldn't make it).
+            Message::Display { index: 1, on: false, message, .. } => *self.shared.second_gone.lock().unwrap() = Some(message.clone()),
             Message::Features { features } => {
                 *self.shared.features.lock().unwrap() = features.clone();
                 self.shared.features_changed.store(true, Ordering::Relaxed);
@@ -167,9 +181,61 @@ impl Handler for Feed {
     }
 }
 
+/// Start a thread that decodes one picture stream into `shared` (its newest picture, its
+/// figures, and why it stopped if it did).
+fn decoding(shared: Arc<Shared>) -> Result<mpsc::SyncSender<Msg>> {
+    let (tx, rx) = mpsc::sync_channel::<Msg>(8);
+    let s = shared;
+    std::thread::Builder::new().name("decode".into()).spawn(move || {
+        let mut decoder: Option<Decoder> = None;
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                Msg::Stream(info) => match Decoder::new(info.mode.codec) {
+                    Ok(d) => {
+                        *s.decoder.lock().unwrap() = format!("{} {}×{}", d.name, info.width, info.height);
+                        decoder = Some(d);
+                    }
+                    Err(e) => {
+                        *s.closed.lock().unwrap() = Some(format!("{e:#}"));
+                        return;
+                    }
+                },
+                Msg::Frame(data, age) => {
+                    let Some(d) = decoder.as_mut() else { continue };
+                    if s.no_dmabuf.load(Ordering::Relaxed) {
+                        d.stop_exporting();
+                    }
+                    let t = std::time::Instant::now();
+                    match d.decode(&data) {
+                        Ok(Some(picture)) => {
+                            let took = t.elapsed().as_micros() as u32;
+                            s.decode_us_max.fetch_max(took, Ordering::Relaxed);
+                            s.decoded.fetch_add(1, Ordering::Relaxed);
+                            if let Some(a) = age {
+                                s.age_us.store((a.max(0) as u64) + took as u64, Ordering::Relaxed);
+                            }
+                            if s.picture.lock().unwrap().replace(picture).is_some() {
+                                s.replaced.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            *s.closed.lock().unwrap() = Some(format!("{e:#}"));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    })?;
+    Ok(tx)
+}
+
 pub struct Session {
     pub client: Client,
     pub shared: Arc<Shared>,
+    /// The second display's side: its newest picture and figures.
+    pub second: Arc<Shared>,
 }
 
 pub struct Request {
@@ -345,57 +411,17 @@ impl Session {
     pub fn start(r: Request) -> Result<Self> {
         let shared = Arc::new(Shared::default());
         *shared.folder.lock().unwrap() = r.folder.clone();
-        let (tx, rx) = mpsc::sync_channel::<Msg>(8);
-        let s = shared.clone();
-        std::thread::Builder::new().name("decode".into()).spawn(move || {
-            let mut decoder: Option<Decoder> = None;
-            while let Ok(msg) = rx.recv() {
-                match msg {
-                    Msg::Stream(info) => match Decoder::new(info.mode.codec) {
-                        Ok(d) => {
-                            *s.decoder.lock().unwrap() = format!("{} {}×{}", d.name, info.width, info.height);
-                            decoder = Some(d);
-                        }
-                        Err(e) => {
-                            *s.closed.lock().unwrap() = Some(format!("{e:#}"));
-                            return;
-                        }
-                    },
-                    Msg::Frame(data, age) => {
-                        let Some(d) = decoder.as_mut() else { continue };
-                        if s.no_dmabuf.load(Ordering::Relaxed) {
-                            d.stop_exporting();
-                        }
-                        let t = std::time::Instant::now();
-                        match d.decode(&data) {
-                            Ok(Some(picture)) => {
-                                let took = t.elapsed().as_micros() as u32;
-                                s.decode_us_max.fetch_max(took, Ordering::Relaxed);
-                                s.decoded.fetch_add(1, Ordering::Relaxed);
-                                if let Some(a) = age {
-                                    s.age_us.store((a.max(0) as u64) + took as u64, Ordering::Relaxed);
-                                }
-                                if s.picture.lock().unwrap().replace(picture).is_some() {
-                                    s.replaced.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                *s.closed.lock().unwrap() = Some(format!("{e:#}"));
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-        })?;
+        let tx = decoding(shared.clone())?;
+        // The second display's picture, when there is one, is decoded apart and kept apart.
+        let second = Arc::new(Shared::default());
+        let tx2 = decoding(second.clone())?;
         let hostname = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "Linux".into());
         let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, test_drop_one_in: None, test_delay_lost_ms: None, unlock: r.unlock.clone(), attach_only: r.attach_only, cursor: r.cursor };
-        let client = Client::connect(options, Feed { tx, shared: shared.clone(), arriving: HashMap::new(), files: Default::default(), pairing: r.pairing.clone() })?;
+        let client = Client::connect(options, Feed { tx, tx2, shared: shared.clone(), arriving: HashMap::new(), files: Default::default(), pairing: r.pairing.clone() })?;
         // What it said in its hello, unless it has already said otherwise since.
         if !shared.features_changed.load(Ordering::Relaxed) {
             *shared.features.lock().unwrap() = client.host_features.clone();
         }
-        Ok(Self { client, shared })
+        Ok(Self { client, shared, second })
     }
 }

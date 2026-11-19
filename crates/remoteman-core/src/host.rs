@@ -116,6 +116,8 @@ pub enum Out {
     Frame(Frame),
     /// The picture starts afresh as this (see [`Link::restart`]).
     Restart(Accept),
+    /// The same, of the session's second display (see [`Link::second`]).
+    Second(Box<Out>),
 }
 
 /// What a [`Link`] carries that isn't the picture.
@@ -143,9 +145,23 @@ pub struct Link {
     frames: tokio::sync::mpsc::Sender<Out>,
     cursor: tokio::sync::mpsc::UnboundedSender<CursorMsg>,
     clock: Instant,
+    /// What is sent through this copy is the second display's picture.
+    second: bool,
 }
 
 impl Link {
+    /// The way to the same client for the picture of a second display in its session: frames
+    /// sent through it are that display's, with their own count and their own fresh starts.
+    /// Call [`Self::restart`] on it first, to say what the picture is. Its cursor is drawn
+    /// into the picture (the cursor calls do nothing here).
+    pub fn second(&self) -> Link {
+        Link { second: true, ..self.clone() }
+    }
+
+    fn out(&self, out: Out) -> Out {
+        if self.second { Out::Second(Box::new(out)) } else { out }
+    }
+
     /// A link that leads to `LinkEnd` and not to a client: for a host program that reaches its
     /// client through another process (the Linux agent behind the system daemon). `elapsed_us`
     /// is what the client's session clock reads now, so both processes stamp alike.
@@ -154,7 +170,7 @@ impl Link {
         let (cursor, cursor_rx) = tokio::sync::mpsc::unbounded_channel::<CursorMsg>();
         let now = Instant::now();
         let clock = now.checked_sub(Duration::from_micros(elapsed_us)).unwrap_or(now);
-        (Link { frames, cursor, clock }, LinkEnd { frames: frame_rx, cursor: cursor_rx })
+        (Link { frames, cursor, clock, second: false }, LinkEnd { frames: frame_rx, cursor: cursor_rx })
     }
 
     /// Start the picture afresh as something else: another size or codec, or another desktop
@@ -162,7 +178,7 @@ impl Link {
     /// it has and waits for a keyframe, so the next frame sent must be one; frames count from
     /// 0 again. Returns false once the client is gone.
     pub fn restart(&self, accept: Accept) -> bool {
-        self.frames.blocking_send(Out::Restart(accept)).is_ok()
+        self.frames.blocking_send(self.out(Out::Restart(accept))).is_ok()
     }
 
     /// This session's clock in microseconds: stamp each frame with it when it is captured.
@@ -174,22 +190,28 @@ impl Link {
     /// so an encoder calling this is held back and frames get skipped before encoding, never
     /// after. Returns false once the client is gone.
     pub fn send_frame(&self, data: &[u8], key: bool, capture_us: u64) -> bool {
-        self.frames.blocking_send(Out::Frame(Frame { data: data.to_vec(), key, recovery: false, capture_us })).is_ok()
+        self.frames.blocking_send(self.out(Out::Frame(Frame { data: data.to_vec(), key, recovery: false, capture_us }))).is_ok()
     }
 
     /// As [`Self::send_frame`], for the first frame after a reported loss that leans on nothing
     /// the client missed: the client picks the picture up again at it.
     pub fn send_recovery_frame(&self, data: &[u8], capture_us: u64) -> bool {
-        self.frames.blocking_send(Out::Frame(Frame { data: data.to_vec(), key: false, recovery: true, capture_us })).is_ok()
+        self.frames.blocking_send(self.out(Out::Frame(Frame { data: data.to_vec(), key: false, recovery: true, capture_us }))).is_ok()
     }
 
     /// The cursor's image changed (for clients that draw it themselves). Zero size: no cursor.
     pub fn cursor_shape(&self, shape: CursorShape) {
+        if self.second {
+            return;
+        }
         let _ = self.cursor.send(CursorMsg::Shape(shape));
     }
 
     /// Where the cursor is, as fractions of the display; `visible` false when it isn't on it.
     pub fn cursor_at(&self, x: f32, y: f32, visible: bool) {
+        if self.second {
+            return;
+        }
         let _ = self.cursor.send(CursorMsg::At { x, y, visible });
     }
 
@@ -565,7 +587,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
 
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Out>(4);
     let (cursor_tx, mut cursor_rx) = tokio::sync::mpsc::unbounded_channel::<CursorMsg>();
-    let link = Link { frames: frame_tx, cursor: cursor_tx, clock };
+    let link = Link { frames: frame_tx, cursor: cursor_tx, clock, second: false };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let info = ClientInfo { name, fingerprint, display, decoders, cursor, unlock, attach_only: way_in.as_deref() == Some("attach") };
     // Reachable through `Host::link` before the handler hears of the client, so nothing it
@@ -597,7 +619,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     // Counts up each time the picture starts afresh.
     let epoch = std::sync::atomic::AtomicU32::new(1);
     let now = || epoch.load(std::sync::atomic::Ordering::Relaxed) as u16;
-    write_message(&mut send, &Message::Stream { epoch: now(), mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour })
+    write_message(&mut send, &Message::Stream { epoch: now(), mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour, index: 0 })
         .await
         .map_err(yes)?;
     // Three things write to the control stream: answers to the client, cursor shapes, and a
@@ -610,14 +632,35 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     let video = async {
         let mut number = 0u32;
         let mut sent = 0u32;
+        // The second display's picture: how often it has started afresh, and its frame count.
+        let (mut epoch2, mut number2) = (0u16, 0u32);
         while let Some(out) = frame_rx.recv().await {
             let f = match out {
+                Out::Second(second) => {
+                    match *second {
+                        Out::Restart(a) => {
+                            epoch2 = epoch2.wrapping_add(1);
+                            number2 = 0;
+                            let m = Message::Stream { epoch: epoch2, mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 1 };
+                            write_message(&mut *send.lock().await, &m).await?;
+                        }
+                        Out::Frame(f) => {
+                            let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
+                            for d in remoteman_proto::video::fragment_as(remoteman_proto::video::KIND_VIDEO2, &f.data, f.key, f.recovery, epoch2, number2, f.capture_us, max) {
+                                conn.send_datagram_wait(d.into()).await?;
+                            }
+                            number2 = number2.wrapping_add(1);
+                        }
+                        Out::Second(_) => {}
+                    }
+                    continue;
+                }
                 Out::Frame(f) => f,
                 Out::Restart(a) => {
                     epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     number = 0;
                     answer.store(0, std::sync::atomic::Ordering::Relaxed);
-                    let m = Message::Stream { epoch: now(), mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour };
+                    let m = Message::Stream { epoch: now(), mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 0 };
                     write_message(&mut *send.lock().await, &m).await?;
                     continue;
                 }
@@ -659,7 +702,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     }
                 }
                 Message::Ping { id, client_us } => write_message(&mut *send.lock().await, &Message::Pong { id, client_us, host_us: clock.elapsed().as_micros() as u64 }).await?,
-                m @ (Message::Sound { .. } | Message::Mic { .. } | Message::Camera { .. } | Message::Configure { .. } | Message::Clipboard { .. } | Message::FileResult { .. }) => {
+                m @ (Message::Sound { .. } | Message::Mic { .. } | Message::Camera { .. } | Message::Configure { .. } | Message::Clipboard { .. } | Message::FileResult { .. } | Message::Display { .. } | Message::DisplayKeyframe { .. }) => {
                     let _ = calls.send(Call::Message(m));
                 }
                 _ => {}

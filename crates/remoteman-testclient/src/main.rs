@@ -66,6 +66,8 @@ struct Seen {
     closed: Option<String>,
     /// Every frame handed over, the first two seconds' included (what --out has saved).
     saved: u32,
+    /// The second display: its frames and how many of them were keyframes.
+    second: (u32, u32),
     /// Sound packets, how many were missing in between, and the last one's number.
     sound: (u32, u32, Option<u32>),
     /// The sound decoded, left channel only, up to half a minute of it.
@@ -84,6 +86,16 @@ struct Watcher {
 }
 
 impl Handler for Watcher {
+    fn stream2(&mut self, s: &StreamInfo) {
+        println!("second display: {:?} {:?} {}-bit, {}x{} at {} Hz", s.mode.codec, s.mode.chroma, s.mode.depth, s.width, s.height, s.refresh);
+    }
+
+    fn frame2(&mut self, frame: &Frame, _age_us: Option<i64>) {
+        let mut s = self.seen.lock().unwrap();
+        s.second.0 += 1;
+        s.second.1 += frame.key as u32;
+    }
+
     fn stream(&mut self, s: &StreamInfo) {
         println!("stream: {:?} {:?} {}-bit, {}x{} at {} Hz, {}", s.mode.codec, s.mode.chroma, s.mode.depth, s.width, s.height, s.refresh, s.colour);
         if let Some(f) = self.record.as_mut() {
@@ -304,6 +316,19 @@ fn main() -> Result<()> {
                     let text = std::fs::read_to_string(rest.trim()).with_context(|| format!("line {}: read {}", i + 1, rest.trim()))?;
                     client.send(Event::Text(text.trim_end_matches('\n').to_owned()));
                 }
+                // A second display of this size beside the first (`display2 off` takes it away),
+                // and which display the pointer steps that follow are on.
+                "display2" => {
+                    let message = match rest.trim() {
+                        "off" => Message::Display { index: 1, on: false, display: None, message: String::new() },
+                        size => {
+                            let (w, h) = size.split_once('x').with_context(|| format!("line {}: display2 WxH or off", i + 1))?;
+                            Message::Display { index: 1, on: true, display: Some(Display { width: w.parse()?, height: h.parse()?, scale: 1.0, refresh: 60, placement: Placement::Extend }), message: String::new() }
+                        }
+                    };
+                    client.send_message(message);
+                }
+                "target" => client.send(Event::Display(rest.trim().parse().with_context(|| format!("line {}: target 0 or 1", i + 1))?)),
                 "mark" => println!("mark {}: {} frames so far", rest.trim(), seen.lock().unwrap().saved),
                 "sound" => client.send_message(Message::Sound { on: rest.trim() == "on" }),
                 "mic" => {
@@ -446,6 +471,9 @@ fn main() -> Result<()> {
     }
     let n = s.arrivals.len();
     println!("frames {n}, lost {}, keyframes {}, recovery points {}, loss reports {}", stats.lost, s.keys, s.recoveries, stats.keyframe_requests);
+    if s.second.0 > 0 {
+        println!("second display: {} frames, {} keyframes", s.second.0, s.second.1);
+    }
     if n > 2 {
         let span = (s.arrivals[n - 1] - s.arrivals[0]).as_secs_f64();
         let mut iv: Vec<f64> = s.arrivals.windows(2).map(|p| (p[1] - p[0]).as_secs_f64() * 1000.0).collect();

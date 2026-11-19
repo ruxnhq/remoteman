@@ -79,6 +79,9 @@ def on_activate(app):
     else:
         win.fullscreen()
     win.present(); anim.grab_focus()
-app = Gtk.Application(application_id="dev.remoteman.spike.animate")
+# `--id NAME`: a second one beside the first (GTK otherwise hands a second start to the first).
+import sys as _sys
+_id = "dev.remoteman.spike.animate" + ("." + _sys.argv[_sys.argv.index("--id") + 1] if "--id" in _sys.argv else "")
+app = Gtk.Application(application_id=_id)
 app.connect("activate", on_activate)
 app.run([])

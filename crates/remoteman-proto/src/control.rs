@@ -98,7 +98,8 @@ pub enum Message {
         os: String,
         features: Vec<String>,
     },
-    /// What the video datagrams of `epoch` carry.
+    /// What the video datagrams of `epoch` carry. `index` 1: the second display's picture
+    /// (docs/PROTOCOL.md, "A second display"), whose epochs count by themselves.
     Stream {
         epoch: u16,
         #[serde(flatten)]
@@ -107,6 +108,24 @@ pub enum Message {
         height: u32,
         refresh: u32,
         colour: String,
+        #[serde(default, skip_serializing_if = "is_zero8")]
+        index: u8,
+    },
+    /// Client to host: add a second display of this size to the session (`index` 1, `on`
+    /// true), or take it away. Host to client, with `on` false: the second display is gone
+    /// (it could not be made, or the host took it away).
+    Display {
+        index: u8,
+        on: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<Display>,
+        /// Host to client: why it is gone.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        message: String,
+    },
+    /// Client to host: the next frame of this display (not the first) must be a keyframe.
+    DisplayKeyframe {
+        index: u8,
     },
     /// The cursor's shape changed. `rgba` is base64 of `width * height * 4` bytes, premultiplied
     /// RGBA, rows top to bottom; the hotspot is in the image's pixels. `width` 0: no cursor
@@ -298,7 +317,7 @@ mod tests {
 
     #[test]
     fn stream_is_flat_and_unknowns_are_ignored() {
-        let m = Message::Stream { epoch: 1, mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: 2752, height: 2064, refresh: 120, colour: "bt709".into() };
+        let m = Message::Stream { epoch: 1, mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: 2752, height: 2064, refresh: 120, colour: "bt709".into(), index: 0 };
         assert_eq!(
             serde_json::to_string(&m).unwrap(),
             r#"{"t":"stream","epoch":1,"codec":"av1","chroma":"420","depth":10,"width":2752,"height":2064,"refresh":120,"colour":"bt709"}"#

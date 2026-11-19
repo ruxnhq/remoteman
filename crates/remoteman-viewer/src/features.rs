@@ -81,7 +81,7 @@ pub const FEATURES: Features = Features {
     touch: true,
     key_mapping: true,
     release_shortcut: true,
-    second_display: false,
+    second_display: true,
     mirror: true,
     way_in: true,
 };

@@ -82,6 +82,16 @@ impl VirtualDisplay {
     /// With `mirror` no monitor is made: the computer's main monitor is recorded as it is
     /// (`mirrored` says what it is), and the client's input lands on it.
     pub async fn create(cursor_apart: bool, mirror: bool) -> Result<Self> {
+        Self::make(cursor_apart, mirror, false).await
+    }
+
+    /// A second virtual monitor for the same client, beside its first: the first is one of
+    /// the displays that are there before, and is not waited on to go.
+    pub async fn create_beside(cursor_apart: bool) -> Result<Self> {
+        Self::make(cursor_apart, false, true).await
+    }
+
+    async fn make(cursor_apart: bool, mirror: bool, beside: bool) -> Result<Self> {
         let conn = Connection::session().await.context("session bus")?;
         let version: i32 = Proxy::new(&conn, SCREENCAST, "/org/gnome/Mutter/ScreenCast", SCREENCAST)
             .await?
@@ -101,7 +111,7 @@ impl VirtualDisplay {
             let Ok(state) = display_state(&conn).await else { break };
             let stale = state.1.iter().any(|m| m.0.0.starts_with("Meta-"));
             before = Before::of(&state);
-            if !stale {
+            if !stale || beside {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -195,6 +205,9 @@ impl VirtualDisplay {
                 r.call::<_, _, ()>("NotifyPointerMotionAbsolute", &(self.stream_path.as_str(), x, y)).await?
             }
             Event::PointerBy { dx, dy } => r.call::<_, _, ()>("NotifyPointerMotionRelative", &(*dx as f64, *dy as f64)).await?,
+            // Which display the pointer is on is the caller's to keep track of: it picks the
+            // display this is asked of.
+            Event::Display(_) => {}
             Event::Button { button, down } => {
                 // Linux BTN_LEFT, BTN_RIGHT, BTN_MIDDLE.
                 let code: i32 = match button {

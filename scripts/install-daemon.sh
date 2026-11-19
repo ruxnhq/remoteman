@@ -63,9 +63,11 @@ install)
     # The two can't both hold the port: the user service goes first.
     as_user systemctl --user disable --now remoteman-host.service 2>/dev/null || true
     systemctl daemon-reload
-    systemctl enable --now remotemand.service
+    # Restarted, not just started: installing over a running daemon is how it is updated.
+    systemctl enable remotemand.service
+    systemctl restart remotemand.service
     as_user systemctl --user daemon-reload
-    as_user systemctl --user start remoteman-agent.service || true
+    as_user systemctl --user restart remoteman-agent.service || true
     sleep 2
     show
     echo "installed ($how). Remoteman Host in the top bar goes on working; restart it if it shows nothing."

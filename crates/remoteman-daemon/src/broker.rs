@@ -275,7 +275,7 @@ impl HostHandler for Broker {
             if let (Message::Configure { display: Some(display), .. }, Some(client)) = (message, st.client.as_mut()) {
                 client.display = *display;
             }
-            if !matches!(message, Message::FileResult { .. }) {
+            if !matches!(message, Message::FileResult { .. } | Message::DisplayKeyframe { .. }) {
                 st.said.retain(|m| std::mem::discriminant(m) != std::mem::discriminant(message));
                 st.said.push(message.clone());
             }
@@ -404,6 +404,7 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
                 }
             }
             ToDaemon::Refused(why) => {
+                tracing::info!(agent = id, "the agent turned the client away: {}", why.strip_prefix("locked: ").unwrap_or(&why));
                 let mut st = shared.state.lock().unwrap();
                 if st.waiting.as_ref().is_some_and(|w| w.agent == id) {
                     match st.waiting.take().and_then(|w| w.reply) {
@@ -427,6 +428,24 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
                     } else {
                         link.send_frame(&data, key, capture_us);
                     }
+                }
+            }
+            // The second display's picture, the same way.
+            ToDaemon::Frame2 { key, recovery, capture_us, data } => {
+                let _sending = shared.sending.lock().unwrap();
+                if let Some(link) = current_link(&shared, id) {
+                    let link = link.second();
+                    if recovery {
+                        link.send_recovery_frame(&data, capture_us);
+                    } else {
+                        link.send_frame(&data, key, capture_us);
+                    }
+                }
+            }
+            ToDaemon::Restart2(accept) => {
+                let _sending = shared.sending.lock().unwrap();
+                if let Some(link) = current_link(&shared, id) {
+                    link.second().restart(accept);
                 }
             }
             // In order with this agent's frames, like them.
