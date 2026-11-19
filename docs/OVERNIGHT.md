@@ -17,6 +17,9 @@ Windows work stopped.
 - One writer per set of files. Each stream below owns the crates named for it.
 - A change is done when it has a test that fails without it and passes with it, or a measured
   number before and after. Say what was not tested in the same breath as what was.
+- Usage: the owner wants no limit hit before morning and no paid extra usage. Work in long
+  steps, don't re-read what you have read, don't poll; stop and report rather than loop on
+  something that isn't converging.
 - Commits are signed and end with the Co-Authored-By line. Each stream commits to its own
   branch; the main session merges into `main`.
 - Record findings and numbers in `docs/PLAN.md` as they are made.
@@ -56,22 +59,31 @@ crate with a test.
 
 Then the whole e2e suite, twice in a row, on the final `main`, with every flake run down.
 
-## Stream 3: what is missing on Linux (one session; crates as named)
+## Stream 3: what is missing on Linux (one session; crates/remoteman-daemon)
 
-- A package for Arch (PKGBUILD, viewer and host as two packages), built and installed into a
-  container, not onto this PC.
-- The AppImages rebuilt from the final `main` and checked as on 2026-11-18.
-- Each device belonging to a user of its own in the daemon.
+- Each device belonging to a user of its own in the daemon, and a review of the daemon for bugs.
+- No AppImages and no Arch package tonight: the owner said to wait for their word.
 - HDR and variable refresh stay parked: they wait on a change to Mutter.
 
-## Stream 4: Windows (two sessions, as `docs/HANDOFF.md` lays out)
+## Stream 4: Windows (two sessions in parallel, as `docs/HANDOFF.md` lays out)
+
+Decided by the owner tonight: both at once; the viewer ships as `remoteman.exe`; the host's
+virtual display is Guesthouse's user-mode display driver under a per-machine self-signed
+certificate (no paid signing, as decided on 2026-11-18), and sound and microphone go through
+Valve's signed Steam Streaming devices.
 
 - The viewer's interface (`wip/windows-viewer-ui`), in `crates/remoteman-viewer-windows`.
 - The host's second slice (branch `worktree-agent-af375683c4a419185`), in
-  `crates/remoteman-host-windows`.
-- Built and run in the VM at `/mnt/data/vms/remoteman-win`, tested against the Linux test
-  client and host on this PC. Both merged into `main` when they build on Linux too.
-- Not possible tonight: anything needing a signed driver, or a real Windows PC with a screen.
+  `crates/remoteman-host-windows` and the Direct3D input of `crates/remoteman-encode`.
+- Built and run in the VM at `/mnt/data/vms/remoteman-win`. One user of the VM at a time:
+  `tools/vm.sh take NAME` before, `give NAME` after, and never hold it while only building.
+- Streams tested across systems, every pair, each way: Windows host to the Linux viewer and
+  test client; Linux host (a throwaway one, `scripts/headless-host.sh`) to the Windows viewer;
+  Windows host to the Mac's viewer and the Mac's host to the Windows viewer. The Mac pairs are
+  arranged by the main session with the Mac session: tell the main session when a side can
+  connect.
+- Both merged into `main` when they also build on Linux (`cargo build --release --locked`).
+- Not possible tonight: a real Windows PC with a screen.
 
 ## Stream 5: Apple (the Mac session, on its own machine)
 
