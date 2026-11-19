@@ -40,6 +40,7 @@ fn main() -> Result<()> {
     let mut listen: SocketAddr = format!("0.0.0.0:{}", remoteman_core::PORT).parse()?;
     let mut state = if root { PathBuf::from("/var/lib/remoteman") } else { state_dir() };
     let mut socket = relay::socket_path(root);
+    let mut said_socket = false;
     let (mut pair, mut drop_one_in, mut name) = (false, None::<u32>, None::<String>);
     let mut ctl = None::<Vec<String>>;
     let (mut standin, mut label) = (false, "stand-in".to_owned());
@@ -57,12 +58,22 @@ fn main() -> Result<()> {
         }
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
-            "ctl" => ctl = Some(Vec::new()),
+            "ctl" => {
+                ctl = Some(Vec::new());
+                // Asking: the system's daemon if there is one, whoever asks (its owner may);
+                // else one run by hand as this user.
+                if !said_socket && relay::socket_path(true).exists() {
+                    socket = relay::socket_path(true);
+                }
+            }
             "test-agent" => standin = true,
             "--label" => label = value()?,
             "--listen" => listen = value()?.parse().context("--listen ADDR:PORT")?,
             "--state" => state = value()?.into(),
-            "--socket" => socket = value()?.into(),
+            "--socket" => {
+                socket = value()?.into();
+                said_socket = true;
+            }
             "--name" => name = Some(value()?),
             "--pair" => pair = true,
             "--user" => user = Some(value()?),
