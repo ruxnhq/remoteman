@@ -23,7 +23,7 @@ final class HostSecondDisplay: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Make the display and start its picture. Returns why not, if it couldn't. Main actor.
     @MainActor
-    func start(width: Int, height: Int, fps: Int, hiDPI: Bool, tenBit: Bool) async -> String? {
+    func start(width: Int, height: Int, fps: Int, hiDPI: Bool, tenBit: Bool, side: String = "") async -> String? {
         await stop()
         generation += 1
         let gen = generation
@@ -63,7 +63,7 @@ final class HostSecondDisplay: NSObject, SCStreamOutput, SCStreamDelegate {
             try? await Task.sleep(nanoseconds: 150_000_000)
         }
         guard let d = found else { return "the second display didn't appear for capture" }
-        Self.placeRight(id)
+        Self.place(id, side: side)
         let enc: HostEncoder
         let bitrate = width * height >= 3840 * 2160 ? 40_000_000 : 25_000_000
         do { enc = try HostEncoder(width: width, height: height, fps: fps, bitrate: bitrate, tenBit: tenBit) } catch {
@@ -98,7 +98,7 @@ final class HostSecondDisplay: NSObject, SCStreamOutput, SCStreamDelegate {
         geometry = (b, b.width > 0 ? CGFloat(width) / b.width : 1)
         size = (width, height, fps)
         stream = s
-        hostLog("host: second display \(id): \(width)×\(height) at \(fps) Hz, \(bitrate / 1000) kbit/s, at \(Int(b.minX)),\(Int(b.minY))")
+        hostLog("host: second display \(id): \(width)×\(height) at \(fps) Hz, \(bitrate / 1000) kbit/s, at \(Int(b.minX)),\(Int(b.minY)) (\(side.isEmpty ? "right" : side) of the others)")
         // A still screen sends nothing: the first picture is made from a screenshot if none came.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self, gen == self.generation else { return }
@@ -114,20 +114,35 @@ final class HostSecondDisplay: NSObject, SCStreamOutput, SCStreamDelegate {
         return nil
     }
 
-    /// To the right of every other display, top edges level with the main one's: the same
-    /// place the Linux host gives a second display, wherever macOS first put it.
-    private static func placeRight(_ id: CGDirectDisplayID) {
+    /// On the asked side of every other display ("left", "above", "below"; anything else: the
+    /// right), level with its neighbour there. The others keep their places.
+    private static func place(_ id: CGDirectDisplayID, side: String) {
         var count: UInt32 = 0
         CGGetActiveDisplayList(0, nil, &count)
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
         CGGetActiveDisplayList(count, &ids, &count)
-        let others = ids.prefix(Int(count)).filter { $0 != id && CGDisplayMirrorsDisplay($0) != id }
-        guard let right = others.map({ CGDisplayBounds($0).maxX }).max() else { return }
-        let now = CGDisplayBounds(id)
-        guard Int(now.minX) != Int(right) || Int(now.minY) != 0 else { return }
+        let others = ids.prefix(Int(count)).filter { $0 != id && CGDisplayMirrorsDisplay($0) != id }.map { CGDisplayBounds($0) }
+        guard !others.isEmpty else { return }
+        let own = CGDisplayBounds(id)
+        let origin: CGPoint
+        switch side {
+        case "left":
+            let n = others.min { $0.minX < $1.minX }!
+            origin = CGPoint(x: n.minX - own.width, y: n.minY)
+        case "above":
+            let n = others.min { $0.minY < $1.minY }!
+            origin = CGPoint(x: n.minX, y: n.minY - own.height)
+        case "below":
+            let n = others.max { $0.maxY < $1.maxY }!
+            origin = CGPoint(x: n.minX, y: n.maxY)
+        default:
+            let n = others.max { $0.maxX < $1.maxX }!
+            origin = CGPoint(x: n.maxX, y: n.minY)
+        }
+        guard Int(own.minX) != Int(origin.x) || Int(own.minY) != Int(origin.y) else { return }
         var config: CGDisplayConfigRef?
         guard CGBeginDisplayConfiguration(&config) == .success, let config else { return }
-        CGConfigureDisplayOrigin(config, id, Int32(right), 0)
+        CGConfigureDisplayOrigin(config, id, Int32(origin.x), Int32(origin.y))
         if CGCompleteDisplayConfiguration(config, .forSession) != .success { CGCancelDisplayConfiguration(config) }
     }
 

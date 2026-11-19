@@ -721,8 +721,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let fps = min(240, max(24, int("refresh", 60)))
         let hiDPI = ((d["scale"] as? NSNumber)?.doubleValue ?? 1) >= 1.5
         let tenBit = options.tenBit
+        // Which side of the others it sits on; left out, the right.
+        let side = m["side"] as? String ?? ""
         Task { @MainActor in
-            if let why = await self.second.start(width: width, height: height, fps: fps, hiDPI: hiDPI, tenBit: tenBit) {
+            if let why = await self.second.start(width: width, height: height, fps: fps, hiDPI: hiDPI, tenBit: tenBit, side: side) {
                 hostLog("host: no second display: \(why)")
                 if why != "replaced" { rm_host_second_stop(host, why) }
                 return
