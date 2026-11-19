@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Remoteman Host for Windows: the owner's window and the icon in the notification area,
+       in WinUI 3. Built the way windows/viewer is (build.ps1: the Windows App SDK and .NET
+       inside the app's folder, so it runs from that folder with nothing installed).
+       What it shows and does is the host's: it speaks to the running remoteman-host.exe over
+       the host's control pipe (\\.\pipe\remoteman-host-PORT), one line in and one answer out,
+       in the words Linux's Remoteman Host uses (status, sharing on|off, pair on|off|accept|
+       decline, allow clipboard|files on|off, drop, revoke, send). Every rule of the product
+       stays in the host; this holds none. The host runs on without this window. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>RemotemanHost</RootNamespace>
+    <AssemblyName>remoteman-host-app</AssemblyName>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <SelfContained>true</SelfContained>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\sharing.ico</ApplicationIcon>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.7.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\*.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

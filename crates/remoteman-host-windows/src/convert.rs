@@ -1,5 +1,7 @@
-//! Convert: the driver's RGB texture to the encoder's P010 input in one go on the GPU (two
-//! draws, one for each plane of the P010 texture). See `convert.hlsl` for the numbers.
+//! Convert: the driver's RGB texture to the encoder's input in one go on the GPU: 4:2:0 into a
+//! P010 texture (two draws, one for each plane), or 4:4:4 into an R16 texture with the three
+//! planes stacked (one draw); SDR as BT.709, or HDR as BT.2020 PQ. See `convert.hlsl` for the
+//! numbers.
 
 use std::ffi::c_void;
 
@@ -12,7 +14,7 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11RenderTargetView, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_P010, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_P010, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
     DXGI_SAMPLE_DESC,
 };
 use windows::core::{PCSTR, s};
@@ -24,26 +26,34 @@ const SOURCE: &str = include_str!("convert.hlsl");
 /// How the driver's texture holds the picture.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Input {
-    /// As painted, gamma-encoded: an 8- or 10-bit desktop surface.
+    /// As painted, gamma-encoded: an 8- or 10-bit SDR desktop surface.
     Encoded,
-    /// Linear light where 1.0 is 80 nits (a 16-bit float surface); the client's white is this
+    /// Linear light where 1.0 is 80 nits (a 16-bit float scRGB surface); SDR white is this
     /// many times that.
     Linear { white: f32 },
+    /// HDR10: PQ with BT.2020 primaries; SDR white is at this many nits.
+    Pq { white: f32 },
+}
+
+/// What comes out: SDR (BT.709) or HDR (BT.2020 PQ, an SDR desktop's white put at this many
+/// nits).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Output {
+    Sdr,
+    Pq { sdr_white: f32 },
 }
 
 /// What kind of picture a surface of this format holds, and what to say about it in the log.
-/// HDR is not built: an HDR desktop is squeezed into SDR so that there is a picture at all.
-pub fn input_for(format: u32, is_hdr: bool) -> Result<(Input, Option<&'static str>)> {
+/// `white`: SDR white on an HDR desktop, in nits (Windows' "SDR content brightness").
+pub fn input_for(format: u32, is_hdr: bool, white: f32) -> Result<(Input, Option<&'static str>)> {
     let format = DXGI_FORMAT(format as i32);
     Ok(if format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM {
         (Input::Encoded, None)
     } else if format == DXGI_FORMAT_R10G10B10A2_UNORM {
-        (Input::Encoded, is_hdr.then_some("the desktop is HDR10, which isn't converted yet: its colours will be wrong"))
+        if is_hdr { (Input::Pq { white }, None) } else { (Input::Encoded, None) }
     } else if format == DXGI_FORMAT_R16G16B16A16_FLOAT {
         if is_hdr {
-            // Windows' usual white for SDR content on an HDR desktop is about 200 nits; what
-            // the user set isn't asked for yet.
-            (Input::Linear { white: 2.5 }, Some("the desktop is HDR, which isn't streamed as HDR yet: it is clipped to SDR, with white taken to be 200 nits"))
+            (Input::Linear { white: white / 80.0 }, None)
         } else {
             (Input::Linear { white: 1.0 }, Some("the desktop's surface is 16-bit float in SDR: taken to be linear light with white at 1.0"))
         }
@@ -54,20 +64,28 @@ pub fn input_for(format: u32, is_hdr: bool) -> Result<(Input, Option<&'static st
 
 #[repr(C)]
 struct Params {
-    linear_in: u32,
+    input_kind: u32,
     white: f32,
-    unused: [u32; 2],
+    pq_out: u32,
+    sdr_white_nits: f32,
+    height: u32,
+    unused: [u32; 3],
+}
+
+/// The draws that fill the encoder's input.
+enum Layout {
+    /// P010: its two planes.
+    Semi { luma: ID3D11PixelShader, chroma: ID3D11PixelShader, luma_plane: ID3D11RenderTargetView, chroma_plane: ID3D11RenderTargetView },
+    /// R16, three planes stacked.
+    Planar { shader: ID3D11PixelShader, target: ID3D11RenderTargetView },
 }
 
 pub struct Converter {
     corner: ID3D11VertexShader,
-    luma: ID3D11PixelShader,
-    chroma: ID3D11PixelShader,
+    layout: Layout,
     params: ID3D11Buffer,
     /// The encoder's input.
     pub output: ID3D11Texture2D,
-    luma_plane: ID3D11RenderTargetView,
-    chroma_plane: ID3D11RenderTargetView,
     width: u32,
     height: u32,
 }
@@ -88,60 +106,68 @@ fn compile(entry: PCSTR, target: PCSTR) -> Result<Vec<u8>> {
 }
 
 impl Converter {
-    /// A converter for pictures of this size (even both ways, as 4:2:0 needs).
-    pub fn new(gpu: &Gpu, width: u32, height: u32, input: Input) -> Result<Self> {
+    /// A converter for pictures of this size (even both ways, as 4:2:0 needs), into 4:4:4 if
+    /// `full_chroma` is given: in an R16 texture, UNORM or (`Some(true)`) UINT.
+    pub fn new(gpu: &Gpu, width: u32, height: u32, input: Input, output: Output, full_chroma: Option<bool>) -> Result<Self> {
+        let planar_uint = full_chroma == Some(true);
+        let full_chroma = full_chroma.is_some();
         // SAFETY: Direct3D calls as documented, with live arguments and out-parameters.
         unsafe {
-            let support = gpu.device.CheckFormatSupport(DXGI_FORMAT_P010).context("this GPU has no P010 textures")?;
+            let format = if planar_uint { DXGI_FORMAT_R16_UINT } else if full_chroma { DXGI_FORMAT_R16_UNORM } else { DXGI_FORMAT_P010 };
+            let support = gpu.device.CheckFormatSupport(format).with_context(|| format!("this GPU has no textures of DXGI format {}", format.0))?;
             let needed = (D3D11_FORMAT_SUPPORT_TEXTURE2D.0 | D3D11_FORMAT_SUPPORT_RENDER_TARGET.0) as u32;
             if support & needed != needed {
-                bail!("this GPU can't draw into P010 textures (format support {support:#x})");
+                bail!("this GPU can't draw into textures of DXGI format {} (format support {support:#x})", format.0);
             }
-            let (mut corner, mut luma, mut chroma) = (None, None, None);
+            let mut corner = None;
             gpu.device.CreateVertexShader(&compile(s!("corner"), s!("vs_5_0"))?, None, Some(&mut corner)).context("the vertex shader")?;
-            gpu.device.CreatePixelShader(&compile(s!("luma"), s!("ps_5_0"))?, None, Some(&mut luma)).context("the luma shader")?;
-            gpu.device.CreatePixelShader(&compile(s!("chroma"), s!("ps_5_0"))?, None, Some(&mut chroma)).context("the chroma shader")?;
-
-            let p = match input {
-                Input::Encoded => Params { linear_in: 0, white: 1.0, unused: [0; 2] },
-                Input::Linear { white } => Params { linear_in: 1, white, unused: [0; 2] },
+            let pixel = |entry: PCSTR| -> Result<ID3D11PixelShader> {
+                let mut shader = None;
+                gpu.device.CreatePixelShader(&compile(entry, s!("ps_5_0"))?, None, Some(&mut shader)).with_context(|| format!("the {} shader", entry.to_string().unwrap_or_default()))?;
+                shader.context("no shader")
             };
+
+            let (input_kind, white) = match input {
+                Input::Encoded => (0, 1.0),
+                Input::Linear { white } => (1, white),
+                Input::Pq { white } => (2, white),
+            };
+            let (pq_out, sdr_white_nits) = match output {
+                Output::Sdr => (0, 0.0),
+                Output::Pq { sdr_white } => (1, sdr_white),
+            };
+            let p = Params { input_kind, white, pq_out, sdr_white_nits, height, unused: [0; 3] };
             let desc = D3D11_BUFFER_DESC { ByteWidth: size_of::<Params>() as u32, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
             let mut params = None;
             gpu.device.CreateBuffer(&desc, Some(&D3D11_SUBRESOURCE_DATA { pSysMem: &p as *const Params as *const c_void, ..Default::default() }), Some(&mut params)).context("the shader's parameters")?;
 
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
-                Height: height,
+                Height: if full_chroma { height * 3 } else { height },
                 MipLevels: 1,
                 ArraySize: 1,
-                Format: DXGI_FORMAT_P010,
+                Format: format,
                 SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
                 Usage: D3D11_USAGE_DEFAULT,
                 BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
                 ..Default::default()
             };
-            let mut output = None;
-            gpu.device.CreateTexture2D(&desc, None, Some(&mut output)).with_context(|| format!("a {width}x{height} P010 texture"))?;
-            let output: ID3D11Texture2D = output.context("no texture")?;
+            let mut texture = None;
+            gpu.device.CreateTexture2D(&desc, None, Some(&mut texture)).with_context(|| format!("a {width}x{} texture of DXGI format {}", desc.Height, format.0))?;
+            let texture: ID3D11Texture2D = texture.context("no texture")?;
             // A view of a P010 texture shows one plane, picked by the view's format.
-            let plane = |format: DXGI_FORMAT| {
+            let view = |format: DXGI_FORMAT| {
                 let desc = D3D11_RENDER_TARGET_VIEW_DESC { Format: format, ViewDimension: D3D11_RTV_DIMENSION_TEXTURE2D, Anonymous: D3D11_RENDER_TARGET_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_RTV { MipSlice: 0 } } };
                 let mut view = None;
-                gpu.device.CreateRenderTargetView(&output, Some(&desc), Some(&mut view)).with_context(|| format!("a view of the P010 texture's plane (format {})", format.0))?;
+                gpu.device.CreateRenderTargetView(&texture, Some(&desc), Some(&mut view)).with_context(|| format!("a view of the encoder's input (format {})", format.0))?;
                 view.context("no view")
             };
-            Ok(Self {
-                corner: corner.context("no shader")?,
-                luma: luma.context("no shader")?,
-                chroma: chroma.context("no shader")?,
-                params: params.context("no buffer")?,
-                luma_plane: plane(DXGI_FORMAT_R16_UNORM)?,
-                chroma_plane: plane(DXGI_FORMAT_R16G16_UNORM)?,
-                output,
-                width,
-                height,
-            })
+            let layout = if full_chroma {
+                Layout::Planar { shader: pixel(if planar_uint { s!("planar_uint") } else { s!("planar") })?, target: view(format)? }
+            } else {
+                Layout::Semi { luma: pixel(s!("luma"))?, chroma: pixel(s!("chroma"))?, luma_plane: view(DXGI_FORMAT_R16_UNORM)?, chroma_plane: view(DXGI_FORMAT_R16G16_UNORM)? }
+            };
+            Ok(Self { corner: corner.context("no shader")?, layout, params: params.context("no buffer")?, output: texture, width, height })
         }
     }
 
@@ -161,8 +187,13 @@ impl Converter {
                 c.RSSetViewports(Some(&[D3D11_VIEWPORT { TopLeftX: 0.0, TopLeftY: 0.0, Width: width as f32, Height: height as f32, MinDepth: 0.0, MaxDepth: 1.0 }]));
                 c.Draw(3, 0);
             };
-            draw(&self.luma, &self.luma_plane, self.width, self.height);
-            draw(&self.chroma, &self.chroma_plane, self.width / 2, self.height / 2);
+            match &self.layout {
+                Layout::Semi { luma, chroma, luma_plane, chroma_plane } => {
+                    draw(luma, luma_plane, self.width, self.height);
+                    draw(chroma, chroma_plane, self.width / 2, self.height / 2);
+                }
+                Layout::Planar { shader, target } => draw(shader, target, self.width, self.height * 3),
+            }
             // Let go of both: the driver's texture goes back to the driver, and the output is
             // the encoder's to read.
             c.PSSetShaderResources(0, Some(&[None]));

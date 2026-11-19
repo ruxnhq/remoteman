@@ -1,0 +1,40 @@
+<Window x:Class="RemotemanHost.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:RemotemanHost"
+        Title="Remoteman Host">
+  <Window.SystemBackdrop>
+    <local:StayingMica />
+  </Window.SystemBackdrop>
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="40" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+    <Grid x:Name="TitleBar" Height="40" Padding="16,0,0,0" ColumnSpacing="10">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="*" />
+      </Grid.ColumnDefinitions>
+      <Canvas Width="16" Height="16" VerticalAlignment="Center">
+        <Rectangle Width="16" Height="16" RadiusX="3.5" RadiusY="3.5" Fill="#2458F5" />
+        <Rectangle Canvas.Left="6" Canvas.Top="5" Width="7" Height="5" RadiusX="1.2" RadiusY="1.2" Stroke="White" StrokeThickness="1.2" />
+        <Path Data="M2.5,6 L4.5,6 M2,7.8 L4.5,7.8 M3,9.5 L4.5,9.5" Stroke="White" StrokeThickness="1.1" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+      </Canvas>
+      <TextBlock Grid.Column="1" Text="remoteman host" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center" />
+    </Grid>
+    <NavigationView x:Name="Nav" Grid.Row="1" PaneDisplayMode="Left" IsBackButtonVisible="Collapsed" IsSettingsVisible="False" OpenPaneLength="200" IsPaneToggleButtonVisible="False">
+      <NavigationView.MenuItems>
+        <NavigationViewItem Content="Sharing" Tag="sharing" Icon="Share" />
+        <NavigationViewItem Content="Devices" Tag="devices" Icon="AllApps" />
+        <NavigationViewItem Content="About" Tag="about" Icon="Help" />
+      </NavigationView.MenuItems>
+      <Grid>
+        <ScrollViewer x:Name="Scroll" Padding="32,12,32,24">
+          <StackPanel x:Name="Page" Spacing="4" MaxWidth="880" HorizontalAlignment="Stretch" />
+        </ScrollViewer>
+        <InfoBar x:Name="News" IsClosable="True" Severity="Informational" VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="16" MaxWidth="560" />
+      </Grid>
+    </NavigationView>
+  </Grid>
+</Window>

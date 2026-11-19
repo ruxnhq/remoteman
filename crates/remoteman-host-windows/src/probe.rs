@@ -129,9 +129,9 @@ pub fn run(picture: bool) -> Result<()> {
     }
 
     // 5. Convert one frame.
-    let (input, note) = convert::input_for(meta.format, meta.is_hdr != 0).inspect_err(|e| say!("FAILED: {e:#}"))?;
+    let (input, note) = convert::input_for(meta.format, meta.is_hdr != 0, crate::hdr::USUAL_SDR_WHITE).inspect_err(|e| say!("FAILED: {e:#}"))?;
     say!("conversion: the surface is read as {input:?}{}", note.map(|n| format!(" ({n})")).unwrap_or_default());
-    let converter = Converter::new(&gpu, meta.width, meta.height, input).inspect_err(|e| say!("FAILED: {e:#}"))?;
+    let converter = Converter::new(&gpu, meta.width, meta.height, input, convert::Output::Sdr, None).inspect_err(|e| say!("FAILED: {e:#}"))?;
     say!("conversion: shaders compiled, P010 target made");
     let mut converted = false;
     for attempt in 0..20 {
@@ -173,18 +173,42 @@ pub fn run(picture: bool) -> Result<()> {
         Ok(from) => say!("encoder library: {from}"),
         Err(e) => say!("FAILED: {e:#}"),
     }
+    // Each mode, and HDR, with an input of its own layout (4:4:4: three planes stacked in an
+    // R16 texture, UNORM and then UINT).
+    let mut tries: Vec<(remoteman_core::Mode, bool, Option<bool>)> = Vec::new();
     for mode in encode::MODES {
-        let settings = encode::Settings { mode, width: meta.width, height: meta.height, fps: 60, bitrate: 20_000_000 };
+        if mode.chroma == remoteman_core::Chroma::C444 {
+            tries.push((mode, false, Some(false)));
+            tries.push((mode, false, Some(true)));
+        } else {
+            tries.push((mode, false, None));
+            tries.push((mode, true, None));
+        }
+    }
+    for (mode, hdr, layout) in tries {
+        let settings = encode::Settings { mode, width: meta.width, height: meta.height, fps: 60, bitrate: 20_000_000, hdr };
+        let output = if hdr { convert::Output::Pq { sdr_white: crate::hdr::USUAL_SDR_WHITE } } else { convert::Output::Sdr };
+        let mode_name = format!("{:?} {:?}{}{}", mode.codec, mode.chroma, if hdr { " HDR" } else { "" }, match layout { Some(true) => " (R16_UINT)", Some(false) => " (R16_UNORM)", None => "" });
+        let converter = match Converter::new(&gpu, meta.width, meta.height, input, output, layout) {
+            Ok(c) => {
+                let _ = source.take(&gpu, true, |view, _| c.convert(&gpu, view));
+                c
+            }
+            Err(e) => {
+                say!("FAILED: conversion for {mode_name}: {e:#}");
+                continue;
+            }
+        };
         match encode::open(&gpu, &converter.output, &settings) {
             Ok(mut encoder) => {
                 let note = encoder.note().to_owned();
                 let (short, long) = (encoder.short_term(), encoder.long_term());
                 match encoder.encode_how(0, 0, remoteman_encode::How { idr: true, ..Default::default() }) {
-                    Ok(made) => say!("encoder {:?}: opened ({note}; {short} recent and {long} long-term frames); one frame is {} bytes, keyframe {}", mode.codec, made.data.len(), made.key),
-                    Err(e) => say!("FAILED: encoder {:?} opened ({note}) but didn't encode: {e:#}", mode.codec),
+                    Ok(made) => say!("encoder {mode_name}: opened ({note}; {short} recent and {long} long-term frames); one frame is {} bytes, keyframe {}", made.data.len(), made.key),
+                    Err(e) => say!("FAILED: encoder {mode_name} opened ({note}) but didn't encode: {e:#}"),
                 }
             }
-            Err(e) => say!("FAILED: encoder {:?}: {e:#}", mode.codec),
+            Err(e) => say!("FAILED: encoder {mode_name}: {e:#}"),
         }
     }
     say!("probe done");

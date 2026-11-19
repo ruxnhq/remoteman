@@ -194,7 +194,10 @@ fn microphone_sink() -> Result<Option<(IMMDevice, String)>> {
         for i in 0..all.GetCount()? {
             let device = all.Item(i)?;
             let name = name_of(&device);
-            if MICROPHONE_SINKS.iter().any(|s| name.to_lowercase().contains(s)) {
+            // For tests where neither is installed: REMOTEMAN_TEST_MIC_SINK names another output
+            // to play the microphone into (the guest's speakers, recorded back by loopback).
+            let test = std::env::var("REMOTEMAN_TEST_MIC_SINK").ok().filter(|t| !t.is_empty()).map(|t| t.to_lowercase());
+            if MICROPHONE_SINKS.iter().any(|s| name.to_lowercase().contains(s)) || test.is_some_and(|t| name.to_lowercase().contains(&t)) {
                 return Ok(Some((device, name)));
             }
         }

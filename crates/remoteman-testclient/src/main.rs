@@ -30,6 +30,7 @@
 //!     --drop-one-in N    throw away one video packet in N, as a lossy network would
 //!     --delay-lost MS    hold each loss report back this long, as a slow path to the host would
 //!     --placement P      extend (default), main or only: where the display sits on the host
+//!     --hdr HEADROOM     the display shows HDR, this many times brighter than its SDR white
 
 //!
 //! A recording (`--record`) is for testing decoders without a host. It is:
@@ -107,7 +108,7 @@ impl Handler for Watcher {
     }
 
     fn stream(&mut self, s: &StreamInfo) {
-        println!("stream: {:?} {:?} {}-bit, {}x{} at {} Hz, {}", s.mode.codec, s.mode.chroma, s.mode.depth, s.width, s.height, s.refresh, s.colour);
+        println!("stream: {:?} {:?} {}-bit, {}x{} at {} Hz, {} (sdr_white {}, peak {})", s.mode.codec, s.mode.chroma, s.mode.depth, s.width, s.height, s.refresh, s.colour, s.sdr_white, s.peak);
         if let Some(f) = self.record.as_mut() {
             let codec = if s.mode.codec == Codec::Av1 { "av1" } else { "hevc" };
             let chroma = if s.mode.chroma == Chroma::C444 { "444" } else { "420" };
@@ -240,6 +241,7 @@ fn main() -> Result<()> {
     let mut drop_one_in = None::<u32>;
     let mut delay_lost = None::<u32>;
     let mut placement = Placement::Extend;
+    let mut headroom = 0.0f32;
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -260,6 +262,7 @@ fn main() -> Result<()> {
             "--pointer-demo" => circle = true,
             "--script" => script = Some(value()?.into()),
             "--cursor" => cursor = true,
+            "--hdr" => headroom = value()?.parse().context("--hdr HEADROOM")?,
             // The host user's password, for a host that is locked (tests only: it shows in the process list).
             "--unlock" => unlock = Some(value()?),
             // Only into a session already running on the host: never its login screen.
@@ -301,7 +304,7 @@ fn main() -> Result<()> {
         None => None,
     };
     let watcher = Watcher { decoder: None, seen: seen.clone(), file, record, warm: Instant::now() + Duration::from_secs(2) };
-    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement, hdr: false, headroom: 0.0 }, decoders, test_drop_one_in: drop_one_in, test_delay_lost_ms: delay_lost, unlock: unlock.clone(), attach_only, cursor };
+    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement, hdr: headroom > 0.0, headroom }, decoders, test_drop_one_in: drop_one_in, test_delay_lost_ms: delay_lost, unlock: unlock.clone(), attach_only, cursor };
     let client = Client::connect(options, watcher)?;
     println!("host: {} ({}), features {:?}, fingerprint {}", client.host_name, client.host_os, client.host_features, &client.host_fingerprint[..12]);
 

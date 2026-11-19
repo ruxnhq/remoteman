@@ -55,6 +55,9 @@ struct Live {
     second: Option<(Pipeline, Injector)>,
     /// Which of its displays the client's pointer is on (0, or 1 for the second).
     target: u8,
+    /// HDR switched on for the client's monitor, put back as it was when this goes (held for
+    /// that alone).
+    _hdr: Option<crate::hdr::Switched>,
 }
 
 pub struct Host {
@@ -118,6 +121,15 @@ impl Host {
             None => self.screen.fit(want, if mirror { Fit::Keep } else { self.fit }).map_err(|e| format!("{e:#}"))?,
         };
         let (_, at) = self.screen.now().map_err(|e| format!("{e:#}"))?;
+        // A display that asked for HDR: the monitor shows it (if the encoder can say so), and
+        // its picture is BT.2020 PQ. A mirrored monitor is left as its owner has it.
+        let hdr_wanted = screen.hdr && self.allowed.hdr.load(Ordering::Relaxed);
+        let hdr = if hdr_wanted && !mirror { crate::hdr::Switched::to(self.screen.device(), true) } else { None };
+        if hdr.is_some() {
+            // Windows takes a moment to give the monitor its wide surface.
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        }
+        let sdr_white = crate::hdr::sdr_white(self.screen.device());
         let area = Arc::new(Mutex::new(at));
         let refresh = if mirror { got.refresh.min(want.refresh) } else { got.refresh }.clamp(1, 240);
         let (device, shared) = (self.screen.device().to_owned(), area.clone());
@@ -131,6 +143,8 @@ impl Host {
             expect: Some((at.width, at.height)),
             held,
             status: true,
+            hdr: hdr_wanted,
+            sdr_white,
             // The monitor changed under the stream: input and the cursor follow it.
             resized: Box::new(move |width, height| {
                 let now = display::current(&device).map(|(_, a)| a).unwrap_or(Area { width, height, ..*shared.lock().unwrap() });
@@ -153,7 +167,7 @@ impl Host {
         if !cursor_apart {
             tracing::warn!("this client doesn't draw the cursor itself, and the driver keeps it out of the frames: it will see no cursor");
         }
-        self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, common: modes, ceiling, name: name.clone(), files: Files::default(), clipboard: None, copied: BTreeMap::new(), mode: started.mode, second: None, target: 0 });
+        self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, common: modes, ceiling, name: name.clone(), files: Files::default(), clipboard: None, copied: BTreeMap::new(), mode: started.mode, second: None, target: 0, _hdr: hdr });
         // A new picture shares the clipboard anew.
         self.share_clipboard(self.clipboard_wanted);
         {
@@ -162,7 +176,7 @@ impl Host {
             // A new picture for the same client keeps the time it came.
             let since = now.as_ref().filter(|n| n.name == name).map_or(since, |n| n.since);
             let mode = started.mode;
-            let picture = format!("{} {}-bit{}", if mode.codec == Codec::Av1 { "AV1" } else { "HEVC" }, mode.depth, if mode.chroma == Chroma::C444 { " 4:4:4" } else { "" });
+            let picture = format!("{} {}-bit{}{}", if mode.codec == Codec::Av1 { "AV1" } else { "HEVC" }, mode.depth, if mode.chroma == Chroma::C444 { " 4:4:4" } else { "" }, if started.hdr.is_some() { " HDR" } else { "" });
             // (Every placement but `mirror` is, for now, the one monitor at the device's size.)
             *now = Some(Now { name, since, width: started.width, height: started.height, refresh, placement: match (mirror, own.is_some(), place) {
                 (true, ..) => "mirror",
@@ -172,7 +186,10 @@ impl Host {
                 _ => "only",
             }, picture, sound: self.sound.is_some() });
         }
-        Ok(Accept { mode: started.mode, width: started.width, height: started.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 })
+        if let Some((white, peak)) = started.hdr {
+            tracing::info!(sdr_white = white, peak, "the picture is HDR: BT.2020 PQ");
+        }
+        Ok(started.accept(refresh))
     }
 
     /// Stop the picture, let go of the client's keys, and put the monitor back.
@@ -233,6 +250,8 @@ impl Host {
             expect: Some((at.width, at.height)),
             held: false,
             status: false,
+            hdr: false,
+            sdr_white: crate::hdr::USUAL_SDR_WHITE,
             resized: Box::new(|_, _| {}),
         };
         match Pipeline::start(settings, second) {
@@ -377,6 +396,10 @@ impl Host {
 impl HostHandler for Host {
     fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
         self.left();
+        if self.allowed.paused.load(Ordering::Relaxed) {
+            tracing::info!(name = %client.name, "a device came while sharing is off: turned away");
+            return Err("sharing is switched off on this computer".into());
+        }
         let screen = client.display;
         tracing::info!(name = %client.name, ?screen, decoders = ?client.decoders, cursor_apart = client.cursor, "client");
         self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link, false).inspect_err(|e| tracing::error!("couldn't start the picture: {e}"))

@@ -178,8 +178,8 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
     if ((s = e->f.nvEncOpenEncodeSessionEx(&open, &e->enc))) FAIL("open session");
 
     if (!cap(e, codec, NV_ENC_CAPS_SUPPORT_10BIT_ENCODE)) { snprintf(err, errlen, "no 10-bit encode for this codec"); goto fail; }
-    // Direct3D has no planar 10-bit 4:4:4 texture to hand over, so that path is 4:2:0 (P010) only.
-    if (cfg->chroma444 && device_type == NV_ENC_DEVICE_TYPE_DIRECTX) { snprintf(err, errlen, "no 4:4:4 input from Direct3D"); goto fail; }
+    // Direct3D has no planar 10-bit 4:4:4 format: that input is an R16 texture three times the
+    // picture's height, Y, then Cb, then Cr (see rm_nvenc_register_d3d11).
     if (cfg->chroma444 && !cap(e, codec, NV_ENC_CAPS_SUPPORT_YUV444_ENCODE)) { snprintf(err, errlen, "no 4:4:4 encode for this codec"); goto fail; }
 
     if ((s = e->f.nvEncGetEncodePresetConfigEx(e->enc, codec, preset_guid, NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &preset))) FAIL("preset");
@@ -291,7 +291,9 @@ rm_nvenc *rm_nvenc_open_d3d11(void *device, const rm_nvenc_cfg *cfg, char *err, 
     return nvenc_open(NULL, NV_ENC_DEVICE_TYPE_DIRECTX, device, cfg, err, errlen);
 }
 
-// Register one ID3D11Texture2D* (P010, the encoder's size) as an encoder input.
+// Register one ID3D11Texture2D* as an encoder input: P010 of the encoder's size for 4:2:0, and
+// for 4:4:4 an R16_UNORM texture of the encoder's width and three times its height, the three
+// planes one under the other, each sample's 10 bits at the top of its 16.
 int rm_nvenc_register_d3d11(rm_nvenc *e, void *texture) {
     NV_ENC_REGISTER_RESOURCE r = { NV_ENC_REGISTER_RESOURCE_VER };
     NVENCSTATUS s;

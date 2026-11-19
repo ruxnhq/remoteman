@@ -60,6 +60,8 @@ mod display;
 #[cfg(windows)]
 mod encode;
 #[cfg(windows)]
+mod hdr;
+#[cfg(windows)]
 mod input;
 #[cfg(windows)]
 mod mf;
@@ -69,6 +71,8 @@ mod pipeline;
 mod probe;
 #[cfg(windows)]
 mod session;
+#[cfg(windows)]
+mod testhdr;
 #[cfg(windows)]
 mod vdd;
 
@@ -116,6 +120,7 @@ mod windows_main {
         let mut listen: SocketAddr = format!("0.0.0.0:{}", remoteman_core::PORT).parse()?;
         let (mut pair, mut state, mut bitrate, mut drop_one_in) = (false, state_dir(), 40u32, None::<u32>);
         let (mut name, mut log, mut seconds, mut probing, mut fit) = (None::<String>, None::<PathBuf>, None::<u64>, None::<bool>, Fit::Any);
+        let mut test_hdr = None::<u64>;
         let (mut allow_files, mut allow_clipboard) = (false, false);
         let mut ask = false;
         let mut args = std::env::args().skip(1).peekable();
@@ -189,6 +194,8 @@ mod windows_main {
                 "--log" => log = Some(value()?.into()),
                 // For tests: stop by itself after this long.
                 "--seconds" => seconds = Some(value()?.parse().context("--seconds N")?),
+                // For tests: a window that shows HDR content on the device's monitor.
+                "--test-hdr-window" => test_hdr = Some(value()?.parse().context("--test-hdr-window SECONDS")?),
                 "--probe" => probing = Some(false),
                 "--probe-picture" => probing = Some(true),
                 "--mode" => {
@@ -213,6 +220,9 @@ mod windows_main {
                 tracing_subscriber::fmt().with_max_level(level).with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
             }
             None => tracing_subscriber::fmt().with_max_level(level).with_ansi(false).init(),
+        }
+        if let Some(seconds) = test_hdr {
+            return crate::testhdr::run(seconds).inspect_err(|e| tracing::error!("{e:#}"));
         }
         // Anything that goes wrong is in the log before the process ends.
         let result = run(listen, state, pair, name, bitrate, drop_one_in, seconds, probing, fit, (allow_files, allow_clipboard), ask);
@@ -277,6 +287,11 @@ mod windows_main {
         let saved = crate::control::load(&state);
         allowed.files.store(allow.0 || saved.0, Ordering::Relaxed);
         allowed.clipboard.store(allow.1 || saved.1, Ordering::Relaxed);
+        allowed.paused.store(saved.2, Ordering::Relaxed);
+        if saved.2 {
+            tracing::info!("sharing is switched off (remembered): devices are turned away until `ctl sharing on`");
+        }
+        let _ = crate::control::NAME.set(name.clone());
         // A device's microphone needs a virtual sound device to be played into.
         let (sink, outputs) = crate::sound::find_microphone_sink();
         allowed.microphone.store(sink.is_some(), Ordering::Relaxed);
@@ -288,6 +303,9 @@ mod windows_main {
         let own = fit != Fit::Keep && screen.has_own();
         allowed.own_monitor.store(own, Ordering::Relaxed);
         allowed.second.store(own && screen.has_second(), Ordering::Relaxed);
+        // HDR for a device's own monitor: the driver's monitors take it, and NVENC says it.
+        let hdr = own && crate::encode::WHICH.load(Ordering::Relaxed) != crate::encode::ANY_MAKERS && crate::encode::library().is_ok();
+        allowed.hdr.store(hdr, Ordering::Relaxed);
         if !own {
             tracing::info!("the display driver has no second monitor to give (its settings say one monitor, or `--mode keep`): a device gets the one monitor at its own size");
         }

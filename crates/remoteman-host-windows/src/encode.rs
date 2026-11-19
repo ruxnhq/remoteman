@@ -25,9 +25,14 @@ use windows::core::{HSTRING, Interface, w};
 
 use crate::capture::Gpu;
 
-/// What this host encodes, on any GPU it has an encoder for. (No 4:4:4: Direct3D has no planar
-/// 10-bit 4:4:4 texture to convert into.)
-pub const MODES: [Mode; 2] = [Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 }];
+/// What this host encodes. HEVC 4:4:4 only through NVENC, on a card whose NVENC has it (the
+/// encoder says when it is opened; where it doesn't, the next mode the client offered is
+/// taken).
+pub const MODES: [Mode; 3] = [
+    Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 },
+    Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 },
+    Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 },
+];
 
 pub struct Settings {
     pub mode: Mode,
@@ -35,12 +40,34 @@ pub struct Settings {
     pub height: u32,
     pub fps: u32,
     pub bitrate: u32,
+    /// BT.2020 PQ rather than BT.709 (only where [`can_hdr`] said so).
+    pub hdr: bool,
 }
 
-/// An encoder for pictures drawn into `input`, a P010 texture of `gpu`'s device. The input's
-/// index for `encode_how` is 0.
+/// Whether the encoder this GPU gets can say BT.2020 PQ in its stream: NVENC's can; Media
+/// Foundation's encoders are not told (not built), so their pictures stay SDR.
+pub fn can_hdr(gpu: &Gpu) -> bool {
+    match WHICH.load(std::sync::atomic::Ordering::Relaxed) {
+        NVENC => true,
+        ANY_MAKERS => false,
+        _ => gpu.vendor == NVIDIA,
+    }
+}
+
+/// An encoder for pictures drawn into `input`, a texture of `gpu`'s device (P010, or for 4:4:4
+/// R16 with the planes stacked). The input's index for `encode_how` is 0.
 pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<Box<dyn FrameEncoder>> {
     anyhow::ensure!(MODES.contains(&settings.mode), "this host doesn't encode {:?}", settings.mode);
+    if settings.mode.chroma == Chroma::C444 || settings.hdr {
+        // Only NVENC: Media Foundation's encoders are given 4:2:0 SDR alone.
+        return match WHICH.load(std::sync::atomic::Ordering::Relaxed) {
+            ANY_MAKERS => anyhow::bail!("4:4:4 and HDR are NVENC's only"),
+            NVENC => nvidia::open(gpu, input, settings),
+            _ if gpu.vendor == NVIDIA => nvidia::open(gpu, input, settings),
+            _ => anyhow::bail!("4:4:4 and HDR are NVENC's only, and this isn't an NVIDIA card"),
+        }
+        .with_context(|| format!("NVENC on {}", gpu.adapter));
+    }
     let any = || crate::mf::Encoder::open(gpu, input, settings).map(|e| Box::new(e) as Box<dyn FrameEncoder>).with_context(|| format!("Media Foundation's encoder on {}", gpu.adapter));
     let nvenc = || nvidia::open(gpu, input, settings).with_context(|| format!("NVENC on {}", gpu.adapter));
     match WHICH.load(std::sync::atomic::Ordering::Relaxed) {
@@ -109,10 +136,10 @@ mod nvidia {
         let from = load()?;
         // The Linux host's settings: the fastest preset, two long-term frames, and the usual
         // number of recent ones for the picture's size.
-        let config = Config { codec: if s.mode.codec == Codec::Av1 { remoteman_encode::Codec::Av1 } else { remoteman_encode::Codec::Hevc }, chroma444: false, width: s.width, height: s.height, fps: s.fps, bitrate: s.bitrate, preset: 1, long_term: 2, short_term: None };
+        let config = Config { codec: if s.mode.codec == Codec::Av1 { remoteman_encode::Codec::Av1 } else { remoteman_encode::Codec::Hevc }, chroma444: s.mode.chroma == Chroma::C444, width: s.width, height: s.height, fps: s.fps, bitrate: s.bitrate, preset: 1, long_term: 2, short_term: None };
         // SAFETY: a live device with multithread protection on (`Gpu` sees to that) and a live
-        // P010 texture of that device; the pipeline keeps both for longer than the encoder.
-        let mut encoder = unsafe { Encoder::new_d3d11(gpu.device.as_raw(), &config) }?;
+        // texture of that device; the pipeline keeps both for longer than the encoder.
+        let mut encoder = unsafe { Encoder::new_d3d11(gpu.device.as_raw(), &config, s.hdr) }?;
         let index = unsafe { encoder.add_texture(input.as_raw()) }.context("registering the picture's texture")?;
         anyhow::ensure!(index == 0, "the picture's texture became input {index}");
         tracing::debug!(library = %from, "NVENC");
