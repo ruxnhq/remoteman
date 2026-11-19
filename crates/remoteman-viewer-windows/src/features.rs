@@ -87,7 +87,7 @@ pub const FEATURES: Features = Features {
     system_shortcuts: true,
     key_mapping: false,
     release_shortcut: true,
-    second_display: false,
+    second_display: true,
     mirror: true,
     way_in: false,
 };

@@ -32,6 +32,8 @@ pub struct Args {
     pub dark: Option<bool>,
     /// Start the computer's sound with the session.
     pub sound: bool,
+    /// Add a second display once the session has started.
+    pub second: bool,
     /// For tests: a file whose first line is typed as the password of a locked computer.
     pub password_from: Option<PathBuf>,
 }
@@ -73,6 +75,7 @@ pub fn parse() -> Result<Args> {
         shots: None,
         dark: None,
         sound: false,
+        second: false,
         password_from: None,
     };
     while let Some(arg) = words.next() {
@@ -101,6 +104,7 @@ pub fn parse() -> Result<Args> {
             "--dark" => args.dark = Some(true),
             "--light" => args.dark = Some(false),
             "--sound" => args.sound = true,
+            "--second" => args.second = true,
             "--password-from" => args.password_from = Some(value()?.into()),
             other => bail!("unknown option {other}\n{USAGE}"),
         }

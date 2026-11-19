@@ -19,7 +19,9 @@ public class RmIn {
   [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int w, int hh, uint f);
   [DllImport("user32.dll")] static extern bool GetClientRect(IntPtr h, out R r);
   [StructLayout(LayoutKind.Sequential)] public struct R { public int l, t, r, b; }
-  public static IntPtr Window() { SetProcessDPIAware(); return FindWindowW("remoteman", null); }
+  // Which of the viewer's windows the places are in: "remoteman", or "remoteman-second".
+  public static string Class = "remoteman";
+  public static IntPtr Window() { SetProcessDPIAware(); return FindWindowW(Class, null); }
   // The viewer in front of everything, with the keyboard.
   public static string Top() {
     IntPtr h = Window(); if (h == IntPtr.Zero) return "no window";
