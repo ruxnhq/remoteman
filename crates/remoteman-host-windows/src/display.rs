@@ -71,28 +71,60 @@ fn text(wide: &[u16]) -> String {
     String::from_utf16_lossy(&wide[..wide.iter().position(|&c| c == 0).unwrap_or(wide.len())])
 }
 
-/// The driver's output whose monitor is the driver's number `index`, whether or not it is
-/// part of the desktop. Windows names outputs anew when the driver re-creates its monitors;
-/// what stays is the monitor's own number in its device path ("UID256" for the first).
-pub fn driver_output(index: u32) -> Option<Output> {
-    let mark = format!("uid{}", 256 + index);
+/// Every display output that has monitors of the driver's, with each such monitor's number
+/// with the driver and whether it is the one showing there now. Windows names outputs anew
+/// when the driver re-creates its monitors; what stays is a monitor's own number in its device
+/// path ("UID256" for the driver's first). An output that is no part of the desktop lists
+/// every monitor it could show, so two such outputs list the same ones.
+fn driver_outputs() -> Vec<(Output, Vec<(u32, bool)>)> {
+    let mut all = Vec::new();
     for i in 0.. {
         let mut d = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
         // SAFETY: `d` is sized as the call wants.
         if !unsafe { EnumDisplayDevicesW(PCWSTR::null(), i, &mut d, 0) }.as_bool() {
             break;
         }
-        let mut m = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
-        // 1: the monitor's device path instead of its hardware id.
-        // SAFETY: as above; the name is a NUL-terminated array of the call before.
-        if unsafe { EnumDisplayDevicesW(PCWSTR(d.DeviceName.as_ptr()), 0, &mut m, 1) }.as_bool() {
+        let mut monitors = Vec::new();
+        for j in 0.. {
+            let mut m = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+            // 1: the monitor's device path instead of its hardware id.
+            // SAFETY: as above; the name is a NUL-terminated array of the call before.
+            if !unsafe { EnumDisplayDevicesW(PCWSTR(d.DeviceName.as_ptr()), j, &mut m, 1) }.as_bool() {
+                break;
+            }
             let path = text(&m.DeviceID).to_lowercase();
-            if path.contains(&mark) && vdd::MONITOR_HINTS.iter().any(|h| path.contains(h)) {
-                return Some(Output { device: text(&d.DeviceName), description: text(&d.DeviceString), id: text(&d.DeviceID), primary: d.StateFlags.0 & DISPLAY_DEVICE_PRIMARY_DEVICE.0 != 0 });
+            let number = path.split("uid").nth(1).and_then(|rest| rest.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u32>().ok());
+            if let (Some(number @ 256..=271), true) = (number, vdd::MONITOR_HINTS.iter().any(|h| path.contains(h))) {
+                // (`DISPLAY_DEVICE_ACTIVE`.)
+                monitors.push((number - 256, m.StateFlags.0 & 1 != 0));
             }
         }
+        if !monitors.is_empty() {
+            all.push((Output { device: text(&d.DeviceName), description: text(&d.DeviceString), id: text(&d.DeviceID), primary: d.StateFlags.0 & DISPLAY_DEVICE_PRIMARY_DEVICE.0 != 0 }, monitors));
+        }
     }
-    None
+    all
+}
+
+/// The output for the driver's monitor number `index`: the one showing it, or, while that
+/// monitor is no part of the desktop, an output that could (a different one for each such
+/// monitor). Which monitor an output shows once it has joined the desktop is Windows' choice:
+/// ask [`driver_index`] afterwards.
+pub fn driver_output(index: u32) -> Option<Output> {
+    let all = driver_outputs();
+    if let Some((o, _)) = all.iter().find(|(_, m)| m.contains(&(index, true))) {
+        return Some(o.clone());
+    }
+    let showing = |i: u32| all.iter().any(|(_, m)| m.contains(&(i, true)));
+    // Among the outputs showing nothing: the first for the lowest monitor that isn't shown,
+    // the second for the next, and so on.
+    let before = (0..index).filter(|i| !showing(*i)).count();
+    all.iter().filter(|(_, m)| m.iter().all(|(_, on)| !on) && m.iter().any(|(i, _)| *i == index)).nth(before).map(|(o, _)| o.clone())
+}
+
+/// The driver's number for the monitor this output is showing.
+pub fn driver_index(device: &str) -> Option<u32> {
+    driver_outputs().into_iter().find(|(o, _)| o.device == device).and_then(|(_, m)| m.into_iter().find(|(_, on)| *on).map(|(i, _)| i))
 }
 
 /// Is this output part of the desktop?
@@ -264,6 +296,8 @@ pub struct Screen {
     /// What the first monitor was before a device's monitor took its place as the main
     /// display or the only one: put back when the device leaves.
     first_was: Option<Mode>,
+    /// The device's second display (the driver's monitor 2), while it has one: its output.
+    second: Option<String>,
 }
 
 impl Screen {
@@ -272,7 +306,7 @@ impl Screen {
         driver.ping()?;
         let (output, sure) = find_output()?;
         tracing::info!(driver = %driver.path, output = %output.device, adapter = %output.description, recognised = sure, "display driver");
-        Ok(Self { driver: Arc::new(driver), device: output.device, switched: false, own: None, first_was: None })
+        Ok(Self { driver: Arc::new(driver), device: output.device, switched: false, own: None, first_was: None, second: None })
     }
 
     /// The driver, for the picture's thread to ask for the frame channel with.
@@ -287,7 +321,7 @@ impl Screen {
 
     /// The driver's number for the monitor the client is shown.
     pub fn monitor(&self) -> u32 {
-        self.own.is_some() as u32
+        self.own.as_deref().and_then(driver_index).unwrap_or(self.own.is_some() as u32)
     }
 
     /// The mode and place on the desktop, now, of the monitor the client is shown.
@@ -320,7 +354,87 @@ impl Screen {
         if let Some(first) = driver_output(0) {
             self.device = first.device;
         }
+        // The driver made every monitor its settings allow: a third, which comes a moment
+        // after the second if it comes, is kept out of the desktop as well.
+        let seen = Instant::now();
+        while seen.elapsed() < Duration::from_millis(2500) {
+            match driver_output(2) {
+                Some(third) if attached(&third.device) => {
+                    let _ = detach(&third.device);
+                    break;
+                }
+                // There and already out (left so by an earlier run).
+                Some(_) if seen.elapsed() > Duration::from_millis(1500) => break,
+                _ => std::thread::sleep(Duration::from_millis(100)),
+            }
+        }
         true
+    }
+
+    /// Has the driver a third monitor, for a device's second display?
+    pub fn has_second(&self) -> bool {
+        driver_outputs().iter().any(|(_, m)| m.iter().any(|(i, _)| *i == 2))
+    }
+
+    /// Give the device a second display of this size on that side of everything else on the
+    /// desktop, level with its own monitor. Says the mode it got and where it is.
+    pub fn give_second(&mut self, want: Mode, side: remoteman_core::Side) -> Result<(Mode, Area, u32)> {
+        use remoteman_core::Side;
+        anyhow::ensure!(self.own.is_some(), "a second display goes beside a monitor of the device's own, which it hasn't got");
+        // Of the driver's monitors 1 and 2, the one the device's own monitor isn't.
+        let own_index = self.monitor();
+        let other = if own_index == 2 { 1 } else { 2 };
+        let mut second = driver_output(other).context("the display driver has no monitor left for a second display")?;
+        if !modes(&second.device).contains(&want) {
+            let offered = modes(self.own.as_deref().unwrap_or(&self.device));
+            if let Err(e) = self.add_mode(want, &offered) {
+                tracing::warn!("couldn't add {}x{} at {} Hz to the driver's modes: {e:#}", want.width, want.height, want.refresh);
+            }
+            // Every monitor of the driver's came back under a new name.
+            let asked = Instant::now();
+            while (driver_output(2).is_none() || driver_output(1).is_none()) && asked.elapsed() < Duration::from_secs(6) {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            second = driver_output(other).context("the second display's monitor didn't come back after its mode was added")?;
+            if let Some(first) = driver_output(0) {
+                self.device = first.device;
+            }
+            if let Some(own) = driver_output(own_index) {
+                self.own = Some(own.device);
+            }
+        }
+        let offered = modes(&second.device);
+        let rates = offered.iter().filter(|m| (m.width, m.height) == (want.width, want.height)).map(|m| m.refresh);
+        let mode = match nearest_refresh(rates, want.refresh) {
+            Some(refresh) => Mode { refresh, ..want },
+            None => *offered.first().context("the second display's monitor offers no mode")?,
+        };
+        // Everything on the desktop now, and the device's own monitor among it.
+        let (_, own) = current(self.own.as_deref().unwrap_or(&self.device))?;
+        let all: Vec<Area> = outputs().iter().filter(|o| o.device != second.device).filter_map(|o| current(&o.device).ok().map(|c| c.1)).collect();
+        let edge = |pick: fn(&Area) -> i32, most: bool| all.iter().map(pick).reduce(|a, b| if most { a.max(b) } else { a.min(b) }).unwrap_or(0);
+        let (x, y) = match side {
+            Side::Right => (edge(|a| a.left + a.width as i32, true), own.top),
+            Side::Left => (edge(|a| a.left, false) - mode.width as i32, own.top),
+            Side::Above => (own.left, edge(|a| a.top, false) - mode.height as i32),
+            Side::Below => (own.left, edge(|a| a.top + a.height as i32, true)),
+        };
+        stage(&second.device, Some((mode, x, y, false)))?;
+        apply()?;
+        let (now, area) = current(&second.device)?;
+        tracing::info!(?want, ?now, ?side, output = %second.device, left = area.left, top = area.top, "the device has a second display");
+        let index = driver_index(&second.device).unwrap_or(2);
+        self.second = Some(second.device);
+        Ok((now, area, index))
+    }
+
+    /// The device's second display leaves the desktop.
+    pub fn take_second(&mut self) {
+        let Some(second) = self.second.take() else { return };
+        match detach(&second) {
+            Ok(()) => tracing::info!("the device's second display is off the desktop again"),
+            Err(e) => tracing::warn!("couldn't take the device's second display off the desktop: {e:#}"),
+        }
     }
 
     /// Give the device a monitor of its own at its size and rate, placed as it asked. `None`:
@@ -396,9 +510,8 @@ impl Screen {
 
     /// The device's own monitor leaves the desktop, and the first monitor is as it was.
     fn take_back(&mut self) {
+        self.take_second();
         let Some(own) = self.own.take() else { return };
-        // (Found again by its number: the name may have changed under it.)
-        let own = driver_output(1).map_or(own, |o| o.device);
         let first = driver_output(0).map_or(self.device.clone(), |o| o.device);
         self.device = first.clone();
         let staged = match self.first_was.take() {
@@ -455,7 +568,8 @@ impl Screen {
     /// the mode it is in now, so that nothing changes by itself. The driver keeps the list in
     /// memory only; restarting the driver brings back the one from its settings file.
     fn add_mode(&mut self, want: Mode, offered: &[Mode]) -> Result<()> {
-        let (now, _) = current(&self.device)?;
+        // (The first monitor's mode, or the device's own monitor's while the first is off.)
+        let (now, _) = current(&self.device).or_else(|e| self.own.as_deref().map_or(Err(e), current))?;
         let mut list: Vec<(u32, u32, u32)> = std::iter::once(&now).chain(offered.iter().filter(|m| **m != now)).map(|m| (m.width, m.height, m.refresh)).collect();
         // The driver keeps the first and the newest 95; drop from the middle ourselves so that
         // what is sent is what it keeps.
@@ -468,9 +582,11 @@ impl Screen {
         let asked = Instant::now();
         while asked.elapsed() < Duration::from_secs(8) {
             std::thread::sleep(Duration::from_millis(200));
-            // The monitor comes back as a new output, perhaps under another name.
-            let Ok((output, _)) = find_output() else { continue };
-            if modes(&output.device).contains(&want) {
+            // The monitors come back as new outputs, perhaps under other names. With several,
+            // the first is found by its number; any of them listing the mode means all do.
+            let listed = (0..3).filter_map(driver_output).any(|o| modes(&o.device).contains(&want));
+            let Some(output) = driver_output(0).or_else(|| find_output().ok().map(|f| f.0)) else { continue };
+            if listed || modes(&output.device).contains(&want) {
                 tracing::info!(after_ms = asked.elapsed().as_millis() as u64, output = %output.device, "the monitor offers the mode");
                 self.device = output.device;
                 return Ok(());

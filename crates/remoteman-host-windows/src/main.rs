@@ -287,6 +287,7 @@ mod windows_main {
         let mut screen = screen;
         let own = fit != Fit::Keep && screen.has_own();
         allowed.own_monitor.store(own, Ordering::Relaxed);
+        allowed.second.store(own && screen.has_second(), Ordering::Relaxed);
         if !own {
             tracing::info!("the display driver has no second monitor to give (its settings say one monitor, or `--mode keep`): a device gets the one monitor at its own size");
         }
