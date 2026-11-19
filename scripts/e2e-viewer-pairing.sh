@@ -13,7 +13,7 @@ PY
 dbus-run-session -- mutter --headless --wayland --no-x11 --wayland-display rm-view --virtual-monitor 1920x1080@60 >"$RM_LOGS/mutter-view.log" 2>&1 &
 vpid=$!
 dbus-run-session -- sh -c '
-  bin="$RM_ROOT/target/release"
+  bin="${RM_BIN:-$RM_ROOT/target/release}"
   tell() { python3 -I "$RM_LOGS/tell.py" "$RM_LOGS/host.sock" "$1"; }
   mutter --headless --wayland --no-x11 --wayland-display rm-e2e >"$RM_LOGS/mutter.log" 2>&1 &
   mpid=$!

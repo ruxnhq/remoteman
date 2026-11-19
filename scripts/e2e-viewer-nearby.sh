@@ -9,7 +9,7 @@ root=$(dirname "$(dirname "$(readlink -f "$0")")")
 export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT="${RM_PORT:-7796}" RM_NAME="remoteman test $$"
 systemctl is-active -q avahi-daemon || { echo "SKIP: no Avahi on this computer"; exit 0; }
 dbus-run-session -- sh -c '
-  bin="$RM_ROOT/target/release"
+  bin="${RM_BIN:-$RM_ROOT/target/release}"
   mutter --headless --wayland --no-x11 --wayland-display rm-e2e >"$RM_LOGS/mutter.log" 2>&1 &
   mpid=$!
   sleep 2
@@ -26,7 +26,7 @@ dbus-run-session -- sh -c '
   mutter --headless --wayland --no-x11 --wayland-display rm-view --virtual-monitor 1920x1080@60 >"$RM_LOGS/mutter-view.log" 2>&1 &
   mpid=$!
   sleep 2
-  env -u DISPLAY WAYLAND_DISPLAY=rm-view GDK_BACKEND=wayland timeout 40 "$RM_ROOT/target/release/remoteman" --state "$RM_LOGS/vstate" --ui "wait=3,reach?=127.0.0.1:$RM_PORT,pair-go=127.0.0.1:$RM_PORT,wait=3,back,wait=3,reach?=127.0.0.1:$RM_PORT,wait=10,reach?=127.0.0.1:$RM_PORT" >"$RM_LOGS/viewer.log" 2>"$RM_LOGS/viewer.err"
+  env -u DISPLAY WAYLAND_DISPLAY=rm-view GDK_BACKEND=wayland timeout 40 "${RM_BIN:-$RM_ROOT/target/release}/remoteman" --state "$RM_LOGS/vstate" --ui "wait=3,reach?=127.0.0.1:$RM_PORT,pair-go=127.0.0.1:$RM_PORT,wait=3,back,wait=3,reach?=127.0.0.1:$RM_PORT,wait=10,reach?=127.0.0.1:$RM_PORT" >"$RM_LOGS/viewer.log" 2>"$RM_LOGS/viewer.err"
   kill $mpid 2>/dev/null
   wait 2>/dev/null
 ' >/dev/null 2>&1

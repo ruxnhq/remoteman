@@ -35,6 +35,11 @@ fn autostart() -> std::path::PathBuf {
     base.join("autostart/dev.remoteman.Host.desktop")
 }
 
+/// The AppImage this program was started from, if it was.
+fn appimage() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPIMAGE").map(std::path::PathBuf::from)
+}
+
 fn set_autostart(on: bool) -> std::io::Result<()> {
     let path = autostart();
     if !on {
@@ -43,7 +48,12 @@ fn set_autostart(on: bool) -> std::io::Result<()> {
             _ => Ok(()),
         };
     }
-    let program = std::env::current_exe()?;
+    // Run from an AppImage, this program's own file is inside a mount that is gone at the
+    // next sign-in: the AppImage is what to start.
+    let program = match appimage() {
+        Some(appimage) => appimage,
+        None => std::env::current_exe()?,
+    };
     std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new("/")))?;
     std::fs::write(path, format!("[Desktop Entry]\nType=Application\nName=Remoteman Host\nComment=The icon in the top bar for this computer's sharing\nExec=\"{}\" --background\nIcon=dev.remoteman.Host\nX-GNOME-Autostart-enabled=true\n", program.display()))
 }
@@ -419,9 +429,16 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let notify = adw::SwitchRow::builder().title("Notify me when a device connects").active(notifies()).build();
     later.add(&at_sign_in);
     later.add(&notify);
+    // Run from an AppImage on a computer whose host is not the daemon yet: the way to make it
+    // that. (The window is known only further down, so the button is wired there.)
+    let whole = adw::PreferencesGroup::builder().title("Before anyone has signed in").description("As it is, devices reach this computer only while you are signed in and it is unlocked or may be unlocked for them. Installed for the whole computer, sharing starts when the computer does: a device is shown the login screen when nobody is signed in.").build();
+    let install = adw::ButtonRow::builder().title("Install for the Whole Computer…").build();
+    whole.add(&install);
+    whole.set_visible(appimage().is_some() && !std::path::Path::new("/etc/systemd/user/remoteman-agent.service").exists());
     let sharing_page = adw::PreferencesPage::new();
     sharing_page.add(&sharing_group);
     sharing_page.add(&later);
+    sharing_page.add(&whole);
 
     // Devices.
     let pair = adw::ButtonRow::builder().title("Pair a Device…").build();
@@ -471,6 +488,45 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     toolbar.set_content(Some(&toasts));
     // Closing the window leaves the icon and the sharing as they are.
     let window = adw::ApplicationWindow::builder().application(app).title("remoteman host").default_width(640).default_height(720).hide_on_close(true).content(&toolbar).build();
+
+    install.connect_activated({
+        let (window, whole) = (window.clone(), whole.clone());
+        move |_| {
+            let alert = adw::AlertDialog::new(Some("Install for the whole computer?"), Some("The host is copied to /usr/local/lib/remoteman and starts with the computer from now on, as a system service. Your paired devices stay paired. You are asked for an administrator's password.\n\nTo undo it: run this AppImage in a terminal with sudo and the word remove."));
+            alert.add_responses(&[("cancel", "Cancel"), ("install", "Install")]);
+            alert.set_response_appearance("install", adw::ResponseAppearance::Suggested);
+            let (window2, whole) = (window.clone(), whole.clone());
+            alert.connect_response(Some("install"), move |_, _| {
+                let window = window2.clone();
+                let Some(appimage) = appimage() else { return };
+                let whole = whole.clone();
+                glib::spawn_future_local(async move {
+                    // pkexec asks for the password itself, and hands the AppImage's own
+                    // install step (scripts/install-daemon.sh) to root.
+                    let said = match gtk::gio::Subprocess::newv(&[std::ffi::OsStr::new("pkexec"), appimage.as_os_str(), std::ffi::OsStr::new("install")], gtk::gio::SubprocessFlags::STDOUT_PIPE | gtk::gio::SubprocessFlags::STDERR_MERGE) {
+                        Ok(run) => match run.communicate_utf8_future(None).await {
+                            Ok((out, _)) if run.is_successful() => {
+                                whole.set_visible(false);
+                                Ok(out.map(|o| o.to_string()).unwrap_or_default())
+                            }
+                            Ok((out, _)) => Err(out.map(|o| o.to_string()).unwrap_or_default()),
+                            Err(e) => Err(e.to_string()),
+                        },
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let last = |text: &str| text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_owned();
+                    let (title, body) = match &said {
+                        Ok(out) => ("Installed for the whole computer", last(out)),
+                        Err(why) => ("It was not installed", last(why)),
+                    };
+                    let done = adw::AlertDialog::new(Some(title), Some(&body));
+                    done.add_responses(&[("ok", "OK")]);
+                    done.present(Some(&window));
+                });
+            });
+            alert.present(Some(&window));
+        }
+    });
 
     let ui = Rc::new(Ui {
         app: app.clone(),

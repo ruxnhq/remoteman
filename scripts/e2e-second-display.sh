@@ -12,7 +12,7 @@ side="${RM_SIDE:-right}"
 printf "wait 2\\ndisplay2 1280x720 $side\\n" > "$RM_LOGS/steps.txt"
 printf 'wait 7\ntarget 1\nmove 0.5 0.5\nwait 0.4\nclick 0.5 0.5\nwait 1\ntarget 0\nmove 0.25 0.25\nwait 0.4\nclick 0.25 0.25\nwait 1\ndisplay2 off\nwait 2\n' >> "$RM_LOGS/steps.txt"
 dbus-run-session -- sh -c '
-  bin="$RM_ROOT/target/release"
+  bin="${RM_BIN:-$RM_ROOT/target/release}"
   monitors() { gdbus call --session --dest org.gnome.Mutter.DisplayConfig --object-path /org/gnome/Mutter/DisplayConfig --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>&1 | grep -o "Meta-[0-9]*" | sort -u | tr "\n" " "; }
   content() { env -u DISPLAY WAYLAND_DISPLAY=rm-two GDK_BACKEND=wayland python3 "$RM_ROOT/scripts/animate.py" --monitor "$1" --id "$2" >"$RM_LOGS/content-$2.log" 2>&1 & }
   mutter --headless --wayland --no-x11 --wayland-display rm-two --virtual-monitor 1600x900@60 >"$RM_LOGS/mutter.log" 2>&1 &

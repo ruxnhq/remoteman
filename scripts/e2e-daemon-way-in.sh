@@ -7,7 +7,7 @@
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
 RM_LOGS="${RM_LOGS:-$(mktemp -d)}"; RM_PORT="${RM_PORT:-7794}"
 sock="${XDG_RUNTIME_DIR:-/tmp}/remoteman-e2e-$$.sock"
-bin="$root/target/release"
+bin="${RM_BIN:-$root/target/release}"
 "$bin/remotemand" --listen 127.0.0.1:$RM_PORT --pair --state "$RM_LOGS/state" --socket "$sock" >"$RM_LOGS/daemon.log" 2>&1 &
 dpid=$!
 sleep 1
