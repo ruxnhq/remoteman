@@ -299,6 +299,25 @@ enum Automation {
                 case "mem":
                     let (on, size) = DispatchQueue.main.sync { (session.client != nil, session.renderer?.layer.drawableSize ?? .zero) }
                     print("remoteman: memory \(memory()), \(on ? "connected" : "not connected"), drawing at \(Int(size.width))x\(Int(size.height))")
+                case "second":
+                    // second:w,h[,scale[,refresh]] asks for a second display; second:off gives it back.
+                    DispatchQueue.main.sync {
+                        if n.count >= 2 {
+                            session.setSecondDisplay(ViewerSession.Display(
+                                width: Int(n[0]), height: Int(n[1]), scale: n.count > 2 ? n[2] : 1, refresh: n.count > 3 ? Int(n[3]) : 60))
+                        } else {
+                            session.setSecondDisplay(nil)
+                        }
+                    }
+                    print("remoteman: second display \(n.count >= 2 ? "asked for" : "given back"); on: \(DispatchQueue.main.sync { session.secondOn })")
+                case "shot2":
+                    if let image = session.renderer2?.snapshot() {
+                        let ok = writePNG(image, to: resolve(arg))
+                        print("remoteman: second picture \(image.width)x\(image.height) \(ok ? "saved to" : "NOT saved to") \(arg)")
+                    } else {
+                        print("remoteman: second picture: none")
+                    }
+                case "aim" where n.count == 1: DispatchQueue.main.sync { session.aim(UInt8(n[0])) }
                 case "transfers":
                     print("remoteman: transfers \(DispatchQueue.main.sync { session.transfers })  notice \(DispatchQueue.main.sync { session.notice ?? "none" })")
                 case "shot":

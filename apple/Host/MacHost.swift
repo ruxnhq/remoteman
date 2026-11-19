@@ -105,7 +105,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// What this host offers now: the camera and the microphone only while remoteman's own are installed on this Mac.
     private var featureList: String {
-        "video,input,cursor,placement,configure,mirror" + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
+        "video,input,cursor,placement,configure,mirror,displays" + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
             + (options.allowFiles ? ",files" : "") + (HostCamera.installed ? ",camera" : "") + (HostMicrophone.installed ? ",mic" : "")
     }
     private var announced = ""
@@ -228,6 +228,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private var encoder: HostEncoder?
     private var lastBuffer: CVPixelBuffer?
     private var geometry: (bounds: CGRect, scale: CGFloat)?
+    /// The device's second display, while it has one (SecondDisplay.swift).
+    private let second = HostSecondDisplay()
+    private var aimedAtSecond = false
     private var sent = 0, bytes = 0, encodeMs = 0.0, dropped = 0, keyframes = 0
 
     init(options: Options) {
@@ -237,8 +240,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self else { return nil }
             self.lock.lock()
             defer { self.lock.unlock() }
-            return self.geometry
+            // Pointer and touch events land on whichever display the device last said they are on.
+            return self.aimedAtSecond ? (self.second.geometry ?? self.geometry) : self.geometry
         }
+        second.send = { [weak self] o in self?.sendSecond(o) }
     }
 
     // MARK: Start and stop
@@ -643,6 +648,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             return DispatchQueue.main.async { sharing.setClipboard(on, sendCurrent: true) }
         }
         if m["t"] as? String == "file_result" { sharing?.fileResult(m) }
+        if m["t"] as? String == "display_keyframe" { return second.keyframe() }
+        if m["t"] as? String == "display", (m["index"] as? NSNumber)?.intValue == 1 { return setSecond(m) }
         guard m["t"] as? String == "configure", let host, let old = picture else { return }
         if let b = (m["bitrate"] as? NSNumber)?.intValue {
             limit = max(0, b)
@@ -699,7 +706,60 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         if let enc, let last { frames.async { enc.encode(last, pts: CMClockGetTime(CMClockGetHostTimeClock())) } }
     }
 
+    /// The device asks for a second display, for another size of it, or gives it back.
+    private func setSecond(_ m: [String: Any]) {
+        guard let host else { return }
+        guard m["on"] as? Bool == true, let d = m["display"] as? [String: Any] else {
+            lock.lock()
+            aimedAtSecond = false
+            lock.unlock()
+            Task { @MainActor in await self.second.stop() }
+            return
+        }
+        func int(_ k: String, _ otherwise: Int) -> Int { (d[k] as? NSNumber)?.intValue ?? otherwise }
+        let width = min(7680, max(640, int("width", 1920) & ~1)), height = min(4320, max(360, int("height", 1080) & ~1))
+        let fps = min(240, max(24, int("refresh", 60)))
+        let hiDPI = ((d["scale"] as? NSNumber)?.doubleValue ?? 1) >= 1.5
+        let tenBit = options.tenBit
+        Task { @MainActor in
+            if let why = await self.second.start(width: width, height: height, fps: fps, hiDPI: hiDPI, tenBit: tenBit) {
+                hostLog("host: no second display: \(why)")
+                if why != "replaced" { rm_host_second_stop(host, why) }
+                return
+            }
+            var accept = rm_accept()
+            accept.codec = 0
+            accept.depth = tenBit ? 10 : 8
+            accept.chroma = 420
+            accept.width = UInt32(width)
+            accept.height = UInt32(height)
+            accept.refresh = UInt32(fps)
+            accept.hdr = 0
+            self.secondAnnounced = rm_host_second_start(host, &accept) != 0
+            // The picture starts whole.
+            self.second.keyframe()
+        }
+    }
+    private var secondAnnounced = false
+
+    private func sendSecond(_ o: HostEncoder.Output) {
+        guard let host, secondAnnounced else { return }
+        let age = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()) - o.pts)
+        let now = rm_host_now_us(host)
+        guard now != 0 else { return }
+        let capture = now &- UInt64(max(0, age) * 1_000_000)
+        _ = o.annexB.withUnsafeBytes {
+            rm_host_send_frame2(host, $0.bindMemory(to: UInt8.self).baseAddress, o.annexB.count, o.keyframe ? 1 : 0, capture)
+        }
+    }
+
     private func inputArrived(_ i: rm_input) {
+        if i.kind == 8 {
+            lock.lock()
+            aimedAtSecond = i.slot == 1
+            lock.unlock()
+            return
+        }
         switch i.kind {
         case 1: input.handle(.pointerTo(i.x, i.y))
         case 2: input.handle(.pointerBy(i.x, i.y))
@@ -714,6 +774,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func clientLeft() {
         hostLog("host: client left")
+        secondAnnounced = false
+        lock.lock()
+        aimedAtSecond = false
+        lock.unlock()
+        Task { @MainActor in await self.second.stop() }
         if options.lockOnLeave, !options.loginWindow {
             hostLog("host: locking this Mac, as set")
             if let lib = dlopen("/System/Library/PrivateFrameworks/login.framework/login", RTLD_NOW), let sym = dlsym(lib, "SACLockScreenImmediate") {
