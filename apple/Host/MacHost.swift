@@ -12,6 +12,8 @@ import ScreenCaptureKit
 
 /// Where the log goes besides stdout: an app started from Finder or `open` has no terminal.
 let hostLogFile: FileHandle? = {
+    // At the login window launchd already sends what is printed to the agent's own log.
+    if CommandLine.arguments.contains("--login-window") { return nil }
     let url = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Logs/remoteman-host.log")
     if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
@@ -63,6 +65,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var advertise = false
         /// A new device waits until this Mac's owner has compared the code and said yes.
         var confirm = false
+        /// Running in the login window's session (LoginWindow.swift): the picture is the login
+        /// window, so the device's display is always made the main one.
+        var loginWindow = false
         /// For tests: so many seconds after a device starts waiting, say yes (negative: say no).
         var testDecide: Double?
         var testAllow: Double?
@@ -326,13 +331,17 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         guard decoders.contains("hevc") else { return refuse("this host sends HEVC 4:2:0 and the client doesn't decode it") }
         guard RMVirtualDisplay.isSupported() else { return refuse("this macOS has no virtual displays") }
-        guard CGPreflightScreenCaptureAccess() else {
-            return refuse("the Mac host needs Screen Recording permission (System Settings, Privacy & Security)")
+        if !CGPreflightScreenCaptureAccess() {
+            // At the login window the question can't be asked or answered: try all the same.
+            guard options.loginWindow else {
+                return refuse("the Mac host needs Screen Recording permission (System Settings, Privacy & Security)")
+            }
+            hostLog("host: Screen Recording isn't reported as granted here; trying all the same")
         }
         // Where the client wants its display: 0 extra, 1 main, 2 only. --main yes still forces main.
         let p = Picture(
             width: Int(c.width), height: Int(c.height), fps: Int(c.refresh), hiDPI: c.scale >= 1.5, cursorApart: c.cursor_apart != 0,
-            placement: max(Int(c.placement), options.makeMain ? 1 : 0))
+            placement: max(Int(c.placement), options.makeMain || options.loginWindow ? 1 : 0))
         limit = 0
         if let failure = begin(p) { return refuse(failure) }
         clientName = name

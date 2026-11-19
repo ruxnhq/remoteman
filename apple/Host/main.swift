@@ -23,6 +23,7 @@ var installCamera = false
 var probeDisplay = false
 var testPanel = false
 var installMicrophone = false
+var installLogin: Bool?
 var args = Array(CommandLine.arguments.dropFirst())
 while !args.isEmpty {
     let a = args.removeFirst()
@@ -39,6 +40,11 @@ while !args.isEmpty {
     }
     if a == "--install-microphone" {
         installMicrophone = yes()
+        continue
+    }
+    if a == "--install-login" {
+        // "yes" installs the login window agent, "remove" takes it away.
+        installLogin = value() != "remove"
         continue
     }
     if a == "--install-camera" {
@@ -65,6 +71,14 @@ while !args.isEmpty {
         options.allowClipboard = list.contains("clipboard")
         options.allowFiles = list.contains("files")
     case "--advertise": options.advertise = yes()
+    case "--login-window":
+        // Started by launchd in the login window's session: picture and input only.
+        options.loginWindow = yes()
+        options.sound = false
+        options.allowClipboard = false
+        options.allowFiles = false
+        options.advertise = false
+        options.pair = false
     case "--confirm": options.confirm = yes()
     case "--test-decide": options.testDecide = Double(value())
     case "--test-tone": options.testTone = yes()
@@ -79,7 +93,9 @@ while !args.isEmpty {
 }
 try? FileManager.default.createDirectory(atPath: options.stateDir, withIntermediateDirectories: true)
 
-if unattended {
+if options.loginWindow {
+    hostLog("host: started for the login window (uid \(getuid())); Screen Recording \(CGPreflightScreenCaptureAccess() ? "granted" : "not reported as granted"), Accessibility \(AXIsProcessTrusted() ? "granted" : "not reported as granted")")
+} else if unattended {
     if !CGPreflightScreenCaptureAccess() {
         hostLog("host: no Screen Recording permission yet; clients are refused until it is granted. If macOS doesn't ask, turn on remoteman-host in System Settings > Privacy & Security > Screen & System Audio Recording.")
         CGRequestScreenCaptureAccess()
@@ -110,6 +126,13 @@ if installMicrophone {
         hostLog("microphone: asking for the password to install remoteman Microphone")
         controller.installMicrophone()
         hostLog("microphone: \(controller.microphoneNote.isEmpty ? "cancelled" : controller.microphoneNote)")
+    }
+}
+if let installLogin {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+        hostLog("host: asking for the password to \(installLogin ? "install" : "remove") the login window agent")
+        controller.installLoginWindow(installLogin)
+        hostLog("host: login window agent: \(controller.loginNote.isEmpty ? "cancelled" : controller.loginNote)")
     }
 }
 if installCamera {

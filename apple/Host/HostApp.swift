@@ -61,6 +61,66 @@ final class HostController: ObservableObject {
         }
     }
 
+    /// Reaching this Mac at its login window (LoginWindow.swift).
+    @Published private(set) var loginInstalled = LoginWindow.installed
+    @Published private(set) var loginNote = ""
+    /// Sharing stopped because this session isn't the one on screen; it comes back with it.
+    private var yielded = false
+
+    func installLoginWindow(_ install: Bool? = nil) {
+        let want = install ?? !loginInstalled
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("remoteman-host", isDirectory: true).path
+        loginNote = LoginWindow.setInstalled(
+            want, stateDir: unattended ? options.stateDir : support, listen: "0.0.0.0:\(port.isEmpty ? "7791" : port)", name: options.name)
+        loginInstalled = LoginWindow.installed
+    }
+
+    /// One port, two hosts: this one has it while its session is on screen; the login window's
+    /// has it while the login window is.
+    private func shareThePort() {
+        if options.loginWindow {
+            let want = LoginWindow.showing
+            if want, !host.isRunning {
+                do {
+                    try host.start()
+                    sharing = true
+                    LoginWindow.giveBack(options.stateDir)
+                    hostLog("host: the login window is showing: listening")
+                } catch {
+                    if startError != error.localizedDescription { hostLog("host: can't listen yet: \(error.localizedDescription)") }
+                    startError = error.localizedDescription
+                }
+            } else if !want, host.isRunning {
+                hostLog("host: someone is logged in: leaving the port to their own host")
+                host.stop()
+                sharing = false
+                LoginWindow.giveBack(options.stateDir)
+            }
+            return
+        }
+        let onScreen = LoginWindow.sessionOnConsole
+        if !onScreen, host.isRunning {
+            hostLog("host: this session is no longer on screen: sharing waits")
+            host.stop()
+            sharing = false
+            client = nil
+            yielded = true
+        } else if onScreen, yielded, !host.isRunning {
+            // The login window's host may need a moment to let go: tried again each second.
+            do {
+                try host.start()
+                sharing = true
+                yielded = false
+                startError = nil
+                readInfo()
+                hostLog("host: this session is on screen again: sharing")
+            } catch {
+                startError = error.localizedDescription
+            }
+        }
+    }
+
     func installCamera() {
         CameraInstaller.shared.changed = { [weak self] note in
             self?.cameraNote = note
@@ -144,7 +204,9 @@ final class HostController: ObservableObject {
 
     /// Start as the launch asks: at once when unattended, otherwise unless sharing was paused.
     func launch() {
-        if unattended {
+        if options.loginWindow {
+            // Starts and stops with the login window being shown (shareThePort, each second).
+        } else if unattended {
             do { try host.start() } catch {
                 hostLog("host: failed to start: \(error.localizedDescription)")
                 exit(1)
@@ -155,6 +217,8 @@ final class HostController: ObservableObject {
             // Sharing was on when the app was last open. On a fresh install nothing starts by
             // itself (and so macOS asks nothing at launch): the owner turns sharing on.
             setSharing(true)
+            // The login window's host may still hold the port just after logging in: tried again each second.
+            if !host.isRunning { yielded = true }
         }
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
         RunLoop.main.add(t, forMode: .common)
@@ -245,6 +309,8 @@ final class HostController: ObservableObject {
 
     private func tick() {
         now = Date()
+        shareThePort()
+        if options.loginWindow { return }
         let sr = CGPreflightScreenCaptureAccess(), ax = AXIsProcessTrusted()
         if sr != screenRecording { screenRecording = sr }
         if ax != accessibility { accessibility = ax }
@@ -351,6 +417,11 @@ final class HostAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        if controller.options.loginWindow {
+            // At the login window there is no menu bar to sit in: only the host.
+            controller.launch()
+            return
+        }
         buildMenu()
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.target = self

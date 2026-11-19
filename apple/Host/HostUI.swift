@@ -274,6 +274,21 @@ struct HostSettings: View {
                         .toggleStyle(.checkbox).available(Features.placementPolicy)
                     }
                 }
+                CardGroup(
+                    "When nobody is logged in",
+                    footnote: "Picture and input only. After a restart with FileVault on, the disk has to be unlocked at this Mac first; nothing can show the Mac before that."
+                ) {
+                    Row(
+                        "Show the login window to paired devices",
+                        caption: controller.loginNote.isEmpty
+                            ? (controller.loginInstalled
+                                ? "Installed. After you log out, a paired device connecting to this Mac sees its login window and can log in. It connects again once logged in."
+                                : "Installs a small agent that macOS starts at the login window. macOS asks for your password. remoteman host has to be in the Applications folder.")
+                            : controller.loginNote
+                    ) {
+                        Button(controller.loginInstalled ? "Remove…" : "Install…") { controller.installLoginWindow() }
+                    }
+                }
                 CardGroup("Being found", footnote: "Off, a device is paired by typing this Mac's address. Only paired devices can connect either way.") {
                     Row(
                         "Show this Mac to devices on this network",
