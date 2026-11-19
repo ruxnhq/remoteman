@@ -43,6 +43,15 @@ fn systemctl(args: &[&str]) -> Option<String> {
 /// a user service that is stopped and started.
 static DAEMON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The agent every session runs where the daemon is installed (scripts/install-daemon.sh).
+const AGENT_UNIT: &str = "remoteman-agent.service";
+
+/// Whether this computer's host is the daemon, going by what is installed (for when nothing
+/// answers to say so).
+fn daemon_installed() -> bool {
+    std::env::var_os("REMOTEMAN_HOST_UNIT").is_none() && std::path::Path::new("/etc/systemd/user").join(AGENT_UNIT).exists()
+}
+
 fn daemon() -> bool {
     DAEMON.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -51,6 +60,9 @@ fn daemon() -> bool {
 pub fn start() {
     if daemon() {
         let _ = ask("sharing on");
+    } else if daemon_installed() {
+        // This session's agent isn't running: it is the daemon's to enable, ours to start.
+        let _ = systemctl(&["start", AGENT_UNIT]);
     } else {
         let _ = systemctl(&["enable", "--now", &unit()]);
     }
@@ -60,7 +72,7 @@ pub fn start() {
 pub fn stop() {
     if daemon() {
         let _ = ask("sharing off");
-    } else {
+    } else if !daemon_installed() {
         let _ = systemctl(&["disable", "--now", &unit()]);
     }
 }
