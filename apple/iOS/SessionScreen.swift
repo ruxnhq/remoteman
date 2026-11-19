@@ -14,6 +14,7 @@ struct SessionScreen: View {
     @State private var pictureMenu = false
     @State private var pickingFiles = false
     @State private var leaving = false
+    @AppStorage(InputSettings.touchModeKey) private var touchMode = "direct"
     @State private var hint = false
     @StateObject private var keys = KeyStrip()
     @AppStorage(SessionHandle.shownKey) private var showHandle = true
@@ -123,7 +124,11 @@ struct SessionScreen: View {
             text("Picture", "sparkles.tv", active: pictureMenu) { pictureMenu = true }
                 .popover(isPresented: $pictureMenu) { PictureMenu().presentationCompactAdaptation(.popover) }
                 .available(Features.bitrateLimit && session.has("configure"))
-            text("Touch", "hand.point.up.left", active: false) {}.available(Features.trackpadMode)
+            text(touchMode == "trackpad" ? "Trackpad" : "Touch", touchMode == "trackpad" ? "rectangle.and.hand.point.up.left" : "hand.point.up.left", active: touchMode == "trackpad") {
+                touchMode = touchMode == "trackpad" ? "direct" : "trackpad"
+                Haptics.toggle(touchMode == "trackpad")
+            }
+            .available(Features.trackpadMode)
             separator
             icon(session.soundOn ? "speaker.wave.2.fill" : "speaker.wave.2", session.soundOn ? "Sound, on" : "Sound, off", active: session.soundOn) {
                 Haptics.toggle(!session.soundOn)
@@ -263,7 +268,8 @@ struct SessionScreen: View {
                     Row(title: "Picture") { RowValue(text: PictureMenu.label(session.bitrateLimit), chevron: true) }
                 }
                 .available(Features.bitrateLimit && session.has("configure"))
-                Row(title: "Touch") { RowValue(text: "Direct", chevron: false) }.available(Features.trackpadMode)
+                ChoiceRow(title: "Touch", value: $touchMode, choices: [("direct", "Direct"), ("trackpad", "Trackpad")])
+                    .available(Features.trackpadMode)
                 Row(title: "Show figures", last: true) { Toggle("", isOn: $session.showStats).labelsHidden() }
             }
             .background(Theme.fill, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))

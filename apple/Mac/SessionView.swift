@@ -281,7 +281,9 @@ struct SessionControls {
     @ViewBuilder var main: some View {
         ControlButton(
             symbol: "keyboard", name: "Send keys and shortcuts", word: "Keys", kind: kind, enabled: Features.sendKeys
-        ) { _ in }
+        ) { v in
+            SessionMenus.keys(session: session).open(under: v)
+        }
         ControlButton(symbol: "display", name: "Display", word: "Display", kind: kind) { v in
             SessionMenus.display(model: model, session: session, computer: computer).open(under: v)
         }
@@ -290,7 +292,9 @@ struct SessionControls {
         }
         ControlButton(
             symbol: "cursorarrow", name: "Pointer", word: "Pointer", kind: kind, enabled: Features.pointerOptions
-        ) { _ in }
+        ) { v in
+            SessionMenus.pointer(session: session).open(under: v)
+        }
     }
 
     @ViewBuilder var media: some View {
@@ -577,6 +581,54 @@ enum SessionMenus {
 
     /// The Picture menu. The stream is what the computer and this Mac agree on, so the choices
     /// show what is in use and can't be changed yet; Show Figures works.
+    /// Shortcuts this Mac keeps for itself, or has no key for, sent to the computer.
+    static func keys(session: ViewerSession) -> NSMenu {
+        let width: CGFloat = 300
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.minimumWidth = width
+        let mac = session.client?.host.os == "macos"
+        menu.header("Send to the computer")
+        let list: [(String, String, [UInt16])] =
+            mac
+            ? [
+                ("Switch apps", "⌘Tab", [0xE3, 0x2B]), ("Spotlight", "⌘Space", [0xE3, 0x2C]), ("Quit the app in front", "⌘Q", [0xE3, 0x14]),
+                ("Force Quit…", "⌥⌘Esc", [0xE2, 0xE3, 0x29]), ("Lock the screen", "⌃⌘Q", [0xE0, 0xE3, 0x14]),
+            ]
+            : [
+                ("Ctrl+Alt+Delete", "", [0xE0, 0xE2, 0x4C]), ("Super", "the overview or Start menu", [0xE3]),
+                ("Switch windows", "Alt+Tab", [0xE2, 0x2B]), ("Close the window", "Alt+F4", [0xE2, 0x3D]),
+                ("Lock the screen", "Super+L", [0xE3, 0x0F]), ("Print Screen", "", [0x46]),
+            ]
+        for (title, hint, keys) in list {
+            menu.addItem(ActionItem(title, hint: hint, enabled: session.input != nil, width: width) { session.chord(keys) })
+        }
+        return menu
+    }
+
+    /// How the pointer is drawn and how its movement is sent.
+    static func pointer(session: ViewerSession) -> NSMenu {
+        let width: CGFloat = 340
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.minimumWidth = width
+        let d = UserDefaults.standard
+        menu.header("Pointer movement")
+        menu.addItem(
+            ActionItem("Normal", checked: !InputSettings.captured, width: width) { d.set(false, forKey: InputSettings.capturedKey) })
+        menu.addItem(
+            ActionItem("Captured", hint: "for 3D apps and games", checked: InputSettings.captured, width: width) {
+                d.set(true, forKey: InputSettings.capturedKey)
+            })
+        menu.caption("Captured: click the picture to hold the pointer there; press ⌃⌥ to let it go.", width: width)
+        menu.addItem(.separator())
+        menu.addItem(
+            ActionItem("Draw the Pointer on This Mac", hint: "from the next connection", checked: InputSettings.localPointer, width: width) {
+                d.set(!InputSettings.localPointer, forKey: InputSettings.localPointerKey)
+            })
+        return menu
+    }
+
     static func picture(model: AppModel, session: ViewerSession) -> NSMenu {
         let width: CGFloat = 340
         let menu = NSMenu()

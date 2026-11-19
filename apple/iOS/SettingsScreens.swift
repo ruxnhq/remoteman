@@ -137,6 +137,13 @@ struct SettingsScreen: View {
     @AppStorage("figuresInNewSessions") private var figures = false
     @AppStorage(SessionHandle.shownKey) private var showHandle = true
     @State private var editing: Computer?
+    @AppStorage(InputSettings.commandKey) private var command = "super"
+    @AppStorage(InputSettings.controlKey) private var control = "ctrl"
+    @AppStorage(InputSettings.touchModeKey) private var touch = "direct"
+    @AppStorage(InputSettings.tapToClickKey) private var tapToClick = true
+    @AppStorage(InputSettings.twoFingerRightKey) private var twoFinger = true
+    @AppStorage(InputSettings.naturalScrollKey) private var natural = true
+    @AppStorage(InputSettings.pointerSpeedKey) private var pointerSpeed = "medium"
     private var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
 
     var body: some View {
@@ -151,26 +158,34 @@ struct SettingsScreen: View {
                 VStack(spacing: 22) {
                     InsetGroup(
                         header: "Keyboard",
-                        footer: "For a keyboard connected to this \(device). Other keys go by position, so the computer's own layout decides what they type."
+                        footer: "For a keyboard connected to this \(device). A Mac gets the keys unchanged. Other keys go by position, so the computer's own layout decides what they type."
                     ) {
-                        Row(title: "Command sends") { RowValue(text: "Super", chevron: true) }.available(Features.keyRemapping)
-                        Row(title: "Control sends") { RowValue(text: "Ctrl", chevron: true) }.available(Features.keyRemapping)
-                        Row(title: "Option sends") { RowValue(text: "Alt", chevron: true) }.available(Features.keyRemapping)
+                        ChoiceRow(title: "Command sends", value: $command, choices: [("super", "Super"), ("ctrl", "Ctrl")])
+                            .available(Features.keyRemapping)
+                        ChoiceRow(title: "Control sends", value: $control, choices: [("ctrl", "Ctrl"), ("super", "Super")])
+                            .available(Features.keyRemapping)
+                        Row(title: "Option sends") { RowValue(text: "Alt") }
                         Row(title: "Key strip", last: true) { RowValue(text: "Esc, Tab and 19 more", chevron: true) }
                             .available(Features.keyStripEditing)
                     }
                     InsetGroup(
                         header: "Pointer and touch",
-                        footer: "Direct: your finger is the pointer where it touches. Trackpad: drag anywhere to move the pointer, like a laptop's trackpad."
+                        footer: "Direct: your finger touches the computer's screen where it lands. Trackpad: drag anywhere to move the pointer, tap to click, tap then hold to drag, two fingers to scroll."
                     ) {
-                        Row(title: "Touch") { RowValue(text: "Direct") }.available(Features.trackpadMode)
-                        Row(title: "Tap to click") { Toggle("", isOn: .constant(true)).labelsHidden() }.available(Features.pointerOptions)
-                        Row(title: "Two-finger tap for right click") { Toggle("", isOn: .constant(true)).labelsHidden() }
-                            .available(Features.pointerOptions)
-                        Row(title: "Natural scrolling") { Toggle("", isOn: .constant(true)).labelsHidden() }.available(Features.pointerOptions)
+                        ChoiceRow(title: "Touch", value: $touch, choices: [("direct", "Direct"), ("trackpad", "Trackpad")])
+                            .available(Features.trackpadMode)
+                        Row(title: "Tap to click") { Toggle("", isOn: $tapToClick).labelsHidden() }
+                            .available(Features.pointerOptions && touch == "trackpad")
+                        Row(title: "Two-finger tap for right click") { Toggle("", isOn: $twoFinger).labelsHidden() }
+                            .available(Features.pointerOptions && touch == "trackpad")
+                        Row(title: "Natural scrolling") { Toggle("", isOn: $natural).labelsHidden() }.available(Features.pointerOptions)
                         Row(title: "Pinch to zoom the view") { Toggle("", isOn: .constant(true)).labelsHidden() }
-                            .available(Features.pointerOptions)
-                        Row(title: "Pointer speed", last: true) { RowValue(text: "Medium", chevron: true) }.available(Features.pointerOptions)
+                            .available(Features.viewZoom)
+                        ChoiceRow(
+                            title: "Pointer speed", last: true, value: $pointerSpeed,
+                            choices: [("slow", "Slow"), ("medium", "Medium"), ("fast", "Fast")]
+                        )
+                        .available(Features.pointerOptions && touch == "trackpad")
                     }
                     InsetGroup(
                         header: "During a session",
@@ -222,5 +237,24 @@ struct SettingsScreen: View {
         let f = DateFormatter()
         f.dateFormat = "d MMM"
         return f.string(from: c.added)
+    }
+}
+
+/// A row whose value is one of a few choices, picked from a menu.
+struct ChoiceRow: View {
+    let title: String
+    var last = false
+    @Binding var value: String
+    let choices: [(String, String)]
+    var body: some View {
+        Row(title: title, last: last) {
+            Menu {
+                Picker(title, selection: $value) {
+                    ForEach(choices, id: \.0) { Text($0.1).tag($0.0) }
+                }
+            } label: {
+                RowValue(text: choices.first { $0.0 == value }?.1 ?? "", chevron: true)
+            }
+        }
     }
 }

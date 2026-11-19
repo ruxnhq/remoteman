@@ -97,7 +97,8 @@ final class RefreshMeter {
         }
 
         override func resetCursorRects() {
-            addCursorRect(bounds, cursor: hostCursor ?? .arrow)
+            // With the pointer drawn by the computer (in the picture) there is none of this Mac's.
+            addCursorRect(bounds, cursor: hostCursor ?? (InputSettings.localPointer || session.input == nil ? .arrow : Self.noCursor))
         }
 
         required init?(coder: NSCoder) { fatalError() }
@@ -111,12 +112,17 @@ final class RefreshMeter {
             super.viewDidMoveToWindow()
             link?.invalidate()
             link = nil
-            guard window != nil else { return }
+            NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: nil)
+            guard let window else {
+                capture(false)
+                return
+            }
+            NotificationCenter.default.addObserver(self, selector: #selector(lostKey), name: NSWindow.didResignKeyNotification, object: window)
             let l = displayLink(target: self, selector: #selector(tick))
             l.add(to: .main, forMode: .common)
             link = l
-            window?.acceptsMouseMovedEvents = true
-            window?.makeFirstResponder(self)
+            window.acceptsMouseMovedEvents = true
+            window.makeFirstResponder(self)
             resize()
         }
 
@@ -158,6 +164,48 @@ final class RefreshMeter {
                 cursorVideoSize = v
                 updateCursor()
             }
+            if capturing { placeCapturedCursor() }
+        }
+
+        // MARK: A captured pointer (raw movement, for 3D apps and games)
+
+        /// While captured this Mac's pointer is hidden and held still, and its movement goes to
+        /// the computer as movement. A click in the picture captures; Control-Option, the window
+        /// losing the keyboard or the session ending lets go.
+        private(set) var capturing = false
+        private let capturedCursor = NSImageView()
+
+        private func capture(_ on: Bool) {
+            guard on != capturing else { return }
+            capturing = on
+            CGAssociateMouseAndMouseCursorPosition(on ? 0 : 1)
+            if on { NSCursor.hide() } else { NSCursor.unhide() }
+            pendingPointer = nil
+            if on, capturedCursor.superview == nil {
+                capturedCursor.imageScaling = .scaleAxesIndependently
+                addSubview(capturedCursor)
+            }
+            capturedCursor.isHidden = true
+            session.pointerCaptured?(on)
+        }
+
+        @objc private func lostKey() { capture(false) }
+
+        /// The computer's cursor where the computer says it is: this Mac's own is hidden.
+        private func placeCapturedCursor() {
+            guard let known = session.hostCursor, let c = known, let at = session.hostCursorAt, at.2, let r = session.renderer,
+                let v = r.videoSize, v.width > 0
+            else {
+                capturedCursor.isHidden = true
+                return
+            }
+            let rect = r.videoRect(in: bounds.size)
+            let k = rect.width / v.width
+            capturedCursor.image = NSImage(cgImage: c.image, size: NSSize(width: c.image.width, height: c.image.height))
+            capturedCursor.frame = CGRect(
+                x: rect.minX + CGFloat(at.0) * rect.width - CGFloat(c.hotX) * k, y: rect.minY + CGFloat(at.1) * rect.height - CGFloat(c.hotY) * k,
+                width: CGFloat(c.image.width) * k, height: CGFloat(c.image.height) * k)
+            capturedCursor.isHidden = false
         }
 
         // MARK: Pointer
@@ -174,6 +222,12 @@ final class RefreshMeter {
             let p = convert(e.locationInWindow, from: nil)
             let rect = r.videoRect(in: bounds.size)
             guard rect.width > 0, rect.height > 0 else { return }
+            if capturing {
+                // Points moved here, as the computer's pixels.
+                let k = (r.videoSize?.width ?? rect.width) / rect.width
+                if e.deltaX != 0 || e.deltaY != 0 { session.input?.pointerBy(dx: Float(e.deltaX * k), dy: Float(e.deltaY * k)) }
+                return
+            }
             let x = min(max((p.x - rect.minX) / rect.width, 0), 1)
             let y = min(max((p.y - rect.minY) / rect.height, 0), 1)
             pendingPointer = (Float(x), Float(y))
@@ -189,11 +243,33 @@ final class RefreshMeter {
         override func mouseDragged(with e: NSEvent) { moved(e) }
         override func rightMouseDragged(with e: NSEvent) { moved(e) }
         override func otherMouseDragged(with e: NSEvent) { moved(e) }
+        private var swallowedDown = false
         override func mouseDown(with e: NSEvent) {
             window?.makeFirstResponder(self)
+            if InputSettings.captured, !capturing, session.input != nil {
+                // The click that captures isn't one for the computer.
+                capture(true)
+                swallowedDown = true
+                return
+            }
             button(e, 0, down: true)
         }
-        override func mouseUp(with e: NSEvent) { button(e, 0, down: false) }
+        override func mouseUp(with e: NSEvent) {
+            if swallowedDown {
+                swallowedDown = false
+                return
+            }
+            button(e, 0, down: false)
+        }
+
+        /// A pinch on the trackpad zooms on the computer: Control with the wheel.
+        override func magnify(with e: NSEvent) {
+            guard InputSettings.pinchZooms, let c = session.input, e.magnification != 0 else { return }
+            flushPointer()
+            c.key(usage: 0xE0, down: true)
+            c.scroll(dx: 0, dy: Float(-e.magnification * 600))
+            c.key(usage: 0xE0, down: false)
+        }
         override func rightMouseDown(with e: NSEvent) { button(e, 1, down: true) }
         override func rightMouseUp(with e: NSEvent) { button(e, 1, down: false) }
         override func otherMouseDown(with e: NSEvent) { button(e, 2, down: true) }
@@ -205,7 +281,7 @@ final class RefreshMeter {
             // View points to display pixels; a wheel click without precise deltas is a few lines.
             let k = (rect.width > 0 ? v.width / rect.width : 1) * (e.hasPreciseScrollingDeltas ? 1 : 10)
             flushPointer()
-            session.input?.scroll(dx: Float(-e.scrollingDeltaX * k), dy: Float(-e.scrollingDeltaY * k))
+            session.wheel(dx: Float(-e.scrollingDeltaX * k), dy: Float(-e.scrollingDeltaY * k))
         }
 
         // MARK: Keys
@@ -213,7 +289,7 @@ final class RefreshMeter {
         private func key(_ e: NSEvent, down: Bool) {
             guard let usage = hidUsage(forMacKeyCode: e.keyCode) else { return }
             flushPointer()
-            session.input?.key(usage: usage, down: down)
+            session.hardKey(usage, down: down)
         }
 
         override func keyDown(with e: NSEvent) { if !e.isARepeat { key(e, down: true) } }
@@ -242,15 +318,19 @@ final class RefreshMeter {
             let down = e.modifierFlags.rawValue & mask != 0
             if down == modifiersDown.contains(e.keyCode) { return }
             if down { modifiersDown.insert(e.keyCode) } else { modifiersDown.remove(e.keyCode) }
-            session.input?.key(usage: usage, down: down)
+            session.hardKey(usage, down: down)
+            // Control and Option together, and nothing else: the captured pointer is let go.
+            let held = e.modifierFlags.intersection([.control, .option, .command, .shift])
+            if capturing, down, held == [.control, .option] { capture(false) }
         }
 
         /// Let go of anything still held when the window loses the keyboard.
         override func resignFirstResponder() -> Bool {
             for code in modifiersDown {
-                if let u = hidUsage(forMacKeyCode: code) { session.input?.key(usage: u, down: false) }
+                if let u = hidUsage(forMacKeyCode: code) { session.hardKey(u, down: false) }
             }
             modifiersDown.removeAll()
+            capture(false)
             return super.resignFirstResponder()
         }
     }
@@ -426,7 +506,7 @@ final class RefreshMeter {
             guard now - lastLocal > 0.3 else { return }
             lastLocal = now
             // The modifiers went to the computer as they were pressed: let them go there.
-            for usage in keysDown { session.input?.key(usage: usage, down: false) }
+            for usage in keysDown { session.hardKey(usage, down: false) }
             keysDown = []
             if which == 0 { session.toggleControls?() } else { session.leaveRequested?() }
         }
@@ -511,7 +591,7 @@ final class RefreshMeter {
             let rect = r.videoRect(in: bounds.size)
             let k = rect.width > 0 ? v.width / rect.width : 1
             flushPointer()
-            session.input?.scroll(dx: Float(-(t.x - lastScroll.x) * k), dy: Float(-(t.y - lastScroll.y) * k))
+            session.wheel(dx: Float(-(t.x - lastScroll.x) * k), dy: Float(-(t.y - lastScroll.y) * k))
             lastScroll = t
         }
 
@@ -531,12 +611,96 @@ final class RefreshMeter {
             }
         }
 
+        // MARK: The finger as a trackpad
+
+        /// One finger dragged anywhere moves the pointer; a tap clicks, a tap with two fingers
+        /// is the right button, two fingers dragged scroll, and a tap followed at once by a
+        /// finger held drags.
+        private var pad: [UITouch: CGPoint] = [:]
+        private var padBegan: CFTimeInterval = 0
+        private var padTravel: CGFloat = 0
+        private var padMost = 0
+        private var padLastTap: CFTimeInterval = 0
+        private var padDragging = false
+
+        private func trackpad(_ touches: Set<UITouch>, phase: UInt8) {
+            guard let r = session.renderer, let c = session.input else { return }
+            let rect = r.videoRect(in: bounds.size)
+            let now = CACurrentMediaTime()
+            switch phase {
+            case 0:
+                if pad.isEmpty {
+                    padBegan = now
+                    padTravel = 0
+                    padMost = 0
+                    if now - padLastTap < 0.3 {
+                        padDragging = true
+                        c.button(0, down: true)
+                    }
+                }
+                for t in touches { pad[t] = t.location(in: self) }
+                padMost = max(padMost, pad.count)
+            case 1:
+                var d = CGPoint.zero
+                var n: CGFloat = 0
+                for t in touches {
+                    guard let was = pad[t] else { continue }
+                    let p = t.location(in: self)
+                    d.x += p.x - was.x
+                    d.y += p.y - was.y
+                    n += 1
+                    pad[t] = p
+                }
+                guard n > 0 else { return }
+                d.x /= n
+                d.y /= n
+                padTravel += hypot(d.x, d.y)
+                if pad.count >= 2 {
+                    let k = (r.videoSize?.width ?? rect.width) / rect.width
+                    session.wheel(dx: Float(-d.x * k), dy: Float(-d.y * k))
+                } else {
+                    let speed = InputSettings.pointerFactor
+                    var p = pointerAt ?? CGPoint(x: rect.midX, y: rect.midY)
+                    p.x = min(max(p.x + d.x * speed, rect.minX), rect.maxX)
+                    p.y = min(max(p.y + d.y * speed, rect.minY), rect.maxY)
+                    localPointer(at: p)
+                    if let f = fraction(p) { c.pointerTo(x: f.0, y: f.1) }
+                }
+            default:
+                for t in touches { pad[t] = nil }
+                guard pad.isEmpty else { return }
+                if padDragging {
+                    padDragging = false
+                    c.button(0, down: false)
+                } else if now - padBegan < 0.3, padTravel < 8 {
+                    // Where the pointer is: the tap itself is not a place.
+                    if let p = pointerAt, let f = fraction(p) { c.pointerTo(x: f.0, y: f.1) }
+                    if padMost == 1, InputSettings.tapToClick {
+                        c.button(0, down: true)
+                        c.button(0, down: false)
+                        padLastTap = now
+                        Haptics.key()
+                    } else if padMost == 2, InputSettings.twoFingerRight {
+                        c.button(1, down: true)
+                        c.button(1, down: false)
+                        Haptics.key()
+                    }
+                }
+            }
+        }
+
         // MARK: Touch
 
         private func send(_ touches: Set<UITouch>, _ event: UIEvent?, phase: UInt8) {
             guard let r = session.renderer else { return }
             let rect = r.videoRect(in: bounds.size)
             guard rect.width > 0, rect.height > 0 else { return }
+            if InputSettings.trackpadTouch || !pad.isEmpty {
+                let fingers = touches.filter { $0.type != .indirectPointer }
+                for t in touches where t.type == .indirectPointer { pointer(t, event, phase: phase) }
+                if !fingers.isEmpty { trackpad(fingers, phase: phase) }
+                return
+            }
             for t in touches {
                 if t.type == .indirectPointer {
                     pointer(t, event, phase: phase)
@@ -629,7 +793,7 @@ final class RefreshMeter {
                 flushPointer()
                 let usage = UInt16(k.keyCode.rawValue)
                 if down { keysDown.insert(usage) } else if keysDown.remove(usage) == nil { handled = true; continue }
-                session.input?.key(usage: usage, down: down)
+                session.hardKey(usage, down: down)
                 handled = true
             }
             return handled

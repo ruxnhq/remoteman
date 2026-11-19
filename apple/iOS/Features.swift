@@ -32,10 +32,12 @@ enum Features {
     /// A display on an external monitor, and mirroring one of the computer's monitors.
     static let moreDisplays = false
     /// The finger as a trackpad, and the pointer options that go with it.
-    static let trackpadMode = false
-    static let pointerOptions = false
+    static let trackpadMode = true
+    static let pointerOptions = true
+    /// Pinching to zoom this device's view of the picture.
+    static let viewZoom = false
     /// Remapping Command, Control and Option, stand-ins for shortcuts iPadOS keeps, editing the key strip.
-    static let keyRemapping = false
+    static let keyRemapping = true
     static let keyStripEditing = false
     static let shortcutsMenu = false
     /// A second session in a window of its own, and choosing where a window's controls sit.

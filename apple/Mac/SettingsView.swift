@@ -107,58 +107,82 @@ struct GeneralSettings: View {
 }
 
 struct KeyboardPointerSettings: View {
+    @AppStorage(InputSettings.commandKey) private var command = "super"
+    @AppStorage(InputSettings.controlKey) private var control = "ctrl"
+    @AppStorage(InputSettings.localPointerKey) private var localPointer = true
+    @AppStorage(InputSettings.capturedKey) private var captured = false
+    @AppStorage(InputSettings.naturalScrollKey) private var natural = true
+    @AppStorage(InputSettings.scrollSpeedKey) private var speed = 0.5
+    @AppStorage(InputSettings.pinchZoomsKey) private var pinch = true
+
     var body: some View {
         SettingsPage {
             CardGroup("Keyboard", footnote: "When connected to a Mac, the keys are sent unchanged.") {
                 Row("⌘ Command sends", caption: "Ctrl makes ⌘C and ⌘V copy and paste on a Linux computer.") {
-                    segments("⌘ Command sends", ["Ctrl", "Super"], selected: 1, flag: Features.keyboardMapping)
+                    Picker("⌘ Command sends", selection: $command) {
+                        Text("Ctrl").tag("ctrl")
+                        Text("Super").tag("super")
+                    }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize().available(Features.keyboardMapping)
                 }
                 Row("⌃ Control sends") {
-                    segments("⌃ Control sends", ["Ctrl", "Super"], selected: 0, flag: Features.keyboardMapping)
+                    Picker("⌃ Control sends", selection: $control) {
+                        Text("Ctrl").tag("ctrl")
+                        Text("Super").tag("super")
+                    }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize().available(Features.keyboardMapping)
                 }
-                Row("⌥ Option sends") {
-                    FixedPopUp(title: "⌥ Option sends", value: "Alt", flag: Features.keyboardMapping)
-                }
+                Row("⌥ Option sends", value: "Alt", dim: true)
                 Row(
                     "Send system shortcuts to the computer",
                     caption: "In full screen, ⌘Tab, ⌘Space and ⌘Q go to the computer instead of this Mac."
                 ) {
                     FixedSwitch(title: "Send system shortcuts to the computer", value: false, flag: Features.systemShortcuts)
                 }
-                Row("Keys are sent", caption: "By position suits a computer set to the same layout as this keyboard.") {
-                    FixedPopUp(title: "Keys are sent", value: "By position on the keyboard", flag: Features.keyboardMapping)
-                }
+                Row(
+                    "Keys are sent", caption: "By position suits a computer set to the same layout as this keyboard.",
+                    value: "By position on the keyboard", dim: true)
             }
             CardGroup("Pointer") {
-                Row("Draw the pointer on this Mac", caption: "It moves at once, without waiting for the picture.") {
-                    FixedSwitch(title: "Draw the pointer on this Mac", value: true, flag: Features.pointerOptions)
+                Row(
+                    "Draw the pointer on this Mac",
+                    caption: "It moves at once, without waiting for the picture. Off, the computer draws it into the picture. Applies from the next connection."
+                ) {
+                    Toggle("Draw the pointer on this Mac", isOn: $localPointer).labelsHidden().toggleStyle(.switch).available(Features.pointerOptions)
                 }
-                Row("Pointer movement", caption: "Captured sends raw movement, for 3D apps and games. Press ⌃⌥ to release.") {
-                    segments("Pointer movement", ["Normal", "Captured"], selected: 0, flag: Features.pointerOptions)
+                Row(
+                    "Pointer movement",
+                    caption: "Captured sends raw movement, for 3D apps and games: click the picture to hold the pointer there, press ⌃⌥ to release."
+                ) {
+                    Picker("Pointer movement", selection: $captured) {
+                        Text("Normal").tag(false)
+                        Text("Captured").tag(true)
+                    }
+                    .pickerStyle(.segmented).labelsHidden().fixedSize().available(Features.pointerOptions)
                 }
                 Row("Scroll direction") {
-                    FixedPopUp(title: "Scroll direction", value: "Natural, as on this Mac", flag: Features.scrollOptions)
+                    Picker("Scroll direction", selection: $natural) {
+                        Text("Natural, as on this Mac").tag(true)
+                        Text("Reversed").tag(false)
+                    }
+                    .labelsHidden().fixedSize().available(Features.scrollOptions)
                 }
                 Row("Scroll speed") {
                     HStack(spacing: 8) {
                         Text("Slow").font(.system(size: 11)).foregroundStyle(Tokens.l2)
-                        Slider(value: .constant(0.5)).frame(width: 200).available(Features.scrollOptions)
+                        Slider(value: $speed, in: 0...1).frame(width: 200).available(Features.scrollOptions)
                         Text("Fast").font(.system(size: 11)).foregroundStyle(Tokens.l2)
                     }
                 }
                 Row("Trackpad pinch") {
-                    FixedPopUp(title: "Trackpad pinch", value: "Zooms on the computer", flag: Features.scrollOptions)
+                    Picker("Trackpad pinch", selection: $pinch) {
+                        Text("Zooms on the computer").tag(true)
+                        Text("Does nothing").tag(false)
+                    }
+                    .labelsHidden().fixedSize().available(Features.scrollOptions)
                 }
             }
         }
-    }
-
-    /// A segmented control that can't be changed yet, showing what happens today.
-    private func segments(_ title: String, _ choices: [String], selected: Int, flag: Bool) -> some View {
-        Picker(title, selection: .constant(selected)) {
-            ForEach(choices.indices, id: \.self) { Text(choices[$0]).tag($0) }
-        }
-        .pickerStyle(.segmented).labelsHidden().fixedSize().available(flag)
     }
 }
 

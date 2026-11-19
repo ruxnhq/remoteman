@@ -70,6 +70,26 @@ final class ViewerSession: ObservableObject {
     /// Where input goes: the client, unless the session is view-only.
     var input: CoreClient? { viewOnly ? nil : client }
 
+    /// A key of this device's own keyboard, sent as the settings say (InputSettings).
+    func hardKey(_ usage: UInt16, down: Bool) {
+        guard let c = input else { return }
+        c.key(usage: InputSettings.map(usage, hostOS: c.host.os), down: down)
+    }
+
+    /// Keys pressed together and let go: a shortcut this device's own keyboard can't send.
+    func chord(_ usages: [UInt16]) {
+        guard let c = input else { return }
+        for u in usages { c.key(usage: u, down: true) }
+        for u in usages.reversed() { c.key(usage: u, down: false) }
+    }
+
+    /// Scrolling by this many display pixels as this device gave it, sent in the direction and at
+    /// the speed chosen.
+    func wheel(dx: Float, dy: Float) {
+        let k = InputSettings.scrollFactor * (InputSettings.naturalScroll ? 1 : -1)
+        input?.scroll(dx: dx * k, dy: dy * k)
+    }
+
     /// The host's cursor, sent apart from the picture so the view can draw it at the local
     /// pointer with no delay. All on the main thread.
     struct HostCursor {
@@ -82,6 +102,8 @@ final class ViewerSession: ObservableObject {
     private(set) var hostCursorAt: (x: Float, y: Float, visible: Bool)?
     var cursorShapeChanged: (() -> Void)?
     var cursorMoved: ((Float, Float, Bool) -> Void)?
+    /// The view saying it has taken or let go of the pointer (a captured pointer on the Mac).
+    var pointerCaptured: ((Bool) -> Void)?
 
     // MARK: Features (what the host lists; see docs/PROTOCOL.md, "Features")
 
@@ -395,12 +417,15 @@ final class ViewerSession: ObservableObject {
                             data, key: flags & 1 != 0, recovery: flags & 2 != 0, number: number, captureUs: captureUs,
                             ageUs: ageUs)
                     }
+                    // Without this the host draws its cursor into the picture.
+                    if InputSettings.localPointer {
                     c.onCursorShape = { [weak self] image, hotX, hotY in
                         DispatchQueue.main.async {
                             guard let self, self.generation == gen else { return }
                             self.hostCursor = .some(image.map { HostCursor(image: $0, hotX: hotX, hotY: hotY) })
                             self.cursorShapeChanged?()
                         }
+                    }
                     }
                     c.onCursorAt = { [weak self] x, y, visible in
                         DispatchQueue.main.async {

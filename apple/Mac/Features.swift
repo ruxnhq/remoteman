@@ -42,15 +42,15 @@ enum Features {
     /// Which of this Mac's displays to use ("Display: This Mac's display").
     static let displayChoice = false
     /// "Send keys and shortcuts".
-    static let sendKeys = false
+    static let sendKeys = true
     /// "⌘ Command sends", "⌃ Control sends", "⌥ Option sends", "Keys are sent".
-    static let keyboardMapping = false
+    static let keyboardMapping = true
     /// "Send system shortcuts to the computer" as a choice.
     static let systemShortcuts = false
     /// The Pointer menu, "Draw the pointer on this Mac", "Pointer movement".
-    static let pointerOptions = false
+    static let pointerOptions = true
     /// "Scroll direction", "Scroll speed", "Trackpad pinch".
-    static let scrollOptions = false
+    static let scrollOptions = true
     /// Forgetting a computer also removing its key from this Mac (today only the list entry goes).
     static let forgetKey = true
 }
