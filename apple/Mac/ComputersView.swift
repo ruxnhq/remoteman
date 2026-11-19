@@ -264,8 +264,15 @@ struct ComputerDetail: View {
             }
             Row("Last used", value: Wording.lastUsed(computer), dim: computer.lastUsed == nil)
             Row("Display") {
-                Picker("Display", selection: .constant(0)) { Text("This Mac's display").tag(0) }
-                    .labelsHidden().fixedSize().available(Features.displayChoice)
+                Picker("Display", selection: Binding(get: { computer.screen }, set: { v in model.store.update(computer.id) { $0.screen = v } })) {
+                    Text("Wherever the window is").tag("")
+                    ForEach(NSScreen.screens.map(\.localizedName), id: \.self) { Text($0).tag($0) }
+                    // A display that was chosen and isn't connected now stays in the list.
+                    if !computer.screen.isEmpty, !NSScreen.screens.contains(where: { $0.localizedName == computer.screen }) {
+                        Text("\(computer.screen) (not connected)").tag(computer.screen)
+                    }
+                }
+                .labelsHidden().fixedSize().available(Features.displayChoice)
             }
             Row("This display joins as", caption: PlacementCopy.caption(computer.place, name: computer.name)) {
                 PlacementPicker(computer: computer)

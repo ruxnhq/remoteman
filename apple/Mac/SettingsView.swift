@@ -137,6 +137,9 @@ struct GeneralSettings: View {
 }
 
 struct KeyboardPointerSettings: View {
+    @EnvironmentObject private var model: AppModel
+    @AppStorage(SystemKeys.settingKey) private var systemShortcuts = false
+    @State private var shortcutsNote = ""
     @AppStorage(InputSettings.commandKey) private var command = "super"
     @AppStorage(InputSettings.controlKey) private var control = "ctrl"
     @AppStorage(InputSettings.localPointerKey) private var localPointer = true
@@ -165,9 +168,17 @@ struct KeyboardPointerSettings: View {
                 Row("⌥ Option sends", value: "Alt", dim: true)
                 Row(
                     "Send system shortcuts to the computer",
-                    caption: "In full screen, ⌘Tab, ⌘Space and ⌘Q go to the computer instead of this Mac."
+                    caption: shortcutsNote.isEmpty ? "In full screen, ⌘Tab, ⌘Space, ⌘Q and ⌘` go to the computer instead of this Mac. macOS asks once for Accessibility." : shortcutsNote
                 ) {
-                    FixedSwitch(title: "Send system shortcuts to the computer", value: false, flag: Features.systemShortcuts)
+                    Toggle("Send system shortcuts to the computer", isOn: Binding(
+                        get: { systemShortcuts },
+                        set: { on in
+                            // macOS lets an app catch these keys only with Accessibility: asked for here.
+                            systemShortcuts = on && SystemKeys.askForAccess()
+                            if on, !systemShortcuts { shortcutsNote = "Allow remoteman under System Settings, Privacy & Security, Accessibility, then turn this on again." }
+                            model.systemKeys.refresh()
+                        })
+                    ).labelsHidden().toggleStyle(.switch).available(Features.systemShortcuts)
                 }
                 Row(
                     "Keys are sent", caption: "By position suits a computer set to the same layout as this keyboard.",

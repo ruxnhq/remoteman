@@ -85,6 +85,8 @@ final class AppModel: ObservableObject {
     private var reconnecting = false
     private var savedFrame: NSRect?
     private var pictureTimer: Timer?
+    /// ⌘Tab and the like, for the computer while a session is in full screen (SystemKeys).
+    let systemKeys = SystemKeys()
     private var stateSink: AnyCancellable?
     private var nearbySink: AnyCancellable?
     private var monitor: Any?
@@ -97,6 +99,12 @@ final class AppModel: ObservableObject {
             // The value arrives before the session has it; act once it does.
             DispatchQueue.main.async { self?.stateChanged(s) }
         }
+        systemKeys.active = { [weak self] in
+            guard let self, let w = self.window else { return false }
+            return self.active != nil && self.hasPicture && self.fullScreen && w.isKeyWindow && NSApp.isActive
+        }
+        systemKeys.send = { [weak self] usage, down in self?.session.hardKey(usage, down: down) }
+        if !automated { systemKeys.refresh() }
         nearbySink = Nearby.shared.$found.sink { [weak self] found in
             DispatchQueue.main.async { self?.noteNearby(found) }
         }
@@ -137,6 +145,13 @@ final class AppModel: ObservableObject {
 
     private func connectNow(_ c: SavedComputer, unlock: String? = nil) {
         guard !session.isActive, active == nil else { return }
+        // The display this computer's session is to open on, if one was chosen and is there.
+        if !c.screen.isEmpty, let w = window, !w.styleMask.contains(.fullScreen),
+            let screen = NSScreen.screens.first(where: { $0.localizedName == c.screen }), w.screen != screen
+        {
+            let v = screen.visibleFrame
+            w.setFrameOrigin(NSPoint(x: v.midX - w.frame.width / 2, y: v.midY - w.frame.height / 2))
+        }
         errors[c.id] = nil
         selection = c.id
         active = c.id

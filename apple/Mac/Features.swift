@@ -40,13 +40,13 @@ enum Features {
     /// "Add a Second Display…".
     static let secondDisplay = false
     /// Which of this Mac's displays to use ("Display: This Mac's display").
-    static let displayChoice = false
+    static let displayChoice = true
     /// "Send keys and shortcuts".
     static let sendKeys = true
     /// "⌘ Command sends", "⌃ Control sends", "⌥ Option sends", "Keys are sent".
     static let keyboardMapping = true
     /// "Send system shortcuts to the computer" as a choice.
-    static let systemShortcuts = false
+    static let systemShortcuts = true
     /// The Pointer menu, "Draw the pointer on this Mac", "Pointer movement".
     static let pointerOptions = true
     /// "Scroll direction", "Scroll speed", "Trackpad pinch".

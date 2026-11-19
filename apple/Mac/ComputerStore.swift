@@ -30,6 +30,8 @@ struct SavedComputer: Codable, Identifiable, Equatable {
     var auth = ""
     /// "" any way in (a running session, or the computer's login screen); "attach" only a running session.
     var wayIn = ""
+    /// The name of the display of this Mac a session opens on; "" wherever the window is.
+    var screen = ""
 
     init(name: String, address: String) {
         self.name = name
@@ -54,6 +56,7 @@ struct SavedComputer: Codable, Identifiable, Equatable {
         wake = try c.decodeIfPresent(Bool.self, forKey: .wake) ?? false
         auth = try c.decodeIfPresent(String.self, forKey: .auth) ?? ""
         wayIn = try c.decodeIfPresent(String.self, forKey: .wayIn) ?? ""
+        screen = try c.decodeIfPresent(String.self, forKey: .screen) ?? ""
     }
 
     var place: ViewerSession.Placement {
