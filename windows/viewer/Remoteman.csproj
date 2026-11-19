@@ -2,8 +2,16 @@
   <!-- remoteman for Windows: the WinUI 3 view. The engine (sessions, decode, presentation,
        input, sound, clipboard, files, the store) is remoteman_engine.dll, built from
        crates/remoteman-viewer-windows; this project is only the window and what is on it.
-       Unpackaged, with the Windows App SDK and .NET both inside the app's folder, so it runs
-       from that folder with nothing installed. Built by build.ps1. -->
+       Two ways to build it:
+       - unpackaged (the default, build.ps1): the Windows App SDK and .NET inside the app's
+         folder, so it runs from that folder with nothing installed; for development and the VM;
+       - as an MSIX package for the Microsoft Store (-p:Packaged=true, build.ps1 -Packaged):
+         Package.appxmanifest gives its identity (placeholders until the Store reserves the
+         name) and capabilities; the Windows App SDK then comes as the Store's framework package.
+       Nothing in the app works only unpackaged: its state goes to the package's own data
+       folder when packaged (App.xaml.cs says so to the engine), Credential Manager and the Downloads
+       folder are reachable from a full-trust package, and the engine and FFmpeg's DLLs are
+       content of the package as they are files beside the program unpackaged. -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
@@ -13,8 +21,7 @@
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <UseWinUI>true</UseWinUI>
-    <WindowsPackageType>None</WindowsPackageType>
-    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <Packaged Condition="'$(Packaged)' == ''">false</Packaged>
     <SelfContained>true</SelfContained>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -24,11 +31,28 @@
     <EnableMsixTooling>true</EnableMsixTooling>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Packaged)' != 'true'">
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Packaged)' == 'true'">
+    <WindowsPackageType>MSIX</WindowsPackageType>
+    <WindowsAppSDKSelfContained>false</WindowsAppSDKSelfContained>
+    <AppxPackageSigningEnabled>false</AppxPackageSigningEnabled>
+    <GenerateAppInstallerFile>false</GenerateAppInstallerFile>
+    <AppxBundle>Never</AppxBundle>
+    <AppxPackageDir>$(MSBuildProjectDirectory)\bin\AppPackages\</AppxPackageDir>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(Packaged)' == 'true'">
+    <AppxManifest Include="Package.appxmanifest" />
+    <Content Include="Assets\*.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.7.0" />
   </ItemGroup>
   <ItemGroup>
     <!-- The engine and FFmpeg's DLLs, put beside the program by build.ps1. -->
-    <None Include="native\*.dll" CopyToOutputDirectory="PreserveNewest" Link="%(Filename)%(Extension)" Condition="Exists('native')" />
+    <!-- Content, so they are in the MSIX as well as beside the unpackaged program. -->
+    <Content Include="native\*.dll" CopyToOutputDirectory="PreserveNewest" Link="%(Filename)%(Extension)" Condition="Exists('native')" />
   </ItemGroup>
 </Project>
