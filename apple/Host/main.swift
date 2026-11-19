@@ -23,6 +23,7 @@ var installCamera = false
 var probeDisplay = false
 var testPanel = false
 var installMicrophone = false
+var showSettings = false
 var installLogin: Bool?
 var args = Array(CommandLine.arguments.dropFirst())
 while !args.isEmpty {
@@ -32,6 +33,11 @@ while !args.isEmpty {
     // Asking macOS to install the camera is something the owner does by hand; it starts nothing else.
     if a == "--test-panel" {
         testPanel = yes()
+        continue
+    }
+    if a == "--settings" {
+        // Open the Settings window at once (the app is otherwise only a menu-bar icon).
+        showSettings = yes()
         continue
     }
     if a == "--probe-display" {
@@ -120,6 +126,7 @@ app.setActivationPolicy(.accessory)
 let controller = HostController(options: options, unattended: unattended)
 let delegate = HostAppDelegate(controller: controller)
 app.delegate = delegate
+if showSettings { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { delegate.showSettings() } }
 if testPanel { DispatchQueue.main.asyncAfter(deadline: .now() + 2) { delegate.testPanel() } }
 if probeDisplay { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { DisplayProbe.run() } }
 if installMicrophone {

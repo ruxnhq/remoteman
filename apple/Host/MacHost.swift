@@ -340,17 +340,12 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             hostLog("host: the login window took the password for \(name)")
             return refuse("logging in: this Mac is logging in for you")
         }
-        if Unattended.screenLocked, Unattended.enabled {
+        if Unattended.screenLocked, Unattended.enabled, CommandLine.arguments.contains("--no-unlock") == false {
             // Locked: unlocked for the paired device, which never sees the lock screen.
             if let why = Unattended.submit() {
-                hostLog("host: locked, and couldn't unlock for the device: \(why)")
+                hostLog("host: locked, and couldn't unlock for the device: \(why). The kept password \(Unattended.keptIsRight).")
             } else {
-                var waited = 0.0
-                while Unattended.screenLocked, waited < 6 {
-                    usleep(200_000)
-                    waited += 0.2
-                }
-                hostLog("host: locked: \(Unattended.screenLocked ? "the lock screen took the password but is still up" : "unlocked for \(name) after \(String(format: "%.1f", waited)) s")")
+                hostLog("host: locked: unlocked for \(name)")
             }
         }
         guard decoders.contains("hevc") else { return refuse("this host sends HEVC 4:2:0 and the client doesn't decode it") }
