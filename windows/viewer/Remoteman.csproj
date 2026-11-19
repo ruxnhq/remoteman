@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- remoteman for Windows: the WinUI 3 view. The engine (sessions, decode, presentation,
+       input, sound, clipboard, files, the store) is remoteman_engine.dll, built from
+       crates/remoteman-viewer-windows; this project is only the window and what is on it.
+       Unpackaged, with the Windows App SDK and .NET both inside the app's folder, so it runs
+       from that folder with nothing installed. Built by build.ps1. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>Remoteman</RootNamespace>
+    <AssemblyName>remoteman</AssemblyName>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon></ApplicationIcon>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.7.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The engine and FFmpeg's DLLs, put beside the program by build.ps1. -->
+    <None Include="native\*.dll" CopyToOutputDirectory="PreserveNewest" Link="%(Filename)%(Extension)" Condition="Exists('native')" />
+  </ItemGroup>
+</Project>

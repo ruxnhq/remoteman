@@ -1,0 +1,22 @@
+<Page x:Class="Remoteman.HelloPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <StackPanel Padding="32,12,32,28" Spacing="20">
+    <Grid ColumnSpacing="8">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+      <TextBlock Text="Computers" Style="{StaticResource TitleTextBlockStyle}" />
+      <Button Grid.Column="1" Content="Pair a computer" Style="{StaticResource AccentButtonStyle}" />
+    </Grid>
+    <TextBlock Text="Paired computers" Style="{StaticResource BodyStrongTextBlockStyle}" />
+    <Grid Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6" Padding="16" Width="300" HorizontalAlignment="Left">
+      <StackPanel Spacing="4">
+        <TextBlock Text="workshop" Style="{StaticResource BodyStrongTextBlockStyle}" />
+        <TextBlock Text="Linux · Available" Style="{StaticResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        <ToggleSwitch Header="A switch" IsOn="True" />
+      </StackPanel>
+    </Grid>
+  </StackPanel>
+</Page>
