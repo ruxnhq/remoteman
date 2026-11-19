@@ -36,6 +36,9 @@ pub fn hardware_addresses() -> Vec<String> {
         .filter_map(|e| std::fs::read_to_string(e.path().join("address")).ok())
         .map(|a| a.trim().to_lowercase())
         .filter(|a| a.len() == 17 && a != "00:00:00:00:00:00")
+        // An address someone made up (the "locally administered" bit: bridges, virtual cards,
+        // randomised Wi-Fi addresses) is no card a waking packet could reach.
+        .filter(|a| u8::from_str_radix(&a[..2], 16).is_ok_and(|first| first & 0x02 == 0))
         .collect();
     found.sort();
     found.dedup();
