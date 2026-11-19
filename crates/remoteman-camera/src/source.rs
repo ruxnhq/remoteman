@@ -4,9 +4,10 @@
 //! Annex-B, the parameter sets in front of every keyframe, no B-frames, a keyframe every two
 //! seconds and whenever one is asked for.
 //!
-//! The encoder is one of the system FFmpeg's that needs no software of another licence:
-//! NVIDIA's, or OpenH264 where FFmpeg was built with it. (VA-API, for AMD and Intel, needs the
-//! picture uploaded to the GPU first and is not wired yet.)
+//! The encoder is one of the system FFmpeg's that needs no software of another licence, the
+//! first of these that opens: NVIDIA's, VA-API's (AMD and Intel; the picture is uploaded to
+//! the GPU first), or OpenH264 where FFmpeg was built with it. `REMOTEMAN_CAMERA_ENCODER`
+//! names one of them to use and no other, for tests.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,11 +30,124 @@ const FPS: u32 = 30;
 const BITRATE: usize = 2_500_000;
 
 /// The encoders tried, in order, with their options.
-const ENCODERS: [(&str, &[(&str, &str)]); 2] =
-    [("h264_nvenc", &[("preset", "p1"), ("tune", "ull"), ("zerolatency", "1"), ("delay", "0"), ("forced-idr", "1"), ("rc", "cbr")]), ("libopenh264", &[("allow_skip_frames", "1")])];
+const ENCODERS: [(&str, &[(&str, &str)]); 3] = [
+    ("h264_nvenc", &[("preset", "p1"), ("tune", "ull"), ("zerolatency", "1"), ("delay", "0"), ("forced-idr", "1"), ("rc", "cbr")]),
+    ("h264_vaapi", &[("async_depth", "1"), ("idr_interval", "0")]),
+    ("libopenh264", &[("allow_skip_frames", "1")]),
+];
 
-fn any_encoder() -> bool {
-    ENCODERS.iter().any(|(name, _)| ff::encoder::find_by_name(name).is_some())
+/// Those of [`ENCODERS`] this FFmpeg has (and the test asked for, if it asked).
+fn encoders() -> Vec<(&'static str, ff::Codec, &'static [(&'static str, &'static str)])> {
+    let only = std::env::var("REMOTEMAN_CAMERA_ENCODER").ok();
+    ENCODERS.iter().filter(|(name, _)| only.as_deref().is_none_or(|o| o == *name)).filter_map(|(name, options)| ff::encoder::find_by_name(name).map(|c| (*name, c, *options))).collect()
+}
+
+/// A pool of pictures on a GPU, for an encoder that takes them from there (VA-API).
+struct GpuFrames(*mut ff::ffi::AVBufferRef);
+
+// SAFETY: a reference-counted FFmpeg buffer, used by one thread at a time.
+unsafe impl Send for GpuFrames {}
+
+impl Drop for GpuFrames {
+    fn drop(&mut self) {
+        // SAFETY: our own reference.
+        unsafe { ff::ffi::av_buffer_unref(&mut self.0) };
+    }
+}
+
+impl GpuFrames {
+    /// A pool of NV12 pictures of this size on the GPU behind `device` (a DRM render node).
+    fn vaapi(device: &std::path::Path, width: u32, height: u32) -> Result<GpuFrames> {
+        use ff::ffi;
+        let path = std::ffi::CString::new(device.as_os_str().as_encoded_bytes()).context("the device's path")?;
+        // SAFETY: FFmpeg's hardware-frames calls as documented; every reference made here is
+        // given up here or owned by the result.
+        unsafe {
+            let mut dev = std::ptr::null_mut();
+            if ffi::av_hwdevice_ctx_create(&mut dev, ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI, path.as_ptr(), std::ptr::null_mut(), 0) < 0 {
+                bail!("{} has no VA-API", device.display());
+            }
+            let mut frames = ffi::av_hwframe_ctx_alloc(dev);
+            ffi::av_buffer_unref(&mut dev);
+            if frames.is_null() {
+                bail!("no memory for the GPU's pictures");
+            }
+            let context = (*frames).data as *mut ffi::AVHWFramesContext;
+            (*context).format = ffi::AVPixelFormat::AV_PIX_FMT_VAAPI;
+            (*context).sw_format = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
+            (*context).width = width as i32;
+            (*context).height = height as i32;
+            (*context).initial_pool_size = 4;
+            if ffi::av_hwframe_ctx_init(frames) < 0 {
+                ffi::av_buffer_unref(&mut frames);
+                bail!("{} takes no NV12 pictures of {width} by {height}", device.display());
+            }
+            Ok(GpuFrames(frames))
+        }
+    }
+
+    /// `picture`, uploaded.
+    fn upload(&self, picture: &Video) -> Result<Video> {
+        let mut on_gpu = Video::empty();
+        // SAFETY: both frames are valid; the pool hands out a surface that the frame then owns.
+        unsafe {
+            if ff::ffi::av_hwframe_get_buffer(self.0, on_gpu.as_mut_ptr(), 0) < 0 || ff::ffi::av_hwframe_transfer_data(on_gpu.as_mut_ptr(), picture.as_ptr(), 0) < 0 {
+                bail!("the picture could not be uploaded to the GPU");
+            }
+        }
+        Ok(on_gpu)
+    }
+}
+
+/// The DRM render nodes of this computer, in order.
+fn render_nodes() -> Vec<std::path::PathBuf> {
+    let mut nodes: Vec<_> = std::fs::read_dir("/dev/dri").into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("renderD"))).collect();
+    nodes.sort();
+    nodes
+}
+
+/// Open the first encoder that opens for pictures of this size. With it: the layout it takes
+/// its pictures in, and the GPU pool they are uploaded to first, if it wants that.
+fn open_encoder(width: u32, height: u32) -> Result<(ff::encoder::video::Encoder, Pixel, Option<GpuFrames>, &'static str)> {
+    let mut why = anyhow!("this computer has no H.264 encoder remoteman can use (NVIDIA's, VA-API's or OpenH264)");
+    for (name, codec, options) in encoders() {
+        // FFmpeg lists NVIDIA's and VA-API's encoders on computers that have no such card,
+        // and they only fail when opened; VA-API is tried on each GPU in turn.
+        let pools: Vec<Option<Result<GpuFrames>>> = if name == "h264_vaapi" { render_nodes().iter().map(|node| Some(GpuFrames::vaapi(node, width, height))).collect() } else { vec![None] };
+        for pool in pools {
+            let pool = match pool.transpose() {
+                Ok(pool) => pool,
+                Err(e) => {
+                    why = e;
+                    continue;
+                }
+            };
+            let layout = if pool.is_some() { Pixel::NV12 } else { Pixel::YUV420P };
+            let mut context = ff::codec::Context::new_with_codec(codec).encoder().video()?;
+            context.set_width(width);
+            context.set_height(height);
+            context.set_format(if pool.is_some() { Pixel::VAAPI } else { layout });
+            context.set_time_base((1, FPS as i32));
+            context.set_frame_rate(Some((FPS as i32, 1)));
+            context.set_bit_rate(BITRATE);
+            context.set_max_bit_rate(BITRATE);
+            context.set_max_b_frames(0);
+            context.set_gop(FPS * 2);
+            if let Some(pool) = &pool {
+                // SAFETY: the encoder keeps its own reference to the pool.
+                unsafe { (*context.as_mut_ptr()).hw_frames_ctx = ff::ffi::av_buffer_ref(pool.0) };
+            }
+            let mut said = ff::Dictionary::new();
+            for (option, value) in options {
+                said.set(option, value);
+            }
+            match context.open_with(said) {
+                Ok(encoder) => return Ok((encoder, layout, pool, name)),
+                Err(e) => why = anyhow!("{name} can't be opened: {e}"),
+            }
+        }
+    }
+    Err(why)
 }
 
 /// A running camera. Dropping it lets go of the camera.
@@ -51,8 +165,8 @@ impl Source {
     pub fn start(from: Option<&str>, on_frame: impl FnMut(&[u8], bool) + Send + 'static) -> Result<Source> {
         let _ = ff::init();
         ff::util::log::set_level(ff::util::log::Level::Fatal);
-        if !any_encoder() {
-            bail!("this computer has no H.264 encoder remoteman can use (NVIDIA's or OpenH264)");
+        if encoders().is_empty() {
+            bail!("this computer has no H.264 encoder remoteman can use (NVIDIA's, VA-API's or OpenH264)");
         }
         let (quit, quit_rx) = pw::channel::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
@@ -112,6 +226,8 @@ struct Encoding {
     source: (Pixel, u32, u32),
     scaler: Scaler,
     scaled: Video,
+    /// Where the encoder takes its pictures from, if not from memory.
+    gpu: Option<GpuFrames>,
     encoder: ff::encoder::video::Encoder,
     packet: ff::Packet,
     count: i64,
@@ -186,46 +302,23 @@ impl State {
         let source = (frame.format(), frame.width(), frame.height());
         if self.encoding.as_ref().is_none_or(|e| e.source != source) {
             let (width, height) = fit(source.1, source.2);
-            // The first of them that opens: FFmpeg lists NVIDIA's encoder on computers that
-            // have no such card, and it only fails when opened.
-            let mut opened = None;
-            let mut why = anyhow!("this computer has no H.264 encoder remoteman can use");
-            for (name, options) in ENCODERS {
-                let Some(codec) = ff::encoder::find_by_name(name) else { continue };
-                let mut context = ff::codec::Context::new_with_codec(codec).encoder().video()?;
-                context.set_width(width);
-                context.set_height(height);
-                context.set_format(Pixel::YUV420P);
-                context.set_time_base((1, FPS as i32));
-                context.set_frame_rate(Some((FPS as i32, 1)));
-                context.set_bit_rate(BITRATE);
-                context.set_max_bit_rate(BITRATE);
-                context.set_max_b_frames(0);
-                context.set_gop(FPS * 2);
-                let mut said = ff::Dictionary::new();
-                for (option, value) in options {
-                    said.set(option, value);
-                }
-                match context.open_with(said) {
-                    Ok(encoder) => {
-                        opened = Some(encoder);
-                        break;
-                    }
-                    Err(e) => why = anyhow!("{name} can't be opened: {e}"),
-                }
-            }
-            let Some(encoder) = opened else { return Err(why) };
-            let scaler = scaling::Context::get(source.0, source.1, source.2, Pixel::YUV420P, width, height, scaling::Flags::BILINEAR).context("scale the camera's picture")?;
-            self.encoding = Some(Encoding { source, scaler: Scaler(scaler), scaled: Video::new(Pixel::YUV420P, width, height), encoder, packet: ff::Packet::empty(), count: 0 });
+            let (encoder, layout, gpu, _) = open_encoder(width, height)?;
+            let scaler = scaling::Context::get(source.0, source.1, source.2, layout, width, height, scaling::Flags::BILINEAR).context("scale the camera's picture")?;
+            self.encoding = Some(Encoding { source, scaler: Scaler(scaler), scaled: Video::new(layout, width, height), gpu, encoder, packet: ff::Packet::empty(), count: 0 });
             self.key.store(true, Ordering::Relaxed);
         }
         let e = self.encoding.as_mut().unwrap();
         e.scaler.0.run(frame, &mut e.scaled)?;
-        e.scaled.set_pts(Some(e.count));
-        e.count += 1;
         let key = self.key.swap(false, Ordering::Relaxed);
-        e.scaled.set_kind(if key { ff::picture::Type::I } else { ff::picture::Type::None });
-        e.encoder.send_frame(&e.scaled)?;
+        let mut uploaded = match &e.gpu {
+            Some(gpu) => Some(gpu.upload(&e.scaled)?),
+            None => None,
+        };
+        let picture = uploaded.as_mut().unwrap_or(&mut e.scaled);
+        picture.set_pts(Some(e.count));
+        e.count += 1;
+        picture.set_kind(if key { ff::picture::Type::I } else { ff::picture::Type::None });
+        e.encoder.send_frame(picture)?;
         while e.encoder.receive_packet(&mut e.packet).is_ok() {
             if let Some(data) = e.packet.data() {
                 (self.on_frame)(data, e.packet.is_key());
@@ -380,6 +473,50 @@ fn format_param(raw: Option<&[VideoFormat]>) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each encoder this computer can open gives what the protocol asks for: a keyframe
+    /// first and whenever one is asked for, each with its parameter sets in front, and no
+    /// frame held back. (One test, because it chooses the encoder through the environment.)
+    #[test]
+    fn every_encoder_here_keeps_to_the_protocol() {
+        let _ = ff::init();
+        ff::util::log::set_level(ff::util::log::Level::Fatal);
+        let mut tried = 0;
+        for (name, _) in ENCODERS {
+            // SAFETY: the only test that reads or sets it.
+            unsafe { std::env::set_var("REMOTEMAN_CAMERA_ENCODER", name) };
+            if open_encoder(640, 480).is_err() {
+                continue;
+            }
+            tried += 1;
+            let (tx, rx) = mpsc::channel::<(Vec<u8>, bool)>();
+            let key = Arc::new(AtomicBool::new(true));
+            let mut state = State { agreed: None, encoding: None, jpeg: None, key: key.clone(), last: None, ready: None, on_frame: Box::new(move |data, key| drop(tx.send((data.to_vec(), key)))) };
+            let mut frame = Video::new(Pixel::YUYV422, 640, 480);
+            for n in 0..40u8 {
+                frame.data_mut(0).iter_mut().enumerate().for_each(|(i, b)| *b = (i as u8).wrapping_mul(3).wrapping_add(n.wrapping_mul(5)));
+                if n == 20 {
+                    key.store(true, Ordering::Relaxed);
+                }
+                state.encode(&frame).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            }
+            let frames: Vec<_> = rx.try_iter().collect();
+            assert_eq!(frames.len(), 40, "{name} held frames back");
+            let keys: Vec<usize> = frames.iter().enumerate().filter(|(_, f)| f.1).map(|(i, _)| i).collect();
+            assert_eq!(keys, [0, 20], "{name}'s keyframes");
+            for i in keys {
+                // Annex-B, and a sequence parameter set (NAL type 7) before the picture.
+                let data = &frames[i].0;
+                assert!(data.starts_with(&[0, 0, 0, 1]) || data.starts_with(&[0, 0, 1]), "{name}: not Annex-B");
+                let has_sps = data.windows(4).any(|w| w[0] == 0 && w[1] == 0 && w[2] == 1 && w[3] & 0x1f == 7);
+                assert!(has_sps, "{name}: keyframe {i} has no parameter sets");
+            }
+            println!("{name}: 40 frames, keyframes where asked, parameter sets in front");
+        }
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("REMOTEMAN_CAMERA_ENCODER") };
+        assert!(tried > 0, "no encoder opened on this computer");
+    }
 
     #[test]
     fn fits_within_the_protocols_size() {

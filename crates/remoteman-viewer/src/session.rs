@@ -465,14 +465,8 @@ pub fn wire(app: &Rc<App>) {
     view.camera.connect_toggled({
         let app = app.clone();
         move |button| {
-            let on = button.is_active();
-            let failed = match app.session.borrow().as_ref() {
-                Some(session) => session.set_camera(on, app.args.camera_from.as_deref()).err(),
-                None => None,
-            };
-            if let Some(e) = failed {
-                app.toast(&format!("The camera can't be used: {e:#}"));
-                button.set_active(false);
+            if let Some(session) = app.session.borrow().as_ref() {
+                session.set_camera(button.is_active(), app.args.camera_from.as_deref());
             }
         }
     });

@@ -317,10 +317,7 @@ impl App {
             self.view.camera.set_active(true);
         }
         if self.view.camera.is_active() {
-            if let Err(e) = session.set_camera(true, self.args.camera_from.as_deref()) {
-                self.toast(&format!("The camera can't be used: {e:#}"));
-                self.view.camera.set_active(false);
-            }
+            session.set_camera(true, self.args.camera_from.as_deref());
         }
         *self.session.borrow_mut() = Some(session);
         *self.target.borrow_mut() = Some(Target { address: target.address.clone(), name });
@@ -376,7 +373,7 @@ impl App {
         self.video.free_gl();
         let _ = session.set_sound(false, None);
         let _ = session.set_microphone(false, None);
-        let _ = session.set_camera(false, None);
+        session.set_camera(false, None);
         session.client.close();
         if !stay {
             self.view.sound.set_active(false);
@@ -535,6 +532,13 @@ impl App {
     /// word of files sent.
     fn arrivals(&self) {
         self.follow_features();
+        // A camera that couldn't be opened: say why, and let its button out (which tells the
+        // computer it is off again).
+        let failed = self.session.borrow().as_ref().and_then(|s| s.shared.camera_failed.lock().unwrap().take());
+        if let Some(why) = failed {
+            self.toast(&format!("The camera can't be used: {why}"));
+            self.view.camera.set_active(false);
+        }
         let (copies, results) = match self.session.borrow().as_ref() {
             Some(s) => (std::mem::take(&mut *s.shared.copies.lock().unwrap()), std::mem::take(&mut *s.shared.results.lock().unwrap())),
             None => return,

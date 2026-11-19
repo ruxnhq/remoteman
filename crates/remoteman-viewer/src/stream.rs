@@ -45,6 +45,12 @@ pub struct Shared {
     /// it has sent.
     pub camera: Mutex<Option<remoteman_camera::Source>>,
     pub camera_frames: AtomicU32,
+    /// The computer has been told the camera is on (it may still be opening).
+    camera_told: std::sync::atomic::AtomicBool,
+    /// Counts the times the camera was switched on or off.
+    camera_turn: AtomicU32,
+    /// Why the camera couldn't be opened, until the window says so and lets the button out.
+    pub camera_failed: Mutex<Option<String>>,
     /// What was copied on the computer, whole, until the window takes it: its type and bytes.
     pub copies: Mutex<Vec<(String, Vec<u8>)>>,
     /// What became of files sent to the computer, until the window says so: whether it
@@ -215,39 +221,53 @@ impl Session {
     }
 
     /// Let the computer use this device's camera, or stop. `from`: a PipeWire camera node to
-    /// read and no other, instead of the default camera.
-    pub fn set_camera(&self, on: bool, from: Option<&str>) -> Result<()> {
-        // (Never held while a camera starts or stops: the computer's requests for a keyframe
-        // take it too, on the connection's own thread.)
-        let had = if on { None } else { self.shared.camera.lock().unwrap().take() };
+    /// read and no other, instead of the default camera. The camera is opened on a thread of
+    /// its own, since one that doesn't answer takes seconds to give up on: if it can't be
+    /// opened, the window hears why through `Shared::camera_failed`.
+    pub fn set_camera(&self, on: bool, from: Option<&str>) {
+        let off = Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 };
+        // Each change of mind has a number, so a camera that opens after it was switched off
+        // again is let go of.
+        let turn = self.shared.camera_turn.fetch_add(1, Ordering::Relaxed) + 1;
         if !on {
-            if had.is_some() {
-                drop(had);
-                self.client.send_message(Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 });
+            // (Never held while a camera stops: the computer's requests for a keyframe take
+            // the lock too, on the connection's own thread.)
+            let had = self.shared.camera.lock().unwrap().take();
+            drop(had);
+            if self.shared.camera_told.swap(false, Ordering::Relaxed) {
+                self.client.send_message(off);
                 println!("camera: {} frames sent", self.shared.camera_frames.swap(0, Ordering::Relaxed));
             }
-            return Ok(());
+            return;
         }
-        if self.shared.camera.lock().unwrap().is_some() {
-            return Ok(());
+        if self.shared.camera_told.swap(true, Ordering::Relaxed) {
+            return;
         }
         // Said first: frames that reach the computer before it are thrown away there.
         self.client.send_message(Message::Camera { on: true, codec: "h264".into(), width: 1280, height: 720, fps: 30 });
         let began = std::time::Instant::now();
-        let (sender, shared) = (self.client.camera_sender(), self.shared.clone());
-        let opened = remoteman_camera::Source::start(from, move |data, key| {
-            shared.camera_frames.fetch_add(1, Ordering::Relaxed);
-            sender.send(data, key, began.elapsed().as_micros() as u64);
+        let (sender, shared, from) = (self.client.camera_sender(), self.shared.clone(), from.map(str::to_owned));
+        let started = std::thread::Builder::new().name("camera-start".into()).spawn(move || {
+            let counted = shared.clone();
+            let opened = remoteman_camera::Source::start(from.as_deref(), move |data, key| {
+                counted.camera_frames.fetch_add(1, Ordering::Relaxed);
+                sender.send(data, key, began.elapsed().as_micros() as u64);
+            });
+            let current = || shared.camera_turn.load(Ordering::Relaxed) == turn;
+            match opened {
+                Ok(source) => {
+                    let mut camera = shared.camera.lock().unwrap();
+                    if current() {
+                        *camera = Some(source);
+                    }
+                    // (Otherwise it was switched off meanwhile, and the camera is let go of here.)
+                }
+                Err(e) if current() => *shared.camera_failed.lock().unwrap() = Some(format!("{e:#}")),
+                Err(_) => {}
+            }
         });
-        match opened {
-            Ok(source) => {
-                *self.shared.camera.lock().unwrap() = Some(source);
-                Ok(())
-            }
-            Err(e) => {
-                self.client.send_message(Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 });
-                Err(e)
-            }
+        if let Err(e) = started {
+            *self.shared.camera_failed.lock().unwrap() = Some(e.to_string());
         }
     }
 
