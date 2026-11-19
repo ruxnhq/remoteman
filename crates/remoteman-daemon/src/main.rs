@@ -21,6 +21,7 @@
 mod broker;
 mod gdm;
 mod standin;
+mod users;
 
 use std::io::Read;
 use std::net::SocketAddr;
