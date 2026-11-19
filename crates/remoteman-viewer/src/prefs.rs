@@ -120,7 +120,12 @@ pub fn preferences(app: &Rc<App>) {
     page.add(&keyboard);
 
     let pointer = adw::PreferencesGroup::builder().title("Pointer and touch").build();
-    pointer.add(&gate(combo("Pointer", "Captured sends raw movement, which games and 3D apps need", &["Follows this pointer", "Captured"], 0), FEATURES.pointer_capture));
+    let mode = combo("Pointer", "Captured sends raw movement, which games and 3D apps need; Ctrl+Alt lets it go. A change applies from the next session", &["Follows this pointer", "Captured"], input.capture as u32);
+    mode.connect_selected_notify({
+        let app = app.clone();
+        move |row| set(&app, &|s| s.input.capture = row.selected() == 1)
+    });
+    pointer.add(&gate(mode, FEATURES.pointer_capture));
     let draw = switch("Draw the pointer here", "It moves at this display's refresh rate instead of waiting for the picture. A change applies from the next session", input.draw_pointer);
     draw.connect_active_notify({
         let app = app.clone();
@@ -133,7 +138,12 @@ pub fn preferences(app: &Rc<App>) {
         move |row| set(&app, &|s| s.input.scroll_reversed = row.selected() == 1)
     });
     pointer.add(&gate(direction, FEATURES.scroll_direction));
-    pointer.add(&gate(switch("Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", false), FEATURES.touch));
+    let touch = switch("Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", input.touch);
+    touch.connect_active_notify({
+        let app = app.clone();
+        move |row| set(&app, &|s| s.input.touch = row.is_active())
+    });
+    pointer.add(&gate(touch, FEATURES.touch));
     page.add(&pointer);
 
     let window = adw::PreferencesGroup::builder().title("Session window").build();

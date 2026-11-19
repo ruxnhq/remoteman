@@ -20,6 +20,7 @@
 //! (what isn't built yet), `video`, `stream` and `decode` (the picture), `shot` (pictures of
 //! the window, for tests).
 
+mod capture;
 mod computers;
 mod decode;
 mod features;
