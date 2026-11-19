@@ -36,6 +36,12 @@ pub struct Shared {
     /// The decoder has been given frames for a while and has given no picture: ask the host
     /// for a keyframe (set by the decode thread, taken by the window).
     pub stuck: AtomicBool,
+    /// For finding stalls: when the last frame came from the core and the longest wait
+    /// between two (microseconds, since last read); when the picture now waiting for the
+    /// window was decoded.
+    pub last_frame: Mutex<Option<std::time::Instant>>,
+    pub frame_gap_max: AtomicU32,
+    pub picture_at: Mutex<Option<std::time::Instant>>,
     /// Pictures the window never showed because a newer one arrived first.
     pub replaced: AtomicU32,
     /// The newest frame's age when it was decoded, in microseconds (0: not known yet).
@@ -112,6 +118,10 @@ impl Handler for Feed {
         // falls behind, this waits, and the loss shows up upstream as a keyframe request.
         self.shared.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
         self.shared.handed.fetch_add(1, Ordering::Relaxed);
+        let now = std::time::Instant::now();
+        if let Some(before) = self.shared.last_frame.lock().unwrap().replace(now) {
+            self.shared.frame_gap_max.fetch_max((now - before).as_micros().min(u32::MAX as u128) as u32, Ordering::Relaxed);
+        }
         let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us));
     }
 
@@ -235,6 +245,7 @@ fn decoding(shared: Arc<Shared>) -> Result<mpsc::SyncSender<Msg>> {
                             if let Some(a) = age {
                                 s.age_us.store((a.max(0) as u64) + took as u64, Ordering::Relaxed);
                             }
+                            *s.picture_at.lock().unwrap() = Some(std::time::Instant::now());
                             if s.picture.lock().unwrap().replace(picture).is_some() {
                                 s.replaced.fetch_add(1, Ordering::Relaxed);
                             }
