@@ -283,9 +283,14 @@ mod tests {
     #[test]
     fn keyframes_first_on_request_and_after_a_new_bitrate() {
         let Some((node, caps)) = gpu() else { return };
-        let depth = if caps.encodes(Codec::Hevc, 10) { 10 } else { 8 };
+        for depth in [8, 10].into_iter().filter(|&d| caps.encodes(Codec::Hevc, d)) {
+            keyframes_at(&node, depth);
+        }
+    }
+
+    fn keyframes_at(node: &Path, depth: u8) {
         let (w, h) = (1920, 1080);
-        let (mut conv, mut enc) = open(&node, &Config { codec: Codec::Hevc, depth, width: w, height: h, fps: 60, bitrate: 20_000_000, slots: 4 }).unwrap();
+        let (mut conv, mut enc) = open(node, &Config { codec: Codec::Hevc, depth, width: w, height: h, fps: 60, bitrate: 20_000_000, slots: 4 }).unwrap();
         eprintln!("{}", enc.note);
         let mut stream = Vec::new();
         let mut keys = Vec::new();
@@ -307,7 +312,7 @@ mod tests {
         }
         assert_eq!(keys.iter().positions(), vec![0, 4, 8], "keyframes at {keys:?}");
         if let Ok(path) = std::env::var("RM_VA_DUMP") {
-            std::fs::write(path, &stream).unwrap();
+            std::fs::write(format!("{path}.{depth}"), &stream).unwrap();
         }
     }
 
