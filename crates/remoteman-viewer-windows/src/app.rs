@@ -1603,9 +1603,32 @@ impl App {
             TAB | 0x26 | 0x28 if vk == TAB || self.menu.is_some() => {
                 // Only the top sheet's controls: what is under a dialog is out of reach.
                 let top = self.regions.iter().map(|r| r.layer).max().unwrap_or(0);
-                let stops: Vec<Id> = self.regions.iter().filter(|r| r.focus && r.layer == top).map(|r| r.id).collect();
+                let list = |app: &Self| -> Vec<Id> { app.regions.iter().filter(|r| r.focus && r.layer == top).map(|r| r.id).collect() };
+                let mut stops = list(self);
+                let back = (vk == TAB && shift) || vk == 0x26;
+                // Past the last control in sight (or before the first): what is scrolled out
+                // of sight comes in, so the keyboard reaches all of a long page.
+                let at = stops.iter().position(|s| *s == focus);
+                let edge = if back { at == Some(0) } else { at.is_some_and(|i| i + 1 == stops.len()) };
+                if edge && top == 0 {
+                    let to = if back { (self.scroll - 220.0).max(0.0) } else { (self.scroll + 220.0).min(self.scroll_room.get()) };
+                    if to != self.scroll {
+                        self.scroll = to;
+                        self.build();
+                        let before = std::mem::replace(&mut stops, list(self));
+                        // On to the first control that has come into sight, if the one
+                        // that had the keyboard has gone out of it.
+                        if !stops.contains(&focus) {
+                            let new = |id: &&Id| !before.contains(id);
+                            let to = if back { stops.iter().rev().find(new) } else { stops.iter().find(new) };
+                            if let Some(to) = to.copied() {
+                                self.focus(to, true);
+                                return true;
+                            }
+                        }
+                    }
+                }
                 if !stops.is_empty() {
-                    let back = (vk == TAB && shift) || vk == 0x26;
                     let at = stops.iter().position(|s| *s == focus);
                     let next = match (at, back) {
                         (Some(i), false) => (i + 1) % stops.len(),

@@ -640,7 +640,7 @@ fn computer(app: &App, ui: &mut Ui, address: &str) {
         &[
             row("computer.sound", "Play its sound here", "When a session starts; the bar's button is for the session", Ctl::Toggle(c.sound, Some(Msg::Toggle(Flag::Sound, Some(a())))), gate(FEATURES.sound)),
             row("computer.clipboard", "Share the clipboard with it", "When a session starts, if the computer allows it", Ctl::Toggle(c.clipboard, Some(Msg::Toggle(Flag::Clipboard, Some(a())))), gate(FEATURES.clipboard)),
-            row("computer.files", "Receive files from it", &format!("Into {}", app.store.receive_folder().display()), Ctl::Toggle(FEATURES.files, None), gate(false)),
+            row("computer.files", "Files it sends", &format!("Go into {}, never over a file that is there", app.store.receive_folder().display()), Ctl::None, gate(FEATURES.files)),
         ],
     );
     let key = match app.store.key(address) {

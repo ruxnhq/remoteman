@@ -93,12 +93,16 @@ fn pieces(app: &App, s: &Session, floating: bool) -> Vec<Piece> {
 }
 
 /// Lay the pieces out from `x` in a bar whose top is `y`, in `room`; with no room for the
-/// words, the buttons that have an icon lose them.
-fn lay(ui: &mut Ui, list: Vec<Piece>, x: f32, y: f32, room: f32) {
+/// words, the buttons that have an icon lose them, and with too little even then, the
+/// stream's size goes as well.
+fn lay(ui: &mut Ui, mut list: Vec<Piece>, x: f32, y: f32, room: f32) {
     let t = ui.t;
-    let total = |ui: &Ui, labels: bool| list.iter().map(|p| width(ui, p, labels) + 2.0).sum::<f32>();
-    let labels = total(ui, true) <= room;
-    let used = total(ui, labels);
+    let total = |ui: &Ui, list: &[Piece], labels: bool| list.iter().map(|p| width(ui, p, labels) + 2.0).sum::<f32>();
+    let labels = total(ui, &list, true) <= room;
+    if !labels && total(ui, &list, false) > room {
+        list.retain(|p| !matches!(p, Piece::Status(_)));
+    }
+    let used = total(ui, &list, labels);
     let mut x = x;
     for piece in list {
         let w = width(ui, &piece, labels);

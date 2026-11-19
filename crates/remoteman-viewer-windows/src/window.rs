@@ -502,7 +502,8 @@ impl Win {
         const ESCAPE: u32 = 0x1B;
         const LWIN: u32 = 0x5B;
         const RWIN: u32 = 0x5C;
-        let extended = key.flags.0 & LLKHF_EXTENDED.0 != 0;
+        // The Windows keys are extended keys, whatever a program that makes them up says.
+        let extended = key.flags.0 & LLKHF_EXTENDED.0 != 0 || matches!(key.vkCode, LWIN | RWIN);
         let Some(usage) = crate::keys::usage(key.scanCode as u16, extended) else { return false };
         if !down {
             // What was sent down is sent up, wherever the keyboard is by then.
@@ -510,6 +511,7 @@ impl Win {
             let ours = self.held.borrow().contains(&usage) && matches!(key.vkCode, TAB | ESCAPE | LWIN | RWIN);
             if ours {
                 self.key(key.scanCode as u16, extended, false);
+                say!("shortcut: key {usage:#x} let go, sent to the computer");
             }
             return ours;
         }
@@ -796,7 +798,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             WM_GETMINMAXINFO => {
                 let info = &mut *(l.0 as *mut MINMAXINFO);
                 let scale = win.scale();
-                info.ptMinTrackSize = POINT { x: (560.0 * scale) as i32, y: (400.0 * scale) as i32 };
+                // A session's bar needs more room than the other screens do.
+                let session = win.ask(|app| app.session.is_some() && app.screen == crate::app::Screen::Session).unwrap_or(false);
+                info.ptMinTrackSize = POINT { x: ((if session { 760.0 } else { 560.0 }) * scale) as i32, y: (400.0 * scale) as i32 };
             }
             WM_MOUSEMOVE => {
                 let (x, y) = point(l);

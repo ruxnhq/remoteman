@@ -36,7 +36,9 @@ public class RmIn {
   public static void RightClick(int x, int y) { Move(x, y); mouse_event(8, 0, 0, 0, UIntPtr.Zero); Thread.Sleep(40); mouse_event(16, 0, 0, 0, UIntPtr.Zero); Thread.Sleep(120); }
   public static void Drag(int x0, int y0, int x1, int y1) { Move(x0, y0); mouse_event(2, 0, 0, 0, UIntPtr.Zero); for (int i = 1; i <= 10; i++) { Move(x0 + (x1 - x0) * i / 10, y0 + (y1 - y0) * i / 10); } mouse_event(4, 0, 0, 0, UIntPtr.Zero); Thread.Sleep(120); }
   public static void Wheel(int notches) { mouse_event(0x800, 0, 0, notches * 120, UIntPtr.Zero); Thread.Sleep(80); }
-  static void Vk(byte vk, bool down) { keybd_event(vk, (byte)MapVirtualKeyW(vk, 0), down ? 0u : 2u, UIntPtr.Zero); Thread.Sleep(15); }
+  // The Windows keys and the navigation keys carry the extended flag, as a keyboard's do.
+  static bool Ext(byte vk) { return vk == 0x5B || vk == 0x5C || (vk >= 0x21 && vk <= 0x28) || vk == 0x2D || vk == 0x2E; }
+  static void Vk(byte vk, bool down) { keybd_event(vk, (byte)MapVirtualKeyW(vk, 0), (down ? 0u : 2u) | (Ext(vk) ? 1u : 0u), UIntPtr.Zero); Thread.Sleep(15); }
   public static void Key(byte vk) { Vk(vk, true); Vk(vk, false); Thread.Sleep(40); }
   public static void Chord(byte[] vks) { foreach (byte v in vks) Vk(v, true); Thread.Sleep(40); for (int i = vks.Length - 1; i >= 0; i--) Vk(vks[i], false); Thread.Sleep(80); }
   public static void Text(string s) { foreach (char c in s) { short k = VkKeyScanW(c); bool shift = (k & 0x100) != 0; if (shift) Vk(0x10, true); Key((byte)(k & 0xFF)); if (shift) Vk(0x10, false); } }
