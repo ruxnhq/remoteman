@@ -21,6 +21,10 @@ A host lets a device it doesn't know past the handshake only while its owner has
 
 The code is made from both keys: the first four bytes of SHA-256 over the text `remoteman pairing`, a newline, the host key's fingerprint, a newline and the device key's fingerprint (both in lower-case hex), as a big-endian number modulo 1,000,000, shown as two groups of three digits. Each side makes it from the key it sees the other use, so something in between, which would have to show each side a key of its own, makes the two codes differ. A client that doesn't know the `pairing` message simply waits for its hello.
 
+### A pairing link
+
+For pairing by scanning a code instead of typing an address, a host may show a link (as a QR code): `remoteman://pair?v=0&name=<name>&addr=<addr[:port]>[,<addr[:port]>...]&fp=<the whole fingerprint of the host key, hex>`. A device adds the computer at the first address that answers, pairing as usual (the host still has to have pairing open, and still asks for the six digits where it does), and after connecting forgets the computer again if the key it met is not the one in the link. There is no secret in the link. (Defined by the Apple apps, which show and scan it; the Linux programs don't yet.)
+
 ## A locked host
 
 A host whose desktop is locked may let a paired device in all the same, if its owner has said so: by the device's key alone, or with the password of the host's user as well.
