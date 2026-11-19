@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use remoteman_core::host::{Accept, Link};
-use remoteman_core::{Message, Mode};
+use remoteman_core::{Chroma, Message, Mode};
 use remoteman_encode::FrameEncoder;
 use remoteman_encode::recovery::{Recovery, Sent};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
@@ -23,7 +23,7 @@ use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
 
 use crate::capture::{Gpu, Source, Take};
-use crate::convert::{self, Converter};
+use crate::convert::{self, Converter, Output};
 use crate::display;
 use crate::encode;
 use crate::vdd::{Driver, Metadata};
@@ -48,6 +48,14 @@ pub struct Settings {
     pub held: bool,
     /// Tell the client what the picture is encoded at (the first picture's business only).
     pub status: bool,
+    /// The client asked for HDR: BT.2020 PQ if the encoder can say so.
+    pub hdr: bool,
+    /// Draw the pointer into the picture, as the cursor's thread says it is (for a client that
+    /// doesn't draw it, and for a second display).
+    pub pointer: Option<Arc<crate::cursor::Drawn>>,
+    /// SDR white on the monitor, in nits (Windows' "SDR content brightness"): where an SDR
+    /// desktop's white goes in an HDR picture, and what an HDR desktop's SDR white is.
+    pub sdr_white: f32,
     /// Called when the picture's size changes under a running stream (someone changed the
     /// monitor's mode), after the client has been told.
     pub resized: Box<dyn Fn(u32, u32) + Send>,
@@ -59,6 +67,19 @@ pub struct Started {
     pub mode: Mode,
     pub width: u32,
     pub height: u32,
+    /// BT.2020 PQ: SDR white and the monitor's peak, in nits. `None`: BT.709.
+    pub hdr: Option<(u32, u32)>,
+}
+
+impl Started {
+    /// What the client is told of this picture.
+    pub fn accept(&self, refresh: u32) -> Accept {
+        let (colour, (sdr_white, peak)) = match self.hdr {
+            Some(light) => ("bt2020-pq", light),
+            None => ("bt709", (0, 0)),
+        };
+        Accept { mode: self.mode, width: self.width, height: self.height, refresh, colour: colour.into(), sdr_white, peak }
+    }
 }
 
 /// An event the picture's thread waits on beside the driver's.
@@ -105,11 +126,15 @@ impl Pipeline {
         let wake = Wake(unsafe { CreateEventW(None, false, false, None) }.context("CreateEvent")?);
         let control = Arc::new(Control { stop: AtomicBool::new(false), held: AtomicBool::new(settings.held), keyframe: AtomicBool::new(true), lost: Mutex::new(None), bitrate: AtomicU32::new(settings.bitrate), wake });
         let (ready_tx, ready_rx) = mpsc::channel::<Result<Started>>();
+        if let Some(drawn) = &settings.pointer {
+            let c = control.clone();
+            drawn.set_wake(Box::new(move || c.wake()));
+        }
         let c = control.clone();
         let thread = std::thread::Builder::new().name("picture".into()).spawn(move || {
             let picture = match Picture::open(&settings) {
                 Ok(p) => {
-                    let _ = ready_tx.send(Ok(Started { mode: p.mode, width: p.width, height: p.height }));
+                    let _ = ready_tx.send(Ok(Started { mode: p.mode, width: p.width, height: p.height, hdr: p.hdr }));
                     p
                 }
                 Err(e) => {
@@ -176,6 +201,8 @@ struct Picture {
     mode: Mode,
     width: u32,
     height: u32,
+    /// BT.2020 PQ (SDR white and peak, in nits), or BT.709.
+    hdr: Option<(u32, u32)>,
     /// The encoder's input holds a picture: there is something to encode again.
     have: bool,
     /// Take the newest frame even if it was taken before (a new client, or a new channel).
@@ -210,21 +237,28 @@ fn wait_for_channel(s: &Settings, patience: Duration) -> Result<crate::vdd::Chan
 }
 
 /// A converter and an encoder for the picture `meta` describes, in the first of `modes` the
-/// encoder opens for.
-fn build(gpu: &Gpu, meta: &Metadata, s: &Settings, bitrate: u32) -> Result<(Converter, Box<dyn FrameEncoder>, Mode)> {
+/// encoder opens for, and HDR if asked and the encoder can say so.
+fn build(gpu: &Gpu, meta: &Metadata, s: &Settings, bitrate: u32) -> Result<(Converter, Box<dyn FrameEncoder>, Mode, Option<(u32, u32)>)> {
     let (width, height) = (meta.width, meta.height);
     ensure!(width % 2 == 0 && height % 2 == 0 && width >= 64 && height >= 64, "the monitor is {width}x{height}; sizes must be even and at least 64");
-    let (input, note) = convert::input_for(meta.format, meta.is_hdr != 0)?;
+    let (input, note) = convert::input_for(meta.format, meta.is_hdr != 0, s.sdr_white)?;
     if let Some(note) = note {
         tracing::warn!("{note}");
     }
-    let converter = Converter::new(gpu, width, height, input)?;
+    let hdr = s.hdr && encode::can_hdr(gpu);
+    if s.hdr && !hdr {
+        tracing::warn!("the client asked for HDR, which this GPU's encoder isn't told how to say: the picture is SDR");
+    }
+    let output = if hdr { Output::Pq { sdr_white: s.sdr_white } } else { Output::Sdr };
+    // The monitor's peak as Windows was told it (its EDID's), else PQ's usual 1000.
+    let light = hdr.then(|| (s.sdr_white.round() as u32, if meta.max_nits > 0.0 { meta.max_nits.round() as u32 } else { 1000 }));
     let mut refused = Vec::new();
     for &mode in &s.modes {
-        match encode::open(gpu, &converter.output, &encode::Settings { mode, width, height, fps: s.fps, bitrate }) {
+        let converter = Converter::new(gpu, width, height, input, output, mode.chroma == Chroma::C444)?;
+        match encode::open(gpu, &converter.output, &encode::Settings { mode, width, height, fps: s.fps, bitrate, hdr }) {
             Ok(encoder) => {
-                tracing::info!(?mode, width, height, fps = s.fps, bitrate, format = meta.format, hdr = meta.is_hdr, ?input, "encoder ready ({})", encoder.note());
-                return Ok((converter, encoder, mode));
+                tracing::info!(?mode, width, height, fps = s.fps, bitrate, format = meta.format, hdr = meta.is_hdr, ?input, ?output, "encoder ready ({})", encoder.note());
+                return Ok((converter, encoder, mode, light));
             }
             Err(e) => {
                 tracing::warn!(?mode, "{e:#}");
@@ -252,9 +286,9 @@ impl Picture {
         );
         let gpu = Gpu::on_adapter((meta.luid_low, meta.luid_high))?;
         let source = Source::open(&gpu, channel)?;
-        let (converter, encoder, mode) = build(&gpu, &source.meta, s, s.bitrate)?;
+        let (converter, encoder, mode, hdr) = build(&gpu, &source.meta, s, s.bitrate)?;
         let recovery = Recovery::new(encoder.short_term(), encoder.long_term(), s.fps);
-        Ok(Self { encoder, recovery, converter, gpu, mode, width: source.meta.width, height: source.meta.height, source, have: false, again: true })
+        Ok(Self { encoder, recovery, converter, gpu, mode, width: source.meta.width, height: source.meta.height, hdr, source, have: false, again: true })
     }
 
     /// The channel in hand is dead (or may be): take the driver's current one. If the picture
@@ -267,14 +301,14 @@ impl Picture {
         if (old.width, old.height, old.format, old.is_hdr) != (new.width, new.height, new.format, new.is_hdr) {
             tracing::info!(from = format!("{}x{}", old.width, old.height), to = format!("{}x{}", new.width, new.height), format = new.format, hdr = new.is_hdr, "the monitor changed; the picture starts afresh");
             // Only this mode: the client has its decoder set up for it.
-            let only = Settings { driver: s.driver.clone(), monitor: s.monitor, modes: vec![self.mode], fps: s.fps, bitrate, nudge_at: s.nudge_at, expect: None, held: false, status: false, resized: Box::new(|_, _| {}) };
-            let (converter, encoder, mode) = build(&self.gpu, &new, &only, bitrate)?;
+            let only = Settings { driver: s.driver.clone(), monitor: s.monitor, modes: vec![self.mode], fps: s.fps, bitrate, nudge_at: s.nudge_at, expect: None, held: false, status: false, hdr: s.hdr, pointer: None, sdr_white: s.sdr_white, resized: Box::new(|_, _| {}) };
+            let (converter, encoder, mode, hdr) = build(&self.gpu, &new, &only, bitrate)?;
             // The old encoder goes before the texture it reads from.
             self.encoder = encoder;
             self.converter = converter;
             self.recovery = Recovery::new(self.encoder.short_term(), self.encoder.long_term(), s.fps);
-            (self.width, self.height, self.have) = (new.width, new.height, false);
-            if !link.restart(Accept { mode, width: new.width, height: new.height, refresh: s.fps, colour: "bt709".into(), sdr_white: 0, peak: 0 }) {
+            (self.width, self.height, self.have, self.hdr) = (new.width, new.height, false, hdr);
+            if !link.restart(Started { mode, width: new.width, height: new.height, hdr }.accept(s.fps)) {
                 bail!("the client is gone");
             }
             (s.resized)(new.width, new.height);
@@ -307,6 +341,12 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
     // summed (for the average) and at the last frame.
     let (mut bytes, mut largest, mut qp_sum, mut qp_last) = (0u64, 0usize, 0u64, 0u32);
     let began = Instant::now();
+    // How long each new picture took from being taken up (converted) to being encoded, in
+    // milliseconds; said every ten seconds and at the end.
+    let mut took: Vec<f32> = Vec::new();
+    let mut took_all: Vec<f32> = Vec::new();
+    let mut said_at = Instant::now();
+    let mut taken_at = None::<Instant>;
     // When a frame last came, and when the channel was last checked for having been replaced.
     let (mut quiet_since, mut checked) = (Instant::now(), Instant::now());
     // The stream must begin with a keyframe after it starts afresh.
@@ -320,6 +360,8 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
     let mut last_sent = Instant::now() - interval;
     let mut held_back = None::<u64>;
     let mut told_rate = false;
+    // The pointer's last change drawn in (none yet).
+    let mut pointer_seen = u64::MAX;
     loop {
         let held = control.held.load(Ordering::Relaxed);
         if !p.again || held {
@@ -363,7 +405,19 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
             }
         }
 
+        // The pointer moved or changed: the last frame again, with the pointer where it is now.
+        if let Some(drawn) = &s.pointer {
+            let now = drawn.now.lock().unwrap();
+            if now.serial != pointer_seen {
+                pointer_seen = now.serial;
+                p.converter.set_pointer(&p.gpu, &now);
+                if p.have {
+                    p.again = true;
+                }
+            }
+        }
         let again = std::mem::take(&mut p.again);
+        let before = Instant::now();
         let taken = {
             let Picture { source, converter, gpu, .. } = &mut p;
             source.take(gpu, again, |view, meta| {
@@ -375,6 +429,7 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
             Take::Frame(us) => {
                 p.have = true;
                 quiet_since = Instant::now();
+                taken_at = Some(before);
                 Some(us)
             }
             // Asked for the newest frame whatever its state and didn't get it: the driver
@@ -388,6 +443,8 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
             Take::Stale => {
                 afresh |= p.reopen(s, link, rate)?;
                 checked = Instant::now();
+                // A new converter: the pointer goes into it afresh.
+                pointer_seen = u64::MAX;
                 None
             }
         };
@@ -437,6 +494,7 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         };
         let idr = control.keyframe.swap(false, Ordering::Relaxed);
         let reported = control.lost.lock().unwrap().take();
+        let (p_mode, p_hdr) = (p.mode, p.hdr.is_some());
         let Picture { encoder, recovery, .. } = &mut p;
         let n = recovery.number();
         let plan = recovery.plan(idr, reported, &mut |t| encoder.invalidate(t).inspect_err(|e| tracing::debug!(t, "invalidate: {e:#}")));
@@ -444,6 +502,15 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
             tracing::debug!(?reported, n, ?plan, "loss report");
         }
         let made = encoder.encode_how(0, n, plan.how).context("encode")?;
+        if let Some(at) = taken_at.take() {
+            took.push(at.elapsed().as_secs_f32() * 1000.0);
+        }
+        if said_at.elapsed() >= Duration::from_secs(10) && !took.is_empty() {
+            took.sort_by(f32::total_cmp);
+            tracing::info!(pictures = took.len(), median_ms = format!("{:.2}", took[took.len() / 2]), p99_ms = format!("{:.2}", took[took.len() * 99 / 100]), worst_ms = format!("{:.2}", took[took.len() - 1]), mode = ?p_mode, hdr = p_hdr, "convert and encode, in the last ten seconds");
+            took_all.append(&mut took);
+            said_at = Instant::now();
+        }
         let sent = recovery.made(&plan, made.key, made.marked, made.referred);
         frames += 1;
         keys += made.key as u64;
@@ -465,6 +532,11 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         if s.status && !std::mem::replace(&mut told_rate, true) {
             link.send_message(Message::Status { bitrate: Some(rate) });
         }
+    }
+    took_all.append(&mut took);
+    if !took_all.is_empty() {
+        took_all.sort_by(f32::total_cmp);
+        tracing::info!(pictures = took_all.len(), median_ms = format!("{:.2}", took_all[took_all.len() / 2]), p99_ms = format!("{:.2}", took_all[took_all.len() * 99 / 100]), mode = ?p.mode, hdr = p.hdr.is_some(), "convert and encode, over the whole picture");
     }
     let driver = p.source.counts();
     tracing::info!(

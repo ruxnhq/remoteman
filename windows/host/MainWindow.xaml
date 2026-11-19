@@ -1,0 +1,11 @@
+<Window x:Class="RemotemanHost.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:RemotemanHost"
+        Title="Remoteman Host">
+  <Window.SystemBackdrop>
+    <local:StayingMica />
+  </Window.SystemBackdrop>
+  <!-- Everything else is made in code (MainWindow.xaml.cs, Build). -->
+  <Grid x:Name="Root" />
+</Window>

@@ -16,18 +16,21 @@
 //!                          moveby DX DY | scroll DX DY (both in display pixels)
 //!                          text WORDS | textfile PATH | mark NAME
 //!                          sound on|off | mic PACKETS | camera FRAMES | clip WORDS
-//!                          file PATH | bitrate BITS | resize WxH | keyframe
+//!                          clippng PATH | file PATH | bitrate BITS | resize WxH | keyframe
 //!                        X and Y are fractions of the display. `textfile` types a file's
 //!                        contents without showing them. `mark` prints how many frames have
 //!                        arrived, to find that moment in a stream saved with --out.
 //!                        The last row is the features: ask for the desktop's sound; send
 //!                        made-up microphone packets (100 a second) or camera frames (30 a
 //!                        second); copy WORDS to the host's clipboard; send a file; cap the
-//!                        bitrate; change the display's size. What comes back is printed.
+//!                        bitrate; change the display's size. What comes back is printed;
+//!                        with RM_TESTCLIENT_SAVE=DIR, pictures copied on the host and files
+//!                        it sends are saved there too (files are answered with file_result).
 //!     --cursor           draw the cursor ourselves: ask for its shape and position apart
 //!     --drop-one-in N    throw away one video packet in N, as a lossy network would
 //!     --delay-lost MS    hold each loss report back this long, as a slow path to the host would
 //!     --placement P      extend (default), main or only: where the display sits on the host
+//!     --hdr HEADROOM     the display shows HDR, this many times brighter than its SDR white
 
 //!
 //! A recording (`--record`) is for testing decoders without a host. It is:
@@ -75,6 +78,13 @@ struct Seen {
     heard: Vec<f32>,
     /// Blobs coming in: kind, header, content so far.
     blobs: std::collections::BTreeMap<u32, (u8, String, Vec<u8>)>,
+    /// Answers to send the host (to files it sent).
+    answers: Vec<Message>,
+}
+
+/// A simple sum of bytes, to tell a file arrived as it was sent.
+fn sum_of(content: &[u8]) -> u32 {
+    content.iter().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(*b as u32))
 }
 
 struct Watcher {
@@ -98,7 +108,7 @@ impl Handler for Watcher {
     }
 
     fn stream(&mut self, s: &StreamInfo) {
-        println!("stream: {:?} {:?} {}-bit, {}x{} at {} Hz, {}", s.mode.codec, s.mode.chroma, s.mode.depth, s.width, s.height, s.refresh, s.colour);
+        println!("stream: {:?} {:?} {}-bit, {}x{} at {} Hz, {} (sdr_white {}, peak {})", s.mode.codec, s.mode.chroma, s.mode.depth, s.width, s.height, s.refresh, s.colour, s.sdr_white, s.peak);
         if let Some(f) = self.record.as_mut() {
             let codec = if s.mode.codec == Codec::Av1 { "av1" } else { "hevc" };
             let chroma = if s.mode.chroma == Chroma::C444 { "444" } else { "420" };
@@ -159,6 +169,10 @@ impl Handler for Watcher {
         // A packet marked as a start begins a new count (after a pause, or from another agent).
         let missing = s.sound.2.filter(|_| !packet.start).map_or(0, |last| packet.seq.saturating_sub(last).saturating_sub(1));
         s.sound = (s.sound.0 + 1, s.sound.1 + missing, Some(packet.seq));
+        if s.sound.0 == 1 {
+            // What a player is first handed, to set beside another host's.
+            println!("first sound packet: start {}, seq {}, time {} us, {} bytes, Opus TOC {:#04x}", packet.start, packet.seq, packet.time_us, packet.data.len(), packet.data.first().copied().unwrap_or(0));
+        }
         // Decode it, to say at the end what was heard.
         if self.decoder.is_none() {
             self.decoder = remoteman_audio::Decoder::new(remoteman_audio::Channels::Stereo).ok();
@@ -184,8 +198,24 @@ impl Handler for Watcher {
             }
             BlobEvent::Close { id, complete } => {
                 let Some((kind, header, content)) = s.blobs.remove(id) else { return };
-                if kind == BLOB_CLIPBOARD && *complete {
+                let save = std::env::var_os("RM_TESTCLIENT_SAVE").map(PathBuf::from);
+                if kind == BLOB_CLIPBOARD && *complete && header.contains("text/plain") {
                     println!("clipboard from the host {header}: {}", String::from_utf8_lossy(&content));
+                } else if kind == BLOB_CLIPBOARD && *complete {
+                    println!("clipboard from the host {header}: {} bytes, sum {:08x}", content.len(), sum_of(&content));
+                    if let Some(dir) = save {
+                        let _ = std::fs::write(dir.join(format!("clip-{id}.png")), &content);
+                    }
+                } else if kind == BLOB_FILE {
+                    let h = serde_json::from_str::<FileHeader>(&header).ok();
+                    println!("file from the host {header}: {} bytes, sum {:08x}, complete {complete}", content.len(), sum_of(&content));
+                    if let (Some(dir), Some(h), true) = (save, h.as_ref(), *complete) {
+                        let _ = std::fs::write(dir.join(remoteman_core::media::safe_file_name(&h.name)), &content);
+                    }
+                    if let Some(h) = h {
+                        let ok = *complete && content.len() as u64 == h.size;
+                        s.answers.push(Message::FileResult { id: h.id, ok, message: if ok { "taken by the test client".into() } else { "it didn't arrive whole".into() } });
+                    }
                 } else {
                     println!("blob of kind {kind:#x} {header}: {} bytes, complete {complete}", content.len());
                 }
@@ -211,6 +241,7 @@ fn main() -> Result<()> {
     let mut drop_one_in = None::<u32>;
     let mut delay_lost = None::<u32>;
     let mut placement = Placement::Extend;
+    let mut headroom = 0.0f32;
     while let Some(a) = args.next() {
         let mut value = || args.next().with_context(|| format!("{a} needs a value"));
         match a.as_str() {
@@ -231,6 +262,7 @@ fn main() -> Result<()> {
             "--pointer-demo" => circle = true,
             "--script" => script = Some(value()?.into()),
             "--cursor" => cursor = true,
+            "--hdr" => headroom = value()?.parse().context("--hdr HEADROOM")?,
             // The host user's password, for a host that is locked (tests only: it shows in the process list).
             "--unlock" => unlock = Some(value()?),
             // Only into a session already running on the host: never its login screen.
@@ -272,7 +304,7 @@ fn main() -> Result<()> {
         None => None,
     };
     let watcher = Watcher { decoder: None, seen: seen.clone(), file, record, warm: Instant::now() + Duration::from_secs(2) };
-    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement, hdr: false, headroom: 0.0 }, decoders, test_drop_one_in: drop_one_in, test_delay_lost_ms: delay_lost, unlock: unlock.clone(), attach_only, cursor };
+    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement, hdr: headroom > 0.0, headroom }, decoders, test_drop_one_in: drop_one_in, test_delay_lost_ms: delay_lost, unlock: unlock.clone(), attach_only, cursor };
     let client = Client::connect(options, watcher)?;
     println!("host: {} ({}), features {:?}, fingerprint {}", client.host_name, client.host_os, client.host_features, &client.host_fingerprint[..12]);
 
@@ -291,7 +323,26 @@ fn main() -> Result<()> {
             };
             match word {
                 "" | "#" => {}
-                "wait" => std::thread::sleep(Duration::from_secs_f32(rest.trim().parse().with_context(|| format!("line {}: wait SECONDS", i + 1))?)),
+                "wait" => {
+                    let until = Instant::now() + Duration::from_secs_f32(rest.trim().parse().with_context(|| format!("line {}: wait SECONDS", i + 1))?);
+                    while Instant::now() < until {
+                        let answers = std::mem::take(&mut seen.lock().unwrap().answers);
+                        for a in answers {
+                            client.send_message(a);
+                        }
+                        std::thread::sleep(until.saturating_duration_since(Instant::now()).min(Duration::from_millis(100)));
+                    }
+                }
+                "clippng" => {
+                    let path = std::path::Path::new(rest.trim());
+                    let content = std::fs::read(path).with_context(|| format!("line {}: read {}", i + 1, path.display()))?;
+                    println!("copying a picture: {} bytes, sum {:08x}", content.len(), sum_of(&content));
+                    client.send_message(Message::Clipboard { on: true });
+                    let header = ClipboardHeader { seq: 1000 + i as u32, mime: "image/png".into(), size: content.len() as u64 };
+                    let blob = client.open_blob(BLOB_CLIPBOARD, serde_json::to_string(&header)?);
+                    blob.write(&content);
+                    blob.finish();
+                }
                 "move" => {
                     let (x, y) = xy()?;
                     client.send(Event::PointerTo { x, y });
@@ -400,7 +451,7 @@ fn main() -> Result<()> {
                     let path = std::path::Path::new(rest.trim());
                     let content = std::fs::read(path).with_context(|| format!("line {}: read {}", i + 1, path.display()))?;
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    let sum = content.iter().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(*b as u32));
+                    let sum = sum_of(&content);
                     println!("sending {name}: {} bytes, sum {sum:08x}", content.len());
                     let blob = client.open_blob(BLOB_FILE, serde_json::to_string(&FileHeader { id: i as u32, name, size: content.len() as u64 })?);
                     for piece in content.chunks(64 * 1024) {

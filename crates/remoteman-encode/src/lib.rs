@@ -172,17 +172,20 @@ impl Encoder {
     }
 
     /// An encoder fed from textures of a Direct3D 11 device (see [`Self::add_texture`]).
-    /// 4:2:0 only: Direct3D has no planar 10-bit 4:4:4 texture.
+    /// `hdr`: the stream says BT.2020 primaries, PQ and the BT.2020 matrix rather than BT.709.
+    /// For 4:4:4 the texture is 10-bit R'G'B' that NVENC converts (see [`Self::add_texture`]).
     ///
     /// # Safety
     /// `device` must be a live `ID3D11Device*` with multithread protection switched on (the
     /// encoder works on it from threads of its own), and must outlive the encoder.
     #[cfg(windows)]
-    pub unsafe fn new_d3d11(device: *mut c_void, cfg: &Config) -> Result<Self> {
+    pub unsafe fn new_d3d11(device: *mut c_void, cfg: &Config, hdr: bool) -> Result<Self> {
         let mut err = [0 as c_char; 256];
+        let mut raw = cfg.raw();
+        raw.hdr_pq = hdr as u32;
         // SAFETY: the wrapper's contract; `err` is a writable buffer of the given length.
         unsafe {
-            let enc = rm_nvenc_open_d3d11(device, &cfg.raw(), err.as_mut_ptr(), 256);
+            let enc = rm_nvenc_open_d3d11(device, &raw, err.as_mut_ptr(), 256);
             if enc.is_null() {
                 bail!("{}", text(&err));
             }
@@ -190,7 +193,8 @@ impl Encoder {
         }
     }
 
-    /// Register a P010 texture of the encoder's size as an input. Returns the input's index.
+    /// Register a texture of the encoder's size as an input: P010 for 4:2:0, R10G10B10A2 of
+    /// BT.709 R'G'B' for 4:4:4. Returns the input's index.
     ///
     /// # Safety
     /// `texture` must be a live `ID3D11Texture2D*` of the device the encoder was opened on, and

@@ -1,11 +1,15 @@
 //! The owner's side of the host: what it is asked and told while it runs, by `remoteman-host
 //! ctl WORDS` today and by a tray icon later. The words are the Linux host's (`status`, `pair
 //! on|off|accept|decline`, `allow clipboard|files on|off`, `drop`, `revoke FINGERPRINT`), so
-//! one interface can speak to both.
+//! one interface can speak to both. `send PATH` sends a file to the connected device.
 //!
 //! It is a named pipe, `\\.\pipe\remoteman-host-PORT`, one line in and one answer out. The
-//! pipe is made with Windows' default protection for pipes: the system, Administrators and the
-//! account that made it may write to it. The host runs elevated, so `ctl` must too.
+//! system, Administrators and the user the host runs as may use it, that user also from a
+//! prompt that isn't elevated (the owner's app, Remoteman Host, runs so); nobody else.
+//!
+//! `sharing off` turns every device away (the connected one is dropped, pairing closes) until
+//! `sharing on`; it is remembered in the state folder, as the switches for files and the
+//! clipboard are.
 
 use std::ffi::c_void;
 use std::io::{Read, Write};
@@ -19,7 +23,10 @@ use remoteman_core::host::Host;
 use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE};
 use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, FlushFileBuffers};
 use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
-use windows::core::HSTRING;
+use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW};
+use windows::Win32::Security::{GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows::core::{HSTRING, PWSTR};
 
 /// `PIPE_ACCESS_DUPLEX`.
 const DUPLEX: u32 = 3;
@@ -52,7 +59,14 @@ pub struct Allowed {
     pub own_monitor: Arc<AtomicBool>,
     /// And a third, for a device's second display.
     pub second: Arc<AtomicBool>,
+    /// A device's monitor can be made HDR and the encoder can say so.
+    pub hdr: Arc<AtomicBool>,
+    /// Sharing is switched off: no device may connect.
+    pub paused: Arc<AtomicBool>,
     pub now: Arc<Mutex<Option<Now>>>,
+    /// What the device said of files sent to it: how many it answered for, and the last
+    /// answer (whether it took it, and what it said: where it went, or why not).
+    pub sent: Arc<Mutex<(u64, bool, String)>>,
 }
 
 /// What this host does, as its hello lists it. `mirror`: a device may ask for the monitor as
@@ -64,6 +78,9 @@ pub fn features(allowed: &Allowed) -> Vec<String> {
         features.push("placement".into());
         if allowed.second.load(Ordering::Relaxed) {
             features.push("displays".into());
+        }
+        if allowed.hdr.load(Ordering::Relaxed) {
+            features.push("hdr".into());
         }
     }
     if allowed.microphone.load(Ordering::Relaxed) {
@@ -78,19 +95,27 @@ pub fn features(allowed: &Allowed) -> Vec<String> {
     features
 }
 
+/// What this computer is called, as devices are told.
+fn host_name() -> String {
+    NAME.get().cloned().unwrap_or_default()
+}
+
+/// The name the host gives itself, for `status`.
+pub static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 fn saved_path(state: &Path) -> PathBuf {
     state.join("allowed.json")
 }
 
-/// What the owner switched on earlier: (files, clipboard).
-pub fn load(state: &Path) -> (bool, bool) {
+/// What the owner switched earlier: (files, clipboard, sharing off).
+pub fn load(state: &Path) -> (bool, bool, bool) {
     let saved = std::fs::read_to_string(saved_path(state)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
     let is = |key: &str| saved.as_ref().and_then(|v| v.get(key)).and_then(|v| v.as_bool()).unwrap_or(false);
-    (is("files"), is("clipboard"))
+    (is("files"), is("clipboard"), is("paused"))
 }
 
 fn save(state: &Path, allowed: &Allowed) -> std::io::Result<()> {
-    let saved = serde_json::json!({ "files": allowed.files.load(Ordering::Relaxed), "clipboard": allowed.clipboard.load(Ordering::Relaxed) });
+    let saved = serde_json::json!({ "files": allowed.files.load(Ordering::Relaxed), "clipboard": allowed.clipboard.load(Ordering::Relaxed), "paused": allowed.paused.load(Ordering::Relaxed) });
     std::fs::create_dir_all(state)?;
     std::fs::write(saved_path(state), saved.to_string())
 }
@@ -99,15 +124,47 @@ pub fn pipe_name(port: u16) -> String {
     format!(r"\\.\pipe\remoteman-host-{port}")
 }
 
+/// The pipe's protection: the system and Administrators, and the user this process runs as,
+/// whether or not that user's program is elevated (an elevated program's token makes
+/// Administrators, not the user, the owner of what it creates, so Windows' default would
+/// shut the user's own app out). `None`: Windows' default, if the user can't be named.
+fn protection() -> Option<SECURITY_ATTRIBUTES> {
+    // SAFETY: the token and the buffers are this function's; the SID is read within the
+    // token information it lives in; the descriptor is LocalAlloc'd and kept for the process.
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
+        let mut size = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut size);
+        let mut buffer = vec![0u8; size as usize];
+        let got = GetTokenInformation(token, TokenUser, Some(buffer.as_mut_ptr() as *mut c_void), size, &mut size);
+        let _ = windows::Win32::Foundation::CloseHandle(token);
+        got.ok()?;
+        let user = &*(buffer.as_ptr() as *const TOKEN_USER);
+        let mut text = PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut text).ok()?;
+        let sid = text.to_string().ok()?;
+        let _ = windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(text.0 as *mut c_void)));
+        let sddl = HSTRING::from(format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;{sid})"));
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(&sddl, 1, &mut descriptor, None).ok()?;
+        Some(SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor.0, bInheritHandle: false.into() })
+    }
+}
+
 /// Answer the owner's questions for as long as the host lives.
 pub fn serve(port: u16, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
     let name = HSTRING::from(pipe_name(port));
     let spawned = std::thread::Builder::new().name("control".into()).spawn(move || {
         let mut said = false;
+        let protection = protection();
+        if protection.is_none() {
+            tracing::warn!("the control pipe has Windows' default protection: only an elevated prompt can speak to this host");
+        }
         loop {
             // A pipe for each question: the one before is closed when it has been answered.
-            // SAFETY: plain call; the name outlives it.
-            let pipe = unsafe { CreateNamedPipeW(&name, FILE_FLAGS_AND_ATTRIBUTES(DUPLEX), PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, None) };
+            // SAFETY: plain call; the name and the protection outlive it.
+            let pipe = unsafe { CreateNamedPipeW(&name, FILE_FLAGS_AND_ATTRIBUTES(DUPLEX), PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, protection.as_ref().map(|p| p as *const _)) };
             if pipe.is_invalid() {
                 if !std::mem::replace(&mut said, true) {
                     tracing::warn!("no control pipe ({}): this host can't be asked how it stands", windows::core::Error::from_thread());
@@ -165,13 +222,59 @@ pub fn ask(port: u16, words: &str) -> anyhow::Result<String> {
     anyhow::bail!("no host is answering on {name}: {} (is it running, and is this prompt elevated?)", last.map(|e| e.to_string()).unwrap_or_default())
 }
 
+/// Send a file to the connected device, on a thread of its own. The device decides where it
+/// goes and answers when it has it (`Allowed::sent`). As the Linux host does it.
+fn send_file(link: Option<remoteman_core::host::Link>, path: &Path) -> Result<(), String> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let link = link.ok_or("no device is connected")?;
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let size = file.metadata().map_err(|e| e.to_string())?.len();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+    let header = remoteman_core::media::FileHeader { id: NEXT.fetch_add(1, Ordering::Relaxed), name, size };
+    tracing::info!(bytes = size, "a file goes to the device");
+    let blob = link.open_blob(remoteman_core::media::BLOB_FILE, serde_json::to_string(&header).unwrap_or_default());
+    std::thread::Builder::new()
+        .name("file".into())
+        .spawn(move || {
+            let mut piece = vec![0u8; 256 * 1024];
+            loop {
+                match file.read(&mut piece) {
+                    Ok(0) => {
+                        let _ = blob.finish();
+                        return;
+                    }
+                    Ok(n) if blob.write(&piece[..n]) => {}
+                    // The connection went, or the file can't be read on: given up (dropping
+                    // the blob tells the device).
+                    _ => return,
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
+    // A path may have spaces in it: everything after the word.
+    if let Some(path) = line.trim().strip_prefix("send ") {
+        if !allowed.files.load(Ordering::Relaxed) {
+            return "files are switched off on this computer\n".into();
+        }
+        return match send_file(host.link(), Path::new(path.trim().trim_matches('"'))) {
+            Ok(()) => "ok\n".into(),
+            Err(why) => format!("{why}\n"),
+        };
+    }
     let mut words = line.split_whitespace();
     match (words.next(), words.next(), words.next()) {
         (Some("status") | None, _, _) => {
             let client = allowed.now.lock().unwrap().as_ref().map(|n| {
                 serde_json::json!({ "name": n.name, "since": n.since, "width": n.width, "height": n.height, "refresh": n.refresh, "placement": n.placement, "picture": n.picture, "sound": n.sound })
             });
+            let sent = {
+                let sent = allowed.sent.lock().unwrap();
+                serde_json::json!({ "answered": sent.0, "ok": sent.1, "said": sent.2 })
+            };
             let status = serde_json::json!({
                 "address": host.address.to_string(),
                 "fingerprint": host.fingerprint,
@@ -179,11 +282,13 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "pending": host.pending(),
                 "devices": host.devices(),
                 "daemon": false,
-                "paused": false,
+                "paused": allowed.paused.load(Ordering::Relaxed),
+                "name": host_name(),
                 "clipboard": allowed.clipboard.load(Ordering::Relaxed),
                 "files": allowed.files.load(Ordering::Relaxed),
                 "microphone": allowed.microphone.load(Ordering::Relaxed),
                 "client": client,
+                "sent": sent,
             });
             format!("{status}\n")
         }
@@ -202,6 +307,21 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "ok\n".into()
             } else {
                 "no device is waiting\n".into()
+            }
+        }
+        // Sharing off: every device is turned away until it is on again.
+        (Some("sharing"), Some(word @ ("on" | "off")), _) => {
+            let off = word == "off";
+            allowed.paused.store(off, Ordering::Relaxed);
+            if off {
+                host.set_pairing(false);
+                host.decide(false);
+                host.drop_client();
+            }
+            tracing::info!(on = !off, "sharing switched by the owner");
+            match save(state, allowed) {
+                Ok(()) => "ok\n".into(),
+                Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
         (Some("drop"), _, _) => {
@@ -232,6 +352,6 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
-        _ => "status | pair on|off|accept|decline | allow clipboard|files on|off | drop | revoke FINGERPRINT\n".into(),
+        _ => "status | pair on|off|accept|decline | allow clipboard|files on|off | drop | revoke FINGERPRINT | send PATH | sharing on|off\n".into(),
     }
 }
