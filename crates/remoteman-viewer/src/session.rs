@@ -569,9 +569,11 @@ pub fn wire(app: &Rc<App>) {
             }
             if keyval == gdk::Key::F11 {
                 app.toggle_fullscreen();
-            } else if let Some(usage) = keycode.checked_sub(8).and_then(|c| keys::linux_to_hid(c as u16)) {
+            } else if let Some(own) = keycode.checked_sub(8).and_then(|c| keys::linux_to_hid(c as u16)) {
+                let usage = app.key_for(own);
                 app.held.borrow_mut().insert(usage);
                 app.send(Event::Key { usage, down: true });
+                app.chord_key(own, true);
             }
             glib::Propagation::Stop
         }
@@ -580,11 +582,13 @@ pub fn wire(app: &Rc<App>) {
         let app = app.clone();
         move |_, keyval, keycode, _| {
             if app.streaming() && keyval != gdk::Key::F11 {
-                if let Some(usage) = keycode.checked_sub(8).and_then(|c| keys::linux_to_hid(c as u16)) {
+                if let Some(own) = keycode.checked_sub(8).and_then(|c| keys::linux_to_hid(c as u16)) {
                     // Only what the other computer was told is down: a key let go in one of
                     // this app's own dialogs was never its business.
+                    let usage = app.key_for(own);
                     if app.held.borrow_mut().remove(&usage) {
                         app.send(Event::Key { usage, down: false });
+                        app.chord_key(own, false);
                     }
                 }
             }
@@ -630,6 +634,7 @@ pub fn wire(app: &Rc<App>) {
         move |c, dx, dy| {
             // A wheel reports notches; a touchpad reports pixels.
             let k = if c.unit() == gdk::ScrollUnit::Wheel { 40.0 } else { 1.0 };
+            let k = if app.store.borrow().settings.input.scroll_reversed { -k } else { k };
             app.send(Event::Scroll { dx: (dx * k) as f32, dy: (dy * k) as f32 });
             glib::Propagation::Stop
         }

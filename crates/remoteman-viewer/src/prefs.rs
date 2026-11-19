@@ -9,7 +9,7 @@ use remoteman_core::Placement;
 use crate::computers::{self, about, computer_icon, state};
 use crate::features::{FEATURES, gate};
 use crate::status::Reach;
-use crate::store::{Quality, host_part, key_words, when, with_port};
+use crate::store::{Media, Quality, Stand, host_part, key_words, when, with_port};
 use crate::window::App;
 
 fn switch(title: &str, subtitle: &str, active: bool) -> adw::SwitchRow {
@@ -66,11 +66,12 @@ fn forget(app: &Rc<App>, over: &impl IsA<gtk::Widget>, address: &str, after: imp
 pub fn preferences(app: &Rc<App>) {
     let dialog = adw::PreferencesDialog::builder().title("Preferences").search_enabled(true).build();
     let page = adw::PreferencesPage::new();
-    let (hover, figures, fullscreen, shortcuts, quality) = {
+    let (hover, figures, fullscreen, shortcuts, quality, media, input) = {
         let store = app.store.borrow();
         let s = &store.settings;
-        (app.hover_bar.get(), s.figures, s.fullscreen, s.shortcuts, s.quality)
+        (app.hover_bar.get(), s.figures, s.fullscreen, s.shortcuts, s.quality, s.media, s.input)
     };
+    let media_now = media;
     // Change the remembered preferences and save them.
     let set = |app: &Rc<App>, change: &dyn Fn(&mut crate::store::Settings)| {
         let mut store = app.store.borrow_mut();
@@ -79,9 +80,27 @@ pub fn preferences(app: &Rc<App>) {
     };
 
     let keyboard = adw::PreferencesGroup::builder().title("Keyboard").description("Keys are sent by their position, so the computer's own layout decides what they type").build();
-    keyboard.add(&gate(combo("Key that acts as Super", "Opens the overview on a Linux computer", &["Super"], 0), FEATURES.key_mapping));
-    keyboard.add(&gate(combo("Key that acts as Ctrl", "", &["Ctrl"], 0), FEATURES.key_mapping));
-    keyboard.add(&gate(switch("Use Ctrl as Command on a Mac", "Ctrl+C on this keyboard copies on a Mac, as it does here", false), FEATURES.key_mapping));
+    // A key that stands in for Super or for Ctrl: the key itself, or one of a few others.
+    let stand_row = |title: &str, subtitle: &str, own: &'static str, choices: &'static [Stand], now: Stand, put: fn(&mut crate::store::Input, Stand)| {
+        let names: Vec<&str> = choices.iter().map(|c| if *c == Stand::Own { own } else { Stand::ALL.iter().find(|s| s.0 == *c).map_or("", |s| s.2) }).collect();
+        let row = combo(title, subtitle, &names, choices.iter().position(|c| *c == now).unwrap_or(0) as u32);
+        row.connect_selected_notify({
+            let app = app.clone();
+            move |row| {
+                let chosen = choices[(row.selected() as usize).min(choices.len() - 1)];
+                set(&app, &|s| put(&mut s.input, chosen));
+            }
+        });
+        gate(row, FEATURES.key_mapping)
+    };
+    keyboard.add(&stand_row("Key that acts as Super", "Opens the overview on a Linux computer", "Super", &[Stand::Own, Stand::RightAlt, Stand::RightCtrl, Stand::CapsLock], input.super_key, |i, s| i.super_key = s));
+    keyboard.add(&stand_row("Key that acts as Ctrl", "", "Ctrl", &[Stand::Own, Stand::RightAlt, Stand::CapsLock], input.ctrl_key, |i, s| i.ctrl_key = s));
+    let as_command = switch("Use Ctrl as Command on a Mac", "Ctrl+C on this keyboard copies on a Mac, as it does here", input.ctrl_as_command);
+    as_command.connect_active_notify({
+        let app = app.clone();
+        move |row| set(&app, &|s| s.input.ctrl_as_command = row.is_active())
+    });
+    keyboard.add(&gate(as_command, FEATURES.key_mapping));
     let send_shortcuts = switch("Send system shortcuts to the computer", "Super, Alt+Tab and others go to the session while its window has the keyboard", shortcuts);
     send_shortcuts.connect_active_notify({
         let app = app.clone();
@@ -91,7 +110,7 @@ pub fn preferences(app: &Rc<App>) {
         }
     });
     keyboard.add(&send_shortcuts);
-    let release = adw::ActionRow::builder().title("Release the keyboard").subtitle("Gives shortcuts back to this computer").build();
+    let release = adw::ActionRow::builder().title("Release the keyboard").subtitle("Pressed and let go alone, it gives shortcuts back to this computer, and sends them to the other again").build();
     let caps = gtk::Box::builder().spacing(4).valign(gtk::Align::Center).build();
     caps.append(&gtk::Label::builder().label("Ctrl").css_classes(["rm-keycap"]).build());
     caps.append(&gtk::Label::builder().label("+").css_classes(["dim-label"]).build());
@@ -102,8 +121,18 @@ pub fn preferences(app: &Rc<App>) {
 
     let pointer = adw::PreferencesGroup::builder().title("Pointer and touch").build();
     pointer.add(&gate(combo("Pointer", "Captured sends raw movement, which games and 3D apps need", &["Follows this pointer", "Captured"], 0), FEATURES.pointer_capture));
-    pointer.add(&gate(switch("Draw the pointer here", "It moves at this display's refresh rate instead of waiting for the picture", true), FEATURES.pointer_choice));
-    pointer.add(&gate(combo("Scroll direction", "", &["Same as this computer", "Reversed"], 0), FEATURES.scroll_direction));
+    let draw = switch("Draw the pointer here", "It moves at this display's refresh rate instead of waiting for the picture. A change applies from the next session", input.draw_pointer);
+    draw.connect_active_notify({
+        let app = app.clone();
+        move |row| set(&app, &|s| s.input.draw_pointer = row.is_active())
+    });
+    pointer.add(&gate(draw, FEATURES.pointer_choice));
+    let direction = combo("Scroll direction", "", &["Same as this computer", "Reversed"], input.scroll_reversed as u32);
+    direction.connect_selected_notify({
+        let app = app.clone();
+        move |row| set(&app, &|s| s.input.scroll_reversed = row.selected() == 1)
+    });
+    pointer.add(&gate(direction, FEATURES.scroll_direction));
     pointer.add(&gate(switch("Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", false), FEATURES.touch));
     page.add(&pointer);
 
@@ -145,17 +174,26 @@ pub fn preferences(app: &Rc<App>) {
     page.add(&picture);
 
     let media = adw::PreferencesGroup::builder().title("Sound, microphone and camera").description("What a newly paired computer may use. Each computer has its own setting, and every session has its own switches").build();
-    media.add(&gate(switch("Play the computer's sound here", "", false), FEATURES.sound_setting));
-    media.add(&gate(switch("Let the computer use this microphone", "", false), FEATURES.microphone_setting));
-    media.add(&gate(switch("Let the computer use this camera", "For calls made on the computer. An indicator shows on both sides while it is in use", false), FEATURES.camera));
+    // A switch for one of the things a session starts with.
+    let starts_with = |title: &str, subtitle: &str, now: bool, put: fn(&mut Media, bool)| {
+        let row = switch(title, subtitle, now);
+        row.connect_active_notify({
+            let app = app.clone();
+            move |row| set(&app, &|s| put(&mut s.media, row.is_active()))
+        });
+        row
+    };
+    media.add(&gate(starts_with("Play the computer's sound here", "", media_now.sound, |m, on| m.sound = on), FEATURES.sound_setting));
+    media.add(&gate(starts_with("Let the computer use this microphone", "", media_now.microphone, |m, on| m.microphone = on), FEATURES.microphone_setting));
+    media.add(&gate(starts_with("Let the computer use this camera", "For calls made on the computer", media_now.camera, |m, on| m.camera = on), FEATURES.camera));
     page.add(&media);
 
     let sharing = adw::PreferencesGroup::builder().title("Sharing").build();
-    sharing.add(&gate(switch("Share the clipboard", "Text and images copied on either side can be pasted on the other", false), FEATURES.sharing_settings));
+    sharing.add(&gate(starts_with("Share the clipboard", "With computers that allow it: text and images copied on either side can be pasted on the other", media_now.clipboard, |m, on| m.clipboard = on), FEATURES.sharing_settings));
     let folder = adw::ActionRow::builder().title("Save received files to").build();
     folder.add_suffix(&gtk::Label::builder().label("Downloads").css_classes(["dim-label"]).build());
     folder.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-    sharing.add(&gate(folder, FEATURES.sharing_settings));
+    sharing.add(&gate(folder, FEATURES.receive_files));
     page.add(&sharing);
 
     let paired = adw::PreferencesGroup::builder().title("Paired computers").description("A forgotten computer has to be paired again before this device can connect to it").build();
@@ -258,9 +296,17 @@ pub fn computer(app: &Rc<App>, address: &str, addresses: bool) {
     page.add(&display);
 
     let media = adw::PreferencesGroup::builder().title("Sound, microphone and camera").description("What this computer may use from this device when a session starts").build();
-    media.add(&gate(switch("Sound", "The computer's sound plays on this device", false), FEATURES.sound_setting));
-    media.add(&gate(switch("Microphone", "The computer can use this device's microphone", false), FEATURES.microphone_setting));
-    media.add(&gate(switch("Camera", "The computer can use this device's camera, for calls made there", false), FEATURES.camera));
+    let starts_with = |title: &str, subtitle: &str, now: bool, put: fn(&mut Media, bool)| {
+        let row = switch(title, subtitle, now);
+        row.connect_active_notify({
+            let (app, address) = (app.clone(), address.clone());
+            move |row| app.store.borrow_mut().update(&address.borrow(), |c| put(&mut c.media, row.is_active()))
+        });
+        row
+    };
+    media.add(&gate(starts_with("Sound", "The computer's sound plays on this device", c.media.sound, |m, on| m.sound = on), FEATURES.sound_setting));
+    media.add(&gate(starts_with("Microphone", "The computer can use this device's microphone", c.media.microphone, |m, on| m.microphone = on), FEATURES.microphone_setting));
+    media.add(&gate(starts_with("Camera", "The computer can use this device's camera, for calls made there", c.media.camera, |m, on| m.camera = on), FEATURES.camera));
     page.add(&media);
 
     let connection = adw::PreferencesGroup::builder().title("Connection").build();

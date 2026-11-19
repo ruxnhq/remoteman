@@ -60,6 +60,11 @@ pub struct App {
     ended: RefCell<String>,
     /// Keys the other computer has been told are down.
     pub held: RefCell<HashSet<u16>>,
+    /// System shortcuts were given back to this computer with Ctrl+Alt, until it is pressed again.
+    pub released: Cell<bool>,
+    /// Ctrl and Alt on their way to being pressed and let go alone: which of them have been
+    /// down, and whether another key spoiled it.
+    pub chord: Cell<(bool, bool, bool)>,
     /// The window's size before a session made it larger.
     front_size: Cell<Option<(i32, i32)>>,
     /// Go back to full screen when the next session starts (it was left to reconnect).
@@ -201,7 +206,7 @@ impl App {
         let id = self.attempt.get().wrapping_add(1);
         self.attempt.set(id);
         let (placement, quality) = self.choices(&target.address);
-        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality) };
+        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: self.store.borrow().settings.input.draw_pointer };
         let app = self.clone();
         glib::spawn_future_local(async move {
             let result = match gio::spawn_blocking(move || Session::start(request)).await {
@@ -285,6 +290,20 @@ impl App {
         self.view.show_figures(self.store.borrow().settings.figures);
         self.video.attach(session.shared.clone());
         self.shown_before.set(self.video.shown_total.get());
+        // What this computer's sessions start with, as its settings say (the switches in the
+        // bar are then this session's own).
+        let (media, input) = {
+            let store = self.store.borrow();
+            (store.find(&target.address).map_or(store.settings.media, |c| c.media), store.settings.input)
+        };
+        if self.store.borrow().settings.media.clipboard {
+            self.clipboard_on.set(true);
+        }
+        // The computer draws its pointer into the picture: this window's own is in the way.
+        if !input.draw_pointer {
+            self.video.stack.set_cursor(gdk::Cursor::from_name("none", None).as_ref());
+        }
+        self.released.set(false);
         // So does a shared clipboard.
         let shares = session.offers("clipboard") && self.clipboard_on.get();
         self.view.offer_sharing(session.offers("clipboard"), session.offers("files"), shares);
@@ -293,7 +312,7 @@ impl App {
         }
         // Sound that was on carries over when the same computer is joined again.
         self.view.offer_sound(session.offers("sound"));
-        if self.args.sound && session.offers("sound") {
+        if (self.args.sound || media.sound) && session.offers("sound") {
             self.view.sound.set_active(true);
         }
         if self.view.sound.is_active() {
@@ -303,7 +322,7 @@ impl App {
         }
         // And the microphone.
         self.view.offer_microphone(session.offers("mic"));
-        if self.args.mic && session.offers("mic") {
+        if (self.args.mic || media.microphone) && session.offers("mic") {
             self.view.microphone.set_active(true);
         }
         if self.view.microphone.is_active() {
@@ -313,7 +332,7 @@ impl App {
         }
         // And the camera.
         self.view.offer_camera(session.offers("camera"));
-        if self.args.camera && session.offers("camera") {
+        if (self.args.camera || media.camera) && session.offers("camera") {
             self.view.camera.set_active(true);
         }
         if self.view.camera.is_active() {
@@ -338,10 +357,45 @@ impl App {
         }
     }
 
+    /// The usage to send for a key on this keyboard: the settings may have one key stand in
+    /// for another, and swap Ctrl and Command for a Mac.
+    pub fn key_for(&self, usage: u16) -> u16 {
+        let os = self.session.borrow().as_ref().map(|s| s.client.host_os.clone()).unwrap_or_default();
+        self.store.borrow().settings.input.map(usage, &os)
+    }
+
+    /// Ctrl+Alt, pressed and let go with no other key, gives the system's shortcuts back to
+    /// this computer, and takes them again. `usage` is the key as it is on this keyboard.
+    pub fn chord_key(&self, usage: u16, down: bool) {
+        let (ctrl, alt) = (matches!(usage, 0xE0 | 0xE4), matches!(usage, 0xE2 | 0xE6));
+        let (mut had_ctrl, mut had_alt, mut spoiled) = self.chord.get();
+        if down {
+            had_ctrl |= ctrl;
+            had_alt |= alt;
+            spoiled |= !ctrl && !alt;
+            self.chord.set((had_ctrl, had_alt, spoiled));
+            return;
+        }
+        // Let go: the chord is over when nothing is held any more.
+        if !self.held.borrow().is_empty() {
+            return;
+        }
+        self.chord.set((false, false, false));
+        if had_ctrl && had_alt && !spoiled && self.store.borrow().settings.shortcuts {
+            let released = !self.released.get();
+            self.released.set(released);
+            self.grab_shortcuts();
+            self.toast(if released { "Shortcuts are back with this computer. Ctrl+Alt sends them to the other again" } else { "Shortcuts go to the other computer" });
+            if self.args.ui.is_some() {
+                println!("~ shortcuts released: {released}");
+            }
+        }
+    }
+
     /// Super, Alt+Tab and the like go to the other computer while this has focus, if wanted.
     pub fn grab_shortcuts(&self) {
         let Some(top) = self.window.surface().and_downcast::<gdk::Toplevel>() else { return };
-        if self.streaming() && self.store.borrow().settings.shortcuts {
+        if self.streaming() && self.store.borrow().settings.shortcuts && !self.released.get() {
             top.inhibit_system_shortcuts(None::<&gdk::Event>);
         } else {
             top.restore_system_shortcuts();
@@ -690,6 +744,8 @@ pub fn build(application: &adw::Application, args: Args) {
         attempt: Cell::new(0),
         hover_bar: Cell::new(hover_bar),
         bar_out: Cell::new(false),
+        released: Cell::new(false),
+        chord: Cell::new((false, false, false)),
         said_placement: Cell::new(args.placement),
         reach: RefCell::new(HashMap::new()),
         ended: RefCell::new(String::new()),
