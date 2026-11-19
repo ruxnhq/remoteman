@@ -124,7 +124,16 @@ impl Host {
         // A display that asked for HDR: the monitor shows it (if the encoder can say so), and
         // its picture is BT.2020 PQ. A mirrored monitor is left as its owner has it.
         let hdr_wanted = screen.hdr && self.allowed.hdr.load(Ordering::Relaxed);
-        let hdr = if hdr_wanted && !mirror { crate::hdr::Switched::to(self.screen.device(), true) } else { None };
+        // A device's own monitor is brought to what the device asked, either way (a host stopped
+        // in the middle of a session may have left it in HDR), and left with HDR off; the PC's
+        // own monitor, used when there is no monitor to give, is switched only for a device
+        // that asked, and put back as it was.
+        let hdr = match (mirror, own.is_some()) {
+            (true, _) => None,
+            (false, true) => crate::hdr::Switched::to(self.screen.device(), hdr_wanted, Some(false)),
+            (false, false) if hdr_wanted => crate::hdr::Switched::to(self.screen.device(), true, None),
+            _ => None,
+        };
         if hdr.is_some() {
             // Windows takes a moment to give the monitor its wide surface.
             std::thread::sleep(std::time::Duration::from_millis(700));

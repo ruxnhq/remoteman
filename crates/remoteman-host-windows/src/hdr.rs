@@ -93,39 +93,39 @@ pub fn sdr_white(device: &str) -> f32 {
     level.SDRWhiteLevel as f32 * 80.0 / 1000.0
 }
 
-/// The monitor's HDR as it was before a device asked for it, put back when the device goes.
+/// HDR on a monitor while a device has it, and what it is set to when the device goes.
 pub struct Switched {
     device: String,
-    was: bool,
+    after: bool,
 }
 
 impl Switched {
-    /// Bring HDR on `device` to `on`; `None` if it was so already or can't be.
-    pub fn to(device: &str, on: bool) -> Option<Self> {
+    /// Bring HDR on `device` to `on`, and to `after` when this is dropped (`None`: as it was).
+    /// `None` back if there is nothing to do now or later, or Windows can't say.
+    pub fn to(device: &str, on: bool, after: Option<bool>) -> Option<Self> {
         let (can, is) = state(device)?;
-        if is == on || (on && !can) {
-            if on && !can {
-                tracing::info!(device, "this monitor can't show HDR");
-            }
-            return None;
+        if on && !can {
+            tracing::info!(device, "this monitor can't show HDR");
         }
-        match set(device, on) {
-            Ok(()) => {
-                tracing::info!(device, on, "HDR switched on the monitor");
-                Some(Self { device: device.into(), was: is })
-            }
-            Err(e) => {
-                tracing::warn!("{e:#}");
-                None
+        let want = on && can;
+        if is != want {
+            match set(device, want) {
+                Ok(()) => tracing::info!(device, on = want, "HDR switched on the monitor"),
+                Err(e) => tracing::warn!("{e:#}"),
             }
         }
+        let after = after.unwrap_or(is);
+        (after != want || is != want).then(|| Self { device: device.into(), after })
     }
 }
 
 impl Drop for Switched {
     fn drop(&mut self) {
-        match set(&self.device, self.was) {
-            Ok(()) => tracing::info!(device = self.device, on = self.was, "HDR on the monitor is as it was"),
+        if state(&self.device).is_some_and(|(_, is)| is == self.after) {
+            return;
+        }
+        match set(&self.device, self.after) {
+            Ok(()) => tracing::info!(device = self.device, on = self.after, "HDR on the monitor is as it should be without the device"),
             Err(e) => tracing::warn!("couldn't put HDR back: {e:#}"),
         }
     }
