@@ -155,3 +155,25 @@ fn a_still_second_display_shows_its_first_frame() {
         p.end();
     }
 }
+
+/// The same with a last frame of many datagrams of which the network loses some, at the
+/// very start of a connection, while the datagram limit is still growing: the copy must fit
+/// the pieces the client already holds.
+#[test]
+fn a_large_last_frame_is_completed_by_its_copy() {
+    let p = pair("large", Some(3));
+    let large: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+    assert!(p.link.send_frame(b"zero", true, 1));
+    assert!(p.link.send_frame(b"one", false, 2));
+    assert!(p.link.send_frame(&large, false, 3));
+    let mut last = None;
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while let Ok(seen) = p.seen.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+        if let Seen::Frame(2, data) = seen {
+            last = Some(data);
+            break;
+        }
+    }
+    assert!(last.is_some_and(|data| data == large), "the last frame never arrived whole, or not as it was sent");
+    p.end();
+}

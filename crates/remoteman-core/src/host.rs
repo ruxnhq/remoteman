@@ -642,7 +642,10 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         let (mut epoch2, mut number2) = (0u16, 0u32);
         // The last frame sent of each picture, and when it goes out once more if nothing has
         // followed it (see `REPEAT_AFTER`).
-        let mut last: [Option<(Frame, u16, u32, tokio::time::Instant)>; 2] = [None, None];
+        // With the datagram size it was cut for: the copy is cut the same way, so that it fits the pieces
+        // the client already holds, and goes only while datagrams of that size are still taken
+        // (the limit grows in a connection's first moments, and can shrink on a bad path).
+        let mut last: [Option<(Frame, u16, u32, tokio::time::Instant, usize)>; 2] = [None, None];
         loop {
             let due = last.iter().flatten().map(|l| l.3).min();
             let out = match due {
@@ -652,9 +655,12 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                         let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
                         for (index, slot) in last.iter_mut().enumerate() {
                             if slot.as_ref().is_some_and(|l| l.3 <= tokio::time::Instant::now()) {
-                                let (f, epoch, number, _) = slot.take().unwrap();
+                                let (f, epoch, number, _, cut) = slot.take().unwrap();
+                                if cut > max {
+                                    continue;
+                                }
                                 let kind = if index == 0 { remoteman_proto::video::KIND_VIDEO } else { remoteman_proto::video::KIND_VIDEO2 };
-                                for d in remoteman_proto::video::fragment_as(kind, &f.data, f.key, f.recovery, epoch, number, f.capture_us, max) {
+                                for d in remoteman_proto::video::fragment_as(kind, &f.data, f.key, f.recovery, epoch, number, f.capture_us, cut) {
                                     conn.send_datagram_wait(d.into()).await?;
                                 }
                             }
@@ -680,7 +686,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                             for d in remoteman_proto::video::fragment_as(remoteman_proto::video::KIND_VIDEO2, &f.data, f.key, f.recovery, epoch2, number2, f.capture_us, max) {
                                 conn.send_datagram_wait(d.into()).await?;
                             }
-                            last[1] = Some((f, epoch2, number2, tokio::time::Instant::now() + REPEAT_AFTER));
+                            last[1] = Some((f, epoch2, number2, tokio::time::Instant::now() + REPEAT_AFTER, max));
                             number2 = number2.wrapping_add(1);
                         }
                         Out::Second(_) => {}
@@ -709,7 +715,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             if f.key || f.recovery {
                 answer.store(number.wrapping_add(1), std::sync::atomic::Ordering::Relaxed);
             }
-            last[0] = Some((f, now(), number, tokio::time::Instant::now() + REPEAT_AFTER));
+            last[0] = Some((f, now(), number, tokio::time::Instant::now() + REPEAT_AFTER, max));
             number = number.wrapping_add(1);
         }
         // The handler dropped its link without the client leaving: nothing more to send.
