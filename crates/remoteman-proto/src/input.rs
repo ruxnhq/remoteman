@@ -30,6 +30,9 @@ pub enum Event {
     Touch { phase: TouchPhase, slot: u8, x: f32, y: f32 },
     /// Text from an on-screen keyboard or input method.
     Text(String),
+    /// The pointer and touch events that follow are on this display of the session (0, the
+    /// first, until said otherwise; 1, the second: docs/PROTOCOL.md, "A second display").
+    Display(u8),
 }
 
 impl Event {
@@ -68,6 +71,7 @@ impl Event {
                 out.extend_from_slice(&(s.len() as u16).to_le_bytes());
                 out.extend_from_slice(s);
             }
+            Event::Display(index) => out.extend_from_slice(&[8, *index]),
         }
     }
 
@@ -80,6 +84,7 @@ impl Event {
             3 => 3,
             5 => 4,
             6 => 11,
+            8 => 2,
             7 => {
                 if buf.len() < 3 {
                     return Ok(None);
@@ -106,6 +111,7 @@ impl Event {
             },
             4 => Event::Scroll { dx: f(1), dy: f(5) },
             5 => Event::Key { usage: u16::from_le_bytes([buf[1], buf[2]]), down: buf[3] != 0 },
+            8 => Event::Display(buf[1]),
             6 => Event::Touch {
                 phase: match buf[1] {
                     0 => TouchPhase::Down,

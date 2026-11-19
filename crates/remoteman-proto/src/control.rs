@@ -39,6 +39,10 @@ pub enum Placement {
     Main = 1,
     /// The only display: the host's own screens are off while the client is connected.
     Only = 2,
+    /// No display of the client's own: it is shown the host's main monitor as it is, at that
+    /// monitor's size, and its input lands there. A host that doesn't list `mirror` among
+    /// its features reads this as an extra display.
+    Mirror = 3,
     /// An extra display beside the host's own. Also what a placement this version doesn't know
     /// is read as.
     #[default]
@@ -49,6 +53,26 @@ pub enum Placement {
 impl Placement {
     fn is_default(&self) -> bool {
         *self == Placement::Extend
+    }
+}
+
+/// Which side of the host's other displays a client's second display sits on. The numbers
+/// are the C interface's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Left = 1,
+    Above = 2,
+    Below = 3,
+    /// Also what a side this version doesn't know is read as.
+    #[default]
+    #[serde(other)]
+    Right = 0,
+}
+
+impl Side {
+    fn is_default(&self) -> bool {
+        *self == Side::Right
     }
 }
 
@@ -78,6 +102,15 @@ pub enum Message {
         /// (`cursor`) and position (cursor datagrams) instead.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cursor: bool,
+        /// The password of the host's user, for a host that is locked and answered an
+        /// earlier hello with the error `locked` (docs/PROTOCOL.md, "A locked host").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unlock: Option<String>,
+        /// How this device may be let in where there is a choice: left out, any way the host
+        /// has; `"attach"`, only into a session that is already running (never a login
+        /// screen). A host with one way in takes no notice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        way_in: Option<String>,
     },
     HostHello {
         proto: u32,
@@ -85,7 +118,8 @@ pub enum Message {
         os: String,
         features: Vec<String>,
     },
-    /// What the video datagrams of `epoch` carry.
+    /// What the video datagrams of `epoch` carry. `index` 1: the second display's picture
+    /// (docs/PROTOCOL.md, "A second display"), whose epochs count by themselves.
     Stream {
         epoch: u16,
         #[serde(flatten)]
@@ -94,6 +128,27 @@ pub enum Message {
         height: u32,
         refresh: u32,
         colour: String,
+        #[serde(default, skip_serializing_if = "is_zero8")]
+        index: u8,
+    },
+    /// Client to host: add a second display of this size to the session (`index` 1, `on`
+    /// true), or take it away. Host to client, with `on` false: the second display is gone
+    /// (it could not be made, or the host took it away).
+    Display {
+        index: u8,
+        on: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<Display>,
+        /// Client to host, with `on` true: which side of everything else it should sit on.
+        #[serde(default, skip_serializing_if = "Side::is_default")]
+        side: Side,
+        /// Host to client: why it is gone.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        message: String,
+    },
+    /// Client to host: the next frame of this display (not the first) must be a keyframe.
+    DisplayKeyframe {
+        index: u8,
     },
     /// The cursor's shape changed. `rgba` is base64 of `width * height * 4` bytes, premultiplied
     /// RGBA, rows top to bottom; the hotspot is in the image's pixels. `width` 0: no cursor
@@ -137,6 +192,12 @@ pub enum Message {
     /// Client to host: send the desktop's sound (sound datagrams), or stop.
     Sound {
         on: bool,
+    },
+    /// Host to client, in place of the hello for a moment: this device is new here, and the
+    /// host's owner has this many seconds to confirm it. Both sides can show the same code
+    /// meanwhile (docs/PROTOCOL.md, "Pairing"); the hello, or an error, follows.
+    Pairing {
+        seconds: u32,
     },
     /// Host to client: what the sound datagrams carry, before the first one and on any change.
     SoundFormat {
@@ -268,7 +329,10 @@ mod tests {
         assert_eq!((display.width, display.refresh, display.placement), (2752, 120, Placement::Extend));
         let only = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"only"},"decoders":[]}"#).unwrap();
         assert!(matches!(only, Message::ClientHello { display: Display { placement: Placement::Only, .. }, .. }));
-        let newer = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"mirror"},"decoders":[]}"#).unwrap();
+        let mirror = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"mirror"},"decoders":[]}"#).unwrap();
+        assert!(matches!(mirror, Message::ClientHello { display: Display { placement: Placement::Mirror, .. }, .. }));
+        // A placement this version doesn't know is an extra display.
+        let newer = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"sideways"},"decoders":[]}"#).unwrap();
         assert!(matches!(newer, Message::ClientHello { display: Display { placement: Placement::Extend, .. }, .. }));
         assert_eq!(decoders[1], Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 });
         assert_eq!(serde_json::to_string(&m).unwrap(), json);
@@ -276,7 +340,7 @@ mod tests {
 
     #[test]
     fn stream_is_flat_and_unknowns_are_ignored() {
-        let m = Message::Stream { epoch: 1, mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: 2752, height: 2064, refresh: 120, colour: "bt709".into() };
+        let m = Message::Stream { epoch: 1, mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: 2752, height: 2064, refresh: 120, colour: "bt709".into(), index: 0 };
         assert_eq!(
             serde_json::to_string(&m).unwrap(),
             r#"{"t":"stream","epoch":1,"codec":"av1","chroma":"420","depth":10,"width":2752,"height":2064,"refresh":120,"colour":"bt709"}"#

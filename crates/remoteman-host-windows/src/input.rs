@@ -261,6 +261,8 @@ impl Injector {
                 }
             }
             Event::Touch { phase, slot, x, y } => self.touch(*phase, *slot, *x, *y),
+            // This host gives a device one display, so there is nothing to choose between.
+            Event::Display(_) => {}
         }
     }
 

@@ -24,6 +24,17 @@ pub struct Target {
     pub name: String,
 }
 
+/// A password being tried on a locked computer.
+pub struct Unlocking {
+    /// The computer's key, which is what a kept password is filed under.
+    pub computer: String,
+    pub password: String,
+    /// Keep it in the keyring if it gets this device in.
+    pub remember: bool,
+    /// It came from the keyring (so it is thrown away there if it is wrong).
+    pub kept: bool,
+}
+
 pub struct App {
     pub args: Args,
     pub app: adw::Application,
@@ -49,6 +60,15 @@ pub struct App {
     attempt: Cell<u32>,
     /// Hide the window's bar while connected.
     pub hover_bar: Cell<bool>,
+    /// Seconds of streaming counted, for the line in the log every ten.
+    pub log_tick: Cell<u32>,
+    /// For the same line: pictures shown and input events sent since the last one.
+    pub shown_window: Cell<u32>,
+    pub inputs: Cell<u32>,
+    /// With "The window's size": the display last asked of the computer, and the size the
+    /// picture's place had at the last look.
+    pub asked: Cell<Option<(u32, u32)>>,
+    pub wanted: Cell<(u32, u32)>,
     /// The pointer is at the top edge (or on the bar), so a hidden bar is out.
     pub bar_out: Cell<bool>,
     /// The placement from the command line, until another is chosen in the window.
@@ -60,6 +80,37 @@ pub struct App {
     ended: RefCell<String>,
     /// Keys the other computer has been told are down.
     pub held: RefCell<HashSet<u16>>,
+    /// System shortcuts were given back to this computer with Ctrl+Alt, until it is pressed again.
+    pub released: Cell<bool>,
+    /// Ctrl and Alt on their way to being pressed and let go alone: which of them have been
+    /// down, and whether another key spoiled it.
+    pub chord: Cell<(bool, bool, bool)>,
+    /// The pointer held in the window, its raw movement sent, while that is wanted.
+    /// Every advertisement of a remoteman host seen on this network now.
+    pub nearby: RefCell<Vec<crate::nearby::Found>>,
+    /// The code to compare while a computer's owner is asked about this device, and the
+    /// seconds they have (set by the attempt that is running).
+    pub pairing: std::sync::Arc<std::sync::Mutex<Option<(String, u32)>>>,
+    /// The password typed for a locked computer, for the next try and no longer.
+    pub unlock: RefCell<Option<String>>,
+    /// The password on its way to a locked computer: for which computer (its key), whether it
+    /// is to be remembered if it works, and whether it came from the keyring.
+    pub unlocking: RefCell<Option<Unlocking>>,
+    /// How many tries in a row a computer has answered that it is logging in.
+    pub logging_in: Cell<u32>,
+    /// The second display's window, while there is one, and which display the pointer is on.
+    pub second: RefCell<Option<crate::second::Second>>,
+    pub pointer_on: Cell<u8>,
+    pub capture: RefCell<Option<crate::capture::Capture>>,
+    /// How far a captured pointer has been sent in this run, for tests.
+    pub moved: Cell<(f64, f64)>,
+    /// The other computer's cursor as it last said: its image, the image's size and the spot
+    /// in it that points (in the other display's pixels); and where it last said it was.
+    pub remote_pointer: RefCell<Option<(gdk::Texture, (u32, u32), (i32, i32))>>,
+    pub remote_at: Cell<Option<(f32, f32, bool)>>,
+    /// The fingers on a touchscreen that the other computer knows of: each one's place in
+    /// this list is its number there.
+    pub fingers: RefCell<Vec<Option<usize>>>,
     /// The window's size before a session made it larger.
     front_size: Cell<Option<(i32, i32)>>,
     /// Go back to full screen when the next session starts (it was left to reconnect).
@@ -70,6 +121,9 @@ pub struct App {
 
 const STYLE: &str = "
 .rm-video { background: black; }
+/* The bar keeps its own background when it lies over the picture (libadwaita makes a bar
+   that content extends under see-through). */
+toolbarview.rm-session > .top-bar > windowhandle { background-color: @headerbar_bg_color; box-shadow: 0 1px alpha(black, 0.35); }
 .rm-state { font-size: 13px; font-weight: 700; }
 .rm-dot { min-width: 8px; min-height: 8px; border-radius: 4px; background-color: currentColor; }
 .rm-code { font-size: 52px; font-weight: 800; letter-spacing: 2px; font-feature-settings: 'tnum'; }
@@ -103,6 +157,7 @@ impl App {
     }
 
     pub fn send(&self, event: Event) {
+        self.inputs.set(self.inputs.get() + 1);
         if let Some(s) = self.session.borrow().as_ref() {
             s.client.send(event);
         }
@@ -135,6 +190,61 @@ impl App {
 
     /// The display to ask the host for: this monitor's, unless the command line says otherwise.
     pub fn display(&self, placement: Placement) -> Display {
+        let address = self.target.borrow().as_ref().map(|t| t.address.clone());
+        self.display_for(address.as_deref(), placement)
+    }
+
+    /// How many pixels the picture has to itself in the window, at this scale: the window
+    /// without its bar, or all of it where the bar lies over the picture.
+    fn picture_pixels(&self, scale: f32) -> (u32, u32) {
+        let (mut w, mut h) = (self.window.width(), self.window.height());
+        if self.streaming() && self.video.stack.width() > 0 {
+            // Connected: the picture's place as it is laid out.
+            (w, h) = (self.video.stack.width(), self.video.stack.height());
+        } else {
+            // Not connected yet: the size the window is about to have (a small one is made
+            // room in when the picture comes, see `started`), less its bar if that stays.
+            if !self.window.is_maximized() && !self.window.is_fullscreen() && (w < 1280 || h < 800) && w > 0 {
+                (w, h) = (1280, 800);
+            }
+            if !(self.window.is_fullscreen() || self.hover_bar.get()) {
+                h -= self.view.bar_height();
+            }
+        }
+        let pixels = |points: i32| (((points.max(1) as f32 * scale).round() as u32) & !1).clamp(320, 8192);
+        (pixels(w), pixels(h))
+    }
+
+    /// While connected with "The window's size": when the window has changed size and has
+    /// been still for a second, the computer is asked for a display of the new size. Asked
+    /// once a second. Compared with what was last asked for, never with what came: a host
+    /// may answer with another size (rounded, or the nearest it can do), and that must not
+    /// be asked for again and again.
+    fn follow_window(&self) {
+        let session = self.session.borrow();
+        let (Some(s), Some(target)) = (session.as_ref(), self.target.borrow().clone()) else { return };
+        let most = self.store.borrow().find(&target.address).map_or(0, |c| c.max_height);
+        let placement = self.choices(&target.address).0;
+        // Not with a second display on: a display made afresh takes the second away.
+        if most != crate::store::WINDOW || self.args.size.is_some() || placement == Placement::Mirror || !s.offers("configure") || self.second.borrow().is_some() {
+            return;
+        }
+        let display = self.display_for(Some(&target.address), placement);
+        let now = (display.width, display.height);
+        let Some(asked) = self.asked.get() else { return self.asked.set(Some(now)) };
+        // Still for a second: the same on two looks running.
+        if now != asked && self.wanted.replace(now) == now {
+            self.asked.set(Some(now));
+            if self.args.ui.is_some() {
+                println!("~ asked for a display of {} x {}", now.0, now.1);
+            }
+            s.client.send_message(remoteman_core::Message::Configure { display: Some(display), bitrate: None, decoders: None });
+        }
+    }
+
+    /// The same, as it is asked of the computer at this address (its picture size may have
+    /// been chosen smaller).
+    pub fn display_for(&self, address: Option<&str>, placement: Placement) -> Display {
         let monitor = self
             .window
             .surface()
@@ -146,13 +256,21 @@ impl App {
             scale = m.scale() as f32;
             w = (g.width() as f64 * m.scale()).round() as u32;
             h = (g.height() as f64 * m.scale()).round() as u32;
-            // Decoding and uploading is sized for 120 a second for now.
-            refresh = ((m.refresh_rate() as f64 / 1000.0).round() as u32).clamp(30, 120);
+            // Decoding and uploading is sized for 120 a second for now. Without the match, 60:
+            // what every display and every stream can do.
+            refresh = if self.store.borrow().settings.match_refresh { ((m.refresh_rate() as f64 / 1000.0).round() as u32).clamp(30, 120) } else { 60 };
         }
         if let Some((sw, sh)) = self.args.size {
             (w, h) = (sw, sh);
         }
-        Display { width: w & !1, height: h & !1, scale: self.args.scale.unwrap_or(scale), refresh: self.args.refresh.unwrap_or(refresh), placement }
+        // Fewer pixels, if that was chosen for this computer.
+        let most = address.and_then(|a| self.store.borrow().find(a).map(|c| c.max_height)).unwrap_or(0);
+        let (mut w, mut h, scale) = crate::store::fit_lines(w, h, self.args.scale.unwrap_or(scale), most);
+        // The window's own pixels, if that was chosen (a mirrored display is the computer's).
+        if most == crate::store::WINDOW && self.args.size.is_none() && placement != Placement::Mirror {
+            (w, h) = self.picture_pixels(scale);
+        }
+        Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement }
     }
 
     /// How this display is to sit among a computer's own, and which stream to ask it for.
@@ -174,6 +292,10 @@ impl App {
 
     /// What is known of a computer before trying it, as far as this build may say.
     pub fn reach_of(&self, address: &str) -> Option<status::Reach> {
+        // Seen on this network now beats what an earlier attempt found.
+        if FEATURES.presence && self.seen(address).is_some() {
+            return Some(status::Reach::Online);
+        }
         self.reach.borrow().get(address).copied().filter(|r| FEATURES.presence || *r == status::Reach::Unreachable)
     }
 
@@ -201,7 +323,9 @@ impl App {
         let id = self.attempt.get().wrapping_add(1);
         self.attempt.set(id);
         let (placement, quality) = self.choices(&target.address);
-        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality) };
+        let display = self.display_for(Some(&target.address), placement);
+        self.asked.set(Some((display.width, display.height)));
+        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display, decoders: self.decoders(quality), cursor: self.store.borrow().settings.input.draw_pointer, unlock: self.unlock.borrow_mut().take(), attach_only: self.store.borrow().find(&target.address).is_some_and(|c| c.attach_only), folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
         let app = self.clone();
         glib::spawn_future_local(async move {
             let result = match gio::spawn_blocking(move || Session::start(request)).await {
@@ -233,18 +357,13 @@ impl App {
         if self.streaming() {
             return;
         }
-        if self.reach_of(&target.address) == Some(status::Reach::Asleep) {
-            // Known to be asleep: offer to wake it rather than wait for no answer.
-            self.show_page(&status::problem(self, &target, status::Problem::Asleep));
-            return;
-        }
         let (placement, _) = self.choices(&target.address);
         let to = target.clone();
         let id = self.attempt(&target, pair, move |app, result| match result {
             Ok(session) => app.enter(session, &to),
             Err(e) => app.failed(&to, &e),
         });
-        let page = status::connecting(self, &target, self.display(placement), id);
+        let page = status::connecting(self, &target, self.display_for(Some(&target.address), placement), id);
         self.show_page(&page);
         *self.target.borrow_mut() = Some(target);
     }
@@ -281,10 +400,33 @@ impl App {
         // What each choice of quality asks the computer for first.
         let first = |q: Quality| self.decoders(q).first().map(mode_name).unwrap_or_default();
         let sharp = if self.decoders(Quality::Sharp).first().is_some_and(|m| m.chroma == Chroma::C444) { first(Quality::Sharp) } else { String::new() };
-        self.view.begin(&name, can_place, placement, quality, (first(Quality::Automatic), sharp));
+        self.view.begin(&name, can_place, session.offers("mirror"), placement, quality, (first(Quality::Automatic), sharp));
         self.view.show_figures(self.store.borrow().settings.figures);
         self.video.attach(session.shared.clone());
         self.shown_before.set(self.video.shown_total.get());
+        // What this computer's sessions start with, as its settings say (the switches in the
+        // bar are then this session's own).
+        let (media, input) = {
+            let store = self.store.borrow();
+            (store.find(&target.address).map_or(store.settings.media, |c| c.media), store.settings.input)
+        };
+        if self.store.borrow().settings.media.clipboard {
+            self.clipboard_on.set(true);
+        }
+        // The computer draws its pointer into the picture: this window's own is in the way.
+        if !input.draw_pointer || input.capture {
+            // (Captured, the other computer's pointer is drawn over the picture where it is.)
+            self.video.stack.set_cursor(gdk::Cursor::from_name("none", None).as_ref());
+        }
+        self.released.set(false);
+        self.pointer_on.set(0);
+        self.view.offer_second(session.offers("displays"));
+        self.fingers.borrow_mut().clear();
+        self.view.show_pointer(input.capture);
+        if input.capture {
+            self.hold_pointer(true);
+            self.toast("The pointer is captured. Ctrl+Alt lets it go");
+        }
         // So does a shared clipboard.
         let shares = session.offers("clipboard") && self.clipboard_on.get();
         self.view.offer_sharing(session.offers("clipboard"), session.offers("files"), shares);
@@ -293,7 +435,7 @@ impl App {
         }
         // Sound that was on carries over when the same computer is joined again.
         self.view.offer_sound(session.offers("sound"));
-        if self.args.sound && session.offers("sound") {
+        if (self.args.sound || media.sound) && session.offers("sound") {
             self.view.sound.set_active(true);
         }
         if self.view.sound.is_active() {
@@ -303,13 +445,21 @@ impl App {
         }
         // And the microphone.
         self.view.offer_microphone(session.offers("mic"));
-        if self.args.mic && session.offers("mic") {
+        if (self.args.mic || media.microphone) && session.offers("mic") {
             self.view.microphone.set_active(true);
         }
         if self.view.microphone.is_active() {
             if let Err(e) = session.set_microphone(true, self.args.mic_from.as_deref()) {
                 self.toast(&format!("The microphone can't be used: {e:#}"));
             }
+        }
+        // And the camera.
+        self.view.offer_camera(session.offers("camera"));
+        if (self.args.camera || media.camera) && session.offers("camera") {
+            self.view.camera.set_active(true);
+        }
+        if self.view.camera.is_active() {
+            session.set_camera(true, self.args.camera_from.as_deref());
         }
         *self.session.borrow_mut() = Some(session);
         *self.target.borrow_mut() = Some(Target { address: target.address.clone(), name });
@@ -330,10 +480,100 @@ impl App {
         }
     }
 
+    /// The usage to send for a key on this keyboard: the settings may have one key stand in
+    /// for another, and swap Ctrl and Command for a Mac.
+    pub fn key_for(&self, usage: u16) -> u16 {
+        let os = self.session.borrow().as_ref().map(|s| s.client.host_os.clone()).unwrap_or_default();
+        self.store.borrow().settings.input.map(usage, &os)
+    }
+
+    /// Something other than Ctrl and Alt happened while they were held (a button, the wheel):
+    /// it is a shortcut of the other computer's, not the chord that releases. (Movement
+    /// doesn't count: a hand resting on the mouse would make the pointer impossible to free.)
+    pub fn spoil_chord(&self) {
+        let (ctrl, alt, _) = self.chord.get();
+        if ctrl || alt {
+            self.chord.set((ctrl, alt, true));
+        }
+    }
+
+    /// Hold the pointer in the window and send its raw movement, or let it go.
+    pub fn hold_pointer(&self, hold: bool) {
+        if !hold {
+            if self.capture.borrow_mut().take().is_some() {
+                // This pointer is its owner's again: the one drawn over the picture goes, and
+                // this one wears the other computer's cursor as it does when not captured.
+                self.view.draw_pointer(None, (0.0, 0.0), (0.0, 0.0), (0.0, 0.0));
+                let worn = self.remote_pointer.borrow().as_ref().map(|(texture, _, hot)| gdk::Cursor::from_texture(texture, hot.0, hot.1, None));
+                self.video.stack.set_cursor(worn.as_ref());
+            }
+            return;
+        }
+        match crate::capture::Capture::start(&self.window) {
+            Ok(capture) => {
+                *self.capture.borrow_mut() = Some(capture);
+                self.video.stack.set_cursor(gdk::Cursor::from_name("none", None).as_ref());
+            }
+            Err(e) => self.toast(&format!("The pointer can't be captured: {e}")),
+        }
+    }
+
+    /// The bar's Pointer Mode button: captured or following this pointer, from now on. The
+    /// computer draws a captured pointer into the picture, which it is asked for when a
+    /// session starts, so this one starts again.
+    pub fn toggle_capture(self: &Rc<Self>) {
+        {
+            let mut store = self.store.borrow_mut();
+            store.settings.input.capture = !store.settings.input.capture;
+            store.save_settings();
+        }
+        self.reconnect();
+    }
+
+    /// Ctrl+Alt, pressed and let go with no other key, gives the system's shortcuts back to
+    /// this computer, and takes them again. `usage` is the key as it is on this keyboard.
+    pub fn chord_key(&self, usage: u16, down: bool) {
+        let (ctrl, alt) = (matches!(usage, 0xE0 | 0xE4), matches!(usage, 0xE2 | 0xE6));
+        let (mut had_ctrl, mut had_alt, mut spoiled) = self.chord.get();
+        if down {
+            had_ctrl |= ctrl;
+            had_alt |= alt;
+            spoiled |= !ctrl && !alt;
+            self.chord.set((had_ctrl, had_alt, spoiled));
+            return;
+        }
+        // Let go: the chord is over when nothing is held any more.
+        if !self.held.borrow().is_empty() {
+            return;
+        }
+        self.chord.set((false, false, false));
+        let (shortcuts, capture) = {
+            let store = self.store.borrow();
+            (store.settings.shortcuts, store.settings.input.capture)
+        };
+        if had_ctrl && had_alt && !spoiled && (shortcuts || capture) {
+            let released = !self.released.get();
+            self.released.set(released);
+            self.grab_shortcuts();
+            if capture {
+                self.hold_pointer(!released);
+            }
+            self.toast(match (released, capture) {
+                (true, true) => "The pointer and shortcuts are back with this computer. Ctrl+Alt gives them to the other again",
+                (true, false) => "Shortcuts are back with this computer. Ctrl+Alt sends them to the other again",
+                (false, true) => "The pointer is captured. Ctrl+Alt lets it go",
+                (false, false) => "Shortcuts go to the other computer",
+            });
+            if self.args.ui.is_some() {
+                println!("~ shortcuts released: {released}");
+            }
+        }
+    }
+
     /// Super, Alt+Tab and the like go to the other computer while this has focus, if wanted.
     pub fn grab_shortcuts(&self) {
         let Some(top) = self.window.surface().and_downcast::<gdk::Toplevel>() else { return };
-        if self.streaming() && self.store.borrow().settings.shortcuts {
+        if self.streaming() && self.store.borrow().settings.shortcuts && !self.released.get() {
             top.inhibit_system_shortcuts(None::<&gdk::Event>);
         } else {
             top.restore_system_shortcuts();
@@ -365,10 +605,15 @@ impl App {
         self.video.free_gl();
         let _ = session.set_sound(false, None);
         let _ = session.set_microphone(false, None);
+        session.set_camera(false, None);
+        self.hold_pointer(false);
+        // (Dropped with the session on the computer's side.)
+        self.close_second(false);
         session.client.close();
         if !stay {
             self.view.sound.set_active(false);
             self.view.microphone.set_active(false);
+            self.view.camera.set_active(false);
             self.clipboard_on.set(false);
             self.view.show_clipboard(false);
         }
@@ -454,7 +699,7 @@ impl App {
     /// This computer's clipboard changed (or sharing has just begun): send text if it holds
     /// any, else a picture. What came from the other computer is not sent back.
     pub fn copied_here(self: &Rc<Self>) {
-        if !self.clipboard_on.get() || self.session.borrow().is_none() {
+        if !self.clipboard_on.get() || !self.session.borrow().as_ref().is_some_and(|s| s.offers("clipboard")) {
             return;
         }
         let clipboard = self.window.clipboard();
@@ -479,7 +724,8 @@ impl App {
         if self.from_computer.get() == Some(mark_of(kind, &bytes)) || !self.clipboard_on.get() {
             return;
         }
-        if let Some(s) = self.session.borrow().as_ref() {
+        // Only to a computer that still allows it: its owner may have switched it off since.
+        if let Some(s) = self.session.borrow().as_ref().filter(|s| s.offers("clipboard")) {
             s.send_copy(kind, bytes);
         }
     }
@@ -494,9 +740,56 @@ impl App {
         }
     }
 
+    /// The computer's owner switched something on or off while this device is connected: the
+    /// bar offers what it offers now. A clipboard that was shared, or chosen before it was
+    /// allowed, follows; sound and a microphone that are withdrawn stop.
+    fn follow_features(&self) {
+        let session = self.session.borrow();
+        let Some(s) = session.as_ref() else { return };
+        if !s.shared.features_changed.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let was_shared = self.view.clipboard_shown();
+        let shares = s.offers("clipboard") && self.clipboard_on.get();
+        self.view.offer_sharing(s.offers("clipboard"), s.offers("files"), shares);
+        if shares && !was_shared {
+            s.share_clipboard(true);
+        }
+        self.view.offer_sound(s.offers("sound"));
+        self.view.offer_microphone(s.offers("mic"));
+        self.view.offer_camera(s.offers("camera"));
+        if self.args.ui.is_some() {
+            println!("~ the computer now offers: clipboard {}, files {}", s.offers("clipboard"), s.offers("files"));
+        }
+    }
+
     /// What arrived from the computer since the last frame: copies for this clipboard, and
     /// word of files sent.
     fn arrivals(&self) {
+        self.follow_features();
+        // Files the computer sent: it is told what became of each, and so is the person here.
+        let received = self.session.borrow().as_ref().map(|s| std::mem::take(&mut *s.shared.received.lock().unwrap())).unwrap_or_default();
+        for (id, outcome) in received {
+            if let Some(s) = self.session.borrow().as_ref() {
+                s.client.send_message(remoteman_core::Message::FileResult { id, ok: outcome.is_ok(), message: match &outcome { Ok(at) => at.display().to_string(), Err(why) => why.clone() } });
+            }
+            match outcome {
+                Ok(at) => {
+                    self.toast(&format!("A file from the computer: {}", at.display()));
+                    if self.args.ui.is_some() {
+                        println!("~ received {}", at.display());
+                    }
+                }
+                Err(why) => self.toast(&format!("A file from the computer didn't arrive: {why}")),
+            }
+        }
+        // A camera that couldn't be opened: say why, and let its button out (which tells the
+        // computer it is off again).
+        let failed = self.session.borrow().as_ref().and_then(|s| s.shared.camera_failed.lock().unwrap().take());
+        if let Some(why) = failed {
+            self.toast(&format!("The camera can't be used: {why}"));
+            self.view.camera.set_active(false);
+        }
         let (copies, results) = match self.session.borrow().as_ref() {
             Some(s) => (std::mem::take(&mut *s.shared.copies.lock().unwrap()), std::mem::take(&mut *s.shared.results.lock().unwrap())),
             None => return,
@@ -520,23 +813,67 @@ impl App {
     /// Once per frame of this window: show the newest picture, and notice the session ending.
     fn tick(self: &Rc<Self>) {
         self.arrivals();
+        self.tick_second();
+        // A captured pointer's movement since the last frame.
+        let moved = self.capture.borrow_mut().as_mut().map(|c| c.take());
+        if let Some(((dx, dy), _)) = moved {
+            if dx != 0.0 || dy != 0.0 {
+                let so_far = self.moved.get();
+                self.moved.set((so_far.0 + dx, so_far.1 + dy));
+                self.send(Event::PointerBy { dx: dx as f32, dy: dy as f32 });
+            }
+        }
         let (picture, closed, cursor) = match self.session.borrow().as_ref() {
             Some(s) => (s.shared.picture.lock().unwrap().take(), s.shared.closed.lock().unwrap().clone(), s.shared.cursor.lock().unwrap().take()),
             None => return,
         };
+        let captured = self.capture.borrow().is_some();
         if let Some(c) = cursor {
             // The other computer's cursor becomes this window's own pointer, so it moves with
             // the hand and not a pipeline's delay later. Its image is in the other display's
             // pixels; GDK counts in this one's, so it is scaled to match.
-            let pointer = if c.width == 0 {
-                gdk::Cursor::from_name("none", None)
-            } else {
-                let texture = gdk::MemoryTexture::new(c.width as i32, c.height as i32, gdk::MemoryFormat::R8g8b8a8Premultiplied, &glib::Bytes::from_owned(c.rgba), c.width as usize * 4);
-                Some(gdk::Cursor::from_texture(&texture, c.hot_x, c.hot_y, None))
-            };
-            self.video.stack.set_cursor(pointer.as_ref());
+            let texture = (c.width > 0).then(|| gdk::MemoryTexture::new(c.width as i32, c.height as i32, gdk::MemoryFormat::R8g8b8a8Premultiplied, &glib::Bytes::from_owned(c.rgba), c.width as usize * 4).upcast::<gdk::Texture>());
+            *self.remote_pointer.borrow_mut() = texture.clone().map(|t| (t, (c.width, c.height), (c.hot_x, c.hot_y)));
+            // (A captured pointer has no place of its own to wear it: see below.)
+            if !captured {
+                let pointer = match &texture {
+                    Some(t) => Some(gdk::Cursor::from_texture(t, c.hot_x, c.hot_y, None)),
+                    None => gdk::Cursor::from_name("none", None),
+                };
+                self.video.stack.set_cursor(pointer.as_ref());
+            }
+        }
+        // A captured pointer is where the other computer says its cursor is, so that is where
+        // it is drawn: over the picture, at once, not in the picture a pipeline's delay later.
+        let at = self.session.borrow().as_ref().and_then(|s| s.shared.cursor_at.lock().unwrap().take());
+        if at.is_some() {
+            self.remote_at.set(at);
+        }
+        if captured {
+            let drawn = self.remote_pointer.borrow();
+            match (drawn.as_ref(), self.remote_at.get()) {
+                (Some((texture, size, hot)), Some((x, y, true))) => {
+                    if let Some((px, py, k)) = self.video.spot(x, y) {
+                        self.view.draw_pointer(Some(texture), (size.0 as f64 * k, size.1 as f64 * k), (hot.0 as f64 * k, hot.1 as f64 * k), (px, py));
+                    }
+                }
+                _ => self.view.draw_pointer(None, (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)),
+            }
         }
         if let Some(p) = picture {
+            // A picture: whatever the computer was doing before it let this device in is over.
+            // (Not sooner: a computer that is logging in answers the hello and then closes.)
+            self.logging_in.set(0);
+            // And a password that got this device in is one worth keeping, if that was asked.
+            if let Some(used) = self.unlocking.borrow_mut().take() {
+                if used.remember && !used.kept {
+                    let name = self.target.borrow().as_ref().map(|t| t.name.clone()).unwrap_or_default();
+                    let done = crate::keyring::keep(&used.computer, &name, &used.password);
+                    if self.args.ui.is_some() {
+                        println!("~ password kept in the keyring: {done}");
+                    }
+                }
+            }
             self.video.show(p);
         }
         if let Some(reason) = closed {
@@ -576,6 +913,31 @@ impl App {
             println!("{} | drawn {}", line.replace('\n', " | "), self.video.drawn.replace(0));
         }
         let megabits = s.shared.bytes.swap(0, Ordering::Relaxed) as f64 * 8.0 / 1e6;
+        self.follow_window();
+        // Every ten seconds, to the log (the journal, when started from the desktop): what a
+        // report of "it got stuck" or "it is slow" can be checked against afterwards. Numbers
+        // only, nothing of what is on the screen.
+        let tick = self.log_tick.get() + 1;
+        self.log_tick.set(tick);
+        // A decoder that takes frames and gives no pictures gets a keyframe.
+        if s.shared.stuck.swap(false, Ordering::Relaxed) {
+            eprintln!("remoteman: the decoder was given frames and gave no picture for half a second: asking the computer for a keyframe");
+            s.client.send_message(remoteman_core::Message::Keyframe);
+        }
+        self.shown_window.set(self.shown_window.get() + shown);
+        if tick % 10 == 0 {
+            eprintln!(
+                "remoteman: {decoder} via {}: in ten seconds {} frames came, {} went to the decoder, {} pictures came out, {} were shown, {} input events were sent; the last second {megabits:.1} Mbit/s, {age:.1} ms old, decode up to {decode:.1} ms; in all {} lost, {replaced} replaced unseen, {} keyframes asked; round trip {round_trip:.1} ms",
+                self.video.path.get(),
+                s.shared.handed.swap(0, Ordering::Relaxed),
+                s.shared.fed.swap(0, Ordering::Relaxed),
+                s.shared.pictures.swap(0, Ordering::Relaxed),
+                self.shown_window.replace(0),
+                self.inputs.replace(0),
+                stats.lost,
+                stats.keyframe_requests
+            );
+        }
         self.view.figures.set(&[
             shown.to_string(),
             decoded.to_string(),
@@ -647,7 +1009,26 @@ pub fn build(application: &adw::Application, args: Args) {
         target: RefCell::new(None),
         attempt: Cell::new(0),
         hover_bar: Cell::new(hover_bar),
+        log_tick: Cell::new(0),
+        shown_window: Cell::new(0),
+        inputs: Cell::new(0),
+        asked: Cell::new(None),
+        wanted: Cell::new((0, 0)),
         bar_out: Cell::new(false),
+        released: Cell::new(false),
+        chord: Cell::new((false, false, false)),
+        nearby: RefCell::new(Vec::new()),
+        pairing: Default::default(),
+        unlock: RefCell::new(None),
+        logging_in: Cell::new(0),
+        unlocking: RefCell::new(None),
+        second: RefCell::new(None),
+        pointer_on: Cell::new(0),
+        capture: RefCell::new(None),
+        moved: Cell::new((0.0, 0.0)),
+        remote_pointer: RefCell::new(None),
+        remote_at: Cell::new(None),
+        fingers: RefCell::new(Vec::new()),
         said_placement: Cell::new(args.placement),
         reach: RefCell::new(HashMap::new()),
         ended: RefCell::new(String::new()),
@@ -671,6 +1052,9 @@ pub fn build(application: &adw::Application, args: Args) {
     });
 
     computers::wire(&app);
+    if FEATURES.discovery {
+        crate::nearby::watch(&app);
+    }
     session::wire(&app);
     // Whatever is copied on this computer while the clipboard is shared goes to the other.
     window.clipboard().connect_changed({

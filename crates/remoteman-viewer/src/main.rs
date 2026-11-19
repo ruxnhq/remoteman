@@ -20,6 +20,10 @@
 //! (what isn't built yet), `video`, `stream` and `decode` (the picture), `shot` (pictures of
 //! the window, for tests).
 
+mod capture;
+mod second;
+mod keyring;
+mod nearby;
 mod computers;
 mod decode;
 mod features;
@@ -64,16 +68,20 @@ pub struct Args {
     mic: bool,
     /// Record this PipeWire node only, instead of the default microphone (for tests).
     mic_from: Option<String>,
+    /// Start with this device's camera on.
+    camera: bool,
+    /// Read this PipeWire camera node only, instead of the default camera (for tests).
+    camera_from: Option<String>,
 }
 
 /// The placements, as they are written on the command line and in the state folder.
-pub const PLACEMENTS: [(Placement, &str); 3] = [(Placement::Extend, "extend"), (Placement::Main, "main"), (Placement::Only, "only")];
+pub const PLACEMENTS: [(Placement, &str); 4] = [(Placement::Extend, "extend"), (Placement::Main, "main"), (Placement::Only, "only"), (Placement::Mirror, "mirror")];
 
 fn parse_args() -> anyhow::Result<Args> {
     use anyhow::Context;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/state")).join("remoteman");
-    let mut a = Args { host: None, pair: false, size: None, scale: None, refresh: None, decoders: Vec::new(), state, quit_after: None, dump: None, placement: None, hover_bar: None, ui: None, sound: false, sound_to: None, mic: false, mic_from: None };
+    let mut a = Args { host: None, pair: false, size: None, scale: None, refresh: None, decoders: Vec::new(), state, quit_after: None, dump: None, placement: None, hover_bar: None, ui: None, sound: false, sound_to: None, mic: false, mic_from: None, camera: false, camera_from: None };
     let mut decoders = "av1,hevc444,hevc".to_owned();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -93,7 +101,7 @@ fn parse_args() -> anyhow::Result<Args> {
             "--dump" => a.dump = Some(value()?.into()),
             "--placement" => {
                 let v = value()?;
-                a.placement = Some(PLACEMENTS.iter().find(|p| p.1 == v).context("--placement extend, main or only")?.0);
+                a.placement = Some(PLACEMENTS.iter().find(|p| p.1 == v).context("--placement extend, main, only or mirror")?.0);
             }
             "--hover-bar" => a.hover_bar = Some(value()? == "yes"),
             // For pictures of the window: see shot.rs.
@@ -102,6 +110,8 @@ fn parse_args() -> anyhow::Result<Args> {
             "--sound-to" => a.sound_to = Some(value()?),
             "--mic" => a.mic = true,
             "--mic-from" => a.mic_from = Some(value()?),
+            "--camera" => a.camera = true,
+            "--camera-from" => a.camera_from = Some(value()?),
             other if other.starts_with("--") => anyhow::bail!("unknown option {other}"),
             host => a.host = Some(host.to_owned()),
         }
@@ -118,6 +128,15 @@ fn parse_args() -> anyhow::Result<Args> {
 }
 
 fn main() -> glib::ExitCode {
+    // GTK draws with OpenGL here, not Vulkan (its default where there is one): the decoder's
+    // pictures are drawn by an OpenGL widget, and getting each of those into a Vulkan-drawn
+    // window costs so much at 4K that every other picture was never shown (measured at
+    // 3840×2160 and 120 a second on an NVIDIA card: 60 shown of 121 with Vulkan, 110 of 120
+    // with OpenGL). Whoever sets GSK_RENDERER themselves is left alone.
+    if std::env::var_os("GSK_RENDERER").is_none() {
+        // SAFETY: nothing else runs yet; no other thread reads the environment.
+        unsafe { std::env::set_var("GSK_RENDERER", "gl") };
+    }
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
-use remoteman_core::{Button, Event, Placement, keys};
+use remoteman_core::{Button, Event, Placement, TouchPhase, keys};
 
 use crate::features::{FEATURES, gate};
 use crate::store::Quality;
@@ -126,6 +126,10 @@ impl Figures {
 /// The session's part of the window.
 pub struct View {
     pub toolbar: adw::ToolbarView,
+    /// The other computer's pointer drawn over the picture, while this one's is captured: a
+    /// layer over the picture and the image on it.
+    pointer_layer: gtk::Fixed,
+    pointer_image: gtk::Picture,
     header: adw::HeaderBar,
     title: adw::WindowTitle,
     disconnect: gtk::Button,
@@ -134,12 +138,17 @@ pub struct View {
     menus: [gtk::MenuButton; 5],
     share_clipboard: Item,
     send_file: Item,
-    placements: [(Placement, Item); 3],
+    placements: [(Placement, Item); 4],
     qualities: [(Quality, Item); 2],
-    mirror: Item,
     show_figures: Item,
     /// Plays the computer's sound here while it is pressed in.
     pub sound: gtk::ToggleButton,
+    /// Adds a second display in a window of its own, or takes it away.
+    second: Item,
+    /// Captures the pointer, or lets it follow this one, from now on.
+    pub pointer: gtk::Button,
+    /// Lets the computer use this device's camera while it is pressed in.
+    pub camera: gtk::ToggleButton,
     /// Lets the computer use this device's microphone while it is pressed in.
     pub microphone: gtk::ToggleButton,
     pub figures: Figures,
@@ -171,12 +180,9 @@ pub fn build(video: &Video) -> View {
     let extra = item("Extra Display", "Beside the computer's own", Mark::Radio(None));
     let main = item("Main Display", "", Mark::Radio(extra.mark.as_ref()));
     let only = item("Only Display", "Computer's screens off", Mark::Radio(extra.mark.as_ref()));
-    let second = item("Add a Second Display…", "", Mark::None);
+    let second = item("Add a Second Display", "In a window of its own", Mark::None);
     gate(second.button.clone(), FEATURES.second_display);
-    let mirror = item("Mirror a Monitor", "", Mark::None);
-    if let Some(row) = mirror.button.child().and_downcast::<gtk::Box>() {
-        row.append(&gtk::Image::builder().icon_name("go-next-symbolic").css_classes(["dim-label"]).build());
-    }
+    let mirror = item("Mirror the Main Monitor", "The computer's own picture", Mark::Radio(extra.mark.as_ref()));
     gate(mirror.button.clone(), FEATURES.mirror);
     let display_popover = popover(
         &[section("Use This Display As").upcast_ref(), extra.button.upcast_ref(), main.button.upcast_ref(), only.button.upcast_ref(), gtk::Separator::new(gtk::Orientation::Horizontal).upcast_ref(), second.button.upcast_ref(), mirror.button.upcast_ref()],
@@ -231,14 +237,21 @@ pub fn build(video: &Video) -> View {
     let overlay = gtk::Overlay::builder().child(&video.stack).build();
     overlay.add_overlay(&figures.root);
     overlay.add_css_class("rm-video");
+    let pointer_layer = gtk::Fixed::builder().can_target(false).overflow(gtk::Overflow::Hidden).build();
+    let pointer_image = gtk::Picture::builder().can_shrink(true).content_fit(gtk::ContentFit::Fill).visible(false).build();
+    pointer_layer.put(&pointer_image, 0.0, 0.0);
+    overlay.add_overlay(&pointer_layer);
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_top_bar_style(adw::ToolbarStyle::Raised);
+    toolbar.add_css_class("rm-session");
     toolbar.set_content(Some(&overlay));
 
     View {
         toolbar,
+        pointer_layer,
+        pointer_image,
         header,
         title,
         disconnect,
@@ -246,11 +259,13 @@ pub fn build(video: &Video) -> View {
         menus: [send_keys, display, picture, menu, sharing],
         share_clipboard,
         send_file,
-        placements: [(Placement::Extend, extra), (Placement::Main, main), (Placement::Only, only)],
+        placements: [(Placement::Extend, extra), (Placement::Main, main), (Placement::Only, only), (Placement::Mirror, mirror)],
         qualities: [(Quality::Automatic, automatic), (Quality::Sharp, sharp)],
-        mirror,
         show_figures,
         sound,
+        second,
+        pointer,
+        camera,
         microphone,
         figures,
     }
@@ -260,17 +275,17 @@ impl View {
     /// A session has started: the bar says who with, and the menus what was asked for.
     /// `streams`: what Automatic and Sharp Text ask for first, in words; the second is empty
     /// if there is nothing sharper to ask for.
-    pub fn begin(&self, name: &str, can_place: bool, placement: Placement, quality: Quality, streams: (String, String)) {
+    pub fn begin(&self, name: &str, can_place: bool, can_mirror: bool, placement: Placement, quality: Quality, streams: (String, String)) {
         self.title.set_title(name);
         self.title.set_subtitle("Connected");
-        self.mirror.label.set_text(&format!("Mirror a Monitor of {name}"));
         for (p, item) in &self.placements {
             if let Some(mark) = &item.mark {
                 mark.set_active(*p == placement);
             }
             // Only for computers that offer the choice.
-            item.button.set_sensitive(can_place);
-            item.button.set_tooltip_text((!can_place).then_some("This computer decides where the display goes"));
+            let (can, why) = if *p == Placement::Mirror { (can_place && can_mirror && FEATURES.mirror, "This computer can't show its own monitor") } else { (can_place, "This computer decides where the display goes") };
+            item.button.set_sensitive(can);
+            item.button.set_tooltip_text((!can).then_some(why));
         }
         for (q, item) in &self.qualities {
             if let Some(mark) = &item.mark {
@@ -298,9 +313,77 @@ impl View {
         self.show_clipboard(clipboard && clipboard_on);
     }
 
+    /// Whether the sharing menu's clipboard and file lines can be chosen.
+    pub fn offers(&self) -> (bool, bool) {
+        (self.share_clipboard.button.is_sensitive(), self.send_file.button.is_sensitive())
+    }
+
+    /// Whether the sharing menu shows the clipboard as shared.
+    pub fn clipboard_shown(&self) -> bool {
+        self.share_clipboard.mark.as_ref().is_some_and(|m| m.is_active())
+    }
+
+    /// Whether this computer gives a device a second display: the line is there for those
+    /// that do.
+    /// The other computer's pointer, drawn here: its image (`None`: nothing to draw), the
+    /// image's size and the spot in it that points, in this widget's units, and where that
+    /// spot is over the picture.
+    pub fn draw_pointer(&self, image: Option<&gdk::Texture>, size: (f64, f64), hot: (f64, f64), at: (f64, f64)) {
+        let Some(image) = image else { return self.pointer_image.set_visible(false) };
+        if self.pointer_image.paintable().as_ref() != Some(image.upcast_ref()) {
+            self.pointer_image.set_paintable(Some(image));
+        }
+        self.pointer_image.set_size_request(size.0.round() as i32, size.1.round() as i32);
+        self.pointer_layer.move_(&self.pointer_image, at.0 - hot.0, at.1 - hot.1);
+        self.pointer_image.set_visible(true);
+    }
+
+    /// How tall the window's bar is, whether it has been shown yet or not.
+    pub fn bar_height(&self) -> i32 {
+        match self.header.height() {
+            0 => self.header.measure(gtk::Orientation::Vertical, -1).1,
+            h => h,
+        }
+    }
+
+    pub fn offer_second(&self, offered: bool) {
+        if FEATURES.second_display {
+            self.second.button.set_sensitive(offered);
+            self.second.button.set_tooltip_text((!offered).then_some("This computer gives a device one display"));
+        }
+    }
+
+    /// Say on the menu's line whether there is a second display now.
+    pub fn show_second(&self, there: bool) {
+        self.second.label.set_text(if there { "Remove the Second Display" } else { "Add a Second Display" });
+    }
+
+    /// Say on the Pointer Mode button which way it is now.
+    pub fn show_pointer(&self, captured: bool) {
+        if FEATURES.pointer_capture {
+            self.pointer.set_tooltip_text(Some(if captured { "Pointer: captured, sends raw movement. Press to let it follow this pointer" } else { "Pointer: follows this one. Press to capture it, for games and 3D programs" }));
+            if captured {
+                self.pointer.add_css_class("accent");
+            } else {
+                self.pointer.remove_css_class("accent");
+            }
+        }
+    }
+
     pub fn show_clipboard(&self, on: bool) {
         if let Some(mark) = &self.share_clipboard.mark {
             mark.set_active(on);
+        }
+    }
+
+    /// Whether this computer takes a device's camera: the button is there for those that do.
+    pub fn offer_camera(&self, offered: bool) {
+        if FEATURES.camera {
+            self.camera.set_sensitive(offered);
+            self.camera.set_tooltip_text(Some(if offered { "Camera" } else { "This computer doesn't take a camera" }));
+        }
+        if !offered {
+            self.camera.set_active(false);
         }
     }
 
@@ -438,6 +521,22 @@ pub fn wire(app: &Rc<App>) {
             });
         }
     });
+    view.second.button.connect_clicked({
+        let app = app.clone();
+        move |_| app.toggle_second()
+    });
+    view.pointer.connect_clicked({
+        let app = app.clone();
+        move |_| app.toggle_capture()
+    });
+    view.camera.connect_toggled({
+        let app = app.clone();
+        move |button| {
+            if let Some(session) = app.session.borrow().as_ref() {
+                session.set_camera(button.is_active(), app.args.camera_from.as_deref());
+            }
+        }
+    });
     view.microphone.connect_toggled({
         let app = app.clone();
         move |button| {
@@ -506,9 +605,11 @@ pub fn wire(app: &Rc<App>) {
     // the bar.
     let edge = gtk::EventControllerMotion::new();
     edge.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let at = Rc::new(std::cell::Cell::new(f64::MAX));
     edge.connect_motion({
-        let app = app.clone();
+        let (app, at) = (app.clone(), at.clone());
         move |_, _, y| {
+            at.set(y);
             let out = if app.bar_out.get() { y < 64.0 } else { y < 2.0 };
             if out != app.bar_out.get() {
                 app.bar_out.set(out);
@@ -516,10 +617,14 @@ pub fn wire(app: &Rc<App>) {
             }
         }
     });
+    // The pointer leaving the window from below the bar takes the bar away. Leaving while it
+    // is on the bar does not: that is what dragging the window by its bar looks like from
+    // here (the desktop takes the pointer for the move), and the bar going at that moment
+    // took the grip away with it. It goes when the pointer is next seen below it.
     edge.connect_leave({
-        let app = app.clone();
+        let (app, at) = (app.clone(), at.clone());
         move |_| {
-            if app.bar_out.replace(false) {
+            if at.get() >= 64.0 && app.bar_out.replace(false) {
                 app.place_bar();
             }
         }
@@ -537,9 +642,14 @@ pub fn wire(app: &Rc<App>) {
             }
             if keyval == gdk::Key::F11 {
                 app.toggle_fullscreen();
-            } else if let Some(usage) = keycode.checked_sub(8).and_then(|c| keys::linux_to_hid(c as u16)) {
+            } else if let Some(own) = keycode.checked_sub(8).and_then(|c| keys::linux_to_hid(c as u16)) {
+                let usage = app.key_for(own);
+                if app.args.ui.is_some() {
+                    println!("~ key {own:#x} sent as {usage:#x}");
+                }
                 app.held.borrow_mut().insert(usage);
                 app.send(Event::Key { usage, down: true });
+                app.chord_key(own, true);
             }
             glib::Propagation::Stop
         }
@@ -548,11 +658,13 @@ pub fn wire(app: &Rc<App>) {
         let app = app.clone();
         move |_, keyval, keycode, _| {
             if app.streaming() && keyval != gdk::Key::F11 {
-                if let Some(usage) = keycode.checked_sub(8).and_then(|c| keys::linux_to_hid(c as u16)) {
+                if let Some(own) = keycode.checked_sub(8).and_then(|c| keys::linux_to_hid(c as u16)) {
                     // Only what the other computer was told is down: a key let go in one of
                     // this app's own dialogs was never its business.
+                    let usage = app.key_for(own);
                     if app.held.borrow_mut().remove(&usage) {
                         app.send(Event::Key { usage, down: false });
+                        app.chord_key(own, false);
                     }
                 }
             }
@@ -565,11 +677,52 @@ pub fn wire(app: &Rc<App>) {
     motion.connect_motion({
         let app = app.clone();
         move |_, x, y| {
-            let (x, y) = app.video.fraction(x, y);
-            app.send(Event::PointerTo { x, y });
+            app.point_at(0);
+            // (A captured pointer says how far it moved instead: see `App::tick`.)
+            if app.capture.borrow().is_none() {
+                let (x, y) = app.video.fraction(x, y);
+                app.send(Event::PointerTo { x, y });
+            }
         }
     });
     stack.add_controller(motion);
+
+    // Fingers on a touchscreen, sent as fingers if that is wanted (otherwise GTK makes a
+    // pointer of the first, as it always has).
+    let touches = gtk::EventControllerLegacy::new();
+    touches.connect_event({
+        let app = app.clone();
+        move |controller, event| {
+            use glib::translate::ToGlibPtr;
+            let phase = match event.event_type() {
+                gdk::EventType::TouchBegin => TouchPhase::Down,
+                gdk::EventType::TouchUpdate => TouchPhase::Move,
+                gdk::EventType::TouchEnd | gdk::EventType::TouchCancel => TouchPhase::Up,
+                _ => return glib::Propagation::Proceed,
+            };
+            if !app.store.borrow().settings.input.touch || !app.streaming() {
+                return glib::Propagation::Proceed;
+            }
+            let sequence = event.event_sequence();
+            let finger = ToGlibPtr::<*mut gdk::ffi::GdkEventSequence>::to_glib_none(&sequence).0 as usize;
+            let slot = finger_slot(&mut app.fingers.borrow_mut(), finger, phase);
+            // Where it is in the picture: the event says where in the window.
+            let widget = controller.widget();
+            let place = event.position().zip(widget.as_ref().and_then(|w| w.native())).and_then(|((x, y), native)| {
+                let (ox, oy) = native.surface_transform();
+                native.compute_point(widget.as_ref()?, &gtk::graphene::Point::new((x - ox) as f32, (y - oy) as f32))
+            });
+            if let (Some(slot), Some(place)) = (slot.filter(|s| *s < 10), place) {
+                let (x, y) = app.video.fraction(place.x() as f64, place.y() as f64);
+                if app.args.ui.is_some() {
+                    println!("~ touch {phase:?} finger {slot} at {x:.2},{y:.2}");
+                }
+                app.send(Event::Touch { phase, slot: slot as u8, x, y });
+            }
+            glib::Propagation::Stop
+        }
+    });
+    stack.add_controller(touches);
 
     let click = gtk::GestureClick::builder().button(0).build();
     let button = |g: &gtk::GestureClick| match g.current_button() {
@@ -581,14 +734,27 @@ pub fn wire(app: &Rc<App>) {
         let app = app.clone();
         move |g, _, x, y| {
             app.video.picture.grab_focus();
-            let (x, y) = app.video.fraction(x, y);
-            app.send(Event::PointerTo { x, y });
+            // A finger that is being sent as a finger is not a click as well.
+            if g.current_sequence().is_some() && app.store.borrow().settings.input.touch {
+                return;
+            }
+            app.spoil_chord();
+            app.point_at(0);
+            if app.capture.borrow().is_none() {
+                let (x, y) = app.video.fraction(x, y);
+                app.send(Event::PointerTo { x, y });
+            }
             app.send(Event::Button { button: button(g), down: true });
         }
     });
     click.connect_released({
         let app = app.clone();
-        move |g, _, _, _| app.send(Event::Button { button: button(g), down: false })
+        move |g, _, _, _| {
+            if g.current_sequence().is_some() && app.store.borrow().settings.input.touch {
+                return;
+            }
+            app.send(Event::Button { button: button(g), down: false })
+        }
     });
     stack.add_controller(click);
 
@@ -598,9 +764,54 @@ pub fn wire(app: &Rc<App>) {
         move |c, dx, dy| {
             // A wheel reports notches; a touchpad reports pixels.
             let k = if c.unit() == gdk::ScrollUnit::Wheel { 40.0 } else { 1.0 };
+            let k = if app.store.borrow().settings.input.scroll_reversed { -k } else { k };
+            app.spoil_chord();
             app.send(Event::Scroll { dx: (dx * k) as f32, dy: (dy * k) as f32 });
             glib::Propagation::Stop
         }
     });
     stack.add_controller(scroll);
+}
+
+/// A finger's number on the other computer: its place in the list of fingers that are down,
+/// taken when it lands and kept until it lifts (so the numbers stay small and a lifted
+/// finger's number is used again). `None`: a finger that was never seen landing.
+fn finger_slot(fingers: &mut Vec<Option<usize>>, finger: usize, phase: TouchPhase) -> Option<usize> {
+    let at = fingers.iter().position(|f| *f == Some(finger)).or_else(|| {
+        (phase == TouchPhase::Down).then(|| {
+            let free = fingers.iter().position(|f| f.is_none()).unwrap_or(fingers.len());
+            if free == fingers.len() {
+                fingers.push(None);
+            }
+            fingers[free] = Some(finger);
+            free
+        })
+    });
+    if let (Some(at), TouchPhase::Up) = (at, phase) {
+        fingers[at] = None;
+    }
+    at
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingers_keep_their_numbers_until_they_lift() {
+        let mut fingers = Vec::new();
+        assert_eq!(finger_slot(&mut fingers, 500, TouchPhase::Down), Some(0));
+        assert_eq!(finger_slot(&mut fingers, 700, TouchPhase::Down), Some(1));
+        assert_eq!(finger_slot(&mut fingers, 500, TouchPhase::Move), Some(0));
+        assert_eq!(finger_slot(&mut fingers, 500, TouchPhase::Up), Some(0));
+        // The first number is free again; the second finger keeps its own.
+        assert_eq!(finger_slot(&mut fingers, 900, TouchPhase::Down), Some(0));
+        assert_eq!(finger_slot(&mut fingers, 700, TouchPhase::Move), Some(1));
+        // A finger never seen landing has no number.
+        assert_eq!(finger_slot(&mut fingers, 123, TouchPhase::Move), None);
+        assert_eq!(finger_slot(&mut fingers, 123, TouchPhase::Up), None);
+        assert_eq!(finger_slot(&mut fingers, 700, TouchPhase::Up), Some(1));
+        assert_eq!(finger_slot(&mut fingers, 900, TouchPhase::Up), Some(0));
+        assert!(fingers.iter().all(|f| f.is_none()));
+    }
 }

@@ -1,0 +1,56 @@
+#!/bin/sh
+# The host's AppImage starts here.
+#
+#   Remoteman_Host.AppImage                  Remoteman Host: the top-bar icon and its window.
+#                                            Sharing the session you are logged into needs
+#                                            nothing installed.
+#   sudo Remoteman_Host.AppImage install     for the whole computer: sharing starts at boot,
+#        [key]                               a device gets the login screen when nobody is
+#                                            logged in, and a locked session can be unlocked.
+#                                            The daemon, the agent and their libraries are
+#                                            copied to /usr/local/lib/remoteman; the AppImage
+#                                            is not needed by them afterwards.
+#   sudo Remoteman_Host.AppImage status | remove
+#   Remoteman_Host.AppImage agent ...        the programs inside, as they are
+#   Remoteman_Host.AppImage daemon ...
+here=$(dirname "$(readlink -f "$0")")
+lib="$here/usr/lib/remoteman"
+case "${1:-}" in
+install | status | remove)
+    RM_PAYLOAD="$lib" RM_UNITS="$here/usr/share/remoteman/systemd" exec sh "$lib/install-daemon.sh" "$@"
+    ;;
+agent)
+    shift
+    exec "$lib/remoteman-agent" "$@"
+    ;;
+daemon)
+    shift
+    exec "$lib/remotemand" "$@"
+    ;;
+esac
+
+# Remoteman Host. Three things are put in this user's own folders first, each only if it
+# differs from what is there: the icons (the desktop draws the top-bar icon, and looks for it
+# there), the launcher entry, and, unless this computer's host is the daemon, the user service
+# that Remoteman Host switches on and off. That service starts this AppImage's agent, so it
+# names this file: moved, it is written again the next time this is opened. Nothing is started
+# by any of it.
+data="${XDG_DATA_HOME:-$HOME/.local/share}"
+config="${XDG_CONFIG_HOME:-$HOME/.config}"
+put() {
+    cmp -s "$1" "$2" 2>/dev/null && return 1
+    mkdir -p "$(dirname "$2")" && cp "$1" "$2"
+}
+if [ -n "${APPIMAGE:-}" ] && [ -z "${REMOTEMAN_NO_INTEGRATION:-}" ]; then
+    tmp=$(mktemp -d)
+    (cd "$here/usr/share/icons" && find . -name 'dev.remoteman.Host*' -type f) | while read -r icon; do put "$here/usr/share/icons/$icon" "$data/icons/$icon" || true; done
+    sed "s|^Exec=remoteman-tray|Exec=\"$APPIMAGE\"|" "$here/dev.remoteman.Host.desktop" > "$tmp/entry"
+    put "$tmp/entry" "$data/applications/dev.remoteman.Host.desktop" || true
+    if [ ! -e /etc/systemd/user/remoteman-agent.service ]; then
+        sed "s|=/usr/lib/remoteman/remoteman-agent|=\"$APPIMAGE\" agent|" "$here/usr/share/remoteman/systemd/user/remoteman-host.service" > "$tmp/unit"
+        put "$tmp/unit" "$config/systemd/user/remoteman-host.service" && systemctl --user daemon-reload 2>/dev/null
+    fi
+    rm -rf "$tmp"
+fi
+export XDG_DATA_DIRS="$here/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+exec "$here/usr/bin/remoteman-tray" "$@"

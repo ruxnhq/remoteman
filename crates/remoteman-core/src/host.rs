@@ -50,6 +50,12 @@ pub struct ClientInfo {
     /// It draws the cursor itself: leave the cursor out of the picture and report it through
     /// [`Link::cursor_shape`] and [`Link::cursor_at`].
     pub cursor: bool,
+    /// The password it sent to unlock a locked host with, if it sent one. Never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlock: Option<String>,
+    /// It asked to be let in only into a session that is already running.
+    #[serde(default)]
+    pub attach_only: bool,
 }
 
 /// What the host will send, in answer to a client's hello.
@@ -110,6 +116,8 @@ pub enum Out {
     Frame(Frame),
     /// The picture starts afresh as this (see [`Link::restart`]).
     Restart(Accept),
+    /// The same, of the session's second display (see [`Link::second`]).
+    Second(Box<Out>),
 }
 
 /// What a [`Link`] carries that isn't the picture.
@@ -137,9 +145,23 @@ pub struct Link {
     frames: tokio::sync::mpsc::Sender<Out>,
     cursor: tokio::sync::mpsc::UnboundedSender<CursorMsg>,
     clock: Instant,
+    /// What is sent through this copy is the second display's picture.
+    second: bool,
 }
 
 impl Link {
+    /// The way to the same client for the picture of a second display in its session: frames
+    /// sent through it are that display's, with their own count and their own fresh starts.
+    /// Call [`Self::restart`] on it first, to say what the picture is. Its cursor is drawn
+    /// into the picture (the cursor calls do nothing here).
+    pub fn second(&self) -> Link {
+        Link { second: true, ..self.clone() }
+    }
+
+    fn out(&self, out: Out) -> Out {
+        if self.second { Out::Second(Box::new(out)) } else { out }
+    }
+
     /// A link that leads to `LinkEnd` and not to a client: for a host program that reaches its
     /// client through another process (the Linux agent behind the system daemon). `elapsed_us`
     /// is what the client's session clock reads now, so both processes stamp alike.
@@ -148,7 +170,7 @@ impl Link {
         let (cursor, cursor_rx) = tokio::sync::mpsc::unbounded_channel::<CursorMsg>();
         let now = Instant::now();
         let clock = now.checked_sub(Duration::from_micros(elapsed_us)).unwrap_or(now);
-        (Link { frames, cursor, clock }, LinkEnd { frames: frame_rx, cursor: cursor_rx })
+        (Link { frames, cursor, clock, second: false }, LinkEnd { frames: frame_rx, cursor: cursor_rx })
     }
 
     /// Start the picture afresh as something else: another size or codec, or another desktop
@@ -156,7 +178,7 @@ impl Link {
     /// it has and waits for a keyframe, so the next frame sent must be one; frames count from
     /// 0 again. Returns false once the client is gone.
     pub fn restart(&self, accept: Accept) -> bool {
-        self.frames.blocking_send(Out::Restart(accept)).is_ok()
+        self.frames.blocking_send(self.out(Out::Restart(accept))).is_ok()
     }
 
     /// This session's clock in microseconds: stamp each frame with it when it is captured.
@@ -168,22 +190,28 @@ impl Link {
     /// so an encoder calling this is held back and frames get skipped before encoding, never
     /// after. Returns false once the client is gone.
     pub fn send_frame(&self, data: &[u8], key: bool, capture_us: u64) -> bool {
-        self.frames.blocking_send(Out::Frame(Frame { data: data.to_vec(), key, recovery: false, capture_us })).is_ok()
+        self.frames.blocking_send(self.out(Out::Frame(Frame { data: data.to_vec(), key, recovery: false, capture_us }))).is_ok()
     }
 
     /// As [`Self::send_frame`], for the first frame after a reported loss that leans on nothing
     /// the client missed: the client picks the picture up again at it.
     pub fn send_recovery_frame(&self, data: &[u8], capture_us: u64) -> bool {
-        self.frames.blocking_send(Out::Frame(Frame { data: data.to_vec(), key: false, recovery: true, capture_us })).is_ok()
+        self.frames.blocking_send(self.out(Out::Frame(Frame { data: data.to_vec(), key: false, recovery: true, capture_us }))).is_ok()
     }
 
     /// The cursor's image changed (for clients that draw it themselves). Zero size: no cursor.
     pub fn cursor_shape(&self, shape: CursorShape) {
+        if self.second {
+            return;
+        }
         let _ = self.cursor.send(CursorMsg::Shape(shape));
     }
 
     /// Where the cursor is, as fractions of the display; `visible` false when it isn't on it.
     pub fn cursor_at(&self, x: f32, y: f32, visible: bool) {
+        if self.second {
+            return;
+        }
         let _ = self.cursor.send(CursorMsg::At { x, y, visible });
     }
 
@@ -236,7 +264,33 @@ pub struct Device {
 /// The connection of the client being served, and its fingerprint.
 type Who = Arc<Mutex<Option<(String, Connection)>>>;
 
+/// A device that connected while pairing was open and waits for the host's owner.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PendingDevice {
+    pub name: String,
+    pub fingerprint: String,
+    /// What the device shows too, if it is the device its owner thinks it is.
+    pub code: String,
+    /// How long the owner has left to answer.
+    pub seconds: u32,
+}
+
+/// How long the owner has to confirm a new device.
+const CONFIRM_SECONDS: u32 = 60;
+
+/// Pairing that waits for its owner's word.
+#[derive(Default)]
+struct Confirm {
+    /// This host's own fingerprint: half of what the code is made from.
+    own: String,
+    /// A new device is held until the owner says yes ([`Host::decide`]); otherwise it is
+    /// trusted as soon as it connects while pairing is open.
+    wanted: std::sync::atomic::AtomicBool,
+    waiting: Mutex<Option<(PendingDevice, Instant, tokio::sync::oneshot::Sender<bool>)>>,
+}
+
 pub struct Host {
+    confirm: Arc<Confirm>,
     runtime: Option<tokio::runtime::Runtime>,
     endpoint: remoteman_transport::Endpoint,
     trust: Arc<Trust>,
@@ -244,6 +298,9 @@ pub struct Host {
     who: Who,
     /// What this host can do, as the next hello will say it.
     features: Arc<Mutex<Vec<String>>>,
+    calls: Mutex<mpsc::Sender<Call>>,
+    /// Told once the handler thread has ended and let go of everything it held.
+    handler_done: Mutex<mpsc::Receiver<()>>,
     /// This host's certificate fingerprint, for pairing by hand.
     pub fingerprint: String,
     /// The address actually listened on.
@@ -266,6 +323,7 @@ impl Host {
         // The handler lives on its own thread, so its calls come one at a time and may block.
         let (calls, call_rx) = mpsc::channel::<Call>();
         let mut handler: Box<dyn HostHandler> = Box::new(handler);
+        let (done, handler_done) = mpsc::channel::<()>();
         std::thread::Builder::new().name("remoteman host".into()).spawn(move || {
             while let Ok(call) = call_rx.recv() {
                 match call {
@@ -285,13 +343,18 @@ impl Host {
                     Call::Left => handler.left(),
                 }
             }
+            // Nothing more will come: whatever the handler still holds is let go of here,
+            // and whoever is stopping the host is told when that is done.
+            drop(handler);
+            let _ = done.send(());
         })?;
 
         let link: Arc<Mutex<Option<Link>>> = Arc::default();
         let who = Who::default();
         let features = Arc::new(Mutex::new(options.features.clone()));
-        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls, link.clone(), who.clone(), features.clone()));
-        Ok(Self { runtime: Some(runtime), endpoint, trust, link, who, features, fingerprint: identity.fingerprint, address })
+        let confirm = Arc::new(Confirm { own: identity.fingerprint.clone(), ..Confirm::default() });
+        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone(), confirm.clone()));
+        Ok(Self { confirm, runtime: Some(runtime), endpoint, trust, link, who, features, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
     }
 
     /// Let the next unknown device in (it is remembered and pairing turns itself off), or stop
@@ -304,6 +367,27 @@ impl Host {
         self.trust.pairing()
     }
 
+    /// Whether a new device waits for [`Host::decide`] before it is trusted (off to begin
+    /// with: it is trusted as soon as it connects while pairing is open).
+    pub fn set_confirm(&self, on: bool) {
+        self.confirm.wanted.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The device waiting to be confirmed, if there is one.
+    pub fn pending(&self) -> Option<PendingDevice> {
+        let waiting = self.confirm.waiting.lock().unwrap();
+        let (device, since, _) = waiting.as_ref()?;
+        Some(PendingDevice { seconds: CONFIRM_SECONDS.saturating_sub(since.elapsed().as_secs() as u32), ..device.clone() })
+    }
+
+    /// Trust the waiting device from now on, or turn it away. `false`: none was waiting.
+    pub fn decide(&self, accept: bool) -> bool {
+        match self.confirm.waiting.lock().unwrap().take() {
+            Some((_, _, answer)) => answer.send(accept).is_ok(),
+            None => false,
+        }
+    }
+
     /// Change what this host can do while it runs (its owner switched a feature on or off).
     /// The next client's hello says so, and the connected one is told with a `features`
     /// message; nothing is restarted. Messages for a feature that is off are the handler's
@@ -313,6 +397,14 @@ impl Host {
         if let Some(link) = self.link() {
             link.send_message(Message::Features { features });
         }
+    }
+
+    /// Hand the handler a message as if the client had sent it, on the handler's own thread
+    /// and in turn with everything else: how the host program itself switches something off
+    /// for the connected client (`Message::Clipboard { on: false }` when its owner stops
+    /// allowing the clipboard, say).
+    pub fn tell_handler(&self, message: Message) {
+        let _ = self.calls.lock().unwrap().send(Call::Message(message));
     }
 
     /// Every device this host trusts, in the order they were paired.
@@ -362,6 +454,13 @@ impl Host {
             let endpoint = self.endpoint.clone();
             let _ = rt.block_on(async { tokio::time::timeout(Duration::from_millis(500), endpoint.wait_idle()).await });
             rt.shutdown_timeout(Duration::from_secs(1));
+            // The handler is still taking down what the client had (its display, the encoder
+            // and its GPU context). A program that exits in the middle of that can hang in
+            // the GPU driver's own exit code, so wait for it: the handler's thread ends once
+            // nothing can call it any more.
+            let (closed, _) = mpsc::channel::<Call>();
+            *self.calls.lock().unwrap() = closed;
+            let _ = self.handler_done.lock().unwrap().recv_timeout(Duration::from_secs(5));
         }
     }
 }
@@ -377,17 +476,23 @@ impl Drop for Host {
 pub const CLOSE_DROPPED: u32 = 2;
 pub const CLOSE_REVOKED: u32 = 3;
 
-async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>, who: Who, features: Arc<Mutex<Vec<String>>>) {
+async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>, who: Who, features: Arc<Mutex<Vec<String>>>, confirm: Arc<Confirm>) {
     let options = Arc::new(options);
     let mut current: Option<(tokio::task::JoinHandle<()>, Connection)> = None;
     while let Some(incoming) = endpoint.accept().await {
         // A stranger is refused inside the handshake; this only fails for them.
         let Ok(conn) = incoming.await else { continue };
         let Some(fingerprint) = peer_fingerprint(&conn) else { continue };
+        // Only reachable while pairing: a device nobody knows. It is trusted here and now,
+        // or held until the host's owner has confirmed it (in `serve`, once it has said its name).
+        let mut held = None;
         if !trust.contains(&fingerprint) {
-            // Only reachable while pairing.
-            let _ = trust.add(&fingerprint, &conn.remote_address().ip().to_string());
             trust.set_pairing(false);
+            if confirm.wanted.load(std::sync::atomic::Ordering::Relaxed) {
+                held = Some(confirm.clone());
+            } else {
+                let _ = trust.add(&fingerprint, &conn.remote_address().ip().to_string());
+            }
         }
         // The newest client takes over. The old session is closed and left to finish by
         // itself, so the handler hears `left` for it exactly once, and before the new `connected`.
@@ -399,13 +504,13 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
         let session_conn = conn.clone();
         *who.lock().unwrap() = Some((fingerprint.clone(), conn.clone()));
         // Revoked between its handshake and here: it doesn't get a session.
-        if !trust.contains(&fingerprint) {
+        if held.is_none() && !trust.contains(&fingerprint) {
             conn.close(CLOSE_REVOKED.into(), b"this device is no longer trusted here");
         }
         let (who, trust) = (who.clone(), trust.clone());
         let offered = features.lock().unwrap().clone();
         current = Some((tokio::spawn(async move {
-            let started = serve(&conn, fingerprint, &options, &calls, &current_link, &trust, offered).await;
+            let started = serve(&conn, fingerprint, &options, &calls, &current_link, &trust, offered, held).await;
             {
                 let mut who = who.lock().unwrap();
                 if who.as_ref().is_some_and(|(_, c)| c.stable_id() == conn.stable_id()) {
@@ -431,13 +536,44 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
 
 /// One client's session. The flag in the result says whether the handler's `connected` ran (and
 /// so whether `left` is owed).
-async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, trust: &Trust, features: Vec<String>) -> Result<bool, (bool, anyhow::Error)> {
+async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, trust: &Trust, features: Vec<String>, held: Option<Arc<Confirm>>) -> Result<bool, (bool, anyhow::Error)> {
     let no = |e: anyhow::Error| (false, e);
     let clock = Instant::now();
     let (mut send, mut recv) = conn.accept_bi().await.context("control stream").map_err(no)?;
-    let Some(Message::ClientHello { proto, name, display, decoders, cursor }) = read_message(&mut recv).await.map_err(no)? else {
+    let Some(Message::ClientHello { proto, name, display, decoders, cursor, unlock, way_in }) = read_message(&mut recv).await.map_err(no)? else {
         return Err(no(anyhow::anyhow!("the first message wasn't client_hello")));
     };
+    // A new device, held for the owner's word: it is told to wait (and can show the code),
+    // and gets its hello only after a yes.
+    if let Some(confirm) = held {
+        let device = PendingDevice { name: name.trim().to_owned(), fingerprint: fingerprint.clone(), code: remoteman_transport::pair_code(&confirm.own, &fingerprint), seconds: CONFIRM_SECONDS };
+        let (answer, answered) = tokio::sync::oneshot::channel::<bool>();
+        *confirm.waiting.lock().unwrap() = Some((device, Instant::now(), answer));
+        write_message(&mut send, &Message::Pairing { seconds: CONFIRM_SECONDS }).await.map_err(no)?;
+        let decision = tokio::select! {
+            said = tokio::time::timeout(Duration::from_secs(CONFIRM_SECONDS as u64), answered) => said.ok().and_then(|s| s.ok()),
+            _ = conn.closed() => Some(false),
+        };
+        // Whatever came of it, nobody is waiting any more (unless a newer device already is).
+        {
+            let mut waiting = confirm.waiting.lock().unwrap();
+            if waiting.as_ref().is_some_and(|(d, _, _)| d.fingerprint == fingerprint) {
+                waiting.take();
+            }
+        }
+        match decision {
+            Some(true) => trust.add(&fingerprint, name.trim()).map_err(no)?,
+            other => {
+                let message = if other.is_some() { "pairing was declined on the computer" } else { "nobody confirmed the pairing on the computer in time" };
+                let _ = write_message(&mut send, &Message::Error { code: "not_paired".into(), message: message.into() }).await;
+                let _ = send.finish();
+                // (Time for the reason to arrive before the connection goes.)
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                conn.close(CLOSE_REVOKED.into(), message.as_bytes());
+                return Err(no(anyhow::anyhow!("a new device was not confirmed")));
+            }
+        }
+    }
     write_message(&mut send, &Message::HostHello { proto: remoteman_proto::PROTO, name: options.name.clone(), os: options.os.clone(), features }).await.map_err(no)?;
     // The list of trusted devices shows the name the device gives itself.
     if !name.trim().is_empty() {
@@ -451,9 +587,9 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
 
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Out>(4);
     let (cursor_tx, mut cursor_rx) = tokio::sync::mpsc::unbounded_channel::<CursorMsg>();
-    let link = Link { frames: frame_tx, cursor: cursor_tx, clock };
+    let link = Link { frames: frame_tx, cursor: cursor_tx, clock, second: false };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let info = ClientInfo { name, fingerprint, display, decoders, cursor };
+    let info = ClientInfo { name, fingerprint, display, decoders, cursor, unlock, attach_only: way_in.as_deref() == Some("attach") };
     // Reachable through `Host::link` before the handler hears of the client, so nothing it
     // sends from the start is lost.
     *current_link.lock().unwrap() = Some(link.clone());
@@ -462,7 +598,18 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         Ok(Ok(a)) => a,
         Ok(Err(message)) => {
             current_link.lock().unwrap().take();
-            let _ = write_message(&mut send, &Message::Error { code: "failed".into(), message: message.clone() }).await;
+            // A handler that says "locked: ..." means the client may try again with its
+            // user's password in the hello; one that says "logging in: ..." means the
+            // computer is getting its user's session ready and the client should simply try
+            // again in a few seconds; anything else is a plain failure.
+            let (code, said) = if let Some(said) = message.strip_prefix("locked: ") {
+                ("locked", said)
+            } else if let Some(said) = message.strip_prefix("logging in: ") {
+                ("logging_in", said)
+            } else {
+                ("failed", message.as_str())
+            };
+            let _ = write_message(&mut send, &Message::Error { code: code.into(), message: said.to_owned() }).await;
             // The handler refused, so it holds nothing for this client.
             return Err(no(anyhow::anyhow!(message)));
         }
@@ -472,7 +619,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     // Counts up each time the picture starts afresh.
     let epoch = std::sync::atomic::AtomicU32::new(1);
     let now = || epoch.load(std::sync::atomic::Ordering::Relaxed) as u16;
-    write_message(&mut send, &Message::Stream { epoch: now(), mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour })
+    write_message(&mut send, &Message::Stream { epoch: now(), mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour, index: 0 })
         .await
         .map_err(yes)?;
     // Three things write to the control stream: answers to the client, cursor shapes, and a
@@ -485,14 +632,35 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     let video = async {
         let mut number = 0u32;
         let mut sent = 0u32;
+        // The second display's picture: how often it has started afresh, and its frame count.
+        let (mut epoch2, mut number2) = (0u16, 0u32);
         while let Some(out) = frame_rx.recv().await {
             let f = match out {
+                Out::Second(second) => {
+                    match *second {
+                        Out::Restart(a) => {
+                            epoch2 = epoch2.wrapping_add(1);
+                            number2 = 0;
+                            let m = Message::Stream { epoch: epoch2, mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 1 };
+                            write_message(&mut *send.lock().await, &m).await?;
+                        }
+                        Out::Frame(f) => {
+                            let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
+                            for d in remoteman_proto::video::fragment_as(remoteman_proto::video::KIND_VIDEO2, &f.data, f.key, f.recovery, epoch2, number2, f.capture_us, max) {
+                                conn.send_datagram_wait(d.into()).await?;
+                            }
+                            number2 = number2.wrapping_add(1);
+                        }
+                        Out::Second(_) => {}
+                    }
+                    continue;
+                }
                 Out::Frame(f) => f,
                 Out::Restart(a) => {
                     epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     number = 0;
                     answer.store(0, std::sync::atomic::Ordering::Relaxed);
-                    let m = Message::Stream { epoch: now(), mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour };
+                    let m = Message::Stream { epoch: now(), mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 0 };
                     write_message(&mut *send.lock().await, &m).await?;
                     continue;
                 }
@@ -534,7 +702,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     }
                 }
                 Message::Ping { id, client_us } => write_message(&mut *send.lock().await, &Message::Pong { id, client_us, host_us: clock.elapsed().as_micros() as u64 }).await?,
-                m @ (Message::Sound { .. } | Message::Mic { .. } | Message::Camera { .. } | Message::Configure { .. } | Message::Clipboard { .. } | Message::FileResult { .. }) => {
+                m @ (Message::Sound { .. } | Message::Mic { .. } | Message::Camera { .. } | Message::Configure { .. } | Message::Clipboard { .. } | Message::FileResult { .. } | Message::Display { .. } | Message::DisplayKeyframe { .. }) => {
                     let _ = calls.send(Call::Message(m));
                 }
                 _ => {}

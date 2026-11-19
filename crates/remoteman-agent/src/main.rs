@@ -14,6 +14,8 @@
 //! one unknown device in and remembers it. With `--daemon` it listens for nothing: it attaches
 //! to `remotemand`, which owns the port and the trust list and hands it clients.
 
+mod control;
+mod pam;
 mod pipeline;
 mod session;
 
@@ -37,8 +39,11 @@ fn main() -> Result<()> {
     let mut listen: SocketAddr = format!("0.0.0.0:{}", remoteman_core::PORT).parse()?;
     let (mut pair, mut state, mut bitrate, mut drop_one_in) = (false, state_dir(), 40u32, None::<u32>);
     let (mut daemon, mut socket) = (false, None::<PathBuf>);
+    let (mut advertise, mut advertise_as) = (None::<bool>, None::<String>);
     let mut refs = None::<(u32, u32)>;
-    let mut allowed = session::Allowed::default();
+    let allowed = session::Allowed::default();
+    let (mut allow_files, mut allow_clipboard) = (false, false);
+    let mut control_at = None::<PathBuf>;
     let mut take_output = true;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -56,8 +61,8 @@ fn main() -> Result<()> {
             "--allow" => {
                 for what in value()?.split(',') {
                     match what.trim() {
-                        "files" => allowed.files = true,
-                        "clipboard" => allowed.clipboard = true,
+                        "files" => allow_files = true,
+                        "clipboard" => allow_clipboard = true,
                         other => anyhow::bail!("--allow {other}: files, clipboard"),
                     }
                 }
@@ -69,24 +74,39 @@ fn main() -> Result<()> {
                 refs = Some((s.parse()?, l.parse()?));
             }
             "--socket" => socket = Some(value()?.into()),
+            // Where the host's owner asks how things stand and changes them (see control.rs).
+            // Not a host at all: lock the session if a host left it unlocked for a device.
+            "--lock-if-left-unlocked" => {
+                session::lock_if_left_unlocked();
+                return Ok(());
+            }
+            "--control" => control_at = Some(value()?.into()),
+            // Tell the local network this host is here (or don't), whatever it listens on.
+            "--advertise" => advertise = Some(true),
+            "--no-advertise" => advertise = Some(false),
+            "--advertise-as" => advertise_as = Some(value()?),
             // For tests: lose one video packet in this many.
             "--test-drop-one-in" => drop_one_in = Some(value()?.parse().context("--test-drop-one-in N")?),
             other => anyhow::bail!("unknown option {other}"),
         }
     }
-    let mut features: Vec<String> = ["video", "input", "cursor", "placement", "configure", "sound", "mic", "camera"].map(String::from).to_vec();
-    if allowed.files {
-        features.push("files".into());
-    }
-    if allowed.clipboard {
-        features.push("clipboard".into());
-    }
+    // What the owner switched on earlier (from the host's window) holds until switched off;
+    // `--allow` adds to it for this run.
+    let saved = control::Saved::load(&state);
+    allowed.files.store(allow_files || saved.files, std::sync::atomic::Ordering::Relaxed);
+    allowed.clipboard.store(allow_clipboard || saved.clipboard, std::sync::atomic::Ordering::Relaxed);
+    allowed.unlock.store(saved.unlock, std::sync::atomic::Ordering::Relaxed);
+    let features = control::features(&allowed);
     if daemon {
         // The system service's socket if it is there, else one run by hand as this user.
         let socket = socket.unwrap_or_else(|| {
             let system = remoteman_core::relay::socket_path(true);
             if system.exists() { system } else { remoteman_core::relay::socket_path(false) }
         });
+        // The owner's programs ask this agent how things stand, as they ask the standalone
+        // host; what is the daemon's to say is asked of the daemon.
+        let control_at = control_at.clone().unwrap_or_else(|| control::default_path(remoteman_core::PORT));
+        control::serve(&control_at, control::Behind::Daemon(socket.clone()), allowed.clone(), state.clone());
         // The daemon may start after us, or be restarted: keep trying.
         let mut said = false;
         loop {
@@ -94,7 +114,7 @@ fn main() -> Result<()> {
                 Ok(stream) => {
                     tracing::info!("attached to the daemon at {}", socket.display());
                     said = false;
-                    if let Err(e) = remoteman_core::relay::run_agent(stream, features.clone(), session::Agent::new(bitrate * 1_000_000, refs, allowed, take_output)?) {
+                    if let Err(e) = remoteman_core::relay::run_agent(stream, features.clone(), session::Agent::new(bitrate * 1_000_000, refs, allowed.clone(), take_output)?) {
                         tracing::warn!("{e:#}");
                     }
                     tracing::info!("the daemon went away");
@@ -109,12 +129,32 @@ fn main() -> Result<()> {
         }
     }
     let name = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "linux".into());
+    let said_name = advertise_as.unwrap_or_else(|| name.clone());
     let options = HostOptions { listen, state, name, os: "linux".into(), features, pair, test_drop_one_in: drop_one_in };
-    let host = Host::start(options, session::Agent::new(bitrate * 1_000_000, refs, allowed, take_output)?)?;
+    let state_dir = options.state.clone();
+    let host = std::sync::Arc::new(Host::start(options, session::Agent::new(bitrate * 1_000_000, refs, allowed.clone(), take_output)?)?);
     tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
+    let control_at = control_at.unwrap_or_else(|| control::default_path(host.address.port()));
+    control::serve(&control_at, control::Behind::Own(std::sync::Arc::downgrade(&host)), allowed, state_dir);
     if pair {
         tracing::info!("pairing: the next unknown device to connect will be trusted");
     }
+    // Viewers on this network find a host that can be reached from it; one that listens on
+    // this computer alone (a test's) keeps to itself unless told otherwise.
+    let _advert = if advertise.unwrap_or(!listen.ip().is_loopback()) {
+        match remoteman_desktop::advertise::Advert::start(&said_name, host.address.port(), remoteman_desktop::advertise::records(&host.fingerprint, "linux")) {
+            Ok(advert) => {
+                tracing::info!(name = said_name, "viewers on this network can find this host");
+                Some(advert)
+            }
+            Err(e) => {
+                tracing::warn!("this host isn't advertised on the network (viewers need its address): {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Until Ctrl-C or a request to stop.
     let wait = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -126,6 +166,18 @@ fn main() -> Result<()> {
         }
         anyhow::Ok(())
     })?;
+    let _ = std::fs::remove_file(&control_at);
+    // A control request may hold the host for a moment.
+    let mut host = host;
+    let host = loop {
+        match std::sync::Arc::try_unwrap(host) {
+            Ok(host) => break host,
+            Err(held) => {
+                host = held;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    };
     host.stop();
     Ok(())
 }

@@ -14,9 +14,13 @@
 
 #include "dynlink_loader.h"
 
+#define RM_MAX_INPUTS 8
+
 typedef struct rm_cuda {
     CudaFunctions *cu;
     CUcontext ctx;
+    CUexternalMemory mems[RM_MAX_INPUTS];  // what rm_cuda_import took over, to give back
+    int n_mems;
 } rm_cuda;
 
 typedef struct rm_nvenc_cfg {
@@ -28,8 +32,6 @@ typedef struct rm_nvenc_cfg {
     uint32_t long_term;   // how many long-term reference frames to keep room for (0: none)
     uint32_t short_term;  // how many recent frames to keep (0: the usual, fitted to the picture)
 } rm_nvenc_cfg;
-
-#define RM_MAX_INPUTS 8
 
 typedef struct rm_nvenc {
     rm_cuda *cuda;
@@ -91,13 +93,32 @@ int rm_cuda_import(rm_cuda *c, int fd, uint64_t size, uint64_t *devptr, char *er
     h.handle.fd = fd;
     h.size = size;
     b.size = size;
+    if (c->n_mems >= RM_MAX_INPUTS) { snprintf(err, errlen, "too many inputs"); return -1; }
     if ((r = c->cu->cuCtxPushCurrent(c->ctx))) return cuda_fail(c, r, "push context", err, errlen);
     r = c->cu->cuImportExternalMemory(&mem, &h);
-    if (!r) r = c->cu->cuExternalMemoryGetMappedBuffer(&ptr, mem, &b);
+    if (!r) {
+        c->mems[c->n_mems++] = mem;
+        r = c->cu->cuExternalMemoryGetMappedBuffer(&ptr, mem, &b);
+    }
     c->cu->cuCtxPopCurrent(&dummy);
     if (r) return cuda_fail(c, r, "import Vulkan memory", err, errlen);
     *devptr = (uint64_t)ptr;
     return 0;
+}
+
+// Give back the imported memory and the context. Without this every session's context and
+// frames stay on the card until the process ends. The encoder using it must be closed first.
+void rm_cuda_close(rm_cuda *c) {
+    CUcontext dummy;
+    int i;
+    if (!c) return;
+    if (!c->cu->cuCtxPushCurrent(c->ctx)) {
+        for (i = 0; i < c->n_mems; i++) c->cu->cuDestroyExternalMemory(c->mems[i]);
+        c->cu->cuCtxPopCurrent(&dummy);
+    }
+    c->cu->cuCtxDestroy(c->ctx);
+    cuda_free_functions(&c->cu);
+    free(c);
 }
 
 #endif

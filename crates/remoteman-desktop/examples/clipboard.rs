@@ -488,7 +488,7 @@ async fn run(dir: &Path, socket: &Path, display_name: &str) -> Result<bool> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let wire = Wire::start()?;
-    let display = VirtualDisplay::create(false).await?;
+    let display = VirtualDisplay::create(false, false).await?;
     let (clipboard, changes) = Clipboard::new(&display, DEFAULT_CAP).await?;
     // After the session, whose first key makes the keyboard an app's window gets the focus of.
     let helper = Helper::start(dir, display_name).await?;

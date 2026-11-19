@@ -12,6 +12,62 @@ Nothing here names an operating system. A host describes what it can do, a clien
 - The client opens the connection. Keep-alives every second; a silent connection is dropped after 10 s.
 - **Closing.** Either side closes the QUIC connection with an application code and a short reason in words. From the host: `0` it is stopping, or another device took over; `1` something failed (the reason says what); `2` the host's owner ended this connection (the device stays trusted and may come back); `3` the device was taken off the trust list (it is refused from now on, until it is paired again). A client shows the reason, and after `3` offers pairing instead of reconnecting.
 
+## Pairing
+
+A host lets a device it doesn't know past the handshake only while its owner has pairing open, and only the first such device. What happens then is the host's choice:
+
+- It trusts the device at once (the first way, and what a host started with pairing open on its command line does).
+- Or it holds the device until its owner has confirmed it: in place of the hello the host sends `{"t":"pairing","seconds":60}`, and both sides show a six-digit code for the owner to compare. On a yes the hello follows and the device is trusted from then on. On a no, or when the time is up, the host answers `{"t":"error","code":"not_paired",...}` and closes; the device throws away the host key it had just taken.
+
+The code is made from both keys: the first four bytes of SHA-256 over the text `remoteman pairing`, a newline, the host key's fingerprint, a newline and the device key's fingerprint (both in lower-case hex), as a big-endian number modulo 1,000,000, shown as two groups of three digits. Each side makes it from the key it sees the other use, so something in between, which would have to show each side a key of its own, makes the two codes differ. A client that doesn't know the `pairing` message simply waits for its hello.
+
+### A pairing link
+
+For pairing by scanning a code instead of typing an address, a host may show a link (as a QR code): `remoteman://pair?v=0&name=<name>&addr=<addr[:port]>[,<addr[:port]>...]&fp=<the whole fingerprint of the host key, hex>`. A device adds the computer at the first address that answers, pairing as usual (the host still has to have pairing open, and still asks for the six digits where it does), and after connecting forgets the computer again if the key it met is not the one in the link. There is no secret in the link. (Defined by the Apple apps, which show and scan it; the Linux programs don't yet.)
+
+## A locked host
+
+A host whose desktop is locked may let a paired device in all the same, if its owner has said so: by the device's key alone, or with the password of the host's user as well.
+
+- A host that wants the password answers the hello with `{"t":"error","code":"locked","message":"..."}` and closes the connection, with the same words as its closing reason, begun with `locked: ` (a client sees one or the other, depending on which arrives first). `message` is for people: whose password is wanted, or that the last one was wrong. After a wrong password it contains the words `not right` (a client that kept the password may take that as its cue to throw the kept one away); those words are part of the protocol and will not change.
+- The client asks its user and connects again with the password in the hello: `"unlock":"..."` in `client_hello`. It travels inside the connection's encryption, to a host whose key the device already holds, and is never stored by the host. A wrong one gets the same answer again; after several the host takes no more for a while.
+- A host that is locked and set to let nobody in answers with an ordinary error.
+
+While a host is unlocked for a device this way it may give the device another placement than it asked for (the Linux host makes the device's display the only one, so that an unlocked desktop is not shown on the computer's own screens; a device that asked to mirror is shown them as it asked). The host locks again when the device leaves.
+
+### More than one way in
+
+A host that can both bring a device into a session that is already running and show it a login screen when there is none (the Linux daemon) lists `way_in` in its features. A client may then say `"way_in":"attach"` in its hello: only a session that is already running, never a login screen. Left out, the host uses whatever way fits. With `attach` and nobody logged in, the host refuses with an ordinary error saying so. A host with one way in takes no notice.
+
+### A second display
+
+A host that can give one device two displays in one session lists `displays` in its features.
+
+- Client → host: `{"t":"display","index":1,"on":true,"display":{...}}` adds a second display of that size (the `display` of the hello), beside everything else; `"on":false` takes it away. `"side":"left"`, `"above"` or `"below"` beside `on` says which side of the host's other displays it sits on, level with its neighbour there; left out, or a word the host doesn't know: the right. The others keep their places among themselves. Asking again while it is on, with another size or side, makes it afresh. Only index 1 exists.
+- Host → client: a `stream` message with `"index":1` says what the second picture is; its epochs count by themselves, from 1. Its frames come as datagrams of kind 6, laid out like the picture's (kind 1), with their own frame numbers. The cursor is drawn into this picture (there is no cursor channel for it), and it is in the codec of the first.
+- A client that misses part of it asks with `{"t":"display_keyframe","index":1}` and gets a keyframe (there are no loss reports for the second picture).
+- Host → client: `{"t":"display","index":1,"on":false,"message":"..."}` when the second display could not be made, or is gone.
+- Input: the input event `8, index` (two bytes) says which display the pointer and touch events that follow are on: 0 the first (and where every session starts), 1 the second. Keys go to the desktop whichever it is.
+
+The second display goes when the session ends, and when the first is made afresh (`configure`). Its bitrate is the host's own choice: the ceiling in `configure` is for the first picture only. Frames of it already on their way can still arrive just after the client gave it back; the client drops them.
+
+### A host that logs its user in by itself
+
+Some hosts neither show a login or lock screen nor ask for a password: they log their user in, or unlock, for a paired device (the Mac host, where its owner has switched that on and given it the password once). That takes a few seconds, during which there is no session to show. Such a host answers the hello with `{"t":"error","code":"logging_in","message":"..."}` and closes, its closing reason beginning `logging in: `. A client says so, waits about three seconds and connects again, by itself, some ten times before it asks its user. Through the core a host's handler gets this by refusing with words that begin `logging in: `.
+
+## Finding a host
+
+A host that can be reached from the network says so with DNS-SD (Bonjour, Avahi): a service of type `_remoteman._udp` whose instance name is the computer's name and whose port is the one it listens on. Its text records:
+
+| Record | Content |
+|---|---|
+| `v=0` | The protocol version. |
+| `fp=…` | The first 16 hex digits of the host key's fingerprint, so a viewer recognises a computer it is paired with (and never trusts one by this alone: the handshake checks the whole key). |
+| `os=…` | `linux`, `macos` or `windows`. |
+| `mac=…` | The hardware addresses of the computer's own network cards, comma-separated (`aa:bb:cc:dd:ee:ff`). Left out if there are none. |
+
+A viewer lists hosts it isn't paired with as nearby, and may mark a paired one as online while it sees its `fp`. Seeing nothing says nothing: a paired computer may be reached over a VPN or another network, where none of this travels. A viewer remembers a paired computer's `mac` and can wake it with the usual magic packet (six bytes of `0xFF`, then the address sixteen times) broadcast to UDP port 9 (and 7), which only works on the network the computer is on. The service is withdrawn when the host stops.
+
 ## Channels
 
 | Channel | Carried on | Direction | Content |
@@ -29,7 +85,7 @@ Each message is a `u32` length followed by that many bytes of UTF-8 JSON, an obj
 **Client → host**
 
 - `{"t":"client_hello","proto":0,"name":"Anna's iPad","display":{"width":2752,"height":2064,"scale":2.0,"refresh":120},"decoders":[{"codec":"av1","chroma":"420","depth":10},{"codec":"hevc","chroma":"444","depth":10},{"codec":"hevc","chroma":"420","depth":10}]}`
-  The first message. `display` is the client's screen in pixels, with the scale it wants the desktop drawn at and its refresh rate in Hz. `decoders` lists what it decodes in hardware, most preferred first. An optional `"cursor":true` says the client draws the cursor itself (see Cursor). An optional `"placement"` inside `display` says where the display sits among the host's own screens: `"extend"` (the default: an extra display beside them), `"main"` (the main display, the host's own screens kept on beside it) or `"only"` (the host's own screens off while the client is connected). A host that can do this lists `placement` in its features; one that can't gives an extra display whatever is asked. The host's own layout comes back when the client leaves.
+  The first message. `display` is the client's screen in pixels, with the scale it wants the desktop drawn at and its refresh rate in Hz. `decoders` lists what it decodes in hardware, most preferred first. An optional `"cursor":true` says the client draws the cursor itself (see Cursor). An optional `"placement"` inside `display` says where the display sits among the host's own screens: `"extend"` (the default: an extra display beside them), `"main"` (the main display, the host's own screens kept on beside it) or `"only"` (the host's own screens off while the client is connected). A host that can do this lists `placement` in its features; one that can't gives an extra display whatever is asked. The host's own layout comes back when the client leaves. A fourth value, `"mirror"`, asks for no display of the client's own: the client is shown the host's main monitor as it is, and its input lands there. The `stream` message then carries that monitor's size (not the one the client asked for) and a refresh rate no higher than either side's. A host that can do it lists `mirror` in its features; one that doesn't know the value gives an extra display.
 - `{"t":"lost","first":812,"last":813,"epoch":1}`: frames 812 to 813 never arrived whole (`last` is the newest frame number the client has seen; `epoch` is the stream epoch the numbers belong to, and a host drops a report about an epoch that is over). See Video, "Loss".
 - `{"t":"keyframe"}`: the client needs a keyframe, with no way round it (at the start of a stream).
 - `{"t":"ping","id":7,"client_us":123456}`: answered at once with `pong`. `client_us` is the client's clock in microseconds.

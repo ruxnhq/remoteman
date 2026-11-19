@@ -29,8 +29,10 @@ pub struct Features {
     pub clipboard: bool,
     /// Files sent to the computer: the line in the session's sharing menu.
     pub files: bool,
-    /// Remembering the clipboard choice, and choosing where received files go.
+    /// Remembering the clipboard choice.
     pub sharing_settings: bool,
+    /// Files from the computer, and choosing where they go.
+    pub receive_files: bool,
     /// HDR pictures.
     pub hdr: bool,
     /// A choice of whether the stream follows this display's refresh rate (it always does, up
@@ -58,29 +60,30 @@ pub struct Features {
 }
 
 pub const FEATURES: Features = Features {
-    discovery: false,
-    presence: false,
-    wake: false,
-    pairing_code: false,
+    discovery: true,
+    presence: true,
+    wake: true,
+    pairing_code: true,
     sound: true,
-    sound_setting: false,
+    sound_setting: true,
     microphone: true,
-    microphone_setting: false,
-    camera: false,
+    microphone_setting: true,
+    camera: true,
     clipboard: true,
     files: true,
-    sharing_settings: false,
+    sharing_settings: true,
+    receive_files: true,
     hdr: false,
-    refresh_choice: false,
-    pointer_capture: false,
-    pointer_choice: false,
-    scroll_direction: false,
-    touch: false,
-    key_mapping: false,
-    release_shortcut: false,
-    second_display: false,
-    mirror: false,
-    way_in: false,
+    refresh_choice: true,
+    pointer_capture: true,
+    pointer_choice: true,
+    scroll_direction: true,
+    touch: true,
+    key_mapping: true,
+    release_shortcut: true,
+    second_display: true,
+    mirror: true,
+    way_in: true,
 };
 
 pub const NOT_YET: &str = "Not available yet";

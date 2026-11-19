@@ -12,7 +12,7 @@ ffmpeg -v error -y -f lavfi -i "testsrc2=size=1280x720:rate=30" -t 5 -c:v $enc -
 printf 'wait 2\ncamerafile %s\nwait 1\n' "$RM_LOGS/clip.h264" > "$RM_LOGS/steps.txt"
 rm -f "$RM_LOGS/camera.png"
 dbus-run-session -- sh -c '
-  bin="$RM_ROOT/target/release"
+  bin="${RM_BIN:-$RM_ROOT/target/release}"
   mutter --headless --wayland --no-x11 --wayland-display rm-camera-e2e >"$RM_LOGS/mutter.log" 2>&1 &
   mpid=$!
   sleep 2
