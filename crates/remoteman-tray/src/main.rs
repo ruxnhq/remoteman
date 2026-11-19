@@ -190,6 +190,8 @@ struct Ui {
     setting: Cell<bool>,
     shown: RefCell<Option<State>>,
     icon: RefCell<Option<ksni::blocking::Handle<Icon>>>,
+    /// The question about a device that waits to be paired, while it is asked.
+    asking: RefCell<Option<adw::AlertDialog>>,
 }
 
 impl Ui {
@@ -227,6 +229,42 @@ impl Ui {
                 note.set_body(Some(&format!("It is using {} now.", self.name)));
                 self.app.send_notification(Some("device"), &note);
                 println!("notified: {name} connected");
+            }
+        }
+        // A new device waits for a yes or no: ask, with the code it should be showing. The
+        // question goes when it has been answered here or elsewhere, or its time is up.
+        let pending = |s: &State| if let State::Sharing { pending, .. } = s { pending.clone() } else { None };
+        let (was, now) = (self.shown.borrow().as_ref().and_then(pending), pending(&state));
+        if was != now {
+            if let Some(old) = self.asking.borrow_mut().take() {
+                old.force_close();
+            }
+            if let Some(device) = now {
+                let name = if device.name.is_empty() { "A device".to_owned() } else { device.name.clone() };
+                let ask = adw::AlertDialog::builder()
+                    .heading(format!("Pair with {name}?"))
+                    .body(format!("It wants to use this computer. It should be showing this code:\n\n{}\n\nDecline if it shows another code, or if you didn't start this.", device.code))
+                    .close_response("decline")
+                    .default_response("decline")
+                    .build();
+                ask.add_responses(&[("decline", "Decline"), ("pair", "Pair")]);
+                ask.set_response_appearance("pair", adw::ResponseAppearance::Suggested);
+                ask.connect_response(None, {
+                    let ui = self.clone();
+                    move |_, response| {
+                        // (Closed by this program because it was settled elsewhere: nothing to say.)
+                        if ui.asking.borrow_mut().take().is_some() {
+                            ui.tell(if response == "pair" { "pair accept" } else { "pair decline" });
+                        }
+                    }
+                });
+                self.open("devices");
+                ask.present(Some(&self.window));
+                *self.asking.borrow_mut() = Some(ask);
+                let note = gtk::gio::Notification::new(&format!("{name} wants to pair"));
+                note.set_body(Some(&format!("Its code should be {}. Answer in Remoteman Host.", device.code)));
+                self.app.send_notification(Some("pair"), &note);
+                println!("asking: pair with {name}? code {}", device.code);
             }
         }
         // The device answered for a file sent to it.
@@ -436,6 +474,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         setting: Cell::new(false),
         shown: RefCell::new(None),
         icon: RefCell::new(None),
+        asking: RefCell::new(None),
     });
 
     at_sign_in.connect_active_notify({
@@ -568,7 +607,7 @@ mod tests {
     fn the_icon_has_a_shape_for_each_state() {
         let (tx, _rx) = mpsc::channel();
         let mut icon = Icon { state: State::Paused, name: "desk".into(), tx };
-        let sharing = |client| State::Sharing { fingerprint: String::new(), port: 7791, pairing: false, clipboard: false, files: false, client, devices: Vec::new(), sent: host::Sent::default() };
+        let sharing = |client| State::Sharing { fingerprint: String::new(), port: 7791, pairing: false, clipboard: false, files: false, client, devices: Vec::new(), sent: host::Sent::default(), pending: None };
         let device = host::Client { name: "pad".into(), since: 0, width: 1, height: 1, refresh: 60, placement: String::new(), picture: String::new(), sound: false };
         let mut names = Vec::new();
         for state in [State::Paused, State::Failed("why".into()), sharing(None), sharing(Some(device))] {

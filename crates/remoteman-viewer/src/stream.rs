@@ -83,6 +83,7 @@ struct Feed {
     arriving: HashMap<u32, (String, Vec<u8>)>,
     /// Files from the computer that are still arriving.
     files: remoteman_core::receive::Receiver,
+    pairing: Arc<Mutex<Option<(String, u32)>>>,
 }
 
 impl Handler for Feed {
@@ -96,6 +97,10 @@ impl Handler for Feed {
         // falls behind, this waits, and the loss shows up upstream as a keyframe request.
         self.shared.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
         let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us));
+    }
+
+    fn pairing(&mut self, code: &str, seconds: u32) {
+        *self.pairing.lock().unwrap() = Some((code.to_owned(), seconds));
     }
 
     fn cursor_shape(&mut self, shape: &CursorShape) {
@@ -178,6 +183,9 @@ pub struct Request {
     pub cursor: bool,
     /// Where files from the computer go.
     pub folder: PathBuf,
+    /// Told the code to show, and the seconds there are, if the computer holds this device
+    /// until its owner has confirmed it.
+    pub pairing: Arc<Mutex<Option<(String, u32)>>>,
 }
 
 impl Session {
@@ -379,7 +387,7 @@ impl Session {
         })?;
         let hostname = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "Linux".into());
         let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, test_drop_one_in: None, test_delay_lost_ms: None, cursor: r.cursor };
-        let client = Client::connect(options, Feed { tx, shared: shared.clone(), arriving: HashMap::new(), files: Default::default() })?;
+        let client = Client::connect(options, Feed { tx, shared: shared.clone(), arriving: HashMap::new(), files: Default::default(), pairing: r.pairing.clone() })?;
         // What it said in its hello, unless it has already said otherwise since.
         if !shared.features_changed.load(Ordering::Relaxed) {
             *shared.features.lock().unwrap() = client.host_features.clone();

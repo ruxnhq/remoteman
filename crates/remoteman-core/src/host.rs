@@ -236,7 +236,33 @@ pub struct Device {
 /// The connection of the client being served, and its fingerprint.
 type Who = Arc<Mutex<Option<(String, Connection)>>>;
 
+/// A device that connected while pairing was open and waits for the host's owner.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PendingDevice {
+    pub name: String,
+    pub fingerprint: String,
+    /// What the device shows too, if it is the device its owner thinks it is.
+    pub code: String,
+    /// How long the owner has left to answer.
+    pub seconds: u32,
+}
+
+/// How long the owner has to confirm a new device.
+const CONFIRM_SECONDS: u32 = 60;
+
+/// Pairing that waits for its owner's word.
+#[derive(Default)]
+struct Confirm {
+    /// This host's own fingerprint: half of what the code is made from.
+    own: String,
+    /// A new device is held until the owner says yes ([`Host::decide`]); otherwise it is
+    /// trusted as soon as it connects while pairing is open.
+    wanted: std::sync::atomic::AtomicBool,
+    waiting: Mutex<Option<(PendingDevice, Instant, tokio::sync::oneshot::Sender<bool>)>>,
+}
+
 pub struct Host {
+    confirm: Arc<Confirm>,
     runtime: Option<tokio::runtime::Runtime>,
     endpoint: remoteman_transport::Endpoint,
     trust: Arc<Trust>,
@@ -298,8 +324,9 @@ impl Host {
         let link: Arc<Mutex<Option<Link>>> = Arc::default();
         let who = Who::default();
         let features = Arc::new(Mutex::new(options.features.clone()));
-        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone()));
-        Ok(Self { runtime: Some(runtime), endpoint, trust, link, who, features, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
+        let confirm = Arc::new(Confirm { own: identity.fingerprint.clone(), ..Confirm::default() });
+        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone(), confirm.clone()));
+        Ok(Self { confirm, runtime: Some(runtime), endpoint, trust, link, who, features, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
     }
 
     /// Let the next unknown device in (it is remembered and pairing turns itself off), or stop
@@ -310,6 +337,27 @@ impl Host {
 
     pub fn pairing(&self) -> bool {
         self.trust.pairing()
+    }
+
+    /// Whether a new device waits for [`Host::decide`] before it is trusted (off to begin
+    /// with: it is trusted as soon as it connects while pairing is open).
+    pub fn set_confirm(&self, on: bool) {
+        self.confirm.wanted.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The device waiting to be confirmed, if there is one.
+    pub fn pending(&self) -> Option<PendingDevice> {
+        let waiting = self.confirm.waiting.lock().unwrap();
+        let (device, since, _) = waiting.as_ref()?;
+        Some(PendingDevice { seconds: CONFIRM_SECONDS.saturating_sub(since.elapsed().as_secs() as u32), ..device.clone() })
+    }
+
+    /// Trust the waiting device from now on, or turn it away. `false`: none was waiting.
+    pub fn decide(&self, accept: bool) -> bool {
+        match self.confirm.waiting.lock().unwrap().take() {
+            Some((_, _, answer)) => answer.send(accept).is_ok(),
+            None => false,
+        }
     }
 
     /// Change what this host can do while it runs (its owner switched a feature on or off).
@@ -400,17 +448,23 @@ impl Drop for Host {
 pub const CLOSE_DROPPED: u32 = 2;
 pub const CLOSE_REVOKED: u32 = 3;
 
-async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>, who: Who, features: Arc<Mutex<Vec<String>>>) {
+async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>, who: Who, features: Arc<Mutex<Vec<String>>>, confirm: Arc<Confirm>) {
     let options = Arc::new(options);
     let mut current: Option<(tokio::task::JoinHandle<()>, Connection)> = None;
     while let Some(incoming) = endpoint.accept().await {
         // A stranger is refused inside the handshake; this only fails for them.
         let Ok(conn) = incoming.await else { continue };
         let Some(fingerprint) = peer_fingerprint(&conn) else { continue };
+        // Only reachable while pairing: a device nobody knows. It is trusted here and now,
+        // or held until the host's owner has confirmed it (in `serve`, once it has said its name).
+        let mut held = None;
         if !trust.contains(&fingerprint) {
-            // Only reachable while pairing.
-            let _ = trust.add(&fingerprint, &conn.remote_address().ip().to_string());
             trust.set_pairing(false);
+            if confirm.wanted.load(std::sync::atomic::Ordering::Relaxed) {
+                held = Some(confirm.clone());
+            } else {
+                let _ = trust.add(&fingerprint, &conn.remote_address().ip().to_string());
+            }
         }
         // The newest client takes over. The old session is closed and left to finish by
         // itself, so the handler hears `left` for it exactly once, and before the new `connected`.
@@ -422,13 +476,13 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
         let session_conn = conn.clone();
         *who.lock().unwrap() = Some((fingerprint.clone(), conn.clone()));
         // Revoked between its handshake and here: it doesn't get a session.
-        if !trust.contains(&fingerprint) {
+        if held.is_none() && !trust.contains(&fingerprint) {
             conn.close(CLOSE_REVOKED.into(), b"this device is no longer trusted here");
         }
         let (who, trust) = (who.clone(), trust.clone());
         let offered = features.lock().unwrap().clone();
         current = Some((tokio::spawn(async move {
-            let started = serve(&conn, fingerprint, &options, &calls, &current_link, &trust, offered).await;
+            let started = serve(&conn, fingerprint, &options, &calls, &current_link, &trust, offered, held).await;
             {
                 let mut who = who.lock().unwrap();
                 if who.as_ref().is_some_and(|(_, c)| c.stable_id() == conn.stable_id()) {
@@ -454,13 +508,44 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
 
 /// One client's session. The flag in the result says whether the handler's `connected` ran (and
 /// so whether `left` is owed).
-async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, trust: &Trust, features: Vec<String>) -> Result<bool, (bool, anyhow::Error)> {
+async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, trust: &Trust, features: Vec<String>, held: Option<Arc<Confirm>>) -> Result<bool, (bool, anyhow::Error)> {
     let no = |e: anyhow::Error| (false, e);
     let clock = Instant::now();
     let (mut send, mut recv) = conn.accept_bi().await.context("control stream").map_err(no)?;
     let Some(Message::ClientHello { proto, name, display, decoders, cursor }) = read_message(&mut recv).await.map_err(no)? else {
         return Err(no(anyhow::anyhow!("the first message wasn't client_hello")));
     };
+    // A new device, held for the owner's word: it is told to wait (and can show the code),
+    // and gets its hello only after a yes.
+    if let Some(confirm) = held {
+        let device = PendingDevice { name: name.trim().to_owned(), fingerprint: fingerprint.clone(), code: remoteman_transport::pair_code(&confirm.own, &fingerprint), seconds: CONFIRM_SECONDS };
+        let (answer, answered) = tokio::sync::oneshot::channel::<bool>();
+        *confirm.waiting.lock().unwrap() = Some((device, Instant::now(), answer));
+        write_message(&mut send, &Message::Pairing { seconds: CONFIRM_SECONDS }).await.map_err(no)?;
+        let decision = tokio::select! {
+            said = tokio::time::timeout(Duration::from_secs(CONFIRM_SECONDS as u64), answered) => said.ok().and_then(|s| s.ok()),
+            _ = conn.closed() => Some(false),
+        };
+        // Whatever came of it, nobody is waiting any more (unless a newer device already is).
+        {
+            let mut waiting = confirm.waiting.lock().unwrap();
+            if waiting.as_ref().is_some_and(|(d, _, _)| d.fingerprint == fingerprint) {
+                waiting.take();
+            }
+        }
+        match decision {
+            Some(true) => trust.add(&fingerprint, name.trim()).map_err(no)?,
+            other => {
+                let message = if other.is_some() { "pairing was declined on the computer" } else { "nobody confirmed the pairing on the computer in time" };
+                let _ = write_message(&mut send, &Message::Error { code: "not_paired".into(), message: message.into() }).await;
+                let _ = send.finish();
+                // (Time for the reason to arrive before the connection goes.)
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                conn.close(CLOSE_REVOKED.into(), message.as_bytes());
+                return Err(no(anyhow::anyhow!("a new device was not confirmed")));
+            }
+        }
+    }
     write_message(&mut send, &Message::HostHello { proto: remoteman_proto::PROTO, name: options.name.clone(), os: options.os.clone(), features }).await.map_err(no)?;
     // The list of trusted devices shows the name the device gives itself.
     if !name.trim().is_empty() {

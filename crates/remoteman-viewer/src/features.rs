@@ -63,7 +63,7 @@ pub const FEATURES: Features = Features {
     discovery: true,
     presence: true,
     wake: true,
-    pairing_code: false,
+    pairing_code: true,
     sound: true,
     sound_setting: true,
     microphone: true,

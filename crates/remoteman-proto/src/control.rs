@@ -142,6 +142,12 @@ pub enum Message {
     Sound {
         on: bool,
     },
+    /// Host to client, in place of the hello for a moment: this device is new here, and the
+    /// host's owner has this many seconds to confirm it. Both sides can show the same code
+    /// meanwhile (docs/PROTOCOL.md, "Pairing"); the hello, or an error, follows.
+    Pairing {
+        seconds: u32,
+    },
     /// Host to client: what the sound datagrams carry, before the first one and on any change.
     SoundFormat {
         /// `opus`.

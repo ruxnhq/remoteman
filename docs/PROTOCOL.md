@@ -12,6 +12,15 @@ Nothing here names an operating system. A host describes what it can do, a clien
 - The client opens the connection. Keep-alives every second; a silent connection is dropped after 10 s.
 - **Closing.** Either side closes the QUIC connection with an application code and a short reason in words. From the host: `0` it is stopping, or another device took over; `1` something failed (the reason says what); `2` the host's owner ended this connection (the device stays trusted and may come back); `3` the device was taken off the trust list (it is refused from now on, until it is paired again). A client shows the reason, and after `3` offers pairing instead of reconnecting.
 
+## Pairing
+
+A host lets a device it doesn't know past the handshake only while its owner has pairing open, and only the first such device. What happens then is the host's choice:
+
+- It trusts the device at once (the first way, and what a host started with pairing open on its command line does).
+- Or it holds the device until its owner has confirmed it: in place of the hello the host sends `{"t":"pairing","seconds":60}`, and both sides show a six-digit code for the owner to compare. On a yes the hello follows and the device is trusted from then on. On a no, or when the time is up, the host answers `{"t":"error","code":"not_paired",...}` and closes; the device throws away the host key it had just taken.
+
+The code is made from both keys: the first four bytes of SHA-256 over the text `remoteman pairing`, a newline, the host key's fingerprint, a newline and the device key's fingerprint (both in lower-case hex), as a big-endian number modulo 1,000,000, shown as two groups of three digits. Each side makes it from the key it sees the other use, so something in between, which would have to show each side a key of its own, makes the two codes differ. A client that doesn't know the `pairing` message simply waits for its hello.
+
 ## Finding a host
 
 A host that can be reached from the network says so with DNS-SD (Bonjour, Avahi): a service of type `_remoteman._udp` whose instance name is the computer's name and whose port is the one it listens on. Its text records:

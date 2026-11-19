@@ -77,11 +77,19 @@ pub struct Sent {
     pub said: String,
 }
 
+/// A new device waiting for its owner's word.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pending {
+    pub name: String,
+    /// What the device shows too, if it is the one its owner means.
+    pub code: String,
+}
+
 /// How things stand.
 #[derive(Clone, Debug, PartialEq)]
 pub enum State {
     /// The host runs.
-    Sharing { fingerprint: String, port: u16, pairing: bool, clipboard: bool, files: bool, client: Option<Client>, devices: Vec<Device>, sent: Sent },
+    Sharing { fingerprint: String, port: u16, pairing: bool, clipboard: bool, files: bool, client: Option<Client>, devices: Vec<Device>, sent: Sent, pending: Option<Pending> },
     /// The host doesn't run because it was stopped (or never started).
     Paused,
     /// The host doesn't run because it failed; why, as far as systemd says.
@@ -118,6 +126,7 @@ pub fn state() -> State {
             files: status["files"].as_bool().unwrap_or(false),
             client,
             devices,
+            pending: status["pending"].as_object().map(|_| Pending { name: text(&status["pending"], "name"), code: text(&status["pending"], "code") }),
             sent: Sent { answered: number(&status["sent"], "answered"), ok: status["sent"]["ok"].as_bool().unwrap_or(false), said: text(&status["sent"], "said") },
         };
     }
