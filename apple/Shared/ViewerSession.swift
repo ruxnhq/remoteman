@@ -443,13 +443,15 @@ final class ViewerSession: ObservableObject {
 
     func connect(
         host: String, pair: Bool, name: String, display: Display, decoders: String = ViewerSession.decoders,
-        placement: Placement = .extend, unlock: String? = nil
+        placement: Placement = .extend, unlock: String? = nil, attachOnly: Bool = false
     ) {
         guard !isActive || retrying else { return }
         if !retrying { loginRetries = 0 }
         retrying = false
         again = { [weak self] in
-            self?.connect(host: host, pair: pair, name: name, display: display, decoders: decoders, placement: placement, unlock: unlock)
+            self?.connect(
+                host: host, pair: pair, name: name, display: display, decoders: decoders, placement: placement, unlock: unlock,
+                attachOnly: attachOnly)
         }
         lockedAsk = nil
         let target = host.contains(":") ? host : host + ":7791"
@@ -466,6 +468,9 @@ final class ViewerSession: ObservableObject {
             height: display.height, scale: display.scale, refresh: display.refresh, decoders: decoders,
             options: [
                 placement == .extend ? nil : "placement=\(placement.rawValue)",
+                // Only a session that is already running, never the computer's login screen
+                // (a computer that lists "way_in"; others take no notice).
+                attachOnly ? "way-in=attach" : nil,
                 // The locked computer's password, as hex (the options are split on ";" and "=").
                 unlock.map { "unlock-hex=" + $0.utf8.map { String(format: "%02x", $0) }.joined() },
             ].compactMap { $0 }.joined(separator: ";"))

@@ -68,9 +68,16 @@ struct ComputerSettingsScreen: View {
                         }
                         InsetGroup(
                             header: "Getting in",
-                            footer: "Automatic attaches to your session when you're logged in at the computer, and shows its login screen when nobody is."
+                            footer: "Automatic attaches to your session when you're logged in at the computer, and shows its login screen when nobody is (on a computer that can). Only a running session never shows a login screen."
                         ) {
-                            Row(title: "Way in") { RowValue(text: "Automatic", chevron: true) }.available(Features.remoteLogin)
+                            ChoiceRow(
+                                title: "Way in",
+                                value: Binding(get: { c.wayIn ?? "any" }, set: { v in
+                                    var u = c
+                                    u.wayIn = v == "attach" ? "attach" : nil
+                                    store.update(u)
+                                }),
+                                choices: [("any", "Automatic"), ("attach", "Only a running session")])
                             Row(title: "Require \(Gate.name) to connect", subtitle: ViewerPrefs.requireAuth ? "On for every computer, in Settings" : nil) {
                                 Toggle("", isOn: Binding(get: { c.auth == "always" || (c.auth == nil && ViewerPrefs.requireAuth) }, set: { on in
                                     var u = c

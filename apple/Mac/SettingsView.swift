@@ -260,6 +260,16 @@ struct ComputerSettings: View {
                     ) {
                         PlacementPicker(computer: c)
                     }
+                    Row(
+                        "Way in",
+                        caption: "For a computer that can show its login screen to a device when nobody is logged in. Other computers take no notice."
+                    ) {
+                        Picker("Way in", selection: Binding(get: { c.wayIn }, set: { v in store.update(c.id) { $0.wayIn = v } })) {
+                            Text("Automatic").tag("")
+                            Text("Only a session that is already running").tag("attach")
+                        }
+                        .labelsHidden().fixedSize()
+                    }
                     Row("Require Touch ID to connect") {
                         Picker("Require Touch ID to connect", selection: Binding(get: { c.auth }, set: { v in store.update(c.id) { $0.auth = v } })) {
                             Text("Use the default (\(ViewerPrefs.requireAuth ? "on" : "off"))").tag("")

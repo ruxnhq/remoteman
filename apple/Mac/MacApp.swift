@@ -149,7 +149,7 @@ final class AppModel: ObservableObject {
         session.showStats = UserDefaults.standard.bool(forKey: Self.showFiguresKey)
         // A computer that may be asleep is woken first; one that is awake takes no notice.
         if c.wake, !c.macs.isEmpty, Nearby.shared.seen(fingerprint: c.fingerprint) == nil { Wake.send(macs: c.macs, lastAddress: c.address) }
-        session.connect(host: c.address, pair: c.pairOnConnect, name: DeviceDisplay.name, display: display, placement: c.place, unlock: unlock)
+        session.connect(host: c.address, pair: c.pairOnConnect, name: DeviceDisplay.name, display: display, placement: c.place, unlock: unlock, attachOnly: c.wayIn == "attach")
         watchForPicture()
     }
 
@@ -202,7 +202,7 @@ final class AppModel: ObservableObject {
         barShown = false
         session.disconnect()
         requested = display
-        session.connect(host: c.address, pair: false, name: DeviceDisplay.name, display: display, placement: c.place)
+        session.connect(host: c.address, pair: false, name: DeviceDisplay.name, display: display, placement: c.place, attachOnly: c.wayIn == "attach")
         watchForPicture()
         applyChrome()
     }

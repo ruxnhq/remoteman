@@ -76,7 +76,7 @@ final class AppModel: ObservableObject {
             Wake.send(macs: macs, lastAddress: c.address)
         }
         session.connect(
-            host: c.address, pair: !c.paired, name: DeviceDisplay.name, display: asked(for: c), placement: c.placementChoice, unlock: unlock)
+            host: c.address, pair: !c.paired, name: DeviceDisplay.name, display: asked(for: c), placement: c.placementChoice, unlock: unlock, attachOnly: c.wayIn == "attach")
     }
 
     /// "More space" for the computer in view: the same pixels drawn smaller.

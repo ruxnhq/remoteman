@@ -28,6 +28,8 @@ struct SavedComputer: Codable, Identifiable, Equatable {
     var wake = false
     /// Touch ID before connecting: "" follows the setting in General, "always", "never".
     var auth = ""
+    /// "" any way in (a running session, or the computer's login screen); "attach" only a running session.
+    var wayIn = ""
 
     init(name: String, address: String) {
         self.name = name
@@ -51,6 +53,7 @@ struct SavedComputer: Codable, Identifiable, Equatable {
         macs = try c.decodeIfPresent([String].self, forKey: .macs) ?? []
         wake = try c.decodeIfPresent(Bool.self, forKey: .wake) ?? false
         auth = try c.decodeIfPresent(String.self, forKey: .auth) ?? ""
+        wayIn = try c.decodeIfPresent(String.self, forKey: .wayIn) ?? ""
     }
 
     var place: ViewerSession.Placement {

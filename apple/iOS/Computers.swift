@@ -22,6 +22,8 @@ struct Computer: Codable, Identifiable, Equatable {
     var wake: Bool?
     /// Face ID before connecting: nil follows the setting, "always", "never".
     var auth: String?
+    /// nil any way in (a running session, or the computer's login screen); "attach" only a running session.
+    var wayIn: String?
 
     var osLine: String {
         switch os {
