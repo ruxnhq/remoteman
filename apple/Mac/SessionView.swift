@@ -39,14 +39,9 @@ struct SessionScreen: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .allowsHitTesting(false)
                     }
-                    if bare, model.barShown {
-                        if model.fullScreen {
-                            HoverBar(session: session, computer: computer, facts: facts).padding(.top, 12)
-                                .transition(.move(edge: .top).combined(with: .opacity))
-                        } else {
-                            SlideInBar(session: session, computer: computer, caption: caption)
-                                .transition(.move(edge: .top))
-                        }
+                    if bare, model.barShown || model.pillStays {
+                        HoverBar(session: session, computer: computer, facts: facts).padding(.top, 10)
+                            .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 } else {
                     ConnectingView(session: session, computer: computer)
@@ -448,6 +443,11 @@ struct HoverBar: View {
     var body: some View {
         let c = SessionControls(model: model, session: session, computer: computer, kind: .capsule)
         HStack(spacing: 4) {
+            // In a window the pill carries the window's own buttons: there is no title bar.
+            if !model.fullScreen {
+                WindowButtons(window: model.window).padding(.leading, 8).padding(.trailing, 4)
+                BarDivider()
+            }
             HStack(spacing: 6) {
                 StatusDot(color: Tokens.green)
                 Text(computer.name).fontWeight(.semibold)
@@ -455,6 +455,11 @@ struct HoverBar: View {
             }
             .font(.system(size: 13))
             .padding(.horizontal, 8)
+            .frame(height: 48)
+            .contentShape(Rectangle())
+            // The window has no title bar in a session: it is moved by the pill's name.
+            .modifier(MovesWindow())
+            .help("Drag to move the window")
             BarDivider()
             c.main
             BarDivider()
@@ -788,5 +793,13 @@ struct ConnectingView: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(state == .busy ? Tokens.tintfg : .white.opacity(0.085), lineWidth: 1))
         .accessibilityElement(children: .combine)
+    }
+}
+
+
+/// Dragging here moves the window (macOS 15 and later; before that the window is moved from its edges' title strip).
+private struct MovesWindow: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) { content.gesture(WindowDragGesture()) } else { content }
     }
 }

@@ -72,7 +72,7 @@ struct GeneralSettings: View {
                     caption: "Without a title bar the window shows only the picture. The controls and the window buttons slide in when the pointer reaches the top edge."
                 ) {
                     Picker("Window controls", selection: $controls) {
-                        Text("In the title bar").tag(AppModel.WindowControls.titleBar.rawValue)
+                        Text("Always show, as a pill over the picture").tag(AppModel.WindowControls.titleBar.rawValue)
                         Text("Show when the pointer is at the top").tag(AppModel.WindowControls.slideIn.rawValue)
                     }
                     .pickerStyle(.radioGroup).labelsHidden().fixedSize()

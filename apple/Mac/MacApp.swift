@@ -130,6 +130,16 @@ final class AppModel: ObservableObject {
         }
         connectNow(c)
         let steps: [(Double, () -> Void)] = [
+            (5.5, { [self] in
+                // `--shot-to file.png`: the window as it is drawn (the picture itself comes out black).
+                let args = CommandLine.arguments
+                guard let path = args.firstIndex(of: "--shot-to").flatMap({ $0 + 1 < args.count ? args[$0 + 1] : nil }),
+                    let frame = window?.contentView?.superview, let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds)
+                else { return }
+                frame.cacheDisplay(in: frame.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                print("follow-test: window picture saved")
+            }),
             (6, { say("connected") }), (6.1, { resize(1000, 700) }), (10, { say("after 1000x700") }),
             (10.1, { resize(1500, 900) }), (14, { say("after 1500x900") }),
             (14.1, { resize(1100, 760) }), (14.5, { resize(1180, 800) }), (19, { say("after two quick resizes ending 1180x800") }),
@@ -456,7 +466,12 @@ final class AppModel: ObservableObject {
     }
 
     /// The session's controls are drawn over the picture, not in a title bar.
-    var bare: Bool { active != nil && hasPicture && (fullScreen || WindowControls.current == .slideIn) }
+    /// Always, once there is a picture: the picture has the whole window and the controls are a
+    /// pill floating over its top (always there, or brought out by the pointer at the top edge).
+    var bare: Bool { active != nil && hasPicture }
+    /// The pill stays: the window's setting says always, and this isn't full screen (there the
+    /// pointer at the top brings it out, as the menu bar).
+    var pillStays: Bool { !fullScreen && WindowControls.current == .titleBar }
 
     /// Without a title bar the window is only the picture, edge to edge.
     func applyChrome() {
