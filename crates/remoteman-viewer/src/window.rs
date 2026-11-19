@@ -835,6 +835,13 @@ impl App {
                 self.send(Event::PointerBy { dx: dx as f32, dy: dy as f32 });
             }
         }
+        // A decoder that takes frames and gives no pictures gets a keyframe, this very frame.
+        if let Some(s) = self.session.borrow().as_ref() {
+            if s.shared.stuck.swap(false, Ordering::Relaxed) {
+                eprintln!("remoteman: the decoder took frames and gave no picture: asking the computer for a keyframe");
+                s.client.send_message(remoteman_core::Message::Keyframe);
+            }
+        }
         let (picture, closed, cursor) = match self.session.borrow().as_ref() {
             Some(s) => (s.shared.picture.lock().unwrap().take(), s.shared.closed.lock().unwrap().clone(), s.shared.cursor.lock().unwrap().take()),
             None => return,
@@ -941,11 +948,6 @@ impl App {
         // only, nothing of what is on the screen.
         let tick = self.log_tick.get() + 1;
         self.log_tick.set(tick);
-        // A decoder that takes frames and gives no pictures gets a keyframe.
-        if s.shared.stuck.swap(false, Ordering::Relaxed) {
-            eprintln!("remoteman: the decoder was given frames and gave no picture for half a second: asking the computer for a keyframe");
-            s.client.send_message(remoteman_core::Message::Keyframe);
-        }
         self.shown_window.set(self.shown_window.get() + shown);
         self.drawn_window.set(self.drawn_window.get() + shown);
         if tick % 10 == 0 {

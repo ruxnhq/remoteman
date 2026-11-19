@@ -214,8 +214,12 @@ fn decoding(shared: Arc<Shared>) -> Result<mpsc::SyncSender<Msg>> {
     let s = shared;
     std::thread::Builder::new().name("decode".into()).spawn(move || {
         let mut decoder: Option<Decoder> = None;
-        // Frames given to the decoder since its last picture, and when the first of them was.
+        // Frames given to the decoder since its last picture, and when the first of them was;
+        // how many pictures in a row it gave before that, one for each frame; and when a
+        // keyframe was last asked for on its account.
         let mut barren: (u32, Option<std::time::Instant>) = (0, None);
+        let mut in_step = 0u32;
+        let mut asked: Option<std::time::Instant> = None;
         while let Ok(msg) = rx.recv() {
             match msg {
                 Msg::Stream(info) => match Decoder::new(info.mode.codec) {
@@ -238,6 +242,7 @@ fn decoding(shared: Arc<Shared>) -> Result<mpsc::SyncSender<Msg>> {
                     match d.decode(&data) {
                         Ok(Some(picture)) => {
                             barren = (0, None);
+                            in_step = in_step.saturating_add(1);
                             s.pictures.fetch_add(1, Ordering::Relaxed);
                             let took = t.elapsed().as_micros() as u32;
                             s.decode_us_max.fetch_max(took, Ordering::Relaxed);
@@ -256,9 +261,18 @@ fn decoding(shared: Arc<Shared>) -> Result<mpsc::SyncSender<Msg>> {
                         // was lost on the way, so nothing else will ask for one.
                         Ok(None) => {
                             barren = (barren.0 + 1, barren.1.or(Some(t)));
-                            if barren.0 >= 3 && barren.1.is_some_and(|since| since.elapsed() > std::time::Duration::from_millis(500)) {
+                            // A decoder that has been giving a picture for every frame and
+                            // now gives none for two has refused a frame (seen with a Mac's
+                            // stream every 2048 frames: one frame names pictures the decoder
+                            // was told to drop, and FFmpeg refuses it and all that follow).
+                            // Ask at once; one that never was in step gets half a second.
+                            let refused = in_step >= 10 && barren.0 >= 2;
+                            let silent = barren.0 >= 3 && barren.1.is_some_and(|since| since.elapsed() > std::time::Duration::from_millis(500));
+                            if (refused || silent) && asked.is_none_or(|a| a.elapsed() > std::time::Duration::from_millis(250)) {
                                 s.stuck.store(true, Ordering::Relaxed);
+                                asked = Some(std::time::Instant::now());
                                 barren = (0, None);
+                                in_step = 0;
                             }
                         }
                         Err(e) => {
