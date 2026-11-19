@@ -1,0 +1,656 @@
+// The macOS viewer app: the list of computers, connecting, and the session, in one window that
+// changes with what is going on, plus the Settings window.
+//
+// For unattended runs the app also takes arguments (Shared/Automation.swift): with --host,
+// --play, --bench or --opus-test the window shows nothing but the stream, as it always has,
+// and the run is driven from the arguments.
+import AppKit
+import Combine
+import SwiftUI
+
+/// How the app was started.
+enum Launch {
+    /// Started to run by itself from its arguments: the window is the stream and nothing else.
+    static let automated: Bool = {
+        let args = CommandLine.arguments.dropFirst()
+        return ["--host", "--play", "--bench", "--opus-test", "--nearby", "--wake", "--keychain-test"].contains { args.contains($0) }
+    }()
+}
+
+@main
+struct RemotemanApp: App {
+    @StateObject private var model = AppModel(store: UIShots.directory != nil ? UIShots.sampleStore : ComputerStore())
+
+    init() {
+        // Unattended runs end with exit(); without this the next launch stops at "reopen windows?".
+        UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true, "NSQuitAlwaysKeepsWindows": false])
+        setvbuf(stdout, nil, _IOLBF, 0)
+    }
+
+    var body: some Scene {
+        Window("remoteman", id: "main") {
+            RootView(session: model.session)
+                .environmentObject(model)
+                .frame(minWidth: 480, minHeight: 320)
+                .tint(Tokens.tint)
+        }
+        .defaultSize(width: Launch.automated ? 1376 : 1120, height: Launch.automated ? 1032 : 720)
+
+        Settings {
+            SettingsView().environmentObject(model).tint(Tokens.tint)
+        }
+    }
+}
+
+/// What the window shows and why: the saved computers, which one is selected, which one a
+/// session is running with, and the window's own chrome while a session is on.
+final class AppModel: ObservableObject {
+    /// Settings > General > Window controls.
+    enum WindowControls: String {
+        case titleBar, slideIn
+        static let key = "windowControls"
+        static var current: WindowControls {
+            WindowControls(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? .titleBar
+        }
+    }
+    static let showFiguresKey = "showFiguresAtStart"
+
+    let session = ViewerSession()
+    let store: ComputerStore
+
+    /// The window is only the stream, driven by the launch arguments.
+    @Published var automated = Launch.automated
+    @Published var selection: SavedComputer.ID?
+    /// The computer a connection is being made to, or a session is running with.
+    @Published private(set) var active: SavedComputer.ID?
+    /// The first picture of the session has arrived.
+    @Published private(set) var hasPicture = false
+    /// Why the last connection to a computer failed or ended.
+    @Published var errors: [SavedComputer.ID: String] = [:]
+    @Published var addSheet = false
+    /// The computer whose first connection just worked: "… is paired" is shown for it.
+    @Published var pairedSheet: SavedComputer.ID?
+    @Published private(set) var fullScreen = false
+    /// The controls are over the picture (full screen, or a window without a title bar).
+    @Published var barShown = false { didSet { if barShown != oldValue { applyChrome() } } }
+    /// What the computer was asked for.
+    @Published private(set) var requested: ViewerSession.Display?
+
+    /// The picture area's size in points, kept up to date by the session screen.
+    var pictureSize: CGSize = .zero { didSet { if pictureSize != oldValue { windowResized() } } }
+    private var resizeCount = 0
+
+    /// For a computer whose picture follows the window: once the window has been still for a
+    /// second, ask for its new size. Only where the computer changes size without a reconnect;
+    /// full screen asks by itself.
+    private func windowResized() {
+        resizeCount += 1
+        let count = resizeCount
+        guard let id = active, hasPicture, !automatedResizeOff, let c = store[id],
+            ViewerSession.PictureSize.saved(for: ViewerSession.key(for: c.address)) == .window
+        else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self, count == self.resizeCount, self.active == id, self.hasPicture, !self.reconnecting,
+                self.session.has("configure"), self.pictureSize.width > 0
+            else { return }
+            let d = self.capped(DeviceDisplay.current(
+                for: self.pictureSize, displayScale: self.window?.backingScaleFactor ?? 2, measured: self.session.refreshMeter.rate))
+            // Not for a pixel or two (the window's chrome coming and going).
+            if let r = self.requested, abs(r.width - d.width) < 8, abs(r.height - d.height) < 8 { return }
+            self.reconnect()
+        }
+    }
+    /// For testing (`--follow-test`): connect to the first saved computer with its picture
+    /// following the window, resize the window as a hand would, print what was asked each time.
+    func followTest() {
+        // `--follow-test address`: a computer added for the test and removed after it.
+        let args = CommandLine.arguments
+        let address = args.firstIndex(of: "--follow-test").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? ""
+        var made: SavedComputer.ID?
+        if !address.isEmpty {
+            var new = SavedComputer(name: "remoteman-test-follow", address: address)
+            new.pairOnConnect = true
+            store.add(new)
+            made = new.id
+        }
+        guard let c = made.flatMap({ store[$0] }) ?? store.computers.first else { print("follow-test: no saved computer"); exit(1) }
+        let key = ViewerSession.key(for: c.address)
+        let before = ViewerSession.PictureSize.saved(for: key)
+        ViewerSession.PictureSize.window.save(for: key)
+        func say(_ what: String) {
+            let r = requested.map { "\($0.width)x\($0.height)@\($0.refresh)" } ?? "none"
+            print("follow-test: \(what): window \(Int(window?.frame.width ?? 0))x\(Int(window?.frame.height ?? 0)), picture area \(Int(pictureSize.width))x\(Int(pictureSize.height)), asked \(r), picture \(hasPicture), \(session.statsText.split(separator: "\n").first ?? "")")
+        }
+        func resize(_ w: CGFloat, _ h: CGFloat) {
+            guard let win = window else { return }
+            var f = win.frame
+            f.origin.y += f.height - h
+            f.size = NSSize(width: w, height: h)
+            win.setFrame(f, display: true)
+        }
+        connectNow(c)
+        let steps: [(Double, () -> Void)] = [
+            (5.5, { [self] in
+                // `--shot-to file.png`: the window as it is drawn (the picture itself comes out black).
+                let args = CommandLine.arguments
+                guard let path = args.firstIndex(of: "--shot-to").flatMap({ $0 + 1 < args.count ? args[$0 + 1] : nil }),
+                    let frame = window?.contentView?.superview, let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds)
+                else { return }
+                frame.cacheDisplay(in: frame.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                print("follow-test: window picture saved")
+            }),
+            (6, { say("connected") }), (6.1, { resize(1000, 700) }), (10, { say("after 1000x700") }),
+            (10.1, { resize(1500, 900) }), (14, { say("after 1500x900") }),
+            (14.1, { resize(1100, 760) }), (14.5, { resize(1180, 800) }), (19, { say("after two quick resizes ending 1180x800") }),
+            (24, { say("five seconds later, nothing touched") }),
+            (24.1, { [self] in disconnect(); before.save(for: key); if let made { store.remove(made) }; print("follow-test: done"); exit(0) }),
+        ]
+        for (t, f) in steps { DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: f) }
+    }
+
+    /// Mirroring a monitor has the monitor's size, not the window's.
+    private var automatedResizeOff: Bool { active.flatMap { store[$0]?.place } == .mirror }
+    weak var window: NSWindow? { didSet { if window !== oldValue { watchWindow() } } }
+
+    private var started: Date?
+    private var pairedNow = false
+    private var reconnecting = false
+    private var savedFrame: NSRect?
+    private var pictureTimer: Timer?
+    /// ⌘Tab and the like, for the computer while a session is in full screen (SystemKeys).
+    let systemKeys = SystemKeys()
+    private var stateSink: AnyCancellable?
+    private var nearbySink: AnyCancellable?
+    private var monitor: Any?
+    private var observers: [NSObjectProtocol] = []
+
+    init(store: ComputerStore) {
+        self.store = store
+        selection = store.computers.first?.id
+        stateSink = session.$state.sink { [weak self] s in
+            // The value arrives before the session has it; act once it does.
+            DispatchQueue.main.async { self?.stateChanged(s) }
+        }
+        systemKeys.active = { [weak self] in
+            guard let self, let w = self.window else { return false }
+            return self.active != nil && self.hasPicture && self.fullScreen && w.isKeyWindow && NSApp.isActive
+        }
+        systemKeys.send = { [weak self] usage, down in self?.session.hardKey(usage, down: down) }
+        if !automated { systemKeys.refresh() }
+        nearbySink = Nearby.shared.$found.sink { [weak self] found in
+            DispatchQueue.main.async { self?.noteNearby(found) }
+        }
+        // Looking by itself only once the person has asked for it (and macOS has been answered).
+        if Nearby.wanted, !Launch.automated { Nearby.shared.look() }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .keyDown]) { [weak self] e in
+            guard let self else { return e }
+            return self.intercept(e)
+        }
+    }
+
+    /// What a computer seen on this network says of its network cards is kept for waking it.
+    func noteNearby(_ found: [Nearby.Found]) {
+        for c in store.computers {
+            guard let f = Nearby.shared.seen(fingerprint: c.fingerprint), !f.macs.isEmpty, f.macs != c.macs else { continue }
+            store.update(c.id) { $0.macs = f.macs }
+        }
+    }
+
+    var activeComputer: SavedComputer? { store[active] }
+    var selected: SavedComputer? { store[selection] }
+
+    // MARK: Connecting and leaving
+
+    /// Touch ID (or the Mac's password) first, for a computer that asks for it.
+    func connect(_ c: SavedComputer) {
+        guard !session.isActive, active == nil else { return }
+        let ask = c.auth == "always" || (c.auth.isEmpty && ViewerPrefs.requireAuth)
+        unlocker.cancel()
+        guard ask, !automated else { return connectNow(c) }
+        Gate.pass(for: c.name) { [weak self] ok in
+            if ok { self?.connectNow(c) }
+        }
+    }
+
+    /// For a locked computer that asks for its user's password.
+    let unlocker = Unlocker()
+
+    private func connectNow(_ c: SavedComputer, unlock: String? = nil) {
+        guard !session.isActive, active == nil else { return }
+        // The display this computer's session is to open on, if one was chosen and is there.
+        if !c.screen.isEmpty, let w = window, !w.styleMask.contains(.fullScreen),
+            let screen = NSScreen.screens.first(where: { $0.localizedName == c.screen }), w.screen != screen
+        {
+            let v = screen.visibleFrame
+            w.setFrameOrigin(NSPoint(x: v.midX - w.frame.width / 2, y: v.midY - w.frame.height / 2))
+        }
+        errors[c.id] = nil
+        selection = c.id
+        active = c.id
+        hasPicture = false
+        started = nil
+        pairedNow = false
+        reconnecting = false
+        let display = sessionDisplay()
+        requested = display
+        session.showStats = UserDefaults.standard.bool(forKey: Self.showFiguresKey)
+        // A computer that may be asleep is woken first; one that is awake takes no notice.
+        if c.wake, !c.macs.isEmpty, Nearby.shared.seen(fingerprint: c.fingerprint) == nil { Wake.send(macs: c.macs, lastAddress: c.address) }
+        session.connect(host: c.address, pair: c.pairOnConnect, name: DeviceDisplay.name, display: display, placement: c.place, unlock: unlock, attachOnly: c.wayIn == "attach")
+        watchForPicture()
+    }
+
+    /// The session's chrome with no computer behind it (UIShots plays a recording into it).
+    func beginPreview(_ c: SavedComputer) {
+        selection = c.id
+        active = c.id
+        hasPicture = false
+        started = nil
+        requested = sessionDisplay()
+        watchForPicture()
+    }
+
+    func disconnect() {
+        reconnecting = false
+        keepThumbnail()
+        session.disconnect()
+    }
+
+    /// Leave and join again, for what can only be said at the start: where this display sits
+    /// among the computer's own, and its size.
+    // MARK: A second display (a window of its own, on a computer that offers one)
+
+    @Published private(set) var secondShown = false
+    private var secondWindow: NSWindow?
+    private var secondWatcher: SecondWindowWatcher?
+    private var secondSink: AnyCancellable?
+
+    /// Open the second display's window and ask the computer for a display its size, or close it.
+    func toggleSecondDisplay() {
+        if secondWindow != nil { return closeSecondDisplay() }
+        guard session.has("displays"), case .streaming = session.state else { return }
+        // On another of this Mac's screens if there is one.
+        let screen = NSScreen.screens.first { $0 != window?.screen } ?? window?.screen ?? NSScreen.main
+        let v = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let size = NSSize(width: min(1280, (v.width * 0.8).rounded()), height: min(800, (v.height * 0.8).rounded()))
+        let w = NSWindow(
+            contentRect: NSRect(x: v.midX - size.width / 2, y: v.midY - size.height / 2, width: size.width, height: size.height),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+        w.title = "\(activeComputer?.name ?? "Computer"): second display"
+        w.isReleasedWhenClosed = false
+        w.backgroundColor = .black
+        let view = ViewerView(session: session, index: 1)
+        w.contentView = view
+        let watcher = SecondWindowWatcher()
+        watcher.changed = { [weak self] in self?.askForSecondDisplay() }
+        watcher.closed = { [weak self] in self?.secondClosed() }
+        w.delegate = watcher
+        secondWatcher = watcher
+        secondWindow = w
+        secondShown = true
+        w.makeKeyAndOrderFront(nil)
+        w.makeFirstResponder(view)
+        askForSecondDisplay()
+        // The computer couldn't make it, or took it away: the window goes too.
+        secondSink = session.$secondOn.dropFirst().sink { [weak self] on in
+            DispatchQueue.main.async { if !on { self?.closeSecondDisplay() } }
+        }
+    }
+
+    /// A display the size of the window's picture, at the window's screen's scale.
+    private func askForSecondDisplay() {
+        guard let w = secondWindow, let view = w.contentView, view.bounds.width > 50 else { return }
+        let scale = w.backingScaleFactor
+        let d = ViewerSession.Display(
+            width: max(640, Int(view.bounds.width * scale) & ~1), height: max(360, Int(view.bounds.height * scale) & ~1), scale: Float(scale),
+            refresh: min(ViewerPrefs.fullRefresh ? 240 : 60, w.screen?.maximumFramesPerSecond ?? 60))
+        if d != session.secondDisplay { session.setSecondDisplay(d) }
+    }
+
+    func closeSecondDisplay() {
+        guard let w = secondWindow else { return }
+        secondWindow = nil
+        secondSink = nil
+        w.delegate = nil
+        w.close()
+        secondClosed()
+    }
+
+    private func secondClosed() {
+        secondWindow = nil
+        secondWatcher = nil
+        secondSink = nil
+        secondShown = false
+        if session.secondOn { session.setSecondDisplay(nil) }
+    }
+
+    /// The picture now, kept as the computer's thumbnail.
+    func keepThumbnail() {
+        guard !automated, let id = active, hasPicture, let image = session.renderer?.snapshot() else { return }
+        store.saveThumbnail(image, for: id)
+    }
+
+    /// 60 Hz for those who turned the display's full rate off.
+    private func capped(_ d: ViewerSession.Display) -> ViewerSession.Display {
+        var d = d
+        if !ViewerPrefs.fullRefresh { d.refresh = min(d.refresh, 60) }
+        return d
+    }
+
+    /// `rejoin`: for what the computer is only told as a session starts (which stream it sends).
+    func reconnect(placement: ViewerSession.Placement? = nil, rejoin: Bool = false) {
+        guard let id = active, case .streaming = session.state else { return }
+        if let placement { store.update(id) { $0.place = placement } }
+        guard let c = store[id] else { return }
+        let size = pictureSize.width > 0 ? pictureSize : CGSize(width: 1280, height: 748)
+        let display = capped(DeviceDisplay.current(
+            for: size, displayScale: window?.backingScaleFactor ?? 2, measured: session.refreshMeter.rate))
+        // A computer that can change it in place does; the picture starts afresh by itself.
+        if !rejoin, session.reconfigure(display: display, placement: c.place) {
+            requested = display
+            return
+        }
+        reconnecting = true
+        hasPicture = false
+        barShown = false
+        session.disconnect()
+        requested = display
+        session.connect(host: c.address, pair: false, name: DeviceDisplay.name, display: display, placement: c.place, attachOnly: c.wayIn == "attach")
+        watchForPicture()
+        applyChrome()
+    }
+
+    private func stateChanged(_ s: ViewerSession.State) {
+        guard !automated, let id = active else { return }
+        switch s {
+        case .connecting:
+            break
+        case .streaming:
+            reconnecting = false
+            guard started == nil else { return }
+            unlocker.connected()
+            started = Date()
+            let host = session.client?.host
+            store.update(id) { c in
+                c.lastUsed = Date()
+                c.lastDuration = nil
+                if let host {
+                    if !host.os.isEmpty { c.os = host.os }
+                    if !host.fingerprint.isEmpty { c.fingerprint = host.fingerprint }
+                    // No name was given when it was added: take the computer's own.
+                    if c.name == c.address, !host.name.isEmpty { c.name = host.name }
+                }
+                if c.pairOnConnect { pairedNow = true }
+                c.pairOnConnect = false
+                if c.paired == nil { c.paired = Date() }
+            }
+        case .idle:
+            if reconnecting { return }
+            finish(id, reason: nil)
+        case .failed(let reason):
+            if session.mustPairAgain {
+                store.update(id) { $0.pairOnConnect = true }
+                finish(id, reason: "This Mac was taken off its list of trusted devices. Turn pairing on there, then pair again.")
+                return
+            }
+            let locked = started == nil ? session.lockedAsk : nil
+            let computer = store[id]
+            finish(id, reason: started == nil ? reason : "The connection ended: \(reason)")
+            // Locked, and it wants its user's password: ask (or use the kept one) and connect again.
+            if let locked, let c = computer {
+                unlocker.locked(words: locked, key: c.fingerprint.isEmpty ? c.address : c.fingerprint, name: c.name) { [weak self] password in
+                    self?.connectNow(c, unlock: password)
+                }
+            }
+        }
+    }
+
+    private func finish(_ id: SavedComputer.ID, reason: String?) {
+        if let started {
+            store.update(id) { $0.lastDuration = Date().timeIntervalSince(started) }
+        }
+        errors[id] = reason
+        reconnecting = false
+        closeSecondDisplay()
+        started = nil
+        active = nil
+        hasPicture = false
+        barShown = false
+        requested = nil
+        pictureTimer?.invalidate()
+        pictureTimer = nil
+        if let w = window, let f = savedFrame, !w.styleMask.contains(.fullScreen) { w.setFrame(f, display: true, animate: true) }
+        savedFrame = nil
+        applyChrome()
+        if pairedNow, reason == nil { pairedSheet = id }
+        pairedNow = false
+    }
+
+    private func watchForPicture() {
+        pictureTimer?.invalidate()
+        pictureTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] t in
+            guard let self, self.active != nil else { return t.invalidate() }
+            guard case .streaming = self.session.state, self.session.renderer?.videoSize != nil else { return }
+            t.invalidate()
+            self.hasPicture = true
+            self.applyChrome()
+        }
+    }
+
+    // MARK: The window
+
+    /// The session window's size (1280 × 800, or the screen in full screen), and from it what
+    /// to ask the computer for: the picture area's pixels.
+    private func sessionDisplay() -> ViewerSession.Display {
+        var size = CGSize(width: 1280, height: 748)
+        if let w = window {
+            if w.styleMask.contains(.fullScreen) {
+                size = w.frame.size
+            } else {
+                savedFrame = w.frame
+                let visible = (w.screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+                let target = NSSize(width: min(1280, visible.width), height: min(800, visible.height))
+                // With the controls in the title bar the picture sits under it.
+                let bar = WindowControls.current == .titleBar ? max(0, w.frame.height - w.contentLayoutRect.height) : 0
+                size = CGSize(width: target.width, height: target.height - bar)
+                var f = w.frame
+                f.origin.x = max(visible.minX, min(f.midX - target.width / 2, visible.maxX - target.width))
+                f.origin.y = max(visible.minY, min(f.maxY - target.height, visible.maxY - target.height))
+                f.size = target
+                w.setFrame(f, display: true, animate: true)
+            }
+        }
+        return capped(DeviceDisplay.current(
+            for: size, displayScale: window?.backingScaleFactor ?? 2, measured: session.refreshMeter.rate))
+    }
+
+    /// The session's controls are drawn over the picture, not in a title bar.
+    /// Always, once there is a picture: the picture has the whole window and the controls are a
+    /// pill floating over its top (always there, or brought out by the pointer at the top edge).
+    var bare: Bool { active != nil && hasPicture }
+    /// The pill stays: the window's setting says always, and this isn't full screen (there the
+    /// pointer at the top brings it out, as the menu bar).
+    var pillStays: Bool { !fullScreen && WindowControls.current == .titleBar }
+
+    /// Without a title bar the window is only the picture, edge to edge.
+    func applyChrome() {
+        guard let w = window, !automated else { return }
+        let hidden = bare && !fullScreen
+        w.titlebarAppearsTransparent = hidden
+        w.titleVisibility = hidden ? .hidden : .visible
+        if hidden { w.styleMask.insert(.fullSizeContentView) }
+    }
+
+    private func watchWindow() {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        guard let w = window else { return }
+        fullScreen = w.styleMask.contains(.fullScreen)
+        let center = NotificationCenter.default
+        observers.append(
+            center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: w, queue: .main) { [weak self] _ in
+                self?.fullScreenChanged(true)
+            })
+        observers.append(
+            center.addObserver(forName: NSWindow.didExitFullScreenNotification, object: w, queue: .main) { [weak self] _ in
+                self?.fullScreenChanged(false)
+            })
+    }
+
+    private func fullScreenChanged(_ on: Bool) {
+        fullScreen = on
+        barShown = false
+        applyChrome()
+        // The picture area has a new size: once the layout has settled, ask for that size.
+        guard active != nil, hasPicture else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, self.fullScreen == on, self.hasPicture else { return }
+            self.reconnect()
+        }
+    }
+
+    func toggleFullScreen() { window?.toggleFullScreen(nil) }
+
+    /// Events looked at before the picture gets them: the pointer at the top edge brings the
+    /// controls in, and the two shortcuts that are this app's own stay here (the picture sends
+    /// every other ⌘ shortcut to the computer).
+    private func intercept(_ e: NSEvent) -> NSEvent? {
+        guard !automated, active != nil, hasPicture, let w = window, e.window === w else { return e }
+        if e.type == .keyDown {
+            let mods = e.modifierFlags.intersection([.command, .option, .control, .shift])
+            if mods == [.command, .option], e.keyCode == 34 {  // ⌥⌘I
+                session.showStats.toggle()
+                return nil
+            }
+            if mods == [.command, .control], e.keyCode == 3 {  // ⌃⌘F
+                toggleFullScreen()
+                return nil
+            }
+            return e
+        }
+        guard bare, let content = w.contentView else { return e }
+        let fromTop = content.bounds.height - e.locationInWindow.y
+        if !barShown, fromTop <= 3 {
+            barShown = true
+        } else if barShown, fromTop > (fullScreen ? 96 : 84) {
+            barShown = false
+        }
+        return e
+    }
+}
+
+/// The window's content: the stream alone on an unattended run; otherwise the computers, or
+/// the session with one of them.
+/// The sheet asking for a locked computer's password, over whatever the window shows.
+private struct UnlockPrompt: ViewModifier {
+    @ObservedObject var unlocker: Unlocker
+    func body(content: Content) -> some View {
+        content.sheet(item: $unlocker.asking) { UnlockSheet(ask: $0, unlocker: unlocker) }
+    }
+}
+
+struct RootView: View {
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject var session: ViewerSession
+    @Environment(\.displayScale) private var displayScale
+    @State private var started = false
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                // Measures the display's real refresh rate before any connection asks for it.
+                RefreshProbe(meter: session.refreshMeter).frame(width: 1, height: 1).opacity(0)
+                if model.automated {
+                    AutomatedView(session: session)
+                } else if let computer = model.activeComputer {
+                    SessionScreen(session: session, computer: computer)
+                } else {
+                    ComputersView()
+                }
+            }
+            .modifier(UnlockPrompt(unlocker: model.unlocker))
+            .onAppear {
+                guard !started else { return }
+                started = true
+                // Give the refresh meter a moment before an unattended connect reads it.
+                let size = geo.size
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    if UIShots.directory != nil { return UIShots.run(model: model) }
+                    if CommandLine.arguments.contains("--follow-test") { return model.followTest() }
+                    Automation.run(
+                        session: session,
+                        display: DeviceDisplay.current(for: size, displayScale: displayScale, measured: session.refreshMeter.rate))
+                }
+            }
+        }
+        .background(WindowReader { model.window = $0 })
+    }
+}
+
+/// An unattended run: the stream filling the window, the figures as text, and a way out.
+struct AutomatedView: View {
+    @EnvironmentObject private var model: AppModel
+    @ObservedObject var session: ViewerSession
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if let report = session.report {
+                ScrollView {
+                    Text(report).font(.system(size: 12, design: .monospaced)).foregroundStyle(.white)
+                        .textSelection(.enabled).padding(24).frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else if session.isActive {
+                ViewerRepresentable(session: session)
+                overlay
+            } else {
+                VStack(spacing: 12) {
+                    if case .failed(let reason) = session.state {
+                        Text(reason).foregroundStyle(.red).textSelection(.enabled).multilineTextAlignment(.center)
+                    }
+                    Button("Show Computers") { model.automated = false }
+                }
+                .padding(24)
+            }
+        }
+        .ignoresSafeArea()
+    }
+
+    private var overlay: some View {
+        VStack {
+            HStack(alignment: .top) {
+                if session.showStats, !session.statsText.isEmpty {
+                    Text(session.statsText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .padding(8)
+                        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+                        .allowsHitTesting(false)
+                }
+                Spacer()
+                HStack(spacing: 6) {
+                    Button(session.showStats ? "Hide stats" : "Stats") { session.showStats.toggle() }
+                    Button("Disconnect") { session.disconnect() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .focusable(false)
+                .opacity(0.8)
+            }
+            Spacer()
+        }
+        .padding(10)
+    }
+}
+
+/// Tells the app when the second display's window changes size or screen, or is closed.
+final class SecondWindowWatcher: NSObject, NSWindowDelegate {
+    var changed: (() -> Void)?
+    var closed: (() -> Void)?
+    func windowDidEndLiveResize(_ n: Notification) { changed?() }
+    func windowDidChangeBackingProperties(_ n: Notification) { changed?() }
+    func windowDidEnterFullScreen(_ n: Notification) { changed?() }
+    func windowDidExitFullScreen(_ n: Notification) { changed?() }
+    func windowWillClose(_ n: Notification) { closed?() }
+}

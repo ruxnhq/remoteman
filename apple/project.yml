@@ -1,0 +1,173 @@
+# The remoteman viewer for macOS and for iPad/iPhone: one set of Swift sources (Shared/) on the
+# Rust client core (build/RemotemanCore.xcframework, made by ./build-core.sh).
+# Generate the Xcode project with `xcodegen` here, then build with xcodebuild (see README.md).
+name: Remoteman
+options:
+  bundleIdPrefix: com.xnixy.remoteman
+  deploymentTarget:
+    macOS: "14.0"
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: R82PLAJ45H
+    MARKETING_VERSION: "0.1"
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    CURRENT_PROJECT_VERSION: "1"
+    DEAD_CODE_STRIPPING: YES
+targetTemplates:
+  HostBase:
+    type: application
+    platform: macOS
+    sources:
+      - Host
+      - Shared/HIDKeys.swift
+      - Shared/Sharing.swift
+      - Shared/PairLink.swift
+      # The design's colours and card pieces, shared with the viewer.
+      - Mac/Kit.swift
+      - Support/Assets.xcassets
+    dependencies:
+      - framework: build/RemotemanCore.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: ScreenCaptureKit.framework
+      - sdk: VideoToolbox.framework
+    # remoteman's microphone driver is built by its own script and carried inside the app;
+    # the owner installs it from Settings.
+    preBuildScripts:
+      - name: Build the microphone driver
+        script: |
+          "$SRCROOT/HostMicrophone/build.sh" > "$SRCROOT/build/microphone-build.log" 2>&1 || { cat "$SRCROOT/build/microphone-build.log"; exit 1; }
+          mkdir -p "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
+          rm -rf "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/RemotemanMicrophone.driver"
+          cp -R "$SRCROOT/build/microphone/RemotemanMicrophone.driver" "$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/"
+        # Only when the driver's sources changed: a fresh copy after signing would break the app's seal.
+        inputFiles:
+          - $(SRCROOT)/HostMicrophone/RemotemanMicrophone.c
+          - $(SRCROOT)/HostMicrophone/Info.plist
+          - $(SRCROOT)/HostMicrophone/selftest.c
+          - $(SRCROOT)/HostMicrophone/build.sh
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/RemotemanMicrophone.driver/Contents/MacOS/RemotemanMicrophone
+    info:
+      path: Host/Info.plist
+      properties:
+        CFBundleDisplayName: remoteman host
+        LSUIElement: true
+        NSLocalNetworkUsageDescription: remoteman host lets your own devices connect to this Mac to show and control its desktop.
+        NSBonjourServices: [_remoteman._udp]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman.host
+        PRODUCT_NAME: remoteman-host
+        ASSETCATALOG_COMPILER_APPICON_NAME: HostIcon
+        SWIFT_OBJC_BRIDGING_HEADER: Host/Bridging.h
+        ENABLE_HARDENED_RUNTIME: YES
+targets:
+  RemotemanMac:
+    type: application
+    platform: macOS
+    sources: [Shared, Mac, Support/Assets.xcassets]
+    dependencies:
+      - framework: build/RemotemanCore.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    info:
+      path: Support/Mac-Info.plist
+      properties:
+        CFBundleDisplayName: remoteman
+        LSApplicationCategoryType: public.app-category.utilities
+        NSLocalNetworkUsageDescription: remoteman connects to your PC on the local network to show and control its desktop.
+        NSBonjourServices: [_remoteman._udp]
+        NSHighResolutionCapable: true
+        NSMicrophoneUsageDescription: remoteman can pass this Mac's microphone to the computer you are connected to, when you switch that on.
+        NSCameraUsageDescription: remoteman can pass this Mac's camera to the computer you are connected to, when you switch that on.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman.viewer
+        PRODUCT_NAME: remoteman
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: Support/Mac.entitlements
+  Remoteman:
+    type: application
+    platform: iOS
+    sources: [Shared, iOS, Support/Assets.xcassets]
+    dependencies:
+      - framework: build/RemotemanCore.xcframework
+        embed: false
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    info:
+      path: Support/iOS-Info.plist
+      properties:
+        CFBundleDisplayName: remoteman
+        UILaunchScreen: {}
+        # A second session in a window of its own, on iPad.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+        NSLocalNetworkUsageDescription: remoteman connects to your PC on the local network to show and control its desktop.
+        NSBonjourServices: [_remoteman._udp]
+        NSFaceIDUsageDescription: remoteman can ask for Face ID before it connects to a computer, when you switch that on.
+        # 120 Hz on iPhones with ProMotion; iPads need nothing.
+        CADisableMinimumFrameDurationOnPhone: true
+        # Clicks and drags from a trackpad or mouse arrive as pointer events, not fake touches.
+        UIApplicationSupportsIndirectInputEvents: true
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UIFileSharingEnabled: true
+        # Files received from a computer show in the Files app, under remoteman.
+        LSSupportsOpeningDocumentsInPlace: true
+        NSMicrophoneUsageDescription: remoteman can pass this device's microphone to the computer you are connected to, when you switch that on.
+        NSCameraUsageDescription: remoteman can pass this device's camera to the computer you are connected to, when you switch that on.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman
+        PRODUCT_NAME: remoteman
+        TARGETED_DEVICE_FAMILY: "1,2"
+  # The Mac as a host: a menu-bar app with no Dock icon, so that macOS files its Screen
+  # Recording and Accessibility grants under its own name; it logs to
+  # ~/Library/Logs/remoteman-host.log and takes the options in Host/main.swift.
+  RemotemanHost:
+    templates: [HostBase]
+  # The same host with remoteman's camera inside. It needs the System Extension capability,
+  # so Xcode must be signed in to the team (Settings > Accounts) to make its profile:
+  #   xcodebuild -scheme RemotemanHostCamera -allowProvisioningUpdates ...
+  RemotemanHostCamera:
+    templates: [HostBase]
+    dependencies:
+      - target: RemotemanCamera
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+          subpath: ../Library/SystemExtensions
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Host/Host.entitlements
+  # remoteman's camera on the Mac host: a CoreMediaIO camera extension, embedded in the host app
+  # and installed from its Settings with the owner's approval. Rebuilt from espalier's.
+  RemotemanCamera:
+    type: system-extension
+    platform: macOS
+    sources: [HostCamera]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman.host.camera
+        PRODUCT_NAME: com.xnixy.remoteman.host.camera
+        CODE_SIGN_ENTITLEMENTS: HostCamera/Extension.entitlements
+        INFOPLIST_FILE: HostCamera/Info.plist
+        ENABLE_HARDENED_RUNTIME: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
