@@ -97,6 +97,7 @@ fn main() -> anyhow::Result<()> {
         test_drop_one_in: None,
         test_delay_lost_ms: None,
         cursor: false,
+        unlock: None,
     };
     let client = Client::connect(options, Watcher { seen: seen.clone(), record })?;
     println!("host: {} ({}), features {:?}", client.host_name, client.host_os, client.host_features);

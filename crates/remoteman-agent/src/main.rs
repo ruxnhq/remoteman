@@ -15,6 +15,7 @@
 //! to `remotemand`, which owns the port and the trust list and hands it clients.
 
 mod control;
+mod pam;
 mod pipeline;
 mod session;
 

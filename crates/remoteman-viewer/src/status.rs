@@ -31,6 +31,9 @@ pub enum Problem {
     Changed,
     /// The computer answered and said no; with its reason.
     Refused(String),
+    /// The computer is locked and takes its user's password to let this device in; with what
+    /// it said (who the user is, or that the last password was wrong).
+    Locked(String),
     /// A session that was running ended; with the reason.
     Ended(String),
 }
@@ -41,6 +44,8 @@ pub fn classify(error: &str) -> Problem {
         Problem::Changed
     } else if error.contains("isn't paired") || error.contains("the host refused: not_paired") {
         Problem::NotPaired
+    } else if let Some((_, said)) = error.split_once("the host refused: locked: ") {
+        Problem::Locked(said.to_owned())
     } else if let Some((_, said)) = error.split_once("the host refused: ") {
         // `code: message`; the message is the part for people.
         Problem::Refused(said.split_once(": ").map_or(said, |(_, m)| m).to_owned())
@@ -59,6 +64,8 @@ pub fn ended(reason: &str, shown: bool) -> Problem {
     let said = reason.split_once("closed by peer: ").map(|(_, m)| m.rsplit_once(" (code ").map_or(m, |(m, _)| m));
     match said {
         Some("bye") | Some("done") => Problem::Ended("The computer closed the connection.".into()),
+        // It is locked, and takes its user's password with the next try.
+        Some(words) if !shown && words.starts_with("locked: ") => Problem::Locked(words["locked: ".len()..].to_owned()),
         // It let this device in and then gave a reason for not going on.
         Some(words) if !shown => Problem::Refused(words.to_owned()),
         Some(words) => Problem::Ended(format!("The computer closed the connection: {words}")),
@@ -222,6 +229,29 @@ pub fn problem(app: &Rc<App>, target: &Target, problem: Problem) -> adw::Navigat
             });
             buttons.append(&settings);
             ("dialog-warning-symbolic", format!("{name} Has a Different Key"), format!("What answered at {} is not the computer this device was paired with. If it has been set up again, forget it and pair it anew.", target.address))
+        }
+        Problem::Locked(said) => {
+            // The password goes to the computer with the next try and is kept nowhere here.
+            let password = gtk::PasswordEntry::builder().show_peek_icon(true).placeholder_text("Password").width_request(280).activates_default(true).build();
+            let unlock = pill("Unlock", true);
+            let go = {
+                let (app, target, password) = (app.clone(), target.clone(), password.clone());
+                move || {
+                    let typed = password.text().to_string();
+                    if !typed.is_empty() {
+                        *app.unlock.borrow_mut() = Some(typed);
+                        app.connect(target.clone(), false);
+                    }
+                }
+            };
+            unlock.connect_clicked({
+                let go = go.clone();
+                move |_| go()
+            });
+            password.connect_activate(move |_| go());
+            extra.append(&adw::Clamp::builder().maximum_size(320).child(&password).build());
+            buttons.append(&unlock);
+            ("system-lock-screen-symbolic", format!("{name} Is Locked"), format!("{said} It locks again when you leave."))
         }
         Problem::Refused(said) => {
             buttons.append(&again("Try Again"));

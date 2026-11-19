@@ -71,6 +71,8 @@ pub struct App {
     /// The code to compare while a computer's owner is asked about this device, and the
     /// seconds they have (set by the attempt that is running).
     pub pairing: std::sync::Arc<std::sync::Mutex<Option<(String, u32)>>>,
+    /// The password typed for a locked computer, for the next try and no longer.
+    pub unlock: RefCell<Option<String>>,
     pub capture: RefCell<Option<crate::capture::Capture>>,
     /// How far a captured pointer has been sent in this run, for tests.
     pub moved: Cell<(f64, f64)>,
@@ -223,7 +225,7 @@ impl App {
         let id = self.attempt.get().wrapping_add(1);
         self.attempt.set(id);
         let (placement, quality) = self.choices(&target.address);
-        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
+        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, unlock: self.unlock.borrow_mut().take(), folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
         let app = self.clone();
         glib::spawn_future_local(async move {
             let result = match gio::spawn_blocking(move || Session::start(request)).await {
@@ -843,6 +845,7 @@ pub fn build(application: &adw::Application, args: Args) {
         chord: Cell::new((false, false, false)),
         nearby: RefCell::new(Vec::new()),
         pairing: Default::default(),
+        unlock: RefCell::new(None),
         capture: RefCell::new(None),
         moved: Cell::new((0.0, 0.0)),
         fingers: RefCell::new(Vec::new()),

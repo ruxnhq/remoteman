@@ -17,7 +17,7 @@
 //! - `keys?` and `size?` print whether keys go to the other computer, and the window's size
 //! - `share` (the clipboard), `copy=TEXT` (as if copied in this window), `clipboard?` (print
 //!   what this clipboard holds), `sendfile=PATH`, `offers?` (print which lines of the sharing
-//!   menu can be chosen), `reach?=ADDRESS` (print what is known of a computer), `pointer?` (print whether the pointer is captured and how far it has
+//!   menu can be chosen), `unlock=PASSWORD` (type it into a locked computer's page), `reach?=ADDRESS` (print what is known of a computer), `pointer?` (print whether the pointer is captured and how far it has
 //!   been sent)
 //! - things that can't happen yet, to see how they are laid out: `pair-code=NAME` (the code
 //!   dialog, with a made-up code), `asleep=ADDRESS` (the asleep page), `state=asleep:ADDRESS`
@@ -225,6 +225,22 @@ pub fn run(app: &Rc<App>, script: String) {
                     };
                     let cards = app.store.borrow().find(value).map_or(0, |c| c.cards.split(',').filter(|c| !c.is_empty()).count());
                     println!("~ {value} is {reach}; {cards} network cards remembered");
+                }
+                // A locked computer's password, typed into its page and sent.
+                "unlock" => {
+                    let mut found = None;
+                    each(app.window.upcast_ref(), &mut |w| {
+                        if let Some(entry) = w.downcast_ref::<gtk::PasswordEntry>() {
+                            found = Some(entry.clone());
+                        }
+                    });
+                    match found {
+                        Some(entry) => {
+                            entry.set_text(value);
+                            entry.emit_by_name::<()>("activate", &[]);
+                        }
+                        None => println!("no password field"),
+                    }
                 }
                 "offers?" => println!("~ the sharing menu: clipboard {}, files {}, shared {}", app.view.offers().0, app.view.offers().1, app.view.clipboard_shown()),
                 "copy" => app.window.clipboard().set_text(value),

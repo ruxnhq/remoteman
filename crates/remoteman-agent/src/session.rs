@@ -68,9 +68,10 @@ pub struct Allowed {
     pub files: Arc<std::sync::atomic::AtomicBool>,
     /// Sharing the clipboard both ways: a device could otherwise read whatever is copied here.
     pub clipboard: Arc<std::sync::atomic::AtomicBool>,
-    /// A paired device gets in while this computer is locked: the session is unlocked for
-    /// it, with no password, and locked again when it leaves.
-    pub unlock: Arc<std::sync::atomic::AtomicBool>,
+    /// What a paired device needs to get in while this computer is locked: nothing gets it
+    /// in (`UNLOCK_OFF`), its user's password, or being paired alone. The session is unlocked
+    /// for it and locked again when it leaves.
+    pub unlock: Arc<std::sync::atomic::AtomicU8>,
     /// The client being served, for whoever asks how things stand (the control socket).
     pub now: Arc<std::sync::Mutex<Option<Now>>>,
     /// What the device said became of the last file sent to it: how many have been answered,
@@ -129,7 +130,17 @@ pub struct Agent {
     /// computer's own screens stay off while it is here, and the session is locked again
     /// when it goes.
     unlocked_for_client: bool,
+    /// Wrong passwords for unlocking in a row, and until when no more are taken.
+    wrong: (u32, Option<std::time::Instant>),
 }
+
+pub const UNLOCK_OFF: u8 = 0;
+pub const UNLOCK_WITH_PASSWORD: u8 = 1;
+pub const UNLOCK_WITH_KEY: u8 = 2;
+/// How many wrong passwords in a row before none are taken for a while. (The system's own
+/// limit on wrong tries counts them too.)
+const WRONG_TRIES: u32 = 5;
+const WRONG_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Whether the desktop this host serves is this user's own session, the one logind can lock
 /// and unlock: it is if the session bus is the user's own. A host in a desktop made for a
@@ -137,6 +148,13 @@ pub struct Agent {
 fn own_desktop() -> bool {
     let (Some(bus), Some(runtime)) = (std::env::var_os("DBUS_SESSION_BUS_ADDRESS"), std::env::var_os("XDG_RUNTIME_DIR")) else { return false };
     bus.to_string_lossy().split(',').next().is_some_and(|first| first == format!("unix:path={}/bus", runtime.to_string_lossy()))
+}
+
+/// For tests of what a locked computer does, with nothing locked or unlocked: with
+/// `REMOTEMAN_TEST_LOCKED_PASSWORD` set, the host behaves as if its session were locked and
+/// this were its user's password, and leaves the real session and PAM alone.
+fn pretend_locked() -> Option<String> {
+    std::env::var("REMOTEMAN_TEST_LOCKED_PASSWORD").ok()
 }
 
 /// A note, in this user's runtime folder, that the session is unlocked for a device and
@@ -185,7 +203,7 @@ impl Agent {
         if login_screen.is_some() {
             tracing::info!("this is a login screen's session: no files, no clipboard, and it ends when its client goes");
         }
-        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None, unlocked_for_client: false })
+        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None, unlocked_for_client: false, wrong: (0, None) })
     }
 
     /// What the picture is encoded at when the client's ceiling is `ceiling`.
@@ -211,24 +229,13 @@ impl Agent {
         }
         let mut screen = screen;
         let mut refresh = screen.refresh.clamp(1, 240);
-        // A locked desktop lets no one in from outside (GNOME closes remote access while it
-        // is locked). If its owner has said paired devices may unlock it, it is unlocked now.
-        if self.login_screen.is_none() && own_desktop() && self.runtime.block_on(remoteman_desktop::logind::locked()).unwrap_or(false) {
-            if !self.allowed.unlock.load(Ordering::Relaxed) {
-                return Err("this computer is locked, and it is set not to be unlocked by devices".into());
-            }
-            self.runtime.block_on(remoteman_desktop::logind::set_locked(false)).map_err(|e| format!("this computer is locked and couldn't be unlocked: {e:#}"))?;
-            tracing::info!(device = name, "this computer was locked: unlocked for a paired device; its own screens stay off, and it locks again when the device leaves");
-            self.unlocked_for_client = true;
-            // Should this program die before it has locked the session again, what stops
-            // it finds this note and locks it (`--lock-if-left-unlocked`, run by the service).
-            let _ = std::fs::write(unlocked_note(), "");
-        }
         // Unlocked for this device, in a room that may be empty: nothing of the desktop is
-        // shown on the computer's own screens, whatever the device asked for (mirroring
-        // needs them on, so the device gets a display of its own instead).
-        if self.unlocked_for_client {
+        // shown on the computer's own screens, so the device's display is the only one. The
+        // exception is a device that asked to mirror: showing the computer's own screen is
+        // what it asked for, and that screen has to be on for it.
+        if self.unlocked_for_client && screen.placement != remoteman_core::Placement::Mirror {
             screen.placement = remoteman_core::Placement::Only;
+            tracing::info!("unlocked for this device: this computer's own screens stay off while it is here");
         }
         let mirror = screen.placement == remoteman_core::Placement::Mirror;
         // (Just unlocked: the desktop takes a moment to let remote access back in.)
@@ -298,10 +305,69 @@ impl Agent {
         Ok(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into() })
     }
 
+    /// A device has come to a locked computer (GNOME lets nothing in from outside while it
+    /// is locked): unlock it, if its owner allows that and the device has shown what the
+    /// owner asks for. `Err` is what the device is told; one that starts "locked: " invites
+    /// it to try again with the password.
+    fn unlock_for(&mut self, client: &ClientInfo) -> Result<(), String> {
+        // (For tests: a desktop that only says it is locked, with a password of the test's.)
+        let pretend = pretend_locked();
+        let locked = pretend.is_some() || (own_desktop() && self.runtime.block_on(remoteman_desktop::logind::locked()).unwrap_or(false));
+        if self.login_screen.is_some() || !locked || self.unlocked_for_client {
+            return Ok(());
+        }
+        match self.allowed.unlock.load(Ordering::Relaxed) {
+            UNLOCK_WITH_PASSWORD => {
+                let user = crate::pam::user().ok_or("this computer is locked, and its user couldn't be named")?;
+                // A device that keeps guessing is kept waiting.
+                if let Some(until) = self.wrong.1.filter(|until| *until > std::time::Instant::now()) {
+                    let minutes = (until - std::time::Instant::now()).as_secs() / 60 + 1;
+                    return Err(format!("this computer is locked, and after too many wrong passwords it takes no more for {minutes} min"));
+                }
+                let Some(password) = client.unlock.as_deref().filter(|p| !p.is_empty()) else {
+                    return Err(format!("locked: This computer is locked. Enter the password of {user} on it."));
+                };
+                let checked = match &pretend {
+                    Some(right) => Ok(password == right),
+                    None => crate::pam::check(&user, password),
+                };
+                match checked {
+                    Ok(true) => self.wrong = (0, None),
+                    Ok(false) => {
+                        self.wrong.0 += 1;
+                        tracing::warn!(device = client.name, tries = self.wrong.0, "a wrong password for unlocking this computer");
+                        if self.wrong.0 >= WRONG_TRIES {
+                            self.wrong = (0, Some(std::time::Instant::now() + WRONG_WAIT));
+                        }
+                        return Err("locked: That password is not right.".into());
+                    }
+                    Err(e) => return Err(format!("this computer is locked, and the password couldn't be checked: {e}")),
+                }
+            }
+            UNLOCK_WITH_KEY => {}
+            _ => return Err("this computer is locked, and it is set not to be unlocked by devices".into()),
+        }
+        if pretend.is_none() {
+            self.runtime.block_on(remoteman_desktop::logind::set_locked(false)).map_err(|e| format!("this computer is locked and couldn't be unlocked: {e:#}"))?;
+        }
+        tracing::info!(device = client.name, "this computer was locked: unlocked for a paired device; it locks again when the device leaves");
+        self.unlocked_for_client = true;
+        // Should this program die before it has locked the session again, what stops it
+        // finds this note and locks it (`--lock-if-left-unlocked`, run by the service).
+        if pretend.is_none() {
+            let _ = std::fs::write(unlocked_note(), "");
+        }
+        Ok(())
+    }
+
     /// The client has gone. `left` does the rest; this, last of all, locks a session that was
     /// unlocked for it.
     fn relock(&mut self) {
         if std::mem::take(&mut self.unlocked_for_client) {
+            if pretend_locked().is_some() {
+                tracing::info!("the device has left: this computer is locked again");
+                return;
+            }
             match self.runtime.block_on(remoteman_desktop::logind::set_locked(true)) {
                 Ok(()) => {
                     let _ = std::fs::remove_file(unlocked_note());
@@ -701,6 +767,7 @@ fn downloads() -> PathBuf {
 impl HostHandler for Agent {
     fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
         self.left();
+        self.unlock_for(client)?;
         let screen = client.display;
         tracing::info!(name = %client.name, ?screen, decoders = ?client.decoders, cursor_apart = client.cursor, "client");
         self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link)
