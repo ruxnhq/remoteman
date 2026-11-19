@@ -29,9 +29,6 @@ const MOST: usize = RATE as usize * CHANNELS / 4;
 
 pub struct Player {
     tx: mpsc::Sender<Vec<u8>>,
-    /// Packets taken and frames given to the device, for the log and for tests.
-    pub packets: Arc<AtomicU32>,
-    pub written: Arc<AtomicU32>,
 }
 
 impl Player {
@@ -40,8 +37,8 @@ impl Player {
     pub fn start() -> Result<Self> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<String>>();
-        let (packets, written) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
-        let (p, w) = (packets.clone(), written.clone());
+        // Packets taken and frames given to the device, for the log.
+        let (p, w) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
         std::thread::Builder::new().name("sound".into()).spawn(move || {
             if let Err(e) = play(rx, &ready_tx, &p, &w) {
                 // Before it was ready: the caller hears of it. After: only the log does.
@@ -52,7 +49,7 @@ impl Player {
         })?;
         let device = ready_rx.recv_timeout(Duration::from_secs(5)).context("the sound device didn't answer")??;
         say!("sound: playing through {device}");
-        Ok(Self { tx, packets, written })
+        Ok(Self { tx })
     }
 
     pub fn push(&self, packet: &Packet) {

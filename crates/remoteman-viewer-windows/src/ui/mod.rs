@@ -471,6 +471,7 @@ impl<'a> Ui<'a> {
     }
 
     /// A small outlined word.
+    #[allow(dead_code)]
     pub fn tag(&mut self, x: f32, y: f32, text: &str) -> f32 {
         let w = self.fonts.width(text, Font::Tiny) + 18.0;
         let color = self.t.warn;

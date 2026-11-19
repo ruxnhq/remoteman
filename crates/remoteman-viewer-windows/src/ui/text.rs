@@ -24,6 +24,7 @@ pub enum Font {
     /// 20 on 28: a dialog's or a status page's title.
     Subtitle,
     /// 11 on 16: tags.
+    #[allow(dead_code)]
     Tiny,
     /// 10 on 14, spaced out: the names of the figures.
     Key,

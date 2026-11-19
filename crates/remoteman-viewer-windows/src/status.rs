@@ -4,6 +4,8 @@
 /// What is known of a computer before it is tried.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reach {
+    /// Nothing can tell yet (`Features::presence`).
+    #[allow(dead_code)]
     Online,
     Asleep,
     /// It didn't answer when it was last tried.

@@ -23,6 +23,7 @@ impl Color {
     }
 
     /// This colour with `over` laid on it.
+    #[allow(dead_code)]
     pub fn under(self, over: Color) -> Color {
         let a = over.3;
         Color(self.0 * (1.0 - a) + over.0 * a, self.1 * (1.0 - a) + over.1 * a, self.2 * (1.0 - a) + over.2 * a, self.3 + (1.0 - self.3) * a)

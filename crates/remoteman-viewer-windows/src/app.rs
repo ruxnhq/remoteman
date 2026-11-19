@@ -673,7 +673,7 @@ impl App {
             self.dirty = true;
         }
         // The computer is asking its owner about this PC: show the code to compare.
-        let asking = self.attempt.as_ref().filter(|a| a.pairing).and_then(|a| a.shared.pairing.lock().unwrap().take().map(|p| (a.target.clone(), p)));
+        let asking = self.attempt.as_ref().filter(|a| a.pairing && FEATURES.pairing_code).and_then(|a| a.shared.pairing.lock().unwrap().take().map(|p| (a.target.clone(), p)));
         if let Some((target, (code, seconds))) = asking {
             say!("pairing: the computer is asking its owner; the code here is {code}, {seconds} s to confirm it there");
             self.dialog = Some(Dialog::Code { name: host_part(&target.address).to_owned(), code, until: Instant::now() + Duration::from_secs(seconds as u64) });
