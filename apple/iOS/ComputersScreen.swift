@@ -12,6 +12,8 @@ struct ComputersScreen: View {
     @State private var renaming: Computer?
     @State private var newName = ""
     @State private var forgetting: Computer?
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
     @State private var selecting = false
     @State private var selected: Set<UUID> = []
     @State private var forgettingSelected = false
@@ -200,8 +202,8 @@ struct ComputersScreen: View {
     @ViewBuilder
     private func menuItems(_ c: Computer) -> some View {
         Button { model.connect(c) } label: { Label("Connect", systemImage: "display") }
-        Button {} label: { Label("Connect in New Window", systemImage: "macwindow.on.rectangle") }
-            .disabled(!Features.multiWindow)
+        Button { openWindow(value: c.id) } label: { Label("Connect in New Window", systemImage: "macwindow.on.rectangle") }
+            .disabled(!Features.multiWindow || !supportsMultipleWindows)
         Divider()
         Button { afterMenu { editing = c } } label: { Label("Settings for This Computer…", systemImage: "slider.horizontal.3") }
         // Asked for once the menu has gone: on a device, something presented while the menu is

@@ -45,7 +45,7 @@ enum Features {
     static let keyStripEditing = true
     static let shortcutsMenu = false
     /// A second session in a window of its own, and choosing where a window's controls sit.
-    static let multiWindow = false
+    static let multiWindow = true
     static let windowControlsChoice = false
     /// Choosing several computers at once.
     static let multiSelect = true

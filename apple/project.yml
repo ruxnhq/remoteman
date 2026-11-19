@@ -106,6 +106,9 @@ targets:
       properties:
         CFBundleDisplayName: remoteman
         UILaunchScreen: {}
+        # A second session in a window of its own, on iPad.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
         NSLocalNetworkUsageDescription: remoteman connects to your PC on the local network to show and control its desktop.
         NSBonjourServices: [_remoteman._udp]
         NSFaceIDUsageDescription: remoteman can ask for Face ID before it connects to a computer, when you switch that on.

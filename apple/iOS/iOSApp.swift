@@ -6,26 +6,44 @@ import UIKit
 
 @main
 struct RemotemanApp: App {
-    @StateObject private var model = AppModel()
-
     init() {
         setvbuf(stdout, nil, _IOLBF, 0)
     }
 
     var body: some Scene {
         WindowGroup {
-            RootView()
-                .environmentObject(model)
-                .environmentObject(model.session)
-                .environmentObject(model.store)
-                .tint(Theme.tint)
+            WindowRoot(connectTo: nil)
         }
+        // "Connect in New Window" (iPad): a window that opens straight into one computer.
+        WindowGroup(for: UUID.self) { id in
+            WindowRoot(connectTo: id.wrappedValue)
+        }
+    }
+}
+
+/// One window: its own session, over the list of computers every window shares.
+struct WindowRoot: View {
+    let connectTo: UUID?
+    @StateObject private var model = AppModel()
+    @State private var started = false
+
+    var body: some View {
+        RootView()
+            .environmentObject(model)
+            .environmentObject(model.session)
+            .environmentObject(model.store)
+            .tint(Theme.tint)
+            .onAppear {
+                guard !started, let id = connectTo, let c = model.store.computer(id) else { return }
+                started = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { model.connect(c) }
+            }
     }
 }
 
 final class AppModel: ObservableObject {
     let session = ViewerSession()
-    let store = ComputerStore()
+    let store = ComputerStore.shared
     /// The computer being connected to or shown; nil for an unattended run started from arguments.
     @Published var current: Computer?
     /// What this device asks for; set from the root view's size.

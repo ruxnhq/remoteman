@@ -65,6 +65,8 @@ struct Computer: Codable, Identifiable, Equatable {
 }
 
 final class ComputerStore: ObservableObject {
+    /// One list for every window of the app.
+    static let shared = ComputerStore()
     @Published private(set) var computers: [Computer] = []
     private let key = "computers"
 
