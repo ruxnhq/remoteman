@@ -2,10 +2,10 @@
 //! for one to answer and the ways that goes wrong, the settings, the settings of one computer,
 //! and the dialogs.
 
-use crate::app::{App, Choice, Dialog, MenuKind, Msg, Screen, Target};
+use crate::app::{App, Choice, Dialog, Flag, MenuKind, Msg, Screen, Target};
 use crate::features::{FEATURES, NOT_YET, gate};
 use crate::status::{Problem, Reach};
-use crate::store::{host_part, os_name, short, when};
+use crate::store::{PLACEMENT_NAMES, os_name, short, when};
 use crate::ui::icons::Icon;
 use crate::ui::theme::{Color, rgb, rgba};
 use crate::ui::{Align, En, Font, Id, Kind, Look, ON, Op, Rect, Ui, id, idn, off, rect};
@@ -323,6 +323,47 @@ fn trouble(app: &App, ui: &mut Ui, target: &Target, problem: &Problem) {
         Problem::Refused(said) => {
             status(ui, area, Sign::Icon(Icon::Info), &format!("{name} closed the connection"), &format!("It answered, and said: {said}"), None, &[again("Connect again"), back]);
         }
+        Problem::LoggingIn(said) => {
+            // The computer's own words, as a sentence. It is tried again by itself while the
+            // ring turns; after that it is the person's turn.
+            let mut words = said.chars();
+            let said: String = words.next().map(|first| first.to_uppercase().chain(words).collect()).unwrap_or_default();
+            let words = format!("It was locked or logged out. {said}{}", if said.ends_with('.') { "" } else { "." });
+            let title = format!("{name} is logging in for you");
+            if app.retry_at.is_some() {
+                status(ui, area, Sign::Ring, &title, &words, None, &[back]);
+            } else {
+                status(ui, area, Sign::Icon(Icon::Clock), &title, &words, None, &[again("Try again"), back]);
+            }
+        }
+        Problem::Locked(said) => {
+            if app.retry_at.is_some() {
+                return status(ui, area, Sign::Ring, &format!("Unlocking {name}"), "With the password that was given.", None, &[back]);
+            }
+            // The password goes to the computer with the next try and is kept nowhere.
+            let t = ui.t;
+            let words = format!("{said} It locks again when you leave.");
+            let title = format!("{name} is locked");
+            let title_w = (area.w - 48.0).min(560.0);
+            let (title_h, words_h) = (ui.fonts.height(&title, Font::Subtitle, title_w), ui.fonts.height(&words, Font::Caption, 300.0));
+            let total = 40.0 + 10.0 + title_h + 10.0 + words_h + 18.0 + 32.0 + 12.0 + 32.0;
+            let cx = area.x + (area.w / 2.0).round();
+            let mut y = area.y + ((area.h - total) / 2.0).round().max(8.0);
+            ui.ops.push(Op::Icon { icon: Icon::Lock, x: cx - 20.0, y, size: 40.0, color: t.t2, stroke: 1.1 });
+            y += 50.0;
+            ui.para(cx - title_w / 2.0, y, title_w, &title, Font::Subtitle, t.tx, Align::Center);
+            y += title_h + 10.0;
+            ui.para(cx - 150.0, y, 300.0, &words, Font::Caption, t.t2, Align::Center);
+            y += words_h + 18.0;
+            if let Some(field) = app.fields.get(&id("locked.password")) {
+                ui.secret(id("locked.password"), rect(cx - 140.0, y, 280.0, 32.0), field, ON);
+            }
+            y += 44.0;
+            let (unlock, back_w) = (ui.button_width("Unlock", Look::Accent, false), ui.button_width("Back", Look::Plain, false));
+            let x = cx - ((unlock + 8.0 + back_w) / 2.0).round();
+            ui.button(id("locked.unlock"), rect(x, y, unlock, 32.0), "Unlock", Look::Accent, None, Msg::Unlock, ON);
+            ui.button(id("problem.back"), rect(x + unlock + 8.0, y, back_w, 32.0), "Back", Look::Plain, None, Msg::Back, ON);
+        }
         Problem::Ended(reason) => {
             status(ui, area, Sign::Icon(Icon::Info), &format!("{name} closed the connection"), reason, None, &[again("Connect again"), back]);
         }
@@ -455,7 +496,7 @@ fn settings(app: &App, ui: &mut Ui) {
         "Picture",
         &[
             row("set.quality", "Default quality", "Automatic picks the best stream this PC decodes on its graphics card", chosen(app, Choice::DefaultQuality), ON),
-            row("set.refresh", "Match this monitor's refresh rate", "", Ctl::Toggle(true, None), gate(FEATURES.refresh_choice)),
+            row("set.refresh", "Match this monitor's refresh rate", "Otherwise 60 Hz", Ctl::Toggle(s.match_refresh, Some(Msg::Toggle(Flag::MatchRefresh, None))), gate(FEATURES.refresh_choice)),
             row("set.hdr", "HDR", "Used when the computer offers it and this monitor is in HDR", Ctl::Toggle(false, None), gate(FEATURES.hdr)),
         ],
     );
@@ -471,11 +512,11 @@ fn settings(app: &App, ui: &mut Ui) {
                 "set.shortcuts",
                 "Send system shortcuts to the computer",
                 "Alt+Tab, the Windows key and others, while a session is in front. Ctrl+Alt+Delete is always in Send keys.",
-                Ctl::Toggle(FEATURES.system_shortcuts && s.shortcuts, None),
+                Ctl::Toggle(FEATURES.system_shortcuts && s.shortcuts, Some(Msg::Toggle(Flag::Shortcuts, None))),
                 gate(FEATURES.system_shortcuts),
             ),
-            row("set.release", "Release the keyboard", "Gives shortcuts back to this PC", fixed("Ctrl+Alt+Shift"), gate(FEATURES.release_shortcut)),
-            row("set.command", "On a Mac, Ctrl acts as Command", "Ctrl+C on this keyboard copies on a Mac, as it does here", Ctl::Toggle(false, None), gate(FEATURES.key_mapping)),
+            row("set.release", "Release the keyboard", "Ctrl+Alt+Shift, pressed together, gives shortcuts back to this PC, and takes them again", Ctl::None, gate(FEATURES.release_shortcut)),
+            row("set.command", "On a Mac, Ctrl acts as Command", "Ctrl+C on this keyboard copies on a Mac, as it does here", Ctl::Toggle(s.ctrl_as_command, Some(Msg::Toggle(Flag::CtrlAsCommand, None))), gate(FEATURES.ctrl_as_command)),
             row("set.winkey", "Windows key", "Opens the overview on a Linux computer, Spotlight's key on a Mac", fixed("Super / Command"), gate(FEATURES.key_mapping)),
         ],
     );
@@ -488,7 +529,7 @@ fn settings(app: &App, ui: &mut Ui) {
         "Pointer and touch",
         &[
             row("set.pointer", "Pointer", "Captured sends raw movement, which games and 3D apps need", fixed("Follows this pointer"), gate(FEATURES.pointer_capture)),
-            row("set.scroll", "Scroll direction", "", fixed("Same as this PC"), gate(FEATURES.scroll_direction)),
+            row("set.scroll", "Scroll direction", "", chosen(app, Choice::Scroll), gate(FEATURES.scroll_direction)),
             row("set.touch", "Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", Ctl::Toggle(false, None), gate(FEATURES.touch)),
         ],
     );
@@ -500,7 +541,7 @@ fn settings(app: &App, ui: &mut Ui) {
         room,
         "Sound, microphone and camera",
         &[
-            row("set.sound", "Play the computer's sound here", "", Ctl::Toggle(false, None), gate(FEATURES.sound)),
+            row("set.sound", "Play the computer's sound here", "For computers paired from now on; each has its own switch", Ctl::Toggle(s.sound, Some(Msg::Toggle(Flag::Sound, None))), gate(FEATURES.sound)),
             row("set.mic", "Let computers use this microphone", "Still switched on by you in each session", Ctl::Toggle(false, None), gate(FEATURES.microphone)),
             row("set.camera", "Let computers use this camera", "For calls made on the other computer", Ctl::Toggle(false, None), gate(FEATURES.camera)),
         ],
@@ -513,8 +554,8 @@ fn settings(app: &App, ui: &mut Ui) {
         room,
         "Sharing",
         &[
-            row("set.clipboard", "Share the clipboard", "Text and images copied on either side can be pasted on the other", Ctl::Toggle(false, None), gate(FEATURES.sharing)),
-            row("set.folder", "Save received files to", "Downloads", Ctl::Button("Change…", Look::Plain, None), gate(FEATURES.sharing)),
+            row("set.clipboard", "Share the clipboard", "Text copied on either side can be pasted on the other. For computers paired from now on", Ctl::Toggle(s.clipboard, Some(Msg::Toggle(Flag::Clipboard, None))), gate(FEATURES.clipboard)),
+            row("set.folder", "Save received files to", &app.store.receive_folder().display().to_string(), Ctl::Button("Change…", Look::Plain, None), gate(FEATURES.folder_choice)),
         ],
     );
     let version = format!("remoteman {} · ", env!("CARGO_PKG_VERSION"));
@@ -569,10 +610,11 @@ fn computer(app: &App, ui: &mut Ui, address: &str) {
             row("computer.way", "Getting in", "Joins your session there if you are logged in, otherwise shows its login screen", fixed("The computer decides"), gate(FEATURES.way_in)),
         ],
     );
-    let sits = match c.placement {
-        remoteman_core::Placement::Extend => "Beside the computer's own displays, which stay on",
-        remoteman_core::Placement::Main => "Its own displays stay on as secondary ones",
-        remoteman_core::Placement::Only => "Its own screens turn off while you are connected",
+    let sits = PLACEMENT_NAMES.iter().find(|p| p.0 == c.placement).map_or("", |p| p.2);
+    let size = match c.max_height {
+        0 => "The picture has this screen's own pixels",
+        crate::store::WINDOW => "The computer is asked for a display as large as the window, again when the window changes size",
+        _ => "Fewer pixels, drawn larger here: quicker for a computer that can't keep up",
     };
     y = group(
         app,
@@ -583,7 +625,7 @@ fn computer(app: &App, ui: &mut Ui, address: &str) {
         "Display",
         &[
             row("computer.placement", "Where this display sits", sits, chosen(app, Choice::Placement(a())), ON),
-            row("computer.size", "Size", "", fixed("Follows the window"), gate(FEATURES.follow_window)),
+            row("computer.size", "Picture size", size, chosen(app, Choice::Size(a())), gate(FEATURES.follow_window)),
             row("computer.quality", "Picture quality", "", chosen(app, Choice::Quality(a())), ON),
             row("computer.bitrate", "Bitrate limit", "", chosen(app, Choice::Bitrate(a())), ON),
         ],
@@ -596,9 +638,9 @@ fn computer(app: &App, ui: &mut Ui, address: &str) {
         room,
         "Sound and sharing",
         &[
-            row("computer.sound", "Play its sound here", "", fixed("Same as Settings"), gate(FEATURES.sound)),
-            row("computer.clipboard", "Share the clipboard with it", "", Ctl::Toggle(false, None), gate(FEATURES.sharing)),
-            row("computer.files", "Receive files from it", "Into Downloads", Ctl::Toggle(false, None), gate(FEATURES.sharing)),
+            row("computer.sound", "Play its sound here", "When a session starts; the bar's button is for the session", Ctl::Toggle(c.sound, Some(Msg::Toggle(Flag::Sound, Some(a())))), gate(FEATURES.sound)),
+            row("computer.clipboard", "Share the clipboard with it", "When a session starts, if the computer allows it", Ctl::Toggle(c.clipboard, Some(Msg::Toggle(Flag::Clipboard, Some(a())))), gate(FEATURES.clipboard)),
+            row("computer.files", "Receive files from it", &format!("Into {}", app.store.receive_folder().display()), Ctl::Toggle(FEATURES.files, None), gate(false)),
         ],
     );
     let key = match app.store.key(address) {
@@ -727,16 +769,18 @@ pub fn dialog(app: &App, ui: &mut Ui, dialog: &Dialog) {
                 }
             });
         }
-        Dialog::Code { name, code, left } => {
-            sheet(ui, Some(("Codes match", Look::Accent, ON)), "Cancel", &|c| {
+        Dialog::Code { name, code, until } => {
+            let left = until.saturating_duration_since(std::time::Instant::now()).as_secs() as u32;
+            sheet(ui, None, "Cancel", &|c| {
                 c.para(&format!("Pair with {name}?"), Font::Subtitle, t.tx);
                 c.gap(16.0);
-                c.para(&format!("Check that {name} shows the same code. If it shows a different one, cancel: something else answered at that address."), Font::Body, t.tx);
+                c.para(&format!("{name} is asking its owner about this PC. Check that it shows the same code, and confirm there. If it shows a different one, cancel: something else answered at that address."), Font::Body, t.tx);
                 c.gap(16.0);
                 if let Some(r) = c.room(88.0) {
                     c.ui.fill(r, 6.0, t.sub);
                     // Two groups of three, as it is read out.
-                    let (a, b) = code.split_at(code.len() / 2);
+                    let digits: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+                    let (a, b) = digits.split_at(digits.len() / 2);
                     let (wa, wb) = (c.ui.fonts.width(a, Font::Code), c.ui.fonts.width(b, Font::Code));
                     let x = r.x + ((r.w - wa - wb - 20.0) / 2.0).round();
                     c.ui.label(x, r.y + 20.0, a, Font::Code, t.tx);
@@ -803,7 +847,6 @@ pub fn dialog(app: &App, ui: &mut Ui, dialog: &Dialog) {
             });
         }
     }
-    let _ = host_part;
 }
 
 /// What a control has to say, in a small box under it (over it, if there is no room under).

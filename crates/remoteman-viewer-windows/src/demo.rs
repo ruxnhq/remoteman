@@ -14,7 +14,7 @@ pub fn start(shared: Arc<Shared>, client: Arc<Client>) {
     let _ = std::thread::Builder::new().name("input-demo".into()).spawn(move || {
         // The host's display has to be there, and whatever is on it has to have drawn once.
         while shared.presented_total.load(Ordering::Relaxed) == 0 {
-            if shared.quit.load(Ordering::Relaxed) {
+            if shared.scene.quit.load(Ordering::Relaxed) || shared.closed.lock().unwrap().is_some() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(50));

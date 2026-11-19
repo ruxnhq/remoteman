@@ -56,7 +56,7 @@ impl Painter {
             dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let brush = dc.CreateSolidColorBrush(&color(Color::WHITE), None)?;
             let style = D2D1_STROKE_STYLE_PROPERTIES { startCap: D2D1_CAP_STYLE_ROUND, endCap: D2D1_CAP_STYLE_ROUND, dashCap: D2D1_CAP_STYLE_ROUND, lineJoin: D2D1_LINE_JOIN_ROUND, miterLimit: 10.0, dashStyle: D2D1_DASH_STYLE_SOLID, dashOffset: 0.0 };
-            let round = factory.CreateStrokeStyle(&style, None)?;
+            let round = std::ops::Deref::deref(&factory).CreateStrokeStyle(&style, None)?;
             Ok(Self { factory, dc, brush, round, fonts: Fonts::new()?, paths: HashMap::new(), logo: None })
         }
     }
@@ -87,7 +87,7 @@ impl Painter {
     fn path(&self, segments: &[Seg]) -> Result<ID2D1PathGeometry> {
         // SAFETY: a geometry made, filled and closed here.
         unsafe {
-            let path = self.factory.CreatePathGeometry()?;
+            let path = std::ops::Deref::deref(&self.factory).CreatePathGeometry()?;
             let sink = path.Open()?;
             let mut open = false;
             for seg in segments {

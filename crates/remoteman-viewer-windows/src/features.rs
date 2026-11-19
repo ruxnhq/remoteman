@@ -24,9 +24,13 @@ pub struct Features {
     pub microphone: bool,
     /// This PC's camera used by the computer.
     pub camera: bool,
-    /// One clipboard for both sides, and files sent across: the button in the session's bar,
-    /// and the settings.
-    pub sharing: bool,
+    /// One clipboard for both sides (text): the line in the session's sharing menu, and the
+    /// settings.
+    pub clipboard: bool,
+    /// Files sent to the computer and taken from it.
+    pub files: bool,
+    /// Choosing where received files go (they go to Downloads).
+    pub folder_choice: bool,
     /// HDR pictures.
     pub hdr: bool,
     /// Each frame shown when it arrives, where the monitor can.
@@ -39,6 +43,8 @@ pub struct Features {
     pub sharp_text: bool,
     /// A captured pointer that sends raw movement.
     pub pointer_capture: bool,
+    /// "Ctrl acts as Command on a Mac" (the rest of `key_mapping` isn't built).
+    pub ctrl_as_command: bool,
     /// A choice of scroll direction.
     pub scroll_direction: bool,
     /// Touchscreen touches sent as touches.
@@ -62,24 +68,27 @@ pub const FEATURES: Features = Features {
     discovery: false,
     presence: false,
     wake: false,
-    pairing_code: false,
+    pairing_code: true,
     sound: false,
     microphone: false,
     camera: false,
-    sharing: false,
+    clipboard: false,
+    files: false,
+    folder_choice: false,
     hdr: false,
     variable_refresh: false,
-    refresh_choice: false,
-    follow_window: false,
+    refresh_choice: true,
+    follow_window: true,
     sharp_text: false,
     pointer_capture: false,
-    scroll_direction: false,
+    ctrl_as_command: true,
+    scroll_direction: true,
     touch: false,
-    system_shortcuts: false,
+    system_shortcuts: true,
     key_mapping: false,
-    release_shortcut: false,
+    release_shortcut: true,
     second_display: false,
-    mirror: false,
+    mirror: true,
     way_in: false,
 };
 

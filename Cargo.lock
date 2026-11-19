@@ -1762,7 +1762,9 @@ dependencies = [
  "ffmpeg-sys-next",
  "png",
  "remoteman-core",
+ "serde_json",
  "windows",
+ "windows-numerics",
 ]
 
 [[package]]

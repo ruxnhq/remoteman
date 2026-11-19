@@ -168,14 +168,18 @@ impl Fonts {
     pub fn width(&self, text: &str, font: Font) -> f32 {
         let Ok(layout) = self.layout(text, font, 10_000.0, false, Align::Left) else { return 0.0 };
         // SAFETY: a query on a layout held here.
-        unsafe { layout.GetMetrics().map_or(0.0, |m| m.widthIncludingTrailingWhitespace.ceil()) }
+        let mut m = DWRITE_TEXT_METRICS::default();
+        // SAFETY: a query on a layout held here.
+        unsafe { layout.GetMetrics(&mut m).map_or(0.0, |()| m.widthIncludingTrailingWhitespace.ceil()) }
     }
 
     /// How tall `text` is when wrapped to `width`.
     pub fn height(&self, text: &str, font: Font, width: f32) -> f32 {
         let Ok(layout) = self.layout(text, font, width, true, Align::Left) else { return font.line() };
         // SAFETY: a query on a layout held here.
-        unsafe { layout.GetMetrics().map_or(font.line(), |m| m.lineCount.max(1) as f32 * font.line()) }
+        let mut m = DWRITE_TEXT_METRICS::default();
+        // SAFETY: a query on a layout held here.
+        unsafe { layout.GetMetrics(&mut m).map_or(font.line(), |()| m.lineCount.max(1) as f32 * font.line()) }
     }
 
     /// Where the caret stands before the `at`th UTF-16 unit of a line of text.

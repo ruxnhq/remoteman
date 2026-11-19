@@ -23,9 +23,19 @@ pub enum Problem {
     Changed,
     /// The computer answered and said no; with its reason.
     Refused(String),
+    /// The computer is logging its user in (or unlocking) for this PC and will take it in a
+    /// moment; with what it said.
+    LoggingIn(String),
+    /// The computer is locked and takes its user's password to let this PC in; with what it
+    /// said (who the user is, or that the last password was wrong).
+    Locked(String),
     /// A session that was running ended; with the reason.
     Ended(String),
 }
+
+/// How many times a computer that says it is logging in is tried again, three seconds apart,
+/// before the person is asked.
+pub const LOGGING_IN_TRIES: u32 = 10;
 
 /// Sort out the core's error text.
 pub fn classify(error: &str) -> Problem {
@@ -33,6 +43,10 @@ pub fn classify(error: &str) -> Problem {
         Problem::Changed
     } else if error.contains("isn't paired") || error.contains("the host refused: not_paired") {
         Problem::NotPaired
+    } else if let Some((_, said)) = error.split_once("the host refused: logging_in: ") {
+        Problem::LoggingIn(said.to_owned())
+    } else if let Some((_, said)) = error.split_once("the host refused: locked: ") {
+        Problem::Locked(said.to_owned())
     } else if let Some((_, said)) = error.split_once("the host refused: ") {
         // `code: message`; the message is the part for people.
         Problem::Refused(said.split_once(": ").map_or(said, |(_, m)| m).to_owned())
@@ -51,6 +65,10 @@ pub fn ended(reason: &str, shown: bool) -> Problem {
     let said = reason.split_once("closed by peer: ").map(|(_, m)| m.rsplit_once(" (code ").map_or(m, |(m, _)| m));
     match said {
         Some("bye") | Some("done") => Problem::Ended("The computer closed the connection.".into()),
+        // It is getting its user's session ready: try again shortly.
+        Some(words) if !shown && words.starts_with("logging in: ") => Problem::LoggingIn(words["logging in: ".len()..].to_owned()),
+        // It is locked, and takes its user's password with the next try.
+        Some(words) if !shown && words.starts_with("locked: ") => Problem::Locked(words["locked: ".len()..].to_owned()),
         // It let this PC in and then gave a reason for not going on.
         Some(words) if !shown => Problem::Refused(words.to_owned()),
         Some(words) => Problem::Ended(format!("The computer closed the connection: {words}")),

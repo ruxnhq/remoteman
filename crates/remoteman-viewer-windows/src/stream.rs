@@ -9,7 +9,8 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use anyhow::Result;
-use remoteman_core::{CursorShape, Frame, Handler, Message, Stage, StreamInfo};
+use remoteman_core::media::{BLOB_CLIPBOARD, CLIPBOARD_LIMIT, ClipboardHeader, Packet};
+use remoteman_core::{BlobEvent, CursorShape, Frame, Handler, Message, Stage, StreamInfo};
 
 use crate::decode::{Decoder, Picture};
 use crate::gpu::Gpu;
@@ -83,6 +84,22 @@ pub struct Shared {
     pub features: Mutex<Option<Vec<String>>>,
     /// What the host says the picture is being encoded at, in bits a second (0: it hasn't said).
     pub bitrate: AtomicU32,
+    /// The computer is asking its owner about this PC: the code both sides show, and the
+    /// seconds its owner has.
+    pub pairing: Mutex<Option<(String, u32)>>,
+    /// Text copied on the computer, until the window puts it on this clipboard.
+    pub copies: Mutex<Vec<String>>,
+    /// What the computer said of files sent to it: whether it has them, and where or why not.
+    pub results: Mutex<Vec<(bool, String)>>,
+    /// What became of files the computer sent, until the window answers it and says so here.
+    pub received: Mutex<Vec<remoteman_core::receive::Outcome>>,
+    /// Where files from the computer go.
+    pub folder: Mutex<PathBuf>,
+    /// Plays the computer's sound, while that is on.
+    pub sound: Mutex<Option<crate::sound::Player>>,
+    /// Number the clipboard blobs and the files sent.
+    pub copy_seq: AtomicU32,
+    pub file_seq: AtomicU32,
 
     // Since the figures were last read:
     pub decoded: AtomicU32,
@@ -118,6 +135,14 @@ impl Shared {
             refresh: AtomicU32::default(),
             features: Mutex::default(),
             bitrate: AtomicU32::default(),
+            pairing: Mutex::default(),
+            copies: Mutex::default(),
+            results: Mutex::default(),
+            received: Mutex::default(),
+            folder: Mutex::default(),
+            sound: Mutex::default(),
+            copy_seq: AtomicU32::default(),
+            file_seq: AtomicU32::default(),
             decoded: AtomicU32::default(),
             presented: AtomicU32::default(),
             replaced: AtomicU32::default(),
@@ -148,6 +173,9 @@ enum Msg {
 pub struct Feed {
     tx: mpsc::SyncSender<Msg>,
     shared: Arc<Shared>,
+    /// Clipboard blobs on their way in: what kind, and what has come.
+    arriving: std::collections::HashMap<u32, (String, Vec<u8>)>,
+    files: remoteman_core::receive::Receiver,
 }
 
 impl Feed {
@@ -185,7 +213,58 @@ impl Handler for Feed {
                 *self.shared.features.lock().unwrap() = Some(features.clone());
                 self.wake_window();
             }
+            Message::FileResult { ok, message, .. } => {
+                self.shared.results.lock().unwrap().push((*ok, message.clone()));
+                self.wake_window();
+            }
             _ => {}
+        }
+    }
+
+    fn pairing(&mut self, code: &str, seconds: u32) {
+        *self.shared.pairing.lock().unwrap() = Some((code.to_owned(), seconds));
+        self.wake_window();
+    }
+
+    fn sound(&mut self, packet: &Packet) {
+        if let Some(player) = self.shared.sound.lock().unwrap().as_ref() {
+            player.push(packet);
+        }
+    }
+
+    fn blob(&mut self, event: &BlobEvent) {
+        let folder = self.shared.folder.lock().unwrap().clone();
+        if let Some(outcome) = self.files.blob(event, &folder) {
+            self.shared.received.lock().unwrap().push(outcome);
+            self.wake_window();
+        }
+        match event {
+            BlobEvent::Open { id, kind, header } if *kind == BLOB_CLIPBOARD => {
+                if let Ok(h) = serde_json::from_str::<ClipboardHeader>(header) {
+                    if h.size <= CLIPBOARD_LIMIT {
+                        self.arriving.insert(*id, (h.mime, Vec::with_capacity(h.size as usize)));
+                    }
+                }
+            }
+            BlobEvent::Open { .. } => {}
+            BlobEvent::Data { id, bytes } => {
+                let over = self.arriving.get_mut(id).is_some_and(|copy| {
+                    copy.1.extend_from_slice(bytes);
+                    copy.1.len() as u64 > CLIPBOARD_LIMIT
+                });
+                if over {
+                    self.arriving.remove(id);
+                }
+            }
+            BlobEvent::Close { id, complete } => {
+                // Text only: a picture copied on the computer is not put on this clipboard yet.
+                if let (Some((kind, bytes)), true) = (self.arriving.remove(id), *complete) {
+                    if kind.starts_with("text/plain") {
+                        self.shared.copies.lock().unwrap().push(String::from_utf8_lossy(&bytes).into_owned());
+                        self.wake_window();
+                    }
+                }
+            }
         }
     }
 
@@ -219,7 +298,7 @@ pub fn start(gpu: &Gpu, scene: &Arc<Scene>) -> Result<(Arc<Shared>, Feed)> {
             s.scene.wake_window();
         }
     })?;
-    Ok((shared.clone(), Feed { tx, shared }))
+    Ok((shared.clone(), Feed { tx, shared, arriving: Default::default(), files: Default::default() }))
 }
 
 fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {

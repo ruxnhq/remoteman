@@ -4,9 +4,9 @@
 
 use remoteman_core::Placement;
 
-use crate::app::{App, BITRATES, Choice, Menu, MenuKind, Msg};
+use crate::app::{App, BITRATES, Flag, Menu, MenuKind, Msg};
 use crate::features::{FEATURES, gate};
-use crate::store::Quality;
+use crate::store::{PLACEMENT_NAMES, Quality, SIZES};
 use crate::ui::icons::Icon;
 use crate::ui::{Align, En, Font, Id, Kind, ON, Op, Rect, Ui, id, idn, off, rect};
 
@@ -220,11 +220,10 @@ pub fn view(app: &App, ui: &mut Ui, menu: &Menu) {
             ];
             let mut lines: Vec<Line> = chords.iter().enumerate().map(|(n, (label, hint, codes))| Item { id: idn("keys", n), ..item("", label, Msg::SendKeys(codes)).hint(hint) }.line()).collect();
             lines.push(Line::Rule);
-            let mut shortcuts = item("keys.shortcuts", "Send system shortcuts to the computer", Msg::CloseMenu)
+            let shortcuts = item("keys.shortcuts", "Send system shortcuts to the computer", Msg::Toggle(Flag::Shortcuts, None))
                 .caption("Alt+Tab, the Windows key and others go to it while this window is in front")
                 .toggle(FEATURES.system_shortcuts && app.store.settings.shortcuts)
                 .en(gate(FEATURES.system_shortcuts));
-            shortcuts.msg = None;
             lines.push(shortcuts.line());
             let mut release = item("keys.release", "Release the keyboard", Msg::CloseMenu).caption("Gives shortcuts back to this PC").hint("Ctrl+Alt+Shift").en(gate(FEATURES.release_shortcut));
             release.msg = None;
@@ -236,26 +235,45 @@ pub fn view(app: &App, ui: &mut Ui, menu: &Menu) {
             let now = s.map_or(Placement::Extend, |s| s.display.placement);
             // Only for computers that offer the choice.
             let can = if s.is_some_and(|s| s.offers("placement")) { ON } else { off("This computer decides where the display goes") };
-            let place = |n: &str, label: &str, words: &str, p: Placement| item(n, label, Msg::Place(p)).caption(words).radio(now == p).en(can).line();
+            let mirrors = if s.is_some_and(|s| s.offers("mirror")) { can } else { off("This computer can't show its own monitor") };
             let hz = app.format().map_or(app.monitor.2, |f| f.2);
-            let mut mirror = item("display.mirror", &format!("Mirror a monitor of {name}"), Msg::CloseMenu).en(gate(FEATURES.mirror));
-            mirror.arrow = true;
+            let address = s.map(|s| s.target.address.clone()).unwrap_or_default();
+            let size = app.store.find(&address).map_or(0, |c| c.max_height);
+            let size = SIZES.iter().find(|x| x.0 == size).map_or("", |x| x.1);
+            let mut lines = vec![Line::Heading("Where this display sits")];
+            for (n, (p, label, words)) in PLACEMENT_NAMES.iter().enumerate() {
+                let en = if *p != Placement::Mirror { can } else if FEATURES.mirror { mirrors } else { gate(false) };
+                let label = if *p == Placement::Mirror && !name.is_empty() { format!("Mirror the main monitor of {name}") } else { (*label).to_owned() };
+                lines.push(Item { id: idn("display.place", n), ..item("", &label, Msg::Place(*p)) }.caption(words).radio(now == *p).en(en).line());
+            }
+            let mut rate = item("display.rate", "Refresh rate", Msg::CloseMenu).hint(&format!("{hz} Hz"));
+            rate.msg = None;
+            let mut picture_size = item("display.size", "Picture size", Msg::OpenComputer(address)).hint(size).en(gate(FEATURES.follow_window));
+            picture_size.arrow = true;
+            lines.extend([
+                Line::Rule,
+                Line::Heading("Size and rate"),
+                picture_size.line(),
+                rate.line(),
+                item("display.hdr", "HDR", Msg::CloseMenu).caption("When the computer offers it and this monitor is in HDR").toggle(false).en(gate(FEATURES.hdr)).line(),
+                item("display.vrr", "Variable refresh rate", Msg::CloseMenu).caption("Shows each frame when it arrives, in full screen").toggle(false).en(gate(FEATURES.variable_refresh)).line(),
+                Line::Rule,
+                item("display.second", "Add a second display…", Msg::CloseMenu).en(gate(FEATURES.second_display)).line(),
+            ]);
+            (320.0, lines)
+        }
+        MenuKind::Share => {
+            let s = app.session.as_ref();
+            let no = off("This computer doesn't allow it");
+            let offers = |what: &str| s.is_some_and(|s| s.offers(what));
+            let clipboard = if !FEATURES.clipboard { gate(false) } else if offers("clipboard") { ON } else { no };
+            let files = if !FEATURES.files { gate(false) } else if offers("files") { ON } else { no };
             (
                 300.0,
                 vec![
-                    Line::Heading("Where this display sits"),
-                    place("display.extra", "Extra display", "Beside the computer's own displays, which stay on", Placement::Extend),
-                    place("display.main", "Main display", "Its own displays stay on as secondary ones", Placement::Main),
-                    place("display.only", "Only display", "Its own screens turn off while you are connected", Placement::Only),
-                    Line::Rule,
-                    Line::Heading("Size and rate"),
-                    item("display.size", "Size", Msg::CloseMenu).hint("Follows this window").en(gate(FEATURES.follow_window)).line(),
-                    item("display.rate", "Refresh rate", Msg::CloseMenu).hint(&format!("This monitor's, {hz} Hz")).en(gate(FEATURES.refresh_choice)).line(),
-                    item("display.hdr", "HDR", Msg::CloseMenu).caption("When the computer offers it and this monitor is in HDR").toggle(false).en(gate(FEATURES.hdr)).line(),
-                    item("display.vrr", "Variable refresh rate", Msg::CloseMenu).caption("Shows each frame when it arrives, in full screen").toggle(false).en(gate(FEATURES.variable_refresh)).line(),
-                    Line::Rule,
-                    item("display.second", "Add a second display…", Msg::CloseMenu).en(gate(FEATURES.second_display)).line(),
-                    mirror.line(),
+                    Line::Heading("Clipboard and files"),
+                    item("share.clipboard", "Share the clipboard", Msg::ToggleClipboard).caption("Text copied on either side can be pasted on the other").toggle(s.is_some_and(|s| s.clipboard_on)).en(clipboard).line(),
+                    item("share.file", "Send a file…", Msg::SendFile).caption("The computer decides where it goes, and says where").en(files).line(),
                 ],
             )
         }

@@ -12,7 +12,33 @@ use std::path::{Path, PathBuf};
 use remoteman_core::{Codec, Mode, Placement};
 
 /// The placements, as they are written on the command line and in the state folder.
-pub const PLACEMENTS: [(Placement, &str); 3] = [(Placement::Extend, "extend"), (Placement::Main, "main"), (Placement::Only, "only")];
+pub const PLACEMENTS: [(Placement, &str); 4] = [(Placement::Extend, "extend"), (Placement::Main, "main"), (Placement::Only, "only"), (Placement::Mirror, "mirror")];
+
+/// The placements as the menus and the settings name them, in the order they are offered.
+pub const PLACEMENT_NAMES: [(Placement, &str, &str); 4] = [
+    (Placement::Extend, "Extra display", "Beside the computer's own displays, which stay on"),
+    (Placement::Main, "Main display", "Its own displays stay on as secondary ones"),
+    (Placement::Only, "Only display", "Its own screens turn off while you are connected"),
+    (Placement::Mirror, "Mirror its main monitor", "The computer's own picture, at that monitor's size"),
+];
+
+/// How large a picture to ask a computer for: the most lines (0: this screen's own), or
+/// [`WINDOW`]. The same values, under the same key, as the Linux viewer writes.
+pub const SIZES: [(u32, &str); 4] = [(0, "This screen's own"), (WINDOW, "The window's size"), (1440, "Up to 1440 lines"), (1080, "Up to 1080 lines")];
+
+/// In place of a number of lines: a display as large as the window's picture, asked for again
+/// when the window has changed size and been still for a second.
+pub const WINDOW: u32 = 1;
+
+/// A display no taller than `most` lines, with the same shape and the same apparent size of
+/// things on it (fewer pixels, each drawn larger here).
+pub fn fit_lines(width: u32, height: u32, scale: f32, most: u32) -> (u32, u32, f32) {
+    if most == 0 || most == WINDOW || height <= most {
+        return (width, height, scale);
+    }
+    let by = most as f64 / height as f64;
+    (((width as f64 * by).round() as u32) & !1, most & !1, (scale as f64 * by) as f32)
+}
 
 /// Which stream to ask for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -94,6 +120,19 @@ pub struct Computer {
     pub quality: Option<Quality>,
     /// The most the picture may use, in megabits a second (0: the computer's own choice).
     pub bitrate: u32,
+    /// The most lines of picture to ask for (0: this screen's own; [`WINDOW`]: the window's).
+    pub max_height: u32,
+    /// What a session with it starts with: its sound played here, one clipboard for both.
+    pub sound: bool,
+    pub clipboard: bool,
+    /// Lines this viewer doesn't use (the Linux viewer's), kept as they were.
+    pub other: Vec<(String, String)>,
+}
+
+impl Computer {
+    fn new(name: &str, address: &str, os: &str, now: i64, settings: &Settings) -> Self {
+        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: 0, sound: settings.sound, clipboard: settings.clipboard, other: Vec::new() }
+    }
 }
 
 pub struct Settings {
@@ -108,7 +147,39 @@ pub struct Settings {
     /// Alt+Tab, the Windows key and the like go to the other computer.
     pub shortcuts: bool,
     pub quality: Quality,
+    /// Ask for this monitor's own refresh rate; otherwise 60.
+    pub match_refresh: bool,
+    /// The wheel scrolls the other way on the computer.
+    pub scroll_reversed: bool,
+    /// On a Mac, Ctrl on this keyboard is Command there (and the Windows key is Ctrl).
+    pub ctrl_as_command: bool,
+    /// What a newly paired computer's sessions start with.
+    pub sound: bool,
+    pub clipboard: bool,
+    /// Where files from a computer go; empty: the Downloads folder.
+    pub folder: String,
+    /// Lines this viewer doesn't use, kept as they were.
+    pub other: Vec<(String, String)>,
 }
+
+impl Settings {
+    /// The usage to send for a key on this keyboard, for a computer that runs `os`.
+    pub fn map_key(&self, usage: u16, os: &str) -> u16 {
+        let mac = matches!(os.to_ascii_lowercase().as_str(), "macos" | "mac" | "darwin");
+        if !(self.ctrl_as_command && mac) {
+            return usage;
+        }
+        match usage {
+            0xE0 => 0xE3,
+            0xE4 => 0xE7,
+            0xE3 => 0xE0,
+            0xE7 => 0xE4,
+            other => other,
+        }
+    }
+}
+
+const SETTINGS_KEYS: [&str; 12] = ["placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder"];
 
 pub struct Store {
     dir: PathBuf,
@@ -150,12 +221,19 @@ impl Store {
             fullscreen: yes("fullscreen", false),
             shortcuts: yes("shortcuts", true),
             quality: Quality::from_key(&get("quality").unwrap_or_default()),
+            match_refresh: yes("match-refresh", true),
+            scroll_reversed: yes("scroll-reversed", false),
+            ctrl_as_command: yes("ctrl-as-command", false),
+            sound: yes("sound", false),
+            clipboard: yes("clipboard", false),
+            folder: get("folder").unwrap_or_default(),
+            other: text.lines().filter_map(|l| l.split_once('=')).filter(|(k, _)| !SETTINGS_KEYS.contains(k)).map(|(k, v)| (k.to_owned(), v.to_owned())).collect(),
         };
         let mut store = Self { dir: dir.to_owned(), computers: Vec::new(), settings, pretend: false };
         if let Ok(text) = std::fs::read_to_string(dir.join("viewer-computers")) {
             for line in text.lines() {
                 if line == "[computer]" {
-                    store.computers.push(Computer { name: String::new(), address: String::new(), os: String::new(), paired: 0, used: 0, placement: Placement::Extend, quality: None, bitrate: 0 });
+                    store.computers.push(Computer { sound: false, clipboard: false, ..Computer::new("", "", "", 0, &store.settings) });
                     continue;
                 }
                 let (Some(c), Some((key, value))) = (store.computers.last_mut(), line.split_once('=')) else { continue };
@@ -168,7 +246,10 @@ impl Store {
                     "placement" => c.placement = placement_from_key(value).unwrap_or(Placement::Extend),
                     "quality" => c.quality = (value != "same").then(|| Quality::from_key(value)),
                     "bitrate" => c.bitrate = value.parse().unwrap_or(0),
-                    _ => {}
+                    "picture-lines" => c.max_height = if value == "window" { WINDOW } else { value.parse().unwrap_or(0) },
+                    "sound" => c.sound = value == "yes",
+                    "clipboard" => c.clipboard = value == "yes",
+                    other => c.other.push((other.to_owned(), value.to_owned())),
                 }
             }
             store.computers.retain(|c| !c.address.is_empty());
@@ -180,6 +261,14 @@ impl Store {
     /// Where the core keeps the fingerprint of the computer at this address.
     fn known(&self, address: &str) -> PathBuf {
         self.dir.join("client/hosts").join(address.replace([':', '/'], "_"))
+    }
+
+    /// Where files from a computer go: the folder chosen, or Downloads.
+    pub fn receive_folder(&self) -> PathBuf {
+        if !self.settings.folder.is_empty() {
+            return PathBuf::from(&self.settings.folder);
+        }
+        PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_else(|| ".".into())).join("Downloads")
     }
 
     /// The computer's key fingerprint, if this PC is paired with it.
@@ -213,7 +302,7 @@ impl Store {
             }
             None => {
                 let name = if host_name.is_empty() { host_part(address) } else { host_name };
-                self.computers.push(Computer { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0 });
+                self.computers.push(Computer::new(name, address, os, now, &self.settings));
             }
         }
         self.sort();
@@ -272,7 +361,7 @@ impl Store {
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         for c in &self.computers {
             out += &format!(
-                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\n",
+                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\npicture-lines={}\nsound={}\nclipboard={}\n",
                 clean(&c.name),
                 clean(&c.address),
                 clean(&c.os),
@@ -280,8 +369,14 @@ impl Store {
                 c.used,
                 placement_key(c.placement),
                 c.quality.map_or("same", |q| q.key()),
-                c.bitrate
+                c.bitrate,
+                if c.max_height == WINDOW { "window".to_owned() } else { c.max_height.to_string() },
+                if c.sound { "yes" } else { "no" },
+                if c.clipboard { "yes" } else { "no" },
             );
+            for (key, value) in &c.other {
+                out += &format!("{key}={}\n", clean(value));
+            }
         }
         let _ = std::fs::create_dir_all(&self.dir);
         let _ = std::fs::write(self.dir.join("viewer-computers"), out);
@@ -293,15 +388,24 @@ impl Store {
         }
         let s = &self.settings;
         let yes = |b: bool| if b { "yes" } else { "no" };
-        let out = format!(
-            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\n",
+        let mut out = format!(
+            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\nsound={}\nclipboard={}\nfolder={}\n",
             placement_key(s.placement),
             yes(s.hover_bar),
             yes(s.figures),
             yes(s.fullscreen),
             yes(s.shortcuts),
-            s.quality.key()
+            s.quality.key(),
+            yes(s.match_refresh),
+            yes(s.scroll_reversed),
+            yes(s.ctrl_as_command),
+            yes(s.sound),
+            yes(s.clipboard),
+            s.folder.replace(['\n', '\r'], " "),
         );
+        for (key, value) in &s.other {
+            out += &format!("{key}={value}\n");
+        }
         let _ = std::fs::create_dir_all(&self.dir);
         let _ = std::fs::write(self.dir.join("viewer-settings"), out);
     }

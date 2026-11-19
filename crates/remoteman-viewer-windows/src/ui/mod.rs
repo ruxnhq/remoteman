@@ -93,6 +93,9 @@ pub struct Frame {
 
 pub type Id = u64;
 
+/// What stands for each letter of a password.
+pub const DOT: u16 = 0x2022;
+
 /// A control's name as a number.
 pub fn id(name: &str) -> Id {
     name.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)) | 1
@@ -511,6 +514,12 @@ impl<'a> Ui<'a> {
             self.fill(r, 4.0, t.ac);
             self.unclip();
         }
+    }
+
+    /// A field for a password: every letter is drawn as a dot.
+    pub fn secret(&mut self, id: Id, r: Rect, field: &Field, en: En) {
+        let dots = Field { text: vec![DOT; field.text.len()], caret: field.caret, anchor: field.anchor };
+        self.field(id, r, &dots, en);
     }
 
     /// A flyout's or dialog's body: shadow, fill, hairline.

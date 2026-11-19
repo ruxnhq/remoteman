@@ -8,8 +8,8 @@
 pub mod blob;
 pub mod ffi;
 pub mod host;
-#[cfg(unix)]
 pub mod receive;
+// The relay talks over a Unix socket.
 #[cfg(unix)]
 pub mod relay;
 
