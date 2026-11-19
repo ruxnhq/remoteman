@@ -24,6 +24,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\sharing.ico</ApplicationIcon>
+    <!-- Makes the resource index (.pri) the unpackaged app finds its XAML through. -->
+    <EnableMsixTooling>true</EnableMsixTooling>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup>
