@@ -119,12 +119,25 @@ fn run() -> anyhow::Result<i32> {
     let gpu = gpu::Gpu::open()?;
     say!("gpu: {}", gpu.name);
     let mut decoders = Vec::new();
+    // Any maker's card that decodes through Direct3D 11 video does; what a card doesn't
+    // decode is decoded on the CPU, the last resort (REMOTEMAN_SOFTWARE=1 does so for all of
+    // it, to try that way on a card that needs none of it).
+    let forced = std::env::var("REMOTEMAN_SOFTWARE").as_deref() == Ok("1");
     for mode in &args.decoders {
-        match gpu.decodes(*mode) {
+        let on_card = if forced { Err(anyhow::anyhow!("REMOTEMAN_SOFTWARE=1")) } else { gpu.decodes(*mode) };
+        match on_card {
             Ok(()) => decoders.push(*mode),
-            Err(e) => say!("decoder {:?} left out: {e:#}", mode.codec),
+            Err(e) => match decode::use_software(mode.codec) {
+                Ok(()) => {
+                    say!("decoder {:?}: not on this card ({e:#}); on the CPU instead", mode.codec);
+                    decoders.push(*mode);
+                }
+                Err(soft) => say!("decoder {:?} left out: {e:#}; {soft:#}", mode.codec),
+            },
         }
     }
+    // What the card decodes is offered first.
+    decoders.sort_by_key(|m| decode::is_software(m.codec));
     // With none, the app still opens: the list, the settings and the reason are worth showing.
     say!("decoders offered: {}", decoders.iter().map(|m| format!("{:?}", m.codec).to_lowercase()).collect::<Vec<_>>().join(", "));
     anyhow::ensure!(!decoders.is_empty() || args.host.is_none(), "this card decodes none of what was asked for");

@@ -322,7 +322,7 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Stream(i) => {
-                decoder = Some(Decoder::new(gpu, i.mode.codec, sampled)?);
+                decoder = Some(if crate::decode::is_software(i.mode.codec) { Decoder::software(gpu, i.mode.codec)? } else { Decoder::new(gpu, i.mode.codec, sampled)? });
                 first = true;
                 info = Some(i);
             }
@@ -330,7 +330,7 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
                 let (Some(d), Some(i)) = (decoder.as_mut(), info.as_ref()) else { continue };
                 let t = std::time::Instant::now();
                 let mut decoded = d.decode(&data, age);
-                if first && sampled && decoded.is_err() {
+                if first && sampled && decoded.is_err() && !crate::decode::is_software(i.mode.codec) {
                     // The card is only asked for its textures at the first frame, a keyframe.
                     // Try that frame again with textures for decoding alone.
                     say!("no decoder textures that can be sampled ({:#}): copying each picture on the GPU instead", decoded.as_ref().err().unwrap());

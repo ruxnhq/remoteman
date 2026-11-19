@@ -14,8 +14,11 @@ use crate::ui::{Align, En, Font, Id, Kind, Look, ON, Op, Rect, Ui, id, idn, off,
 pub const TITLE: f32 = 40.0;
 
 pub fn view(app: &App, ui: &mut Ui) {
-    let (whole, bg) = (ui.whole(), ui.t.bg);
-    ui.fill(whole, 0.0, bg);
+    // (On Mica the window's backdrop is the page's background.)
+    if !app.mica {
+        let (whole, bg) = (ui.whole(), ui.t.bg);
+        ui.fill(whole, 0.0, bg);
+    }
     match &app.screen {
         Screen::Connecting => connecting(app, ui),
         Screen::Problem(target, problem) => trouble(app, ui, target, problem),

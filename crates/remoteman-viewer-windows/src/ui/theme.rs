@@ -93,6 +93,11 @@ pub const DARK: Theme = Theme {
     shadow: 0.55,
 };
 
+/// On Mica, as WinUI 3 has them: cards and controls are a thin layer of white that lets the
+/// backdrop through, with a hairline round them.
+pub const LIGHT_ON_MICA: Theme = Theme { card: rgba(0xFFFFFF, 0.70), line: rgba(0x000000, 0.0803), ..LIGHT };
+pub const DARK_ON_MICA: Theme = Theme { card: rgba(0xFFFFFF, 0.0512), line: rgba(0xFFFFFF, 0.0837), ..DARK };
+
 /// The bar that floats over the picture, and its menus: dark whatever the system says, since
 /// what is under it is somebody's desktop.
 pub const OVER: Theme = Theme { line: rgba(0xFFFFFF, 0.13), sub: rgba(0xFFFFFF, 0.08), ..DARK };

@@ -267,6 +267,9 @@ pub struct App {
     pub fonts: Fonts,
     pub store: Store,
     pub dark: bool,
+    /// The window's backdrop is Windows' Mica, which shows wherever nothing is drawn: the
+    /// pages then have no fill of their own.
+    pub mica: bool,
     /// The window's client area in the design's pixels, and device pixels to one of those.
     pub size: (f32, f32),
     pub scale: f32,
@@ -340,6 +343,7 @@ impl App {
             fonts: Fonts::new()?,
             store,
             dark,
+            mica: false,
             size: (984.0, 644.0),
             scale: 1.0,
             maximised: false,
@@ -389,7 +393,12 @@ impl App {
     }
 
     pub fn theme(&self) -> ui::Theme {
-        if self.dark { theme::DARK } else { theme::LIGHT }
+        match (self.mica, self.dark) {
+            (true, true) => theme::DARK_ON_MICA,
+            (true, false) => theme::LIGHT_ON_MICA,
+            (false, true) => theme::DARK,
+            (false, false) => theme::LIGHT,
+        }
     }
 
     /// Keys and the pointer go to the other computer: its picture is what the window shows,
@@ -1900,7 +1909,8 @@ impl App {
             self.dirty = true;
         }
         self.serial += 1;
-        let frame = Frame { ops, scale: self.scale, video: self.video_pixels(), serial: self.serial };
+        let backdrop = if self.dark { theme::DARK.bg } else { theme::LIGHT.bg };
+        let frame = Frame { ops, scale: self.scale, video: self.video_pixels(), serial: self.serial, backdrop };
         *self.scene.frame.lock().unwrap() = Some(Arc::new(frame));
         self.scene.poke();
         self.serial

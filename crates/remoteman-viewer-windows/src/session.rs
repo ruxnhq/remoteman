@@ -209,7 +209,9 @@ pub fn view(app: &App, ui: &mut Ui) {
         }
     } else {
         let (w, t) = (ui.w, ui.t);
-        ui.fill(rect(0.0, 0.0, w, BAR), 0.0, t.bg);
+        if !app.mica {
+            ui.fill(rect(0.0, 0.0, w, BAR), 0.0, t.bg);
+        }
         ui.region(id("title"), rect(0.0, 0.0, w, BAR), Kind::Drag, None, ON, "", false);
         let list = pieces(app, s, false);
         lay(ui, list, 12.0, 0.0, w - 12.0 - 142.0);

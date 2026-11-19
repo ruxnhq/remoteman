@@ -39,6 +39,11 @@ const NOTCH: f32 = 40.0;
 /// Text on the clipboard, as UTF-16.
 const CF_UNICODETEXT: u32 = 13;
 
+/// An ordinary window that can be sized, minimised and maximised, but without Windows' own
+/// system menu: with the frame extended over the whole window for the backdrop, Windows would
+/// otherwise draw its own three buttons under ours.
+const STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 & !WS_SYSMENU.0);
+
 /// Going through the screens for pictures of them (`--ui`).
 struct Walk {
     steps: Vec<String>,
@@ -93,6 +98,22 @@ pub fn system_dark() -> bool {
     // SAFETY: the out pointers are valid for the sizes given.
     let read = unsafe { RegGetValueW(HKEY_CURRENT_USER, w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), w!("AppsUseLightTheme"), RRF_RT_REG_DWORD, None, Some(&mut value as *mut u32 as *mut _), Some(&mut size)) };
     read.is_ok() && value == 0
+}
+
+/// Give the window Windows 11's Mica as its backdrop, in the light or the dark tint. False
+/// where Windows has none (before Windows 11 22H2).
+fn backdrop(hwnd: HWND, dark: bool) -> bool {
+    use windows::Win32::Graphics::Dwm::{DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
+    // SAFETY: each attribute is given with its own size.
+    unsafe {
+        let dark = windows::core::BOOL::from(dark);
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, 4);
+        // The backdrop is drawn wherever the frame is, so the frame is made the whole window.
+        let all = windows::Win32::UI::Controls::MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &all);
+        let kind = DWMSBT_MAINWINDOW;
+        DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &kind as *const _ as *const _, 4).is_ok()
+    }
 }
 
 /// Ask the window (from any thread) to look at what has changed.
@@ -200,8 +221,11 @@ pub fn create(mut app: App) -> Result<HWND> {
             ..Default::default()
         };
         anyhow::ensure!(RegisterClassW(&class) != 0, "register the window class");
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("remoteman"), w!("remoteman"), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1000, 700, None, None, Some(instance.into()), None).context("create the window")?;
+        // No surface of Windows' own: what is on the window is the draw thread's layers.
+        let hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, w!("remoteman"), w!("remoteman"), STYLE, CW_USEDEFAULT, CW_USEDEFAULT, 1000, 700, None, None, Some(instance.into()), None).context("create the window")?;
 
+        app.mica = backdrop(hwnd, app.dark);
+        say!("window: {}", if app.mica { "Mica behind it, kept when another window has the keyboard" } else { "no Mica on this Windows: a plain background" });
         let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
         let (mw, mh, hz, _, work) = monitor_of(hwnd);
         app.scale = scale;
@@ -748,6 +772,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 params.rgrc[0].top = if IsZoomed(hwnd).as_bool() { top + GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi) } else { top };
                 return result;
             }
+            // Windows takes Mica away from a window that hasn't the keyboard, leaving a flat
+            // colour. It goes by whether the frame is drawn as active: so it always is.
+            WM_NCACTIVATE => return DefWindowProcW(hwnd, msg, WPARAM(1), l),
             WM_NCHITTEST => {
                 let hit = pass();
                 if hit.0 as u32 != HTCLIENT || win.full.get() {
@@ -882,6 +909,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             WM_SETTINGCHANGE => {
                 if win.follow_theme {
                     let dark = system_dark();
+                    if win.ask(|app| app.mica).unwrap_or(false) {
+                        backdrop(hwnd, dark);
+                    }
                     win.event(|app| app.set_dark(dark));
                 }
                 return pass();

@@ -89,6 +89,8 @@ pub struct Frame {
     pub video: Option<(i32, i32, i32, i32)>,
     /// Counts up; a picture of the window waits for the frame it asked for.
     pub serial: u64,
+    /// What a saved picture of the window puts where the window's backdrop shows through.
+    pub backdrop: Color,
 }
 
 pub type Id = u64;

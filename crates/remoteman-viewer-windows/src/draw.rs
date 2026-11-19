@@ -1,10 +1,12 @@
 //! The draw thread: a flip-model swap chain on the window, and on it, at each refresh of the
 //! display, the newest decoded picture with the interface over it.
 //!
-//! The interface is drawn by Direct2D, which doesn't draw into a 10-bit buffer (asked once at
-//! the start, and what it answers is logged). So it is drawn into a texture of its own, 8 bits
-//! a channel with transparency, whenever it changes, and that texture is laid over the picture
-//! in the back buffer by one more draw. The picture's own way to the screen is as it was: the
+//! The window has no surface of Windows' own. What is on it is two layers put together by the
+//! desktop's compositor (DirectComposition): below, the picture, in a swap chain of 10 bits a
+//! channel that is only there while a session is, and only where the picture goes; above it,
+//! the interface, which Direct2D draws straight into a second swap chain of 8 bits a channel
+//! with transparency (Direct2D doesn't draw into a 10-bit buffer). Where neither has anything,
+//! the window's backdrop shows: Mica. The picture's own way to the screen is as it was: the
 //! decoder's texture sampled straight into the 10-bit buffer. All of this, Direct2D included,
 //! happens on this thread, so the interface never holds the device's lock from another.
 //!
@@ -29,6 +31,7 @@ use windows::Win32::Foundation::{DXGI_STATUS_OCCLUDED, HANDLE, HWND};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_SRV_DIMENSION_TEXTURE2DARRAY, ID3DBlob};
 use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::DirectComposition::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Threading::WaitForSingleObject;
@@ -74,13 +77,6 @@ float4 ps(Corner c) : SV_Target {
     float2 cc = (chroma.Sample(smooth, at) * scale - mid) / crange;
     return float4(y + 1.5748 * cc.y, y - 0.1873 * cc.x - 0.4681 * cc.y, y + 1.8556 * cc.x, 1);
 }
-
-// The interface: a texture of the window's size, its colours already multiplied by alpha.
-Texture2D<float4> sheet : register(t2);
-
-float4 ps_sheet(Corner c) : SV_Target {
-    return sheet.Sample(smooth, c.uv);
-}
 ";
 
 fn compile(entry: PCSTR, target: PCSTR) -> Result<Vec<u8>> {
@@ -109,8 +105,6 @@ struct Drawer {
     swap: IDXGISwapChain1,
     /// Signalled when the swap chain has room for another picture.
     room: HANDLE,
-    /// The swap chain's pixel format: 10 bits a channel where the system gives it.
-    format: DXGI_FORMAT,
     target: Option<ID3D11RenderTargetView>,
     /// The size the swap chain's buffers are now.
     size: (u32, u32),
@@ -127,14 +121,16 @@ struct Drawer {
     /// The picture on screen, kept for drawing again when the window or the interface changes.
     shown: Option<Picture>,
     painter: Painter,
-    ps_sheet: ID3D11PixelShader,
-    /// Lays the interface over the picture.
-    over: ID3D11BlendState,
-    /// The interface's texture, what Direct2D draws into it through, and what the shader reads
-    /// it through; made anew when the window changes size.
-    sheet: Option<(ID3D11Texture2D, windows::Win32::Graphics::Direct2D::ID2D1Bitmap1, ID3D11ShaderResourceView)>,
-    /// Whether the sheet has anything on it.
-    painted: bool,
+    /// The interface's layer, and what Direct2D draws into it through (made anew when the
+    /// window changes size).
+    ui_swap: IDXGISwapChain1,
+    ui_target: Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
+    /// The compositor's side: the device, the window's target (kept alive), and the picture's
+    /// layer with the part of the window it is cut to (`None`: not shown at all).
+    dcomp: IDCompositionDevice,
+    _target: IDCompositionTarget,
+    video_visual: IDCompositionVisual,
+    clip: Option<Option<(i32, i32, i32, i32)>>,
 }
 
 fn plane_formats(format: DXGI_FORMAT) -> Result<(DXGI_FORMAT, DXGI_FORMAT)> {
@@ -151,10 +147,12 @@ impl Drawer {
         // through each call.
         unsafe {
             let factory: IDXGIFactory2 = gpu.device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
+            let mut client = windows::Win32::Foundation::RECT::default();
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+            let (width, height) = (client.right.max(8) as u32, client.bottom.max(8) as u32);
             let mut desc = DXGI_SWAP_CHAIN_DESC1 {
-                // 0: the window's size.
-                Width: 0,
-                Height: 0,
+                Width: width,
+                Height: height,
                 Format: DXGI_FORMAT_R10G10B10A2_UNORM,
                 SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -165,17 +163,27 @@ impl Drawer {
                 Flags: WAITABLE.0 as u32,
                 ..Default::default()
             };
-            // The stream is 10-bit, so the buffers are too where that is allowed.
-            let swap = match factory.CreateSwapChainForHwnd(&gpu.device, hwnd, &desc, None, None) {
+            // The stream is 10-bit, so the picture's buffers are too where that is allowed.
+            let swap = match factory.CreateSwapChainForComposition(&gpu.device, &desc, None) {
                 Ok(swap) => swap,
                 Err(e) => {
                     say!("no 10-bit swap chain ({e}): 8-bit");
                     desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-                    factory.CreateSwapChainForHwnd(&gpu.device, hwnd, &desc, None, None).context("create the swap chain")?
+                    factory.CreateSwapChainForComposition(&gpu.device, &desc, None).context("create the picture's swap chain")?
                 }
             };
-            // Alt+Enter is the other computer's.
-            let _ = factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+            // The interface's: Direct2D's own format, transparent where nothing is drawn.
+            let ui_desc = DXGI_SWAP_CHAIN_DESC1 { Format: DXGI_FORMAT_B8G8R8A8_UNORM, SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED, Flags: 0, ..desc };
+            let ui_swap = factory.CreateSwapChainForComposition(&gpu.device, &ui_desc, None).context("create the interface's swap chain")?;
+            let dcomp: IDCompositionDevice = DCompositionCreateDevice(&gpu.device.cast::<IDXGIDevice>()?).context("no DirectComposition")?;
+            let target = dcomp.CreateTargetForHwnd(hwnd, true).context("a composition target for the window")?;
+            let (root, video_visual, ui_visual) = (dcomp.CreateVisual()?, dcomp.CreateVisual()?, dcomp.CreateVisual()?);
+            video_visual.SetContent(&swap)?;
+            ui_visual.SetContent(&ui_swap)?;
+            root.AddVisual(&video_visual, false, None)?;
+            root.AddVisual(&ui_visual, true, &video_visual)?;
+            target.SetRoot(&root)?;
+            dcomp.Commit()?;
             let now = swap.GetDesc1()?;
             let latency: IDXGISwapChain2 = swap.cast()?;
             latency.SetMaximumFrameLatency(1)?;
@@ -200,37 +208,11 @@ impl Drawer {
             say!("swap chain: {}x{}, {}, flip model", now.Width, now.Height, if now.Format == DXGI_FORMAT_R10G10B10A2_UNORM { "10 bits a channel" } else { "8 bits a channel" });
 
             let painter = Painter::new(&gpu.device)?;
-            say!("interface: Direct2D on the same device, text in {}", painter.family());
-            {
-                // Could Direct2D draw straight into the back buffer? Only asked, to have it on
-                // record; the answer for a 10-bit one is no.
-                let back: IDXGISurface = swap.GetBuffer(0)?;
-                match painter.target_as(&back, now.Format) {
-                    Ok(_) => say!("interface: Direct2D would draw into this back buffer itself; it is drawn into its own texture all the same"),
-                    Err(e) => say!("interface: Direct2D doesn't draw into this back buffer ({e:#}), so it draws into a texture of its own that is laid over the picture"),
-                }
-            }
-            let ps_sheet_code = compile(windows::core::s!("ps_sheet"), windows::core::s!("ps_5_0"))?;
-            let mut ps_sheet = None;
-            gpu.device.CreatePixelShader(&ps_sheet_code, None, Some(&mut ps_sheet))?;
-            let mut blend = D3D11_BLEND_DESC::default();
-            blend.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
-                BlendEnable: true.into(),
-                SrcBlend: D3D11_BLEND_ONE,
-                DestBlend: D3D11_BLEND_INV_SRC_ALPHA,
-                BlendOp: D3D11_BLEND_OP_ADD,
-                SrcBlendAlpha: D3D11_BLEND_ONE,
-                DestBlendAlpha: D3D11_BLEND_INV_SRC_ALPHA,
-                BlendOpAlpha: D3D11_BLEND_OP_ADD,
-                RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
-            };
-            let mut over = None;
-            gpu.device.CreateBlendState(&blend, Some(&mut over))?;
+            say!("interface: Direct2D on the same device, in a layer of its own over the picture's; text in {}", painter.family());
             Ok(Self {
                 gpu,
                 swap,
                 room,
-                format: now.Format,
                 target: None,
                 size: (now.Width, now.Height),
                 vs: vs.context("no vertex shader")?,
@@ -242,10 +224,12 @@ impl Drawer {
                 own: None,
                 shown: None,
                 painter,
-                ps_sheet: ps_sheet.context("no pixel shader")?,
-                over: over.context("no blend state")?,
-                sheet: None,
-                painted: false,
+                ui_swap,
+                ui_target: None,
+                dcomp,
+                _target: target,
+                video_visual,
+                clip: None,
             })
         }
     }
@@ -272,6 +256,30 @@ impl Drawer {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: the out pointer is valid.
         unsafe { picture.texture.GetDesc(&mut desc) };
+        if let Some(chroma) = &picture.chroma {
+            // Decoded on the CPU: two plain textures, made for sampling.
+            let key = (picture.texture.as_raw() as usize, 0);
+            if let Some(planes) = self.views.get(&key) {
+                return Ok((planes.clone(), desc));
+            }
+            let view = |texture: &ID3D11Texture2D, format| -> Result<ID3D11ShaderResourceView> {
+                let d = D3D11_SHADER_RESOURCE_VIEW_DESC {
+                    Format: format,
+                    ViewDimension: D3D_SRV_DIMENSION_TEXTURE2DARRAY,
+                    Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 { Texture2DArray: D3D11_TEX2D_ARRAY_SRV { MostDetailedMip: 0, MipLevels: 1, FirstArraySlice: 0, ArraySize: 1 } },
+                };
+                let mut view = None;
+                // SAFETY: the description lives through the call.
+                unsafe { self.gpu.device.CreateShaderResourceView(texture, Some(&d), Some(&mut view))? };
+                view.context("no view")
+            };
+            let planes = Planes { luma: view(&picture.texture, DXGI_FORMAT_R16_UNORM)?, chroma: view(chroma, DXGI_FORMAT_R16G16_UNORM)? };
+            if self.views.len() > 16 {
+                self.views.clear();
+            }
+            self.views.insert(key, planes.clone());
+            return Ok((planes, desc));
+        }
         if !self.copying {
             let key = (picture.texture.as_raw() as usize, picture.slice);
             if let Some(planes) = self.views.get(&key) {
@@ -321,49 +329,46 @@ impl Drawer {
         }
         // Nothing may hold the old buffers while they are replaced.
         self.target = None;
-        self.sheet = None;
-        self.painted = false;
+        self.ui_target = None;
         // SAFETY: calls on interfaces we hold.
         unsafe {
             self.gpu.context.OMSetRenderTargets(None, None);
             self.swap.ResizeBuffers(0, to.0, to.1, DXGI_FORMAT_UNKNOWN, WAITABLE).context("resize the swap chain")?;
+            self.ui_swap.ResizeBuffers(0, to.0, to.1, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)).context("resize the interface's swap chain")?;
         }
         self.size = to;
         Ok(true)
     }
 
-    /// Draw the interface into its texture.
+    /// Draw the interface into its layer's back buffer.
     fn paint(&mut self, frame: &crate::ui::Frame) -> Result<()> {
-        if self.sheet.is_none() {
-            let desc = D3D11_TEXTURE2D_DESC {
-                Width: self.size.0,
-                Height: self.size.1,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-                ..Default::default()
-            };
-            // SAFETY: the description lives through the calls.
+        if self.ui_target.is_none() {
+            // SAFETY: a call on the swap chain; with the flip model, buffer 0 is always the
+            // one being drawn, so what is made on it lasts until the size changes.
+            let back: IDXGISurface = unsafe { self.ui_swap.GetBuffer(0)? };
+            self.ui_target = Some(self.painter.target(&back)?);
+        }
+        let bitmap = self.ui_target.clone().unwrap();
+        self.painter.paint(&bitmap, frame)
+    }
+
+    /// Show the picture's layer in this part of the window only (in pixels), or not at all.
+    fn place_video(&mut self, area: Option<(i32, i32, i32, i32)>) -> Result<()> {
+        if self.clip != Some(area) {
+            self.clip = Some(area);
+            let (x, y, w, h) = area.unwrap_or((0, 0, 0, 0));
+            let r = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F { left: x as f32, top: y as f32, right: (x + w) as f32, bottom: (y + h) as f32 };
+            // SAFETY: calls on interfaces held here; the rectangle lives through the call.
             unsafe {
-                let (mut texture, mut view) = (None, None);
-                self.gpu.device.CreateTexture2D(&desc, None, Some(&mut texture)).context("a texture for the interface")?;
-                let texture = texture.context("no texture")?;
-                self.gpu.device.CreateShaderResourceView(&texture, None, Some(&mut view))?;
-                let bitmap = self.painter.target(&texture.cast::<IDXGISurface>()?)?;
-                self.sheet = Some((texture, bitmap, view.context("no view")?));
+                self.video_visual.SetClip2(&r)?;
+                self.dcomp.Commit()?;
             }
         }
-        let bitmap = self.sheet.as_ref().unwrap().1.clone();
-        self.painter.paint(&bitmap, frame)?;
-        self.painted = !frame.ops.is_empty();
         Ok(())
     }
 
-    /// Draw the back buffer: black, the picture (if there is one and somewhere for it to go)
-    /// as large as fits `video` with its shape kept, and the interface over it.
+    /// Draw the picture's back buffer: black, and the picture (if there is one and somewhere
+    /// for it to go) as large as fits `video` with its shape kept.
     fn draw(&mut self, picture: Option<&Picture>, video: Option<(i32, i32, i32, i32)>) -> Result<()> {
         let planes = match (picture, video) {
             (Some(picture), Some(_)) => Some((self.planes(picture)?, picture)),
@@ -393,9 +398,8 @@ impl Drawer {
             ctx.HSSetShader(None, None);
             ctx.DSSetShader(None, None);
             ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
-            let (ww, wh) = (self.size.0 as f32, self.size.1 as f32);
             if let (Some(((planes, desc), picture)), Some(area)) = (planes, video) {
-                let ten = desc.Format == DXGI_FORMAT_P010;
+                let ten = desc.Format == DXGI_FORMAT_P010 || desc.Format == DXGI_FORMAT_R16_UNORM;
                 // P010 keeps its 10 bits at the top of 16: a normalised sample times 65535/64 is
                 // the 10-bit code.
                 let (scale, black, yrange, mid, crange) = if ten { (65535.0 / 64.0, 64.0, 876.0, 512.0, 896.0) } else { (255.0, 16.0, 219.0, 128.0, 224.0) };
@@ -415,26 +419,18 @@ impl Drawer {
                 // Let go of the slice, so the decoder may write to it again when its turn comes.
                 ctx.PSSetShaderResources(0, Some(&[None, None]));
             }
-            if let (Some((_, _, sheet)), true) = (&self.sheet, self.painted) {
-                ctx.RSSetViewports(Some(&[D3D11_VIEWPORT { TopLeftX: 0.0, TopLeftY: 0.0, Width: ww, Height: wh, MinDepth: 0.0, MaxDepth: 1.0 }]));
-                ctx.OMSetBlendState(&self.over, None, u32::MAX);
-                ctx.PSSetShader(&self.ps_sheet, None);
-                ctx.PSSetShaderResources(2, Some(&[Some(sheet.clone())]));
-                ctx.Draw(3, 0);
-                // Direct2D can't draw into a texture that is still bound for reading.
-                ctx.PSSetShaderResources(2, Some(&[None]));
-                ctx.OMSetBlendState(None, None, u32::MAX);
-            }
+            // Direct2D draws with the same context: leave nothing of ours bound to it.
+            ctx.OMSetRenderTargets(None, None);
         }
         Ok(())
     }
 
-    /// The back buffer as it is about to be presented, copied down and saved.
-    fn shot(&self, path: &std::path::Path) -> Result<()> {
+    /// A swap chain's back buffer copied down: its size and its pixels as they lie in memory.
+    fn read(&self, swap: &IDXGISwapChain1) -> Result<(usize, usize, DXGI_FORMAT, Vec<u8>)> {
         // SAFETY: the staging texture is mapped for reading and unmapped again; rows are read
         // within the mapped pitch and height.
         unsafe {
-            let back: ID3D11Texture2D = self.swap.GetBuffer(0)?;
+            let back: ID3D11Texture2D = swap.GetBuffer(0)?;
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             back.GetDesc(&mut desc);
             let d = D3D11_TEXTURE2D_DESC { Usage: D3D11_USAGE_STAGING, BindFlags: 0, CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32, MiscFlags: 0, ..desc };
@@ -445,23 +441,50 @@ impl Drawer {
             let mut map = D3D11_MAPPED_SUBRESOURCE::default();
             self.gpu.context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut map))?;
             let (w, h) = (desc.Width as usize, desc.Height as usize);
-            let mut rgb = Vec::with_capacity(w * h * 3);
+            let mut out = Vec::with_capacity(w * h * 4);
             for row in 0..h {
-                let line = std::slice::from_raw_parts((map.pData as *const u8).add(row * map.RowPitch as usize), w * 4);
-                for px in line.chunks_exact(4) {
-                    if self.format == DXGI_FORMAT_R10G10B10A2_UNORM {
-                        // Red in the low 10 bits, then green, then blue; the PNG gets the top 8.
-                        let v = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
-                        rgb.extend_from_slice(&[(v >> 2) as u8, (v >> 12) as u8, (v >> 22) as u8]);
-                    } else {
-                        rgb.extend_from_slice(&[px[2], px[1], px[0]]);
-                    }
-                }
+                out.extend_from_slice(std::slice::from_raw_parts((map.pData as *const u8).add(row * map.RowPitch as usize), w * 4));
             }
             self.gpu.context.Unmap(&staging, 0);
-            crate::shot::save(path, desc.Width, desc.Height, &rgb)?;
-            say!("shot: {} ({}x{}, the back buffer before it was presented)", path.display(), desc.Width, desc.Height);
+            Ok((w, h, desc.Format, out))
         }
+    }
+
+    /// The window as it is about to be shown, put together here as the compositor will: the
+    /// picture where its layer shows (if `picture`), `backdrop` elsewhere, the interface over
+    /// both. The only place pixels come to CPU memory.
+    fn shot(&self, path: &std::path::Path, backdrop: crate::ui::Color, picture: bool) -> Result<()> {
+        let (w, h, _, ui) = self.read(&self.ui_swap)?;
+        let under = if picture { Some(self.read(&self.swap)?) } else { None };
+        let clip = self.clip.flatten().unwrap_or((0, 0, 0, 0));
+        let back = [(backdrop.0 * 255.0) as u8, (backdrop.1 * 255.0) as u8, (backdrop.2 * 255.0) as u8];
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let inside = (x as i32) >= clip.0 && (y as i32) >= clip.1 && (x as i32) < clip.0 + clip.2 && (y as i32) < clip.1 + clip.3;
+                let below = match &under {
+                    Some((vw, vh, format, px)) if inside && x < *vw && y < *vh => {
+                        let j = (y * vw + x) * 4;
+                        if *format == DXGI_FORMAT_R10G10B10A2_UNORM {
+                            // Red in the low 10 bits, then green, then blue; the PNG gets the top 8.
+                            let v = u32::from_le_bytes([px[j], px[j + 1], px[j + 2], px[j + 3]]);
+                            [(v >> 2) as u8, (v >> 12) as u8, (v >> 22) as u8]
+                        } else {
+                            [px[j + 2], px[j + 1], px[j]]
+                        }
+                    }
+                    _ => back,
+                };
+                // The interface's colours are already multiplied by its alpha.
+                let keep = 255 - ui[i + 3] as u32;
+                for (c, over) in [ui[i + 2], ui[i + 1], ui[i]].into_iter().enumerate() {
+                    rgb.push((over as u32 + (below[c] as u32 * keep + 127) / 255).min(255) as u8);
+                }
+            }
+        }
+        crate::shot::save(path, w as u32, h as u32, &rgb)?;
+        say!("shot: {} ({w}x{h}, the window's layers as they are about to be shown)", path.display());
         Ok(())
     }
 }
@@ -520,46 +543,66 @@ fn run(gpu: Gpu, scene: &Scene, hwnd: HWND, mut shot: Option<PathBuf>) -> Result
         let fresh = session.as_ref().and_then(|s| s.picture.lock().unwrap().take());
         changed |= drawer.resize(unpack(scene.client_size.load(Ordering::Relaxed)))?;
         let frame = scene.frame.lock().unwrap().clone();
+        let mut painted = false;
         if let Some(frame) = &frame {
-            if drawer.sheet.is_none() || drawn.as_ref().is_none_or(|d| d.serial != frame.serial) {
+            if drawer.ui_target.is_none() || drawn.as_ref().is_none_or(|d| d.serial != frame.serial) {
                 drawer.paint(frame)?;
                 drawn = Some(frame.clone());
-                changed = true;
+                painted = true;
             }
         }
+        // The picture's layer is there while a session is, where the interface leaves room.
+        let whole = Some((0, 0, drawer.size.0 as i32, drawer.size.1 as i32));
+        let video = frame.as_ref().map_or(whole, |f| f.video);
+        let before = drawer.clip;
+        drawer.place_video(if session.is_some() { video } else { None })?;
+        changed |= drawer.clip != before;
         let new = fresh.is_some();
         if let Some(picture) = fresh {
             drawer.shown = Some(picture);
         }
         // A picture of the window that was asked for, once what it should show is drawn.
         let wanted = scene.shot.lock().unwrap().as_ref().is_some_and(|(_, serial)| drawn.as_ref().is_some_and(|d| d.serial >= *serial));
-        if !new && !changed && !wanted {
+        let early = new && shot.is_some() && first.is_some_and(|t| t.elapsed() >= SHOT_AFTER);
+        // The picture's layer is drawn again for a new picture, a new size or place, and for
+        // a saved picture of the window (what was presented is no longer there to be read).
+        let draws = session.is_some() && (new || changed || wanted);
+        if !draws && !painted && !wanted {
             continue;
         }
         let picture = drawer.shown.take();
-        drawer.draw(picture.as_ref(), frame.as_ref().map_or(Some((0, 0, drawer.size.0 as i32, drawer.size.1 as i32)), |f| f.video))?;
-        if new && shot.is_some() && first.is_some_and(|t| t.elapsed() >= SHOT_AFTER) {
-            if let Err(e) = drawer.shot(&shot.take().unwrap()) {
+        if draws {
+            drawer.draw(picture.as_ref(), video)?;
+        }
+        let backdrop = frame.as_ref().map_or(crate::ui::Color(0.0, 0.0, 0.0, 1.0), |f| f.backdrop);
+        if early {
+            if let Err(e) = drawer.shot(&shot.take().unwrap(), backdrop, draws) {
                 say!("shot failed: {e:#}");
             }
         }
         if wanted {
             if let Some((path, _)) = scene.shot.lock().unwrap().take() {
-                if let Err(e) = drawer.shot(&path) {
+                if let Err(e) = drawer.shot(&path, backdrop, draws) {
                     say!("shot failed: {e:#}");
                 }
                 scene.shots.fetch_add(1, Ordering::Relaxed);
                 scene.wake_window();
             }
         }
-        // For the next refresh of the display. There is room, so this doesn't wait.
-        // SAFETY: a call on the swap chain.
-        let presented = unsafe { drawer.swap.Present(1, DXGI_PRESENT(0)) };
-        room = false;
-        presented.ok().context("present")?;
-        if (presented == DXGI_STATUS_OCCLUDED) != occluded {
-            occluded = !occluded;
-            say!("the window is {}", if occluded { "covered or has no desktop to be on: presenting isn't paced by a display" } else { "visible again" });
+        if painted {
+            // SAFETY: a call on the swap chain. The interface is shown as soon as may be.
+            unsafe { drawer.ui_swap.Present(0, DXGI_PRESENT(0)) }.ok().context("present the interface")?;
+        }
+        if draws {
+            // For the next refresh of the display. There is room, so this doesn't wait.
+            // SAFETY: a call on the swap chain.
+            let presented = unsafe { drawer.swap.Present(1, DXGI_PRESENT(0)) };
+            room = false;
+            presented.ok().context("present")?;
+            if (presented == DXGI_STATUS_OCCLUDED) != occluded {
+                occluded = !occluded;
+                say!("the window is {}", if occluded { "covered or has no desktop to be on: presenting isn't paced by a display" } else { "visible again" });
+            }
         }
         if let (true, Some(s), Some(picture)) = (new, &session, &picture) {
             first.get_or_insert_with(Instant::now);

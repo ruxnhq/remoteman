@@ -31,6 +31,10 @@ public class RmIn {
   }
   // The window's outer size, where it is.
   public static void Size(int w, int h) { SetWindowPos(Window(), IntPtr.Zero, 0, 0, w, h, 0x16); Thread.Sleep(100); }
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder s, int n);
+  // The title of the window that has the keyboard now.
+  public static string Front() { var s = new System.Text.StringBuilder(200); GetWindowTextW(GetForegroundWindow(), s, 200); return s.ToString(); }
   public static void Move(int x, int y) { P p = new P(); p.x = x; p.y = y; ClientToScreen(Window(), ref p); SetCursorPos(p.x, p.y); mouse_event(1, 0, 0, 0, UIntPtr.Zero); Thread.Sleep(30); }
   public static void Click(int x, int y) { Move(x, y); mouse_event(2, 0, 0, 0, UIntPtr.Zero); Thread.Sleep(40); mouse_event(4, 0, 0, 0, UIntPtr.Zero); Thread.Sleep(120); }
   public static void RightClick(int x, int y) { Move(x, y); mouse_event(8, 0, 0, 0, UIntPtr.Zero); Thread.Sleep(40); mouse_event(16, 0, 0, 0, UIntPtr.Zero); Thread.Sleep(120); }
