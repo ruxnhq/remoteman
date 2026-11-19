@@ -564,7 +564,11 @@ enum SessionMenus {
         }
         menu.addItem(.separator())
         menu.addItem(
-            ActionItem("Add a Second Display…", hint: "External monitor", enabled: Features.secondDisplay, width: width) {})
+            ActionItem(
+                model.secondShown ? "Remove the Second Display" : "Add a Second Display",
+                hint: session.has("displays") ? "in a window of its own" : "\(name) can't do this yet", checked: model.secondShown,
+                enabled: Features.secondDisplay && session.has("displays"), width: width
+            ) { model.toggleSecondDisplay() })
         menu.addItem(.separator())
         menu.header("Or mirror \(name)'s monitor")
         menu.addItem(

@@ -63,9 +63,20 @@ final class RefreshMeter {
         private var pendingPointer: (Float, Float)?
         private var modifiersDown: Set<UInt16> = []
 
-        init(session: ViewerSession) {
+        /// Which of the session's displays this view shows and sends its pointer to: 0 the
+        /// first, 1 the second (a window of its own; the computer draws its pointer into that picture).
+        let index: UInt8
+        private var renderer: VideoRenderer? { index == 0 ? session.renderer : session.renderer2 }
+
+        init(session: ViewerSession, index: UInt8 = 0) {
             self.session = session
+            self.index = index
             super.init(frame: .zero)
+            guard index == 0 else {
+                wantsLayer = true
+                layerContentsRedrawPolicy = .never
+                return
+            }
             wantsLayer = true
             layerContentsRedrawPolicy = .never
             session.cursorShapeChanged = { [weak self] in self?.updateCursor() }
@@ -82,7 +93,7 @@ final class RefreshMeter {
         private func updateCursor() {
             hostCursor = nil
             if let known = session.hostCursor {
-                if let c = known, let r = session.renderer, let v = r.videoSize, v.width > 0 {
+                if let c = known, let r = renderer, let v = r.videoSize, v.width > 0 {
                     // The image is in the host display's pixels; draw it at the size it has there.
                     let k = r.videoRect(in: bounds.size).width / v.width
                     let size = NSSize(width: CGFloat(c.image.width) * k, height: CGFloat(c.image.height) * k)
@@ -98,12 +109,13 @@ final class RefreshMeter {
 
         override func resetCursorRects() {
             // With the pointer drawn by the computer (in the picture) there is none of this Mac's.
+            if index != 0 { return addCursorRect(bounds, cursor: Self.noCursor) }
             addCursorRect(bounds, cursor: hostCursor ?? (InputSettings.localPointer || session.input == nil ? .arrow : Self.noCursor))
         }
 
         required init?(coder: NSCoder) { fatalError() }
 
-        override func makeBackingLayer() -> CALayer { session.renderer?.layer ?? CALayer() }
+        override func makeBackingLayer() -> CALayer { renderer?.layer ?? CALayer() }
         override var isFlipped: Bool { true }
         override var acceptsFirstResponder: Bool { true }
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -145,7 +157,7 @@ final class RefreshMeter {
         }
 
         private func resize() {
-            guard let r = session.renderer else { return }
+            guard let r = renderer else { return }
             let scale = window?.backingScaleFactor ?? 2
             r.layer.contentsScale = scale
             r.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
@@ -157,9 +169,9 @@ final class RefreshMeter {
 
         @objc private func tick() {
             flushPointer()
-            session.renderer?.draw()
+            renderer?.draw()
             // The cursor's size follows the picture's, which is known once a frame is in.
-            let v = session.renderer?.videoSize
+            let v = renderer?.videoSize
             if v != cursorVideoSize {
                 cursorVideoSize = v
                 updateCursor()
@@ -193,7 +205,7 @@ final class RefreshMeter {
 
         /// The computer's cursor where the computer says it is: this Mac's own is hidden.
         private func placeCapturedCursor() {
-            guard let known = session.hostCursor, let c = known, let at = session.hostCursorAt, at.2, let r = session.renderer,
+            guard let known = session.hostCursor, let c = known, let at = session.hostCursorAt, at.2, let r = renderer,
                 let v = r.videoSize, v.width > 0
             else {
                 capturedCursor.isHidden = true
@@ -213,12 +225,13 @@ final class RefreshMeter {
         private func flushPointer() {
             guard let p = pendingPointer else { return }
             pendingPointer = nil
+            session.aim(index)
             session.input?.pointerTo(x: p.0, y: p.1)
         }
 
         /// Pointer moves are kept to one per refresh, and sent ahead of any click or key.
         private func moved(_ e: NSEvent) {
-            guard let r = session.renderer else { return }
+            guard let r = renderer else { return }
             let p = convert(e.locationInWindow, from: nil)
             let rect = r.videoRect(in: bounds.size)
             guard rect.width > 0, rect.height > 0 else { return }
@@ -236,6 +249,7 @@ final class RefreshMeter {
         private func button(_ e: NSEvent, _ b: UInt8, down: Bool) {
             moved(e)
             flushPointer()
+            session.aim(index)
             session.input?.button(b, down: down)
         }
 
@@ -276,11 +290,12 @@ final class RefreshMeter {
         override func otherMouseUp(with e: NSEvent) { button(e, 2, down: false) }
 
         override func scrollWheel(with e: NSEvent) {
-            guard let r = session.renderer, let v = r.videoSize else { return }
+            guard let r = renderer, let v = r.videoSize else { return }
             let rect = r.videoRect(in: bounds.size)
             // View points to display pixels; a wheel click without precise deltas is a few lines.
             let k = (rect.width > 0 ? v.width / rect.width : 1) * (e.hasPreciseScrollingDeltas ? 1 : 10)
             flushPointer()
+            session.aim(index)
             session.wheel(dx: Float(-e.scrollingDeltaX * k), dy: Float(-e.scrollingDeltaY * k))
         }
 

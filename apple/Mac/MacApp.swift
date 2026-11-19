@@ -186,6 +186,72 @@ final class AppModel: ObservableObject {
 
     /// Leave and join again, for what can only be said at the start: where this display sits
     /// among the computer's own, and its size.
+    // MARK: A second display (a window of its own, on a computer that offers one)
+
+    @Published private(set) var secondShown = false
+    private var secondWindow: NSWindow?
+    private var secondWatcher: SecondWindowWatcher?
+    private var secondSink: AnyCancellable?
+
+    /// Open the second display's window and ask the computer for a display its size, or close it.
+    func toggleSecondDisplay() {
+        if secondWindow != nil { return closeSecondDisplay() }
+        guard session.has("displays"), case .streaming = session.state else { return }
+        // On another of this Mac's screens if there is one.
+        let screen = NSScreen.screens.first { $0 != window?.screen } ?? window?.screen ?? NSScreen.main
+        let v = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let size = NSSize(width: min(1280, (v.width * 0.8).rounded()), height: min(800, (v.height * 0.8).rounded()))
+        let w = NSWindow(
+            contentRect: NSRect(x: v.midX - size.width / 2, y: v.midY - size.height / 2, width: size.width, height: size.height),
+            styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+        w.title = "\(activeComputer?.name ?? "Computer"): second display"
+        w.isReleasedWhenClosed = false
+        w.backgroundColor = .black
+        let view = ViewerView(session: session, index: 1)
+        w.contentView = view
+        let watcher = SecondWindowWatcher()
+        watcher.changed = { [weak self] in self?.askForSecondDisplay() }
+        watcher.closed = { [weak self] in self?.secondClosed() }
+        w.delegate = watcher
+        secondWatcher = watcher
+        secondWindow = w
+        secondShown = true
+        w.makeKeyAndOrderFront(nil)
+        w.makeFirstResponder(view)
+        askForSecondDisplay()
+        // The computer couldn't make it, or took it away: the window goes too.
+        secondSink = session.$secondOn.dropFirst().sink { [weak self] on in
+            DispatchQueue.main.async { if !on { self?.closeSecondDisplay() } }
+        }
+    }
+
+    /// A display the size of the window's picture, at the window's screen's scale.
+    private func askForSecondDisplay() {
+        guard let w = secondWindow, let view = w.contentView, view.bounds.width > 50 else { return }
+        let scale = w.backingScaleFactor
+        let d = ViewerSession.Display(
+            width: max(640, Int(view.bounds.width * scale) & ~1), height: max(360, Int(view.bounds.height * scale) & ~1), scale: Float(scale),
+            refresh: min(ViewerPrefs.fullRefresh ? 240 : 60, w.screen?.maximumFramesPerSecond ?? 60))
+        if d != session.secondDisplay { session.setSecondDisplay(d) }
+    }
+
+    func closeSecondDisplay() {
+        guard let w = secondWindow else { return }
+        secondWindow = nil
+        secondSink = nil
+        w.delegate = nil
+        w.close()
+        secondClosed()
+    }
+
+    private func secondClosed() {
+        secondWindow = nil
+        secondWatcher = nil
+        secondSink = nil
+        secondShown = false
+        if session.secondOn { session.setSecondDisplay(nil) }
+    }
+
     /// The picture now, kept as the computer's thumbnail.
     func keepThumbnail() {
         guard !automated, let id = active, hasPicture, let image = session.renderer?.snapshot() else { return }
@@ -273,6 +339,7 @@ final class AppModel: ObservableObject {
         }
         errors[id] = reason
         reconnecting = false
+        closeSecondDisplay()
         started = nil
         active = nil
         hasPicture = false
@@ -496,4 +563,15 @@ struct AutomatedView: View {
         }
         .padding(10)
     }
+}
+
+/// Tells the app when the second display's window changes size or screen, or is closed.
+final class SecondWindowWatcher: NSObject, NSWindowDelegate {
+    var changed: (() -> Void)?
+    var closed: (() -> Void)?
+    func windowDidEndLiveResize(_ n: Notification) { changed?() }
+    func windowDidChangeBackingProperties(_ n: Notification) { changed?() }
+    func windowDidEnterFullScreen(_ n: Notification) { changed?() }
+    func windowDidExitFullScreen(_ n: Notification) { changed?() }
+    func windowWillClose(_ n: Notification) { closed?() }
 }

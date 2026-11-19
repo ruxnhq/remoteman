@@ -36,7 +36,7 @@ enum Features {
     /// Mirroring one of the computer's monitors.
     static let mirrorMonitor = true
     /// "Add a Second Display…".
-    static let secondDisplay = false
+    static let secondDisplay = true
     /// Which of this Mac's displays to use ("Display: This Mac's display").
     static let displayChoice = true
     /// "Send keys and shortcuts".
