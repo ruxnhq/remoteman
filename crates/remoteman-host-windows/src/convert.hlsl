@@ -12,14 +12,14 @@
 //
 // Two layouts come out. 4:2:0 in a P010 texture, drawn one plane at a time: `luma` into its
 // full-size 16-bit plane, `chroma` into its half-size plane of Cb,Cr pairs, chroma being the
-// average of each 2x2 block (so it sits in the block's centre, as the stream says). And 4:4:4
-// in an R16 texture three times the picture's height, Y then Cb then Cr one under the other,
-// drawn in one go by `planar`. Each sample is 10 bits in the high end of 16, so a code q is
-// written as (q << 6) / 65535.
+// average of each 2x2 block (so it sits in the block's centre, as the stream says). Each sample
+// is 10 bits in the high end of 16, so a code q is written as (q << 6) / 65535. And for 4:4:4,
+// R'G'B' as it is into an R10G10B10A2 texture (`rgb10`), which NVENC converts itself: Direct3D
+// has no planar 4:4:4 texture NVENC takes.
 
 Texture2D<float4> src : register(t0);
 // The pointer, for a picture that has it drawn in: RGBA, colour premultiplied, as painted.
-Texture2D<float4> pointer : register(t1);
+Texture2D<float4> cursor_image : register(t1);
 
 cbuffer Params : register(b0) {
     // 0: as painted (sRGB). 1: linear scRGB. 2: HDR10 (PQ, BT.2020).
@@ -30,7 +30,7 @@ cbuffer Params : register(b0) {
     uint pq_out;
     // For HDR out from an SDR desktop: where its white goes, in nits.
     float sdr_white_nits;
-    // The picture's height, for the stacked 4:4:4 planes.
+    // (Unused: the picture's height.)
     uint height;
     // 1: draw the pointer, its top left corner at `pointer_at`, `pointer_size` big.
     uint pointer_on;
@@ -68,22 +68,7 @@ float3 pq_decode(float3 e) {
 static const float3x3 TO_2020 = { 0.6274, 0.3293, 0.0433, 0.0691, 0.9195, 0.0114, 0.0164, 0.0880, 0.8956 };
 static const float3x3 TO_709 = { 1.6605, -0.5876, -0.0728, -0.1246, 1.1329, -0.0083, -0.0182, -0.1006, 1.1187 };
 
-float3 picture_out(int2 p);
-
-// The picture's non-linear R'G'B' at a pixel, in the output's colours, with the pointer over
-// it where it is drawn in.
-float3 rgb_out(int2 p) {
-    float3 under = picture_out(p);
-    int2 q = p - pointer_at;
-    if (pointer_on == 0 || q.x < 0 || q.y < 0 || q.x >= (int)pointer_size.x || q.y >= (int)pointer_size.y) return under;
-    float4 c = pointer.Load(int3(q, 0));
-    if (c.a <= 0.0) return under;
-    float3 straight = saturate(c.rgb / c.a);
-    // An SDR colour, as painted: in an HDR picture it sits where SDR white does.
-    float3 over = pq_out != 0 ? pq_encode(max(mul(TO_2020, srgb_decode(straight) * sdr_white_nits), 0.0)) : straight;
-    return lerp(under, over, c.a);
-}
-
+// The picture's non-linear R'G'B' at a pixel, in the output's colours.
 float3 picture_out(int2 p) {
     float3 c = src.Load(int3(p, 0)).rgb;
     if (pq_out != 0) {
@@ -95,6 +80,21 @@ float3 picture_out(int2 p) {
     if (input_kind == 2) return srgb_encode(saturate(mul(TO_709, pq_decode(c)) / white));
     return saturate(c);
 }
+
+// The picture's non-linear R'G'B' at a pixel, in the output's colours, with the pointer over
+// it where it is drawn in.
+float3 rgb_out(int2 p) {
+    float3 under = picture_out(p);
+    int2 q = p - pointer_at;
+    if (pointer_on == 0 || q.x < 0 || q.y < 0 || q.x >= (int)pointer_size.x || q.y >= (int)pointer_size.y) return under;
+    float4 c = cursor_image.Load(int3(q, 0));
+    if (c.a <= 0.0) return under;
+    float3 straight = saturate(c.rgb / c.a);
+    // An SDR colour, as painted: in an HDR picture it sits where SDR white does.
+    float3 over = pq_out != 0 ? pq_encode(max(mul(TO_2020, srgb_decode(straight) * sdr_white_nits), 0.0)) : straight;
+    return lerp(under, over, c.a);
+}
+
 
 float3 ycc(int2 p) {
     float3 rgb = rgb_out(p);
@@ -124,14 +124,9 @@ float2 chroma(float4 at : SV_Position) : SV_Target {
     return float2(chroma_code(m.x), chroma_code(m.y));
 }
 
-float planar(float4 at : SV_Position) : SV_Target {
-    uint row = (uint)at.y;
-    uint plane = row / height;
-    float3 v = ycc(int2((int)at.x, (int)(row - plane * height)));
-    return plane == 0 ? luma_code(v.x) : chroma_code(plane == 1 ? v.y : v.z);
-}
 
-// The same into an R16_UINT texture (the format NVENC may want for planar 4:4:4 instead).
-uint planar_uint(float4 at : SV_Position) : SV_Target {
-    return (uint)round(planar(at) * 65535.0);
+
+// 10-bit R'G'B' as it is, for an encoder that converts to 4:4:4 itself (an R10G10B10A2 target).
+float4 rgb10(float4 at : SV_Position) : SV_Target {
+    return float4(rgb_out(int2(at.xy)), 1.0);
 }

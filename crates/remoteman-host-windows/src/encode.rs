@@ -27,7 +27,7 @@ use crate::capture::Gpu;
 
 /// What this host encodes. HEVC 4:4:4 only through NVENC, on a card whose NVENC has it (the
 /// encoder says when it is opened; where it doesn't, the next mode the client offered is
-/// taken).
+/// taken), and not in HDR.
 pub const MODES: [Mode; 3] = [
     Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 },
     Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 },
@@ -58,6 +58,9 @@ pub fn can_hdr(gpu: &Gpu) -> bool {
 /// R16 with the planes stacked). The input's index for `encode_how` is 0.
 pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<Box<dyn FrameEncoder>> {
     anyhow::ensure!(MODES.contains(&settings.mode), "this host doesn't encode {:?}", settings.mode);
+    // NVENC makes 4:4:4 from RGB itself, with BT.709's matrix as measured; whether it would use
+    // BT.2020's for an HDR picture is not known, so that is not asked of it.
+    anyhow::ensure!(!(settings.mode.chroma == Chroma::C444 && settings.hdr), "no 4:4:4 in HDR");
     if settings.mode.chroma == Chroma::C444 || settings.hdr {
         // Only NVENC: Media Foundation's encoders are given 4:2:0 SDR alone.
         return match WHICH.load(std::sync::atomic::Ordering::Relaxed) {

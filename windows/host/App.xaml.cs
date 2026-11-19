@@ -29,7 +29,7 @@ public partial class App : Application
             }
         }
         InitializeComponent();
-        UnhandledException += (_, e) => Log.Say($"unhandled: {e.Exception}");
+        UnhandledException += (_, e) => Log.Say($"unhandled: {e.Message} {e.Exception}");
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)

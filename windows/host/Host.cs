@@ -37,7 +37,7 @@ public static class Host
         return null;
     }
 
-    public static Status? Status()
+    public static Status? Read()
     {
         var said = Ask("status");
         if (said is null) return null;

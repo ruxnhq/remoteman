@@ -254,20 +254,15 @@ fn build(gpu: &Gpu, meta: &Metadata, s: &Settings, bitrate: u32) -> Result<(Conv
     let light = hdr.then(|| (s.sdr_white.round() as u32, if meta.max_nits > 0.0 { meta.max_nits.round() as u32 } else { 1000 }));
     let mut refused = Vec::new();
     for &mode in &s.modes {
-        // 4:4:4: three planes in an R16 texture; NVENC's documentation doesn't say whether it
-        // takes UNORM or UINT, so UNORM is tried first and UINT after.
-        let layouts: &[Option<bool>] = if mode.chroma == Chroma::C444 { &[Some(false), Some(true)] } else { &[None] };
-        for &layout in layouts {
-            let converter = Converter::new(gpu, width, height, input, output, layout)?;
-            match encode::open(gpu, &converter.output, &encode::Settings { mode, width, height, fps: s.fps, bitrate, hdr }) {
-                Ok(encoder) => {
-                    tracing::info!(?mode, ?layout, width, height, fps = s.fps, bitrate, format = meta.format, hdr = meta.is_hdr, ?input, ?output, "encoder ready ({})", encoder.note());
-                    return Ok((converter, encoder, mode, light));
-                }
-                Err(e) => {
-                    tracing::warn!(?mode, ?layout, "{e:#}");
-                    refused.push(format!("{mode:?} {layout:?}: {e:#}"));
-                }
+        let converter = Converter::new(gpu, width, height, input, output, mode.chroma == Chroma::C444)?;
+        match encode::open(gpu, &converter.output, &encode::Settings { mode, width, height, fps: s.fps, bitrate, hdr }) {
+            Ok(encoder) => {
+                tracing::info!(?mode, width, height, fps = s.fps, bitrate, format = meta.format, hdr = meta.is_hdr, ?input, ?output, "encoder ready ({})", encoder.note());
+                return Ok((converter, encoder, mode, light));
+            }
+            Err(e) => {
+                tracing::warn!(?mode, "{e:#}");
+                refused.push(format!("{mode:?}: {e:#}"));
             }
         }
     }

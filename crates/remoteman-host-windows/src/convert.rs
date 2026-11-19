@@ -1,7 +1,7 @@
 //! Convert: the driver's RGB texture to the encoder's input in one go on the GPU: 4:2:0 into a
-//! P010 texture (two draws, one for each plane), or 4:4:4 into an R16 texture with the three
-//! planes stacked (one draw); SDR as BT.709, or HDR as BT.2020 PQ. See `convert.hlsl` for the
-//! numbers.
+//! P010 texture (two draws, one for each plane), or for 4:4:4 R'G'B' into an R10G10B10A2
+//! texture that NVENC converts itself; SDR as BT.709, or HDR as BT.2020 PQ. The pointer is drawn
+//! in where it is asked for. See `convert.hlsl` for the numbers.
 
 use std::ffi::c_void;
 
@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11RenderTargetView, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_P010, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_P010, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
     DXGI_SAMPLE_DESC,
 };
 use windows::core::{PCSTR, s};
@@ -79,8 +79,8 @@ struct Params {
 enum Layout {
     /// P010: its two planes.
     Semi { luma: ID3D11PixelShader, chroma: ID3D11PixelShader, luma_plane: ID3D11RenderTargetView, chroma_plane: ID3D11RenderTargetView },
-    /// R16, three planes stacked.
-    Planar { shader: ID3D11PixelShader, target: ID3D11RenderTargetView },
+    /// 10-bit RGB, for an encoder that converts it.
+    Rgb { shader: ID3D11PixelShader, target: ID3D11RenderTargetView },
 }
 
 pub struct Converter {
@@ -114,14 +114,13 @@ fn compile(entry: PCSTR, target: PCSTR) -> Result<Vec<u8>> {
 }
 
 impl Converter {
-    /// A converter for pictures of this size (even both ways, as 4:2:0 needs), into 4:4:4 if
-    /// `full_chroma` is given: in an R16 texture, UNORM or (`Some(true)`) UINT.
-    pub fn new(gpu: &Gpu, width: u32, height: u32, input: Input, output: Output, full_chroma: Option<bool>) -> Result<Self> {
-        let planar_uint = full_chroma == Some(true);
-        let full_chroma = full_chroma.is_some();
+    /// A converter for pictures of this size (even both ways, as 4:2:0 needs), for a 4:4:4
+    /// encoder if `full_chroma` (10-bit R'G'B' that it converts).
+    pub fn new(gpu: &Gpu, width: u32, height: u32, input: Input, output: Output, full_chroma: bool) -> Result<Self> {
+        let rgb = full_chroma;
         // SAFETY: Direct3D calls as documented, with live arguments and out-parameters.
         unsafe {
-            let format = if planar_uint { DXGI_FORMAT_R16_UINT } else if full_chroma { DXGI_FORMAT_R16_UNORM } else { DXGI_FORMAT_P010 };
+            let format = if rgb { DXGI_FORMAT_R10G10B10A2_UNORM } else { DXGI_FORMAT_P010 };
             let support = gpu.device.CheckFormatSupport(format).with_context(|| format!("this GPU has no textures of DXGI format {}", format.0))?;
             let needed = (D3D11_FORMAT_SUPPORT_TEXTURE2D.0 | D3D11_FORMAT_SUPPORT_RENDER_TARGET.0) as u32;
             if support & needed != needed {
@@ -151,7 +150,7 @@ impl Converter {
 
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
-                Height: if full_chroma { height * 3 } else { height },
+                Height: height,
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: format,
@@ -170,8 +169,8 @@ impl Converter {
                 gpu.device.CreateRenderTargetView(&texture, Some(&desc), Some(&mut view)).with_context(|| format!("a view of the encoder's input (format {})", format.0))?;
                 view.context("no view")
             };
-            let layout = if full_chroma {
-                Layout::Planar { shader: pixel(if planar_uint { s!("planar_uint") } else { s!("planar") })?, target: view(format)? }
+            let layout = if rgb {
+                Layout::Rgb { shader: pixel(s!("rgb10"))?, target: view(format)? }
             } else {
                 Layout::Semi { luma: pixel(s!("luma"))?, chroma: pixel(s!("chroma"))?, luma_plane: view(DXGI_FORMAT_R16_UNORM)?, chroma_plane: view(DXGI_FORMAT_R16G16_UNORM)? }
             };
@@ -234,7 +233,7 @@ impl Converter {
                     draw(luma, luma_plane, self.width, self.height);
                     draw(chroma, chroma_plane, self.width / 2, self.height / 2);
                 }
-                Layout::Planar { shader, target } => draw(shader, target, self.width, self.height * 3),
+                Layout::Rgb { shader, target } => draw(shader, target, self.width, self.height),
             }
             // Let go of both: the driver's texture goes back to the driver, and the output is
             // the encoder's to read.

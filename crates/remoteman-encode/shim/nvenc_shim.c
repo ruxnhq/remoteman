@@ -178,8 +178,9 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
     if ((s = e->f.nvEncOpenEncodeSessionEx(&open, &e->enc))) FAIL("open session");
 
     if (!cap(e, codec, NV_ENC_CAPS_SUPPORT_10BIT_ENCODE)) { snprintf(err, errlen, "no 10-bit encode for this codec"); goto fail; }
-    // Direct3D has no planar 10-bit 4:4:4 format: that input is an R16 texture three times the
-    // picture's height, Y, then Cb, then Cr (see rm_nvenc_register_d3d11).
+    // Direct3D has no planar 10-bit 4:4:4 format, and NVENC refuses an R16 texture with the
+    // planes stacked (UNORM or UINT: NV_ENC_ERR_UNSUPPORTED_PARAM on registering, 2026-11-19).
+    // So from Direct3D 4:4:4 is 10-bit RGB that NVENC converts itself (see below).
     if (cfg->chroma444 && !cap(e, codec, NV_ENC_CAPS_SUPPORT_YUV444_ENCODE)) { snprintf(err, errlen, "no 4:4:4 encode for this codec"); goto fail; }
 
     if ((s = e->f.nvEncGetEncodePresetConfigEx(e->enc, codec, preset_guid, NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &preset))) FAIL("preset");
@@ -268,6 +269,11 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
     if ((s = e->f.nvEncInitializeEncoder(e->enc, &e->init))) FAIL("initialize encoder");
 
     e->fmt = cfg->chroma444 ? NV_ENC_BUFFER_FORMAT_YUV444_10BIT : NV_ENC_BUFFER_FORMAT_YUV420_10BIT;
+    // 4:4:4 from Direct3D: an R10G10B10A2 texture of R'G'B' (DXGI's R in the low bits is
+    // NVENC's ABGR10), converted by NVENC. Its conversion was measured to be BT.709's matrix in
+    // limited range (the same mean Y, Cb, Cr as this host's own 4:2:0 conversion of one frame,
+    // to half a code value); for BT.2020 it is unknown, so the host doesn't ask for 4:4:4 HDR.
+    if (cfg->chroma444 && device_type == NV_ENC_DEVICE_TYPE_DIRECTX) e->fmt = NV_ENC_BUFFER_FORMAT_ABGR10;
     if ((s = e->f.nvEncCreateBitstreamBuffer(e->enc, &bs))) FAIL("bitstream buffer");
     e->bitstream = bs.bitstreamBuffer;
     snprintf(err, errlen, "ref invalidation %s, %u long-term frames",
@@ -291,9 +297,8 @@ rm_nvenc *rm_nvenc_open_d3d11(void *device, const rm_nvenc_cfg *cfg, char *err, 
     return nvenc_open(NULL, NV_ENC_DEVICE_TYPE_DIRECTX, device, cfg, err, errlen);
 }
 
-// Register one ID3D11Texture2D* as an encoder input: P010 of the encoder's size for 4:2:0, and
-// for 4:4:4 an R16_UNORM texture of the encoder's width and three times its height, the three
-// planes one under the other, each sample's 10 bits at the top of its 16.
+// Register one ID3D11Texture2D* of the encoder's size as an encoder input: P010 for 4:2:0, and
+// R10G10B10A2 (R'G'B') for 4:4:4.
 int rm_nvenc_register_d3d11(rm_nvenc *e, void *texture) {
     NV_ENC_REGISTER_RESOURCE r = { NV_ENC_REGISTER_RESOURCE_VER };
     NVENCSTATUS s;

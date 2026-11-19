@@ -26,9 +26,45 @@ public sealed partial class MainWindow : Window
     long _answered = -1;
     bool _filling;
 
+    // Made in Build().
+    Grid TitleBar = null!;
+    NavigationView Nav = null!;
+    StackPanel Page = null!;
+    InfoBar News = null!;
+
+    /// The title bar (the logo and the app's name), the navigation (Sharing, Devices, About), the
+    /// page, and a line of news at the bottom.
+    void Build()
+    {
+        Root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(40) });
+        Root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        TitleBar = new Grid { Height = 40, Padding = new Thickness(16, 0, 0, 0), ColumnSpacing = 10 };
+        TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var logo = new Microsoft.UI.Xaml.Shapes.Rectangle { Width = 16, Height = 16, RadiusX = 3.5, RadiusY = 3.5, Fill = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0x24, 0x58, 0xF5)), VerticalAlignment = VerticalAlignment.Center };
+        TitleBar.Children.Add(logo);
+        var name = new TextBlock { Text = "remoteman host", Style = Style("CaptionTextBlockStyle"), VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetColumn(name, 1);
+        TitleBar.Children.Add(name);
+        Root.Children.Add(TitleBar);
+
+        Nav = new NavigationView { PaneDisplayMode = NavigationViewPaneDisplayMode.Left, IsBackButtonVisible = NavigationViewBackButtonVisible.Collapsed, IsSettingsVisible = false, IsPaneToggleButtonVisible = false, OpenPaneLength = 200 };
+        foreach (var (title, tag, symbol) in new[] { ("Sharing", "sharing", Symbol.Share), ("Devices", "devices", Symbol.AllApps), ("About", "about", Symbol.Help) })
+            Nav.MenuItems.Add(new NavigationViewItem { Content = title, Tag = tag, Icon = new SymbolIcon(symbol) });
+        var body = new Grid();
+        Page = new StackPanel { Spacing = 4, MaxWidth = 880, HorizontalAlignment = HorizontalAlignment.Stretch };
+        body.Children.Add(new ScrollViewer { Padding = new Thickness(32, 12, 32, 24), Content = Page });
+        News = new InfoBar { IsClosable = true, Severity = InfoBarSeverity.Informational, VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(16), MaxWidth = 560 };
+        body.Children.Add(News);
+        Nav.Content = body;
+        Grid.SetRow(Nav, 1);
+        Root.Children.Add(Nav);
+    }
+
     public MainWindow()
     {
         InitializeComponent();
+        Build();
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(TitleBar);
         AppWindow.Resize(new Windows.Graphics.SizeInt32(Scale(900), Scale(680)));
@@ -96,7 +132,7 @@ public sealed partial class MainWindow : Window
 
     void Refresh()
     {
-        var status = Host.Status();
+        var status = Host.Read();
         bool changed = !Same(status, _status);
         _status = status;
         // The icon and its tooltip.
@@ -193,7 +229,7 @@ public sealed partial class MainWindow : Window
                 if (s.Files) items.Add(("Send a file to the device…", () => _ = SendFile()));
                 items.Add(("Disconnect", () => Tell("drop")));
             }
-            items.Add(s.Paused ? ("Resume sharing", () => Tell("sharing on")) : ("Pause sharing", () => Tell("sharing off")));
+            items.Add(s.Paused ? ("Resume sharing", (Action?)(() => Tell("sharing on"))) : ("Pause sharing", (Action?)(() => Tell("sharing off"))));
             if (!s.Paused) items.Add(("Pair a device…", () => { Tell("pair on"); ShowWindow("devices"); }));
         }
         items.Add(("Settings…", () => ShowWindow("sharing")));

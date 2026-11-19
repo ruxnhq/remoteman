@@ -157,6 +157,8 @@ impl Host {
         let (pipeline, started) = match Pipeline::start(settings, link.clone()) {
             Ok(p) => p,
             Err(e) => {
+                // HDR back while the monitor is still on the desktop.
+                drop(hdr);
                 self.screen.release();
                 return Err(format!("{e:#}"));
             }

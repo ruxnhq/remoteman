@@ -173,7 +173,7 @@ impl Encoder {
 
     /// An encoder fed from textures of a Direct3D 11 device (see [`Self::add_texture`]).
     /// `hdr`: the stream says BT.2020 primaries, PQ and the BT.2020 matrix rather than BT.709.
-    /// For 4:4:4 the texture is R16 with the three planes stacked (see [`Self::add_texture`]).
+    /// For 4:4:4 the texture is 10-bit R'G'B' that NVENC converts (see [`Self::add_texture`]).
     ///
     /// # Safety
     /// `device` must be a live `ID3D11Device*` with multithread protection switched on (the
@@ -193,9 +193,8 @@ impl Encoder {
         }
     }
 
-    /// Register a texture as an input: P010 of the encoder's size for 4:2:0, or for 4:4:4
-    /// R16_UNORM of its width and three times its height (Y, Cb, Cr one under the other).
-    /// Returns the input's index.
+    /// Register a texture of the encoder's size as an input: P010 for 4:2:0, R10G10B10A2 of
+    /// BT.709 R'G'B' for 4:4:4. Returns the input's index.
     ///
     /// # Safety
     /// `texture` must be a live `ID3D11Texture2D*` of the device the encoder was opened on, and
