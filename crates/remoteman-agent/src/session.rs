@@ -832,7 +832,7 @@ impl Agent {
             BlobEvent::Close { id, complete } => {
                 let Some(f) = l.files.remove(id) else { return };
                 let whole = *complete && f.got == f.size;
-                let result = if whole { f.file.sync_all().and_then(|()| std::fs::rename(&f.part, &f.done)).map_err(|e| e.to_string()) } else { Err("it didn't arrive whole".to_owned()) };
+                let result = if whole { f.file.sync_all().and_then(|()| remoteman_core::receive::settle(&f.part, &f.done)).map_err(|e| e.to_string()) } else { Err("it didn't arrive whole".to_owned()) };
                 match result {
                     Ok(()) => {
                         tracing::info!(file = %f.done.display(), bytes = f.got, "a file from the device");
