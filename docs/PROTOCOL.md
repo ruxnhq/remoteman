@@ -49,7 +49,7 @@ A host that can give one device two displays in one session lists `displays` in 
 - Host → client: `{"t":"display","index":1,"on":false,"message":"..."}` when the second display could not be made, or is gone.
 - Input: the input event `8, index` (two bytes) says which display the pointer and touch events that follow are on: 0 the first (and where every session starts), 1 the second. Keys go to the desktop whichever it is.
 
-The second display goes when the session ends, and when the first is made afresh (`configure`).
+The second display goes when the session ends, and when the first is made afresh (`configure`). Its bitrate is the host's own choice: the ceiling in `configure` is for the first picture only. Frames of it already on their way can still arrive just after the client gave it back; the client drops them.
 
 ### A host that logs its user in by itself
 
