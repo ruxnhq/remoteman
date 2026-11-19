@@ -67,6 +67,13 @@ typedef struct rm_callbacks {
     // thread inside rm_client_connect, before it returns; if it fails, the last stage given is
     // the one that failed. After 3 come on_stream and the first on_frame.
     void (*on_stage)(void *ctx, uint8_t stage);
+    // This device is new to the host, whose owner now has `seconds` to confirm it there: show
+    // `code` (six digits, "123 456"), which the host shows too, for comparing. Called on the
+    // thread inside rm_client_connect, which goes on waiting: it returns with a session after a
+    // yes, and fails with "the host refused: not_paired: ..." after a no or when the time is
+    // up. `code` is valid only during the call. May be NULL. (Added last: rebuild everything
+    // that fills this struct when taking this header.)
+    void (*on_pairing)(void *ctx, const char *code, uint32_t seconds);
 } rm_callbacks;
 
 // Forget a host this device paired with (`host` as given to rm_client_connect): its key is
@@ -231,6 +238,19 @@ void rm_host_set_features(const rm_host *host, const char *features);
 // Pairing: let the next unknown device in (it is remembered and pairing turns itself off).
 void rm_host_set_pairing(const rm_host *host, int32_t on);
 int32_t rm_host_pairing(const rm_host *host);
+
+// Pairing confirmed by the host's owner (docs/PROTOCOL.md, "Pairing"). With confirming on, a
+// device that comes while pairing is on is not trusted yet: it is told to wait, and both sides
+// show the same six digits. rm_host_pending copies who is waiting into `out` as JSON,
+// {"name":"...","fingerprint":"...","code":"123 456","seconds":42} (`seconds`: how long the
+// owner still has, of 60), and returns its length (`len` or more: cut short; 0 and an empty
+// string: nobody is waiting): ask it about once a second while pairing is on or was just used.
+// rm_host_decide answers: 1 trusts the device from now on and lets it in, 0 turns it away;
+// it returns 1 if a device was waiting. Off to begin with: a device is then trusted as soon as
+// it connects while pairing is on.
+void rm_host_set_confirm(const rm_host *host, int32_t on);
+size_t rm_host_pending(const rm_host *host, char *out, size_t len);
+int32_t rm_host_decide(const rm_host *host, int32_t accept);
 
 // The devices this host trusts, as JSON copied into `out`, in the order they were paired:
 // [{"fingerprint":"...","name":"...","connected":false}]. `name` is what the device called

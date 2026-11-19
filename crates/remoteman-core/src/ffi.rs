@@ -40,6 +40,13 @@ pub struct RmCallbacks {
     /// inside `rm_client_connect`, before it returns; if it fails, the last stage given is the
     /// one that failed. After 3 come `on_stream` and the first `on_frame`.
     pub on_stage: Option<extern "C" fn(ctx: *mut c_void, stage: u8)>,
+    /// This device is new to the host, whose owner now has `seconds` to confirm it there:
+    /// show `code` (six digits, "123 456"), which the host shows too, for comparing. Called
+    /// on the thread inside `rm_client_connect`, which goes on waiting: it returns with a
+    /// session after a yes, and fails with "the host refused: not_paired: ..." after a no or
+    /// when the time is up. `code` is valid only during the call. (The last field: a caller
+    /// built against an older header must not be given a struct that ends before it.)
+    pub on_pairing: Option<extern "C" fn(ctx: *mut c_void, code: *const c_char, seconds: u32)>,
 }
 
 // SAFETY: the app promises its context may be used from another thread, one call at a time.
@@ -111,6 +118,13 @@ impl Handler for RmCallbacks {
     fn stage(&mut self, stage: crate::Stage) {
         if let Some(f) = self.on_stage {
             f(self.ctx, stage as u8);
+        }
+    }
+
+    fn pairing(&mut self, code: &str, seconds: u32) {
+        if let Some(f) = self.on_pairing {
+            let code = CString::new(code).unwrap_or_default();
+            f(self.ctx, code.as_ptr(), seconds);
         }
     }
 
@@ -749,6 +763,42 @@ pub unsafe extern "C" fn rm_host_set_pairing(host: *const Host, on: i32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rm_host_pairing(host: *const Host) -> i32 {
     unsafe { &*host }.pairing() as i32
+}
+
+/// Whether a new device waits for this host's owner before it is trusted (off to begin with:
+/// it is trusted as soon as it connects while pairing is on). With it on, a device that
+/// comes while pairing is on is held: `rm_host_pending` says who and with what code, and
+/// `rm_host_decide` answers.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_set_confirm(host: *const Host, on: i32) {
+    unsafe { &*host }.set_confirm(on != 0);
+}
+
+/// The device waiting to be confirmed, as JSON copied into `out`:
+/// `{"name":"...","fingerprint":"...","code":"123 456","seconds":42}` (`seconds`: how long
+/// the owner still has). Returns the JSON's length, so a result of `len` or more means it was
+/// cut short; 0, and an empty string, when no device is waiting.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `out` must be writable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_pending(host: *const Host, out: *mut c_char, len: usize) -> usize {
+    let json = unsafe { &*host }.pending().and_then(|p| serde_json::to_string(&p).ok()).unwrap_or_default();
+    report(out, len, &json);
+    json.len()
+}
+
+/// Answer for the waiting device: trust it from now on (1), or turn it away (0). Returns 1 if
+/// a device was waiting, 0 if none was.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_decide(host: *const Host, accept: i32) -> i32 {
+    unsafe { &*host }.decide(accept != 0) as i32
 }
 
 /// The connected client's session clock in microseconds, to stamp frames with at capture; 0
