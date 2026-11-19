@@ -136,6 +136,8 @@ pub struct Agent {
     wrong: (u32, Option<std::time::Instant>),
     /// A login screen whose client has gone, on its way to being ended.
     ending: Option<tokio::task::JoinHandle<()>>,
+    /// For tests: how many clients have been told this computer is logging in.
+    told_logging_in: u32,
 }
 
 /// How long a login screen's session is kept after its client has gone.
@@ -210,7 +212,7 @@ impl Agent {
         if login_screen.is_some() {
             tracing::info!("this is a login screen's session: no files, no clipboard, and it ends when its client goes");
         }
-        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None, unlocked_for_client: false, wrong: (0, None), ending: None })
+        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None, unlocked_for_client: false, wrong: (0, None), ending: None, told_logging_in: 0 })
     }
 
     /// What the picture is encoded at when the client's ceiling is `ceiling`.
@@ -774,6 +776,14 @@ fn downloads() -> PathBuf {
 impl HostHandler for Agent {
     fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
         self.left();
+        // (For tests of what a client does with a computer that is still logging its user in:
+        // with `REMOTEMAN_TEST_LOGGING_IN=N` the first N clients are told so and turned away.)
+        if let Some(n) = std::env::var("REMOTEMAN_TEST_LOGGING_IN").ok().and_then(|n| n.parse::<u32>().ok()) {
+            self.told_logging_in += 1;
+            if self.told_logging_in <= n {
+                return Err("logging in: this computer is logging in for you".into());
+            }
+        }
         // A login screen that was about to be ended has a client again.
         if let Some(ending) = self.ending.take() {
             ending.abort();

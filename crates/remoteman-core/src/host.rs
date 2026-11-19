@@ -574,10 +574,15 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         Ok(Err(message)) => {
             current_link.lock().unwrap().take();
             // A handler that says "locked: ..." means the client may try again with its
-            // user's password in the hello; anything else is a plain failure.
-            let (code, said) = match message.strip_prefix("locked: ") {
-                Some(said) => ("locked", said),
-                None => ("failed", message.as_str()),
+            // user's password in the hello; one that says "logging in: ..." means the
+            // computer is getting its user's session ready and the client should simply try
+            // again in a few seconds; anything else is a plain failure.
+            let (code, said) = if let Some(said) = message.strip_prefix("locked: ") {
+                ("locked", said)
+            } else if let Some(said) = message.strip_prefix("logging in: ") {
+                ("logging_in", said)
+            } else {
+                ("failed", message.as_str())
             };
             let _ = write_message(&mut send, &Message::Error { code: code.into(), message: said.to_owned() }).await;
             // The handler refused, so it holds nothing for this client.
