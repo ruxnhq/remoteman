@@ -18,6 +18,8 @@
 // written as (q << 6) / 65535.
 
 Texture2D<float4> src : register(t0);
+// The pointer, for a picture that has it drawn in: RGBA, colour premultiplied, as painted.
+Texture2D<float4> pointer : register(t1);
 
 cbuffer Params : register(b0) {
     // 0: as painted (sRGB). 1: linear scRGB. 2: HDR10 (PQ, BT.2020).
@@ -30,7 +32,11 @@ cbuffer Params : register(b0) {
     float sdr_white_nits;
     // The picture's height, for the stacked 4:4:4 planes.
     uint height;
-    uint3 unused;
+    // 1: draw the pointer, its top left corner at `pointer_at`, `pointer_size` big.
+    uint pointer_on;
+    int2 pointer_at;
+    uint2 pointer_size;
+    uint2 unused;
 };
 
 float4 corner(uint id : SV_VertexID) : SV_Position {
@@ -62,8 +68,23 @@ float3 pq_decode(float3 e) {
 static const float3x3 TO_2020 = { 0.6274, 0.3293, 0.0433, 0.0691, 0.9195, 0.0114, 0.0164, 0.0880, 0.8956 };
 static const float3x3 TO_709 = { 1.6605, -0.5876, -0.0728, -0.1246, 1.1329, -0.0083, -0.0182, -0.1006, 1.1187 };
 
-// The picture's non-linear R'G'B' at a pixel, in the output's colours.
+float3 picture_out(int2 p);
+
+// The picture's non-linear R'G'B' at a pixel, in the output's colours, with the pointer over
+// it where it is drawn in.
 float3 rgb_out(int2 p) {
+    float3 under = picture_out(p);
+    int2 q = p - pointer_at;
+    if (pointer_on == 0 || q.x < 0 || q.y < 0 || q.x >= (int)pointer_size.x || q.y >= (int)pointer_size.y) return under;
+    float4 c = pointer.Load(int3(q, 0));
+    if (c.a <= 0.0) return under;
+    float3 straight = saturate(c.rgb / c.a);
+    // An SDR colour, as painted: in an HDR picture it sits where SDR white does.
+    float3 over = pq_out != 0 ? pq_encode(max(mul(TO_2020, srgb_decode(straight) * sdr_white_nits), 0.0)) : straight;
+    return lerp(under, over, c.a);
+}
+
+float3 picture_out(int2 p) {
     float3 c = src.Load(int3(p, 0)).rgb;
     if (pq_out != 0) {
         if (input_kind == 2) return saturate(c);

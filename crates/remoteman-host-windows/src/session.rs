@@ -52,7 +52,7 @@ struct Live {
     /// What the picture is encoded as: a second display's picture is the same.
     mode: Mode,
     /// The client's second display, while it has one: its picture, and its pointer's way in.
-    second: Option<(Pipeline, Injector)>,
+    second: Option<(Pipeline, Injector, Option<Cursor>)>,
     /// Which of its displays the client's pointer is on (0, or 1 for the second).
     target: u8,
     /// HDR switched on for the client's monitor, put back as it was when this goes (held for
@@ -131,6 +131,8 @@ impl Host {
         }
         let sdr_white = crate::hdr::sdr_white(self.screen.device());
         let area = Arc::new(Mutex::new(at));
+        // A client that doesn't draw the pointer gets it drawn into the picture.
+        let drawn = Arc::new(crate::cursor::Drawn::default());
         let refresh = if mirror { got.refresh.min(want.refresh) } else { got.refresh }.clamp(1, 240);
         let (device, shared) = (self.screen.device().to_owned(), area.clone());
         let settings = pipeline::Settings {
@@ -144,6 +146,7 @@ impl Host {
             held,
             status: true,
             hdr: hdr_wanted,
+            pointer: (!cursor_apart).then(|| drawn.clone()),
             sdr_white,
             // The monitor changed under the stream: input and the cursor follow it.
             resized: Box::new(move |width, height| {
@@ -163,9 +166,9 @@ impl Host {
             let mut a = area.lock().unwrap();
             (a.width, a.height) = (started.width, started.height);
         }
-        let cursor = if cursor_apart { Cursor::start(link.clone(), area.clone()).inspect_err(|e| tracing::warn!("couldn't start reporting the cursor: {e}")).ok() } else { None };
+        let cursor = Cursor::start(cursor_apart.then(|| link.clone()), area.clone(), (!cursor_apart).then(|| drawn.clone())).inspect_err(|e| tracing::warn!("couldn't start following the cursor: {e}")).ok();
         if !cursor_apart {
-            tracing::warn!("this client doesn't draw the cursor itself, and the driver keeps it out of the frames: it will see no cursor");
+            tracing::info!("this client doesn't draw the pointer: it is drawn into the picture");
         }
         self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, common: modes, ceiling, name: name.clone(), files: Files::default(), clipboard: None, copied: BTreeMap::new(), mode: started.mode, second: None, target: 0, _hdr: hdr });
         // A new picture shares the clipboard anew.
@@ -196,7 +199,7 @@ impl Host {
     fn stop(&mut self) -> Option<Live> {
         let mut l = self.live.take()?;
         // The second display goes with the first.
-        if let Some((pipeline, mut injector)) = l.second.take() {
+        if let Some((pipeline, mut injector, _)) = l.second.take() {
             injector.release_all();
             drop(pipeline);
             self.screen.take_second();
@@ -211,11 +214,10 @@ impl Host {
 
     /// Give the client a second display beside everything else, or take it away. It gets a
     /// monitor of its own (the driver's third) and a picture of its own in the codec of the
-    /// first. Its pointer is NOT drawn into the picture, as the protocol asks: this host can't
-    /// draw a cursor into a picture yet.
+    /// first, with the pointer drawn into it, as the protocol asks.
     fn second_display(&mut self, on: bool, display: Option<Display>, side: remoteman_core::Side) {
         let Some(l) = self.live.as_mut() else { return };
-        if let Some((pipeline, mut injector)) = l.second.take() {
+        if let Some((pipeline, mut injector, _)) = l.second.take() {
             injector.release_all();
             drop(pipeline);
             self.screen.take_second();
@@ -240,6 +242,7 @@ impl Host {
         // Said before its first frame can be sent.
         second.restart(Accept { mode: l.mode, width: mode.width, height: mode.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
         let area = Arc::new(Mutex::new(at));
+        let drawn = Arc::new(crate::cursor::Drawn::default());
         let settings = pipeline::Settings {
             driver: self.screen.driver(),
             monitor,
@@ -251,11 +254,16 @@ impl Host {
             held: false,
             status: false,
             hdr: false,
+            // The protocol has no cursor channel for a second display: it is drawn in.
+            pointer: Some(drawn.clone()),
             sdr_white: crate::hdr::USUAL_SDR_WHITE,
             resized: Box::new(|_, _| {}),
         };
         match Pipeline::start(settings, second) {
-            Ok((pipeline, _)) => l.second = Some((pipeline, Injector::new(area))),
+            Ok((pipeline, _)) => {
+                let cursor = Cursor::start(None, area.clone(), Some(drawn)).inspect_err(|e| tracing::warn!("couldn't follow the cursor for the second display: {e}")).ok();
+                l.second = Some((pipeline, Injector::new(area), cursor));
+            }
             Err(e) => {
                 self.screen.take_second();
                 gone(format!("{e:#}"))
@@ -427,7 +435,7 @@ impl HostHandler for Host {
             }
             Message::Display { index: 1, on, display, side, .. } => self.second_display(*on, *display, *side),
             Message::DisplayKeyframe { index: 1 } => {
-                if let Some((pipeline, _)) = self.live.as_ref().and_then(|l| l.second.as_ref()) {
+                if let Some((pipeline, ..)) = self.live.as_ref().and_then(|l| l.second.as_ref()) {
                     pipeline.request_keyframe();
                 }
             }
@@ -490,7 +498,7 @@ impl HostHandler for Host {
         // The pointer and touches go to the display they are on; keys to the desktop.
         let pointing = matches!(event, Event::PointerTo { .. } | Event::PointerBy { .. } | Event::Button { .. } | Event::Scroll { .. } | Event::Touch { .. });
         match &mut l.second {
-            Some((_, injector)) if l.target == 1 && pointing => injector.inject(&event),
+            Some((_, injector, _)) if l.target == 1 && pointing => injector.inject(&event),
             _ => l.injector.inject(&event),
         }
     }

@@ -50,6 +50,9 @@ pub struct Settings {
     pub status: bool,
     /// The client asked for HDR: BT.2020 PQ if the encoder can say so.
     pub hdr: bool,
+    /// Draw the pointer into the picture, as the cursor's thread says it is (for a client that
+    /// doesn't draw it, and for a second display).
+    pub pointer: Option<Arc<crate::cursor::Drawn>>,
     /// SDR white on the monitor, in nits (Windows' "SDR content brightness"): where an SDR
     /// desktop's white goes in an HDR picture, and what an HDR desktop's SDR white is.
     pub sdr_white: f32,
@@ -123,6 +126,10 @@ impl Pipeline {
         let wake = Wake(unsafe { CreateEventW(None, false, false, None) }.context("CreateEvent")?);
         let control = Arc::new(Control { stop: AtomicBool::new(false), held: AtomicBool::new(settings.held), keyframe: AtomicBool::new(true), lost: Mutex::new(None), bitrate: AtomicU32::new(settings.bitrate), wake });
         let (ready_tx, ready_rx) = mpsc::channel::<Result<Started>>();
+        if let Some(drawn) = &settings.pointer {
+            let c = control.clone();
+            drawn.set_wake(Box::new(move || c.wake()));
+        }
         let c = control.clone();
         let thread = std::thread::Builder::new().name("picture".into()).spawn(move || {
             let picture = match Picture::open(&settings) {
@@ -299,7 +306,7 @@ impl Picture {
         if (old.width, old.height, old.format, old.is_hdr) != (new.width, new.height, new.format, new.is_hdr) {
             tracing::info!(from = format!("{}x{}", old.width, old.height), to = format!("{}x{}", new.width, new.height), format = new.format, hdr = new.is_hdr, "the monitor changed; the picture starts afresh");
             // Only this mode: the client has its decoder set up for it.
-            let only = Settings { driver: s.driver.clone(), monitor: s.monitor, modes: vec![self.mode], fps: s.fps, bitrate, nudge_at: s.nudge_at, expect: None, held: false, status: false, hdr: s.hdr, sdr_white: s.sdr_white, resized: Box::new(|_, _| {}) };
+            let only = Settings { driver: s.driver.clone(), monitor: s.monitor, modes: vec![self.mode], fps: s.fps, bitrate, nudge_at: s.nudge_at, expect: None, held: false, status: false, hdr: s.hdr, pointer: None, sdr_white: s.sdr_white, resized: Box::new(|_, _| {}) };
             let (converter, encoder, mode, hdr) = build(&self.gpu, &new, &only, bitrate)?;
             // The old encoder goes before the texture it reads from.
             self.encoder = encoder;
@@ -358,6 +365,8 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
     let mut last_sent = Instant::now() - interval;
     let mut held_back = None::<u64>;
     let mut told_rate = false;
+    // The pointer's last change drawn in (none yet).
+    let mut pointer_seen = u64::MAX;
     loop {
         let held = control.held.load(Ordering::Relaxed);
         if !p.again || held {
@@ -401,6 +410,17 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
             }
         }
 
+        // The pointer moved or changed: the last frame again, with the pointer where it is now.
+        if let Some(drawn) = &s.pointer {
+            let now = drawn.now.lock().unwrap();
+            if now.serial != pointer_seen {
+                pointer_seen = now.serial;
+                p.converter.set_pointer(&p.gpu, &now);
+                if p.have {
+                    p.again = true;
+                }
+            }
+        }
         let again = std::mem::take(&mut p.again);
         let before = Instant::now();
         let taken = {
@@ -428,6 +448,8 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
             Take::Stale => {
                 afresh |= p.reopen(s, link, rate)?;
                 checked = Instant::now();
+                // A new converter: the pointer goes into it afresh.
+                pointer_seen = u64::MAX;
                 None
             }
         };

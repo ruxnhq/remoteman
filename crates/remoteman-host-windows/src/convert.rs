@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use windows::Win32::Graphics::Direct3D::Fxc::{D3DCOMPILE_OPTIMIZATION_LEVEL3, D3DCompile};
 use windows::Win32::Graphics::Direct3D::{D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, ID3DBlob};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BUFFER_DESC, D3D11_FORMAT_SUPPORT_RENDER_TARGET, D3D11_FORMAT_SUPPORT_TEXTURE2D, D3D11_RENDER_TARGET_VIEW_DESC,
+    D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC, D3D11_FORMAT_SUPPORT_RENDER_TARGET, D3D11_FORMAT_SUPPORT_TEXTURE2D, D3D11_RENDER_TARGET_VIEW_DESC,
     D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SUBRESOURCE_DATA, D3D11_TEX2D_RTV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIEWPORT, ID3D11Buffer, ID3D11PixelShader,
     ID3D11RenderTargetView, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
 };
@@ -69,7 +69,10 @@ struct Params {
     pq_out: u32,
     sdr_white_nits: f32,
     height: u32,
-    unused: [u32; 3],
+    pointer_on: u32,
+    pointer_at: [i32; 2],
+    pointer_size: [u32; 2],
+    unused: [u32; 2],
 }
 
 /// The draws that fill the encoder's input.
@@ -88,6 +91,11 @@ pub struct Converter {
     pub output: ID3D11Texture2D,
     width: u32,
     height: u32,
+    /// The parameters as the shader has them (the pointer's part changes as it moves).
+    p: Params,
+    /// The pointer's image, while one is drawn in, and which of its images it is.
+    pointer: Option<ID3D11ShaderResourceView>,
+    pointer_serial: u64,
 }
 
 /// Compile one function of `convert.hlsl`. On failure the compiler's own words are the error.
@@ -136,7 +144,7 @@ impl Converter {
                 Output::Sdr => (0, 0.0),
                 Output::Pq { sdr_white } => (1, sdr_white),
             };
-            let p = Params { input_kind, white, pq_out, sdr_white_nits, height, unused: [0; 3] };
+            let p = Params { input_kind, white, pq_out, sdr_white_nits, height, pointer_on: 0, pointer_at: [0; 2], pointer_size: [0; 2], unused: [0; 2] };
             let desc = D3D11_BUFFER_DESC { ByteWidth: size_of::<Params>() as u32, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
             let mut params = None;
             gpu.device.CreateBuffer(&desc, Some(&D3D11_SUBRESOURCE_DATA { pSysMem: &p as *const Params as *const c_void, ..Default::default() }), Some(&mut params)).context("the shader's parameters")?;
@@ -167,8 +175,42 @@ impl Converter {
             } else {
                 Layout::Semi { luma: pixel(s!("luma"))?, chroma: pixel(s!("chroma"))?, luma_plane: view(DXGI_FORMAT_R16_UNORM)?, chroma_plane: view(DXGI_FORMAT_R16G16_UNORM)? }
             };
-            Ok(Self { corner: corner.context("no shader")?, layout, params: params.context("no buffer")?, output: texture, width, height })
+            Ok(Self { corner: corner.context("no shader")?, layout, params: params.context("no buffer")?, output: texture, width, height, p, pointer: None, pointer_serial: 0 })
         }
+    }
+
+    /// Draw the pointer into the pictures converted from now on, as `now` has it.
+    pub fn set_pointer(&mut self, gpu: &Gpu, now: &crate::cursor::Pointer) {
+        if now.shape_serial != self.pointer_serial {
+            self.pointer_serial = now.shape_serial;
+            self.pointer = now.shape.as_ref().filter(|s| s.width > 0 && s.height > 0 && s.rgba.len() as u32 >= s.width * s.height * 4).and_then(|s| {
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: s.width,
+                    Height: s.height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                    Usage: D3D11_USAGE_DEFAULT,
+                    BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                    ..Default::default()
+                };
+                let data = D3D11_SUBRESOURCE_DATA { pSysMem: s.rgba.as_ptr() as *const c_void, SysMemPitch: s.width * 4, SysMemSlicePitch: 0 };
+                // SAFETY: the pixels live through the call; out-parameters are live.
+                unsafe {
+                    let mut texture = None;
+                    gpu.device.CreateTexture2D(&desc, Some(&data), Some(&mut texture)).ok()?;
+                    let mut view = None;
+                    gpu.device.CreateShaderResourceView(&texture?, None, Some(&mut view)).ok()?;
+                    view
+                }
+            });
+            self.p.pointer_size = now.shape.as_ref().map_or([0; 2], |s| [s.width, s.height]);
+        }
+        self.p.pointer_on = (now.visible && self.pointer.is_some()) as u32;
+        self.p.pointer_at = [now.x, now.y];
+        // SAFETY: the buffer is ours and as large as the parameters.
+        unsafe { gpu.context.UpdateSubresource(&self.params, 0, None, &self.p as *const Params as *const c_void, 0, 0) };
     }
 
     /// Convert `source` (the driver's texture, held by the caller) into the output.
@@ -179,7 +221,7 @@ impl Converter {
             c.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             c.IASetInputLayout(None);
             c.VSSetShader(&self.corner, None);
-            c.PSSetShaderResources(0, Some(&[Some(source.clone())]));
+            c.PSSetShaderResources(0, Some(&[Some(source.clone()), self.pointer.clone()]));
             c.PSSetConstantBuffers(0, Some(&[Some(self.params.clone())]));
             let draw = |shader: &ID3D11PixelShader, plane: &ID3D11RenderTargetView, width: u32, height: u32| {
                 c.PSSetShader(shader, None);
@@ -196,7 +238,7 @@ impl Converter {
             }
             // Let go of both: the driver's texture goes back to the driver, and the output is
             // the encoder's to read.
-            c.PSSetShaderResources(0, Some(&[None]));
+            c.PSSetShaderResources(0, Some(&[None, None]));
             c.OMSetRenderTargets(None, None);
         }
     }
