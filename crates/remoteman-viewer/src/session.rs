@@ -279,6 +279,8 @@ pub fn build(video: &Video) -> View {
         .halign(gtk::Align::Center)
         .valign(gtk::Align::Start)
         .margin_top(PILL_TOP)
+        .margin_start(PILL_TOP)
+        .margin_end(PILL_TOP)
         .overflow(gtk::Overflow::Visible)
         .build();
 

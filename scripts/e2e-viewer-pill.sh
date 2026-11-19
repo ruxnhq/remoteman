@@ -5,7 +5,7 @@
 # centre of the picture, as wide as its controls, and the picture has the whole window.
 #
 # First with the bar always shown (light, dark, a menu open, then full screen, where the pill
-# hides until it is brought out), then with "Show on hover": hidden, brought out, and in full
+# hides until it is brought out, then a window made too narrow for it), then with "Show on hover": hidden, brought out, and in full
 # screen a click on the pill and one on the picture are put in the way a person would. The host
 # must get the second and not the first, at its place on the picture; the pill must go once the
 # pointer is below it. Pictures of each are left in RM_SHOTS (default: the logs).
@@ -37,7 +37,7 @@ dbus-run-session -- sh -c '
   run() { env -u DISPLAY WAYLAND_DISPLAY=rm-view GDK_BACKEND=wayland timeout 50 "$bin/remoteman" --state "$RM_LOGS/vstate" --size 1920x1080 --scale 1 --refresh 60 "$@"; }
   S="$RM_SHOTS"
   # Always shown.
-  run --hover-bar no --ui "wait=1,pair-go=127.0.0.1:$RM_PORT,wait=3,click=Connect,wait=4,light,figures,wait=0.5,pill?,place?,shot=$S/pill-always-light.png,dark,wait=0.5,shot=$S/pill-always-dark.png,light,menu=display,wait=0.8,shot=$S/pill-menu.png,menu=none,fullscreen,wait=1.5,pill?,bar,wait=0.8,pill?,place?,shot=$S/pill-fullscreen.png" >"$RM_LOGS/viewer.log" 2>"$RM_LOGS/viewer.err"
+  run --hover-bar no --ui "wait=1,pair-go=127.0.0.1:$RM_PORT,wait=3,click=Connect,wait=4,light,figures,wait=0.5,pill?,place?,shot=$S/pill-always-light.png,dark,wait=0.5,shot=$S/pill-always-dark.png,light,menu=display,wait=0.8,shot=$S/pill-menu.png,menu=none,fullscreen,wait=1.5,pill?,bar,wait=0.8,pill?,place?,shot=$S/pill-fullscreen.png,fullscreen,wait=1,size=560x420,wait=1.5,pill?,shot=$S/pill-narrow.png" >"$RM_LOGS/viewer.log" 2>"$RM_LOGS/viewer.err"
   # Show on hover. Once the pill has said where it is in full screen, the pointer goes to the
   # top edge, clicks on the pill'"'"'s end, and then clicks on the picture well below it.
   ( n=0; until [ "$(grep -c "^~ pill" "$RM_LOGS/viewer-hover.log" 2>/dev/null)" -ge 3 ] || [ $n -ge 250 ]; do sleep 0.2; n=$((n + 1)); done
@@ -55,7 +55,7 @@ grep "input: click" "$RM_LOGS/content.log"
 fail=0
 # `~ pill out B, at X,Y size W x H, asks for width N; window WW x WH; picture's place PW x PH at PX,PY; figures F`
 check() { # which line, of which run; whether out
-  run=$1; n=$2; want=$3
+  run=$1; n=$2; want=$3; narrow=$4
   line=$(grep "^~ pill" "$RM_LOGS/$run" | sed -n "${n}p")
   [ -n "$line" ] || { echo "no reading $n of $run"; fail=1; return; }
   set -- $(echo "$line" | sed "s/^~ pill out \([a-z]*\), at \(-*[0-9]*\),\(-*[0-9]*\) size \([0-9]*\) x \([0-9]*\), asks for width \([0-9]*\); window \([0-9]*\) x \([0-9]*\); picture.s place \([0-9]*\) x \([0-9]*\) at \(-*[0-9]*\),\(-*[0-9]*\); figures \(.*\)/\1 \2 \3 \4 \5 \6 \7 \8/")
@@ -65,7 +65,8 @@ check() { # which line, of which run; whether out
   [ "$out" = true ] || return
   mid=$((2 * x + w - ww)); [ $mid -ge -2 ] && [ $mid -le 2 ] || { echo "$run reading $n: the pill is not in the middle ($x + $w of $ww)"; fail=1; }
   [ "$y" = 8 ] || { echo "$run reading $n: the pill is $y from the top"; fail=1; }
-  [ "$w" = "$asks" ] || { echo "$run reading $n: the pill is $w wide, its controls ask for $asks"; fail=1; }
+  [ "$x" -ge 0 ] && [ $((x + w)) -le "$ww" ] || { echo "$run reading $n: the pill ($x + $w) is cut off by the window ($ww)"; fail=1; }
+  [ -n "$narrow" ] || [ "$w" = "$asks" ] || { echo "$run reading $n: the pill is $w wide, its controls ask for $asks"; fail=1; }
   [ "$w" -lt "$ww" ] && [ "$h" -ge 30 ] && [ "$h" -le 60 ] || { echo "$run reading $n: the pill is $w x $h"; fail=1; }
   fy=$(echo "$line" | sed -n "s/.*figures Some((\(-*[0-9]*\), \(-*[0-9]*\),.*/\2/p")
   [ -z "$fy" ] || [ "$fy" -ge $((y + h)) ] || { echo "$run reading $n: the figures ($fy) are not below the pill"; fail=1; }
@@ -73,6 +74,8 @@ check() { # which line, of which run; whether out
 check viewer.log 1 true
 check viewer.log 2 false
 check viewer.log 3 true
+# A window made narrower than the pill: the window stays wide enough for it.
+check viewer.log 4 true narrow
 check viewer-hover.log 1 false
 check viewer-hover.log 2 true
 check viewer-hover.log 3 true

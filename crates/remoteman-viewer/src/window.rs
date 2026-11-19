@@ -186,6 +186,10 @@ impl App {
         let hidden = self.streaming() && (self.window.is_fullscreen() || self.hover_bar.get());
         self.view.pill.set_reveal_child(!hidden || self.bar_out.get() || self.view.menu_open());
         self.view.place_figures();
+        // The window no narrower than the pill, as it was no narrower than a header bar: an
+        // overlay asks only for what its picture needs.
+        let least = self.view.pill_box.measure(gtk::Orientation::Horizontal, -1).0;
+        self.view.page.set_size_request(least + 2 * crate::session::PILL_TOP, -1);
     }
 
     pub fn toggle_fullscreen(&self) {
