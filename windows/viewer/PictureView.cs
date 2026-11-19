@@ -12,6 +12,8 @@ namespace Remoteman;
 public sealed class PictureView : UserControl
 {
     public readonly SwapChainPanel Panel = new();
+    /// The pointer's height over the picture, in the app's units.
+    public event Action<double>? PointerAt;
     bool _attached;
 
     public PictureView()
@@ -80,6 +82,7 @@ public sealed class PictureView : UserControl
     void Pointer(PointerRoutedEventArgs e)
     {
         var pt = e.GetCurrentPoint(Panel);
+        PointerAt?.Invoke(pt.Position.Y);
         int x = (int)Math.Round(pt.Position.X * Panel.CompositionScaleX), y = (int)Math.Round(pt.Position.Y * Panel.CompositionScaleY);
         Engine.remoteman_pointer(x, y);
         var p = pt.Properties;

@@ -22,7 +22,7 @@ tar -C "$work" -czf "$work/winui.tar.gz" viewer
 bash $T/tools/vm.sh put "$work/winui.tar.gz" >/dev/null
 bash $T/tools/vm.sh run '
   $ErrorActionPreference = "Stop"
-  if (Test-Path C:\rm\winui) { Get-ChildItem C:\rm\winui -Exclude obj,bin | Remove-Item -Recurse -Force }
+  if (Test-Path C:\rm\winui) { Get-ChildItem C:\rm\winui -Exclude obj,bin,native | Remove-Item -Recurse -Force }
   New-Item -ItemType Directory -Force C:\rm\winui | Out-Null
   tar.exe -xzf C:\rm\winui.tar.gz -C C:\rm\winui --strip-components 1
   $env:DOTNET_CLI_HOME = "C:\rm\dnhome"; $env:NUGET_PACKAGES = "C:\rm\nuget"

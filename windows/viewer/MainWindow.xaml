@@ -19,7 +19,7 @@
         <ColumnDefinition Width="*" />
         <ColumnDefinition x:Name="CaptionRoom" Width="138" />
       </Grid.ColumnDefinitions>
-      <Button x:Name="BackButton" Grid.Column="0" Visibility="Collapsed" Style="{StaticResource NavigationBackButtonSmallStyle}" Click="Back_Click" />
+      <Button x:Name="BackButton" AutomationProperties.Name="Back" Grid.Column="0" Visibility="Collapsed" Style="{StaticResource NavigationBackButtonSmallStyle}" Click="Back_Click" />
       <Canvas x:Name="Logo" Grid.Column="1" Width="16" Height="16" Margin="6,0,0,0" VerticalAlignment="Center">
         <Rectangle Width="16" Height="16" RadiusX="3.5" RadiusY="3.5" Fill="#2458F5" />
         <Rectangle Canvas.Left="6" Canvas.Top="5" Width="7" Height="5" RadiusX="1.2" RadiusY="1.2" Stroke="White" StrokeThickness="1.2" />
@@ -30,6 +30,9 @@
     </Grid>
     <Grid x:Name="Body" Grid.Row="1">
       <local:PictureView x:Name="Picture" Visibility="Collapsed" />
+      <local:FiguresPanel x:Name="Figures" Visibility="Collapsed" />
+      <Border x:Name="Floating" VerticalAlignment="Top" Height="44" Visibility="Collapsed" Padding="8,0,8,0"
+              Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1" />
       <ContentPresenter x:Name="PageHost" />
     </Grid>
     <InfoBar x:Name="Toast" Grid.Row="1" IsClosable="False" Severity="Informational" VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="16" MaxWidth="560" />

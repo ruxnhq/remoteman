@@ -986,6 +986,7 @@ fn state(app: &App) -> Value {
             json!({
                 "address": c.address, "short": crate::store::short(&c.address), "name": c.name, "os": c.os, "os_name": os_name(&c.os),
                 "last": if c.used > 0 { when(c.used) } else { String::new() },
+                "paired": if c.paired > 0 { when(c.paired) } else { String::new() },
                 "reach": reach_word(reach),
                 "key": app.store.key(&c.address).map(|k| key_words(&k, 4)).unwrap_or_default(),
                 "placement": placement_key(c.placement), "sound": c.sound, "clipboard": c.clipboard,
@@ -1036,6 +1037,7 @@ fn state(app: &App) -> Value {
         "computer": computer,
         "session": session,
         "fullscreen": app.fullscreen,
+        "monitor": [app.monitor.0, app.monitor.1, app.monitor.2],
         "captured": app.captured,
         "toast": app.toast.as_ref().map(|t| t.0.clone()),
         "remember": app.remember,

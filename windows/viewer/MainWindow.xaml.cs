@@ -24,6 +24,17 @@ public sealed partial class MainWindow : Window
         AppWindow.Resize(new Windows.Graphics.SizeInt32(Scale(w), Scale(h)));
         if (App.Options.Pos is var (x, y)) AppWindow.Move(new Windows.Graphics.PointInt32(x, y));
         _views = new Views(this);
+        TitleBar.LayoutUpdated += (_, _) => Passthrough();
+        Picture.PointerAt += PointerOverPicture;
+        _barAway.Tick += (_, _) =>
+        {
+            // Not while the pointer is on it or one of its menus is open.
+            if (Floating.Child is SessionBar && (_overBar || Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(Content.XamlRoot).Count > 0)) return;
+            _barAway.Stop();
+            Floating.Visibility = Visibility.Collapsed;
+        };
+        Floating.PointerEntered += (_, _) => { _overBar = true; _barAway.Stop(); };
+        Floating.PointerExited += (_, _) => { _overBar = false; _barAway.Start(); };
         Engine.Changed += Refresh;
         Closed += (_, _) =>
         {
@@ -84,17 +95,69 @@ public sealed partial class MainWindow : Window
         if (on == _fullscreen) return;
         _fullscreen = on;
         AppWindow.SetPresenter(on ? AppWindowPresenterKind.FullScreen : AppWindowPresenterKind.Overlapped);
-        TitleRow.Height = new GridLength(on ? 0 : 40);
         Engine.Do("now-fullscreen", new { on });
+        Refresh();
         Log.Say($"window: {(on ? "full screen" : "out of full screen")}");
     }
 
     public void SetBack(bool shown) => BackButton.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
-    public void SetBar(UIElement? bar)
+
+    bool _floating, _overBar;
+    readonly DispatcherTimer _barAway = new() { Interval = TimeSpan.FromSeconds(2) };
+
+    /// The session's bar (`null`: no session on screen): in the title bar, or floating over the
+    /// picture at the top edge in full screen and when Settings says so.
+    public void SetSession(SessionBar? bar, JsonObject state)
     {
-        if (BarHost.Content != bar) BarHost.Content = bar;
-        Logo.Visibility = TitleText.Visibility = bar is null ? Visibility.Visible : Visibility.Collapsed;
+        bool floating = bar is not null && (_fullscreen || state.O("settings").B("hover_bar"));
+        TitleRow.Height = new GridLength(_fullscreen || floating ? 0 : 40);
+        if (bar is null)
+        {
+            BarHost.Content = null;
+            Floating.Child = null;
+            Floating.Visibility = Visibility.Collapsed;
+        }
+        else if (floating)
+        {
+            if (BarHost.Content is not null) BarHost.Content = null;
+            if (Floating.Child != bar) Floating.Child = bar;
+        }
+        else
+        {
+            if (Floating.Child is not null) Floating.Child = null;
+            Floating.Visibility = Visibility.Collapsed;
+            if (BarHost.Content != bar) BarHost.Content = bar;
+        }
+        _floating = floating;
+        Logo.Visibility = TitleText.Visibility = BarHost.Content is null ? Visibility.Visible : Visibility.Collapsed;
+        if (bar is not null) Figures.Update(state); else Figures.Visibility = Visibility.Collapsed;
     }
+
+    /// The pointer over the picture, in the app's units: at the top edge the floating bar comes.
+    void PointerOverPicture(double y)
+    {
+        if (!_floating || y > 3 || Floating.Visibility == Visibility.Visible) return;
+        Floating.Visibility = Visibility.Visible;
+        _barAway.Start();
+    }
+
+    /// Where the title bar takes clicks itself (its buttons) rather than moving the window.
+    void Passthrough()
+    {
+        var rects = new List<Windows.Graphics.RectInt32>();
+        double k = Content.XamlRoot?.RasterizationScale ?? 1;
+        foreach (FrameworkElement e in new FrameworkElement[] { BackButton, BarHost })
+        {
+            if (e.Visibility != Visibility.Visible || e.ActualWidth <= 0 || (e == BarHost && BarHost.Content is null)) continue;
+            var at = e.TransformToVisual(null).TransformPoint(new Windows.Foundation.Point(0, 0));
+            rects.Add(new Windows.Graphics.RectInt32((int)(at.X * k), (int)(at.Y * k), (int)(e.ActualWidth * k), (int)(e.ActualHeight * k)));
+        }
+        string key = string.Join(";", rects.Select(r => $"{r.X},{r.Y},{r.Width},{r.Height}"));
+        if (key == _passthrough) return;
+        _passthrough = key;
+        Microsoft.UI.Input.InputNonClientPointerSource.GetForWindowId(AppWindow.Id).SetRegionRects(Microsoft.UI.Input.NonClientRegionKind.Passthrough, rects.ToArray());
+    }
+    string _passthrough = "";
     /// A page, or the picture (`null`).
     public void SetBody(UIElement? page)
     {
