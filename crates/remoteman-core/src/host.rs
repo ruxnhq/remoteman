@@ -245,6 +245,8 @@ pub struct Host {
     /// What this host can do, as the next hello will say it.
     features: Arc<Mutex<Vec<String>>>,
     calls: Mutex<mpsc::Sender<Call>>,
+    /// Told once the handler thread has ended and let go of everything it held.
+    handler_done: Mutex<mpsc::Receiver<()>>,
     /// This host's certificate fingerprint, for pairing by hand.
     pub fingerprint: String,
     /// The address actually listened on.
@@ -267,6 +269,7 @@ impl Host {
         // The handler lives on its own thread, so its calls come one at a time and may block.
         let (calls, call_rx) = mpsc::channel::<Call>();
         let mut handler: Box<dyn HostHandler> = Box::new(handler);
+        let (done, handler_done) = mpsc::channel::<()>();
         std::thread::Builder::new().name("remoteman host".into()).spawn(move || {
             while let Ok(call) = call_rx.recv() {
                 match call {
@@ -286,13 +289,17 @@ impl Host {
                     Call::Left => handler.left(),
                 }
             }
+            // Nothing more will come: whatever the handler still holds is let go of here,
+            // and whoever is stopping the host is told when that is done.
+            drop(handler);
+            let _ = done.send(());
         })?;
 
         let link: Arc<Mutex<Option<Link>>> = Arc::default();
         let who = Who::default();
         let features = Arc::new(Mutex::new(options.features.clone()));
         runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone()));
-        Ok(Self { runtime: Some(runtime), endpoint, trust, link, who, features, calls: Mutex::new(calls), fingerprint: identity.fingerprint, address })
+        Ok(Self { runtime: Some(runtime), endpoint, trust, link, who, features, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
     }
 
     /// Let the next unknown device in (it is remembered and pairing turns itself off), or stop
@@ -371,6 +378,13 @@ impl Host {
             let endpoint = self.endpoint.clone();
             let _ = rt.block_on(async { tokio::time::timeout(Duration::from_millis(500), endpoint.wait_idle()).await });
             rt.shutdown_timeout(Duration::from_secs(1));
+            // The handler is still taking down what the client had (its display, the encoder
+            // and its GPU context). A program that exits in the middle of that can hang in
+            // the GPU driver's own exit code, so wait for it: the handler's thread ends once
+            // nothing can call it any more.
+            let (closed, _) = mpsc::channel::<Call>();
+            *self.calls.lock().unwrap() = closed;
+            let _ = self.handler_done.lock().unwrap().recv_timeout(Duration::from_secs(5));
         }
     }
 }

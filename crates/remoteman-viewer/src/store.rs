@@ -66,6 +66,9 @@ pub struct Computer {
     pub quality: Quality,
     /// What a session with this computer starts with.
     pub media: Media,
+    /// The hardware addresses of its network cards, as it last advertised them on this
+    /// network (comma-separated; empty: never seen): what waking it needs.
+    pub cards: String,
 }
 
 /// What a session starts with switched on: the computer's sound played here, this device's
@@ -248,7 +251,7 @@ impl Store {
             Ok(text) => {
                 for line in text.lines() {
                     if line == "[computer]" {
-                        store.computers.push(Computer { name: String::new(), address: String::new(), os: String::new(), paired: 0, used: 0, placement: Placement::Extend, quality: Quality::Automatic, media: Media::default() });
+                        store.computers.push(Computer { name: String::new(), address: String::new(), os: String::new(), paired: 0, used: 0, placement: Placement::Extend, quality: Quality::Automatic, media: Media::default(), cards: String::new() });
                         continue;
                     }
                     let (Some(c), Some((key, value))) = (store.computers.last_mut(), line.split_once('=')) else { continue };
@@ -260,6 +263,7 @@ impl Store {
                         "used" => c.used = value.parse().unwrap_or(0),
                         "placement" => c.placement = placement_from_key(value).unwrap_or(Placement::Extend),
                         "quality" => c.quality = Quality::from_key(value),
+                        "cards" => c.cards = value.to_owned(),
                         other => {
                             if let Some(field) = c.media.field(other) {
                                 *field = value == "yes";
@@ -276,7 +280,7 @@ impl Store {
                 let last = last.trim();
                 if !last.is_empty() && store.known(last).exists() {
                     let paired = std::fs::metadata(store.known(last)).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64);
-                    store.computers.push(Computer { name: host_part(last).to_owned(), address: last.to_owned(), os: String::new(), paired, used: paired, placement: store.settings.placement, quality: store.settings.quality, media: store.settings.media });
+                    store.computers.push(Computer { name: host_part(last).to_owned(), address: last.to_owned(), os: String::new(), paired, used: paired, placement: store.settings.placement, quality: store.settings.quality, media: store.settings.media, cards: String::new() });
                 }
             }
         }
@@ -319,7 +323,7 @@ impl Store {
             }
             None => {
                 let name = if host_name.is_empty() { host_part(address) } else { host_name };
-                self.computers.push(Computer { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: self.settings.quality, media: self.settings.media });
+                self.computers.push(Computer { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: self.settings.quality, media: self.settings.media, cards: String::new() });
             }
         }
         self.sort();
@@ -373,7 +377,7 @@ impl Store {
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         for c in &self.computers {
             out += &format!(
-                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\n{}",
+                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\ncards={}\n{}",
                 clean(&c.name),
                 clean(&c.address),
                 clean(&c.os),
@@ -381,6 +385,7 @@ impl Store {
                 c.used,
                 placement_key(c.placement),
                 c.quality.key(),
+                clean(&c.cards),
                 c.media.lines()
             );
         }

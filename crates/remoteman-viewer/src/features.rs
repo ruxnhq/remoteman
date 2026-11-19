@@ -60,9 +60,9 @@ pub struct Features {
 }
 
 pub const FEATURES: Features = Features {
-    discovery: false,
-    presence: false,
-    wake: false,
+    discovery: true,
+    presence: true,
+    wake: true,
     pairing_code: false,
     sound: true,
     sound_setting: true,

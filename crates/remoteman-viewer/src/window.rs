@@ -66,6 +66,8 @@ pub struct App {
     /// down, and whether another key spoiled it.
     pub chord: Cell<(bool, bool, bool)>,
     /// The pointer held in the window, its raw movement sent, while that is wanted.
+    /// Every advertisement of a remoteman host seen on this network now.
+    pub nearby: RefCell<Vec<crate::nearby::Found>>,
     pub capture: RefCell<Option<crate::capture::Capture>>,
     /// How far a captured pointer has been sent in this run, for tests.
     pub moved: Cell<(f64, f64)>,
@@ -186,6 +188,10 @@ impl App {
 
     /// What is known of a computer before trying it, as far as this build may say.
     pub fn reach_of(&self, address: &str) -> Option<status::Reach> {
+        // Seen on this network now beats what an earlier attempt found.
+        if FEATURES.presence && self.seen(address).is_some() {
+            return Some(status::Reach::Online);
+        }
         self.reach.borrow().get(address).copied().filter(|r| FEATURES.presence || *r == status::Reach::Unreachable)
     }
 
@@ -243,11 +249,6 @@ impl App {
     /// Connect to a computer: the connecting page, then its session or what went wrong.
     pub fn connect(self: &Rc<Self>, target: Target, pair: bool) {
         if self.streaming() {
-            return;
-        }
-        if self.reach_of(&target.address) == Some(status::Reach::Asleep) {
-            // Known to be asleep: offer to wake it rather than wait for no answer.
-            self.show_page(&status::problem(self, &target, status::Problem::Asleep));
             return;
         }
         let (placement, _) = self.choices(&target.address);
@@ -820,6 +821,7 @@ pub fn build(application: &adw::Application, args: Args) {
         bar_out: Cell::new(false),
         released: Cell::new(false),
         chord: Cell::new((false, false, false)),
+        nearby: RefCell::new(Vec::new()),
         capture: RefCell::new(None),
         moved: Cell::new((0.0, 0.0)),
         fingers: RefCell::new(Vec::new()),
@@ -846,6 +848,9 @@ pub fn build(application: &adw::Application, args: Args) {
     });
 
     computers::wire(&app);
+    if FEATURES.discovery {
+        crate::nearby::watch(&app);
+    }
     session::wire(&app);
     // Whatever is copied on this computer while the clipboard is shared goes to the other.
     window.clipboard().connect_changed({
