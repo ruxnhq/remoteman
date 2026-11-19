@@ -81,6 +81,23 @@ own so that it can't collide with the main session's edits to `docs/PLAN.md`.
 - For measuring: `--log`, `--dump`, `--whole-every`, `--keep-last`, `--test-bursts`, `--encoder`,
   `--pace` on the host; `--follow-test`, `window:`, `picture:` in the viewer.
 
+## Windows, each way (00:00 to 00:25)
+
+- **Windows viewer to a Mac host** (a second Mac host on the LAN, port 7803, a key and state of
+  its own; the everyday host was not touched): pairs (code 886 574 on both sides), HEVC Main10 at
+  1920×1080 and 3840×2160, left clicks land at 0.500, 0.501 and 0.250, 0.751, a scroll and the
+  keys r, m, 1 arrive, a configure to another size changes the display in place in 0.54 s, sound
+  arrives (2872 packets in 30 s by its count, a test tone), 0 lost and 0 keyframe requests. Its
+  first run lost 1 to 3 frames in the VM's network. Its name arrives as "W-".
+- **Mac viewer to the Windows host** (over Tailscale; the PC's firewall drops the port from the
+  LAN): pairs (code 905 071), AV1 4:2:0 10-bit at 1920×1080 decoded in hardware in 2.1 to 2.4 ms,
+  HEVC when only HEVC is offered, 60 frames a second shown while the screen moves, age 12 ms, a
+  right click opens the menu at the point aimed at, the Windows key and typed letters arrive in
+  order, a configure to 1600×900 works. No sound packet reached the Mac viewer in three sessions
+  (a silent VM, or not sent: not settled). The Windows host sends no bitrate status.
+- *Not tried either way:* a second display, main and only placements, clipboard, files,
+  microphone, camera, long runs.
+
 ## Went wrong
 
 - My loopback tests ran over the owner's session (21:58 to 22:00) and over a test session from
