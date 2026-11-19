@@ -4,6 +4,7 @@ org.gnome.Mutter.RemoteDesktop on the session bus this runs on. Steps are read f
 line, one after another:
   wait=SECONDS   move=DX,DY (relative, in one go)   moves=N,DX,DY (N small ones)
   key=EVDEV_CODE (down and up)   down=CODE   up=CODE   wheel=STEPS (vertical notches)
+  click (the left button, down and up)
 Never run it on a real desktop's bus: it would move the real pointer."""
 import sys, time
 import gi
@@ -36,5 +37,8 @@ for step in sys.argv[1:]:
         key(int(value), name == "down")
     elif name == "wheel":
         call(session, S, "NotifyPointerAxisDiscrete", GLib.Variant("(ui)", (0, int(value))))
+    elif name == "click":
+        for down in (True, False):
+            call(session, S, "NotifyPointerButton", GLib.Variant("(ib)", (272, down))); time.sleep(0.05)
     time.sleep(0.1)
 call(session, S, "Stop")

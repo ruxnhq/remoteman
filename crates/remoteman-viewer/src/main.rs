@@ -7,7 +7,7 @@
 //! Without a host it opens on the list of paired computers. With one it connects at once;
 //! `--pair` then trusts the computer if it isn't known yet (it must be in pairing mode).
 //! `--placement`: this window as an extra display beside the other computer's own, as its main
-//! display, or as its only one. `--hover-bar yes`: no title bar while connected; it comes out
+//! display, or as its only one. `--hover-bar yes`: the session's pill hidden while connected; it comes out
 //! when the pointer reaches the top edge. Both can be changed in the window, and are remembered.
 //!
 //! For testing: `--quit-after SECONDS` leaves by itself and prints what it saw, and
