@@ -36,6 +36,12 @@ pub struct Args {
     pub second: bool,
     /// For tests: a file whose first line is typed as the password of a locked computer.
     pub password_from: Option<PathBuf>,
+    /// For tests: say the screen is (or isn't) HDR whatever Windows says.
+    pub screen_hdr: Option<bool>,
+    /// For tests: play this HEVC (Annex B, with access unit delimiters) as a made-up session's
+    /// picture, through the same decoding and drawing; `--play-colour bt2020-pq` for HDR.
+    pub play: Option<PathBuf>,
+    pub play_colour: String,
 }
 
 const USAGE: &str = "usage: remoteman [HOST:PORT] [--pair] [--state DIR] [--size WxH] [--refresh HZ] [--decoders av1,hevc] [--seconds N] [--fullscreen] [--shot FILE.png] [--stats] [--input-demo] [--log FILE] [--sound] [--ui STEPS --shots DIR [--dark|--light]]";
@@ -46,6 +52,7 @@ fn mode(word: &str) -> Option<Mode> {
     Some(match word {
         "av1" => Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 },
         "hevc" => Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 },
+        "hevc444" => Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 },
         _ => return None,
     })
 }
@@ -56,7 +63,12 @@ fn default_state() -> PathBuf {
 }
 
 pub fn parse() -> Result<Args> {
-    let mut words = std::env::args().skip(1).peekable();
+    parse_from(std::env::args().skip(1).collect())
+}
+
+/// The same from words given, for the engine (the WinUI 3 app passes on what is its own).
+pub fn parse_from(words: Vec<String>) -> Result<Args> {
+    let mut words = words.into_iter().peekable();
     let host = words.next_if(|h| !h.starts_with("--"));
     let mut args = Args {
         host,
@@ -64,7 +76,7 @@ pub fn parse() -> Result<Args> {
         state: default_state(),
         size: None,
         refresh: None,
-        decoders: vec![mode("av1").unwrap(), mode("hevc").unwrap()],
+        decoders: vec![mode("av1").unwrap(), mode("hevc").unwrap(), mode("hevc444").unwrap()],
         seconds: None,
         fullscreen: false,
         shot: None,
@@ -77,6 +89,9 @@ pub fn parse() -> Result<Args> {
         sound: false,
         second: false,
         password_from: None,
+        screen_hdr: None,
+        play: None,
+        play_colour: "bt709".into(),
     };
     while let Some(arg) = words.next() {
         let mut value = || words.next().ok_or_else(|| anyhow!("{arg} needs a value"));
@@ -106,6 +121,9 @@ pub fn parse() -> Result<Args> {
             "--sound" => args.sound = true,
             "--second" => args.second = true,
             "--password-from" => args.password_from = Some(value()?.into()),
+            "--screen-hdr" => args.screen_hdr = Some(value()? == "yes"),
+            "--play" => args.play = Some(value()?.into()),
+            "--play-colour" => args.play_colour = value()?,
             other => bail!("unknown option {other}\n{USAGE}"),
         }
     }

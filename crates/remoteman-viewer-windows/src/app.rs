@@ -285,9 +285,10 @@ pub struct Summary {
 }
 
 /// The steps of the bitrate limit, in megabits a second; the last is no limit.
-pub const BITRATES: [u32; 12] = [5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 0];
+pub const BITRATES: [u32; 15] = [5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 150, 300, 500, 0];
 /// The ones the drop-down of a computer's settings offers.
-pub const BITRATE_CHOICES: [u32; 6] = [0, 10, 20, 40, 60, 100];
+/// The same steps as the Linux viewer's "Bitrate, at most".
+pub const BITRATE_CHOICES: [u32; 7] = [0, 20, 50, 100, 150, 300, 500];
 
 pub struct App {
     pub args: Args,
@@ -365,6 +366,9 @@ pub struct App {
     pub remote_cursor: Option<Arc<remoteman_core::CursorShape>>,
     /// A line of news over the window, until it has been read.
     pub toast: Option<(String, Instant)>,
+    /// The picture has a place of its own (the WinUI 3 app's panel, `engine.rs`) and the
+    /// size the window is said to have is that place's: the bar is not in it.
+    pub panel: bool,
 }
 
 fn mode_word(mode: &Mode) -> &'static str {
@@ -427,6 +431,7 @@ impl App {
             captured: false,
             remote_cursor: None,
             toast: None,
+            panel: false,
             shown_format: None,
             args,
             gpu,
@@ -502,7 +507,7 @@ impl App {
                 if !self.maximised && (w < 1224.0 || h < 744.0) {
                     (w, h) = (1224.0, 744.0);
                 }
-                if !self.store.settings.hover_bar {
+                if !self.store.settings.hover_bar && !self.panel {
                     h -= crate::session::BAR;
                 }
                 (w * self.scale, h * self.scale)
@@ -527,7 +532,10 @@ impl App {
             (w, h) = self.picture_pixels();
         }
         let refresh = if self.store.settings.match_refresh { self.monitor.2.clamp(30, 240) } else { 60 };
-        Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement, hdr: false, headroom: 0.0 }
+        // HDR where this screen shows it (or a test says so); the host then may send PQ.
+        let hdr = FEATURES.hdr && self.scene.screen_hdr.load(Ordering::Relaxed);
+        let headroom = if hdr { f32::from_bits(self.scene.headroom.load(Ordering::Relaxed)) } else { 0.0 };
+        Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement, hdr, headroom }
     }
 
     /// While connected with "The window's size": when the window has changed size and been
@@ -1438,7 +1446,8 @@ impl App {
     /// What a drop-down offers: each choice, whether it can be chosen, and which is chosen now.
     pub fn options(&self, choice: &Choice) -> (Vec<(String, bool)>, usize) {
         let decodes = |word: &str| self.decoders.iter().any(|m| mode_word(m) == word);
-        let qualities = [(Quality::Automatic, true), (Quality::Sharp, FEATURES.sharp_text), (Quality::Hevc, decodes("hevc")), (Quality::Av1, decodes("av1"))];
+        let full = self.decoders.iter().any(|m| m.chroma == remoteman_core::Chroma::C444);
+        let qualities = [(Quality::Automatic, true), (Quality::Sharp, FEATURES.sharp_text && full), (Quality::Hevc, decodes("hevc")), (Quality::Av1, decodes("av1"))];
         match choice {
             Choice::Controls => (vec![("Title bar".into(), true), ("Show the bar on hover".into(), true)], self.store.settings.hover_bar as usize),
             Choice::DefaultQuality => (qualities.iter().map(|(q, on)| (q.name().to_owned(), *on)).collect(), qualities.iter().position(|(q, _)| *q == self.store.settings.quality).unwrap_or(0)),
@@ -2045,7 +2054,7 @@ impl App {
         if self.screen != Screen::Session || self.session.is_none() {
             return None;
         }
-        let top = if self.bar_hidden() { 0.0 } else { crate::session::BAR };
+        let top = if self.bar_hidden() || self.panel { 0.0 } else { crate::session::BAR };
         Some(ui::rect(0.0, top, self.size.0, (self.size.1 - top).max(1.0)))
     }
 

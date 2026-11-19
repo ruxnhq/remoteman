@@ -27,6 +27,12 @@ pub struct Scene {
     poked: Condvar,
     /// The window's client area in pixels: width in the high half.
     pub client_size: AtomicU64,
+    /// This screen shows HDR (Windows has it in HDR mode), and how many times brighter than
+    /// SDR white it can go; set by whoever owns the window.
+    pub screen_hdr: AtomicBool,
+    pub headroom: AtomicU32,
+    /// A panel's scale, x in the high half, each an f32's bits (0: none, a window's own).
+    pub panel_scale: AtomicU64,
     /// The window, for waking it from other threads (0 until there is one).
     pub hwnd: AtomicIsize,
     /// Set when it is time to leave.
@@ -81,6 +87,10 @@ pub struct Shared {
     pub decoder: Mutex<String>,
     /// The stream's size in pixels, once the host has said: 0 until then. Width in the high half.
     pub stream_size: AtomicU64,
+    /// The stream is HDR (BT.2020 with PQ), and where its SDR white and peak sit, in nits.
+    pub hdr: AtomicBool,
+    pub sdr_white: AtomicU32,
+    pub peak: AtomicU32,
     pub refresh: AtomicU32,
     /// What the host says it can do, when that changes during the session.
     pub features: Mutex<Option<Vec<String>>>,
@@ -140,6 +150,9 @@ impl Shared {
             picture: Mutex::default(),
             cursor: Mutex::default(),
             cursor_gone: AtomicBool::default(),
+            hdr: AtomicBool::default(),
+            sdr_white: AtomicU32::new(203),
+            peak: AtomicU32::new(1000),
             cursor_at: Mutex::default(),
             cursor_moved: AtomicBool::default(),
             stage: AtomicU8::default(),
@@ -176,6 +189,15 @@ pub fn pack(width: u32, height: u32) -> u64 {
     (width as u64) << 32 | height as u64
 }
 
+#[allow(dead_code)]
+pub fn pack_scale(x: f32, y: f32) -> u64 {
+    ((x.to_bits() as u64) << 32) | y.to_bits() as u64
+}
+
+pub fn unpack_scale(v: u64) -> (f32, f32) {
+    if v == 0 { (1.0, 1.0) } else { (f32::from_bits((v >> 32) as u32), f32::from_bits(v as u32)) }
+}
+
 pub fn unpack(size: u64) -> (u32, u32) {
     ((size >> 32) as u32, size as u32)
 }
@@ -207,6 +229,9 @@ impl Handler for Feed {
         say!("stream: {:?} {}x{} at {} Hz, {}", info.mode, info.width, info.height, info.refresh, info.colour);
         self.shared.stream_size.store(pack(info.width, info.height), Ordering::Relaxed);
         self.shared.refresh.store(info.refresh, Ordering::Relaxed);
+        self.shared.hdr.store(info.colour == "bt2020-pq", Ordering::Relaxed);
+        self.shared.sdr_white.store(info.sdr_white.max(1), Ordering::Relaxed);
+        self.shared.peak.store(info.peak.max(1), Ordering::Relaxed);
         self.wake_window();
         let _ = self.tx.send(Msg::Stream(info.clone()));
     }
@@ -361,7 +386,7 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Stream(i) => {
-                decoder = Some(if crate::decode::is_software(i.mode.codec) { Decoder::software(gpu, i.mode.codec)? } else { Decoder::new(gpu, i.mode.codec, sampled)? });
+                decoder = Some(if crate::decode::mode_in_software(i.mode) { Decoder::software(gpu, i.mode.codec)? } else { Decoder::new(gpu, i.mode.codec, sampled)? });
                 first = true;
                 info = Some(i);
             }
@@ -369,7 +394,7 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
                 let (Some(d), Some(i)) = (decoder.as_mut(), info.as_ref()) else { continue };
                 let t = std::time::Instant::now();
                 let mut decoded = d.decode(&data, age);
-                if first && sampled && decoded.is_err() && !crate::decode::is_software(i.mode.codec) {
+                if first && sampled && decoded.is_err() && !crate::decode::mode_in_software(i.mode) {
                     // The card is only asked for its textures at the first frame, a keyframe.
                     // Try that frame again with textures for decoding alone.
                     say!("no decoder textures that can be sampled ({:#}): copying each picture on the GPU instead", decoded.as_ref().err().unwrap());

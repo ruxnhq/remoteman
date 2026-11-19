@@ -288,7 +288,7 @@ pub fn clipboard_set_picture(data: &[u8]) -> bool {
 }
 
 /// Ask for a file to send. `None`: nothing was chosen.
-fn pick_file(hwnd: HWND) -> Option<PathBuf> {
+pub(crate) fn pick_file(hwnd: HWND) -> Option<PathBuf> {
     let mut name = [0u16; 2048];
     let mut ask = OPENFILENAMEW {
         lStructSize: size_of::<OPENFILENAMEW>() as u32,
@@ -305,7 +305,7 @@ fn pick_file(hwnd: HWND) -> Option<PathBuf> {
 }
 
 /// Ask for a folder, with Windows' own dialog. `None`: none was chosen.
-fn pick_folder(hwnd: HWND) -> Option<PathBuf> {
+pub(crate) fn pick_folder(hwnd: HWND) -> Option<PathBuf> {
     use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
     use windows::Win32::UI::Shell::{FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH};
     // SAFETY: COM calls on this thread, which says so first; the name Windows hands back is
@@ -324,7 +324,7 @@ fn pick_folder(hwnd: HWND) -> Option<PathBuf> {
 }
 
 /// The size in pixels and the refresh rate of the monitor the window is on.
-fn monitor_of(hwnd: HWND) -> (u32, u32, u32, RECT, RECT) {
+pub(crate) fn monitor_of(hwnd: HWND) -> (u32, u32, u32, RECT, RECT) {
     // SAFETY: structures that say their own size and live through each call.
     unsafe {
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
