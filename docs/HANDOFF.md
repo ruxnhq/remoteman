@@ -39,6 +39,12 @@ The builders were subagents of the session that wrote this; another account can'
 
 After both: merge the host branch and the interface branch into `main` (both change `Cargo.lock`), confirm `cargo build --release --locked` on Linux, and record it in the plan.
 
+## After the night of 2026-11-18: the host's second slice
+
+On branch `claude/win-host-night-aa0044` (`main` merged in). `docs/PLAN.md`, "Windows host, second slice", has what was run and what it showed. In short: pairing by code through `remoteman-host ctl`, the features list, sound out, clipboard text, files in, mirroring, loss recovery and a monitor of the device's own (the driver's second monitor, attached and detached) work in the VM against the Linux test client and the Linux viewer. Not built: the pointer drawn into the picture for a client without the cursor channel, the tray interface, a service for the sign-in screen, HDR, pictures on the clipboard, files out, a second display for one device. Not run: the microphone (it needs Steam or VB-CABLE in the VM, which needs the owner's word), touch, a real PC with a screen, a Mac viewer.
+
+The VM differs from before in this: the driver's settings allow two monitors, a second "Generic Monitor (Guesthouse)" exists outside the desktop, the first monitor's output is `\\.\DISPLAY3`, and `C:\rm\steam\SteamSetup.exe` is there unrun. `tools/run.sh` (one host run with a client command on this PC), `tools/obs.ps1` (a window in the guest that writes down the input reaching it, or shows moving text) and `tools/disp.ps1` (Windows' list of displays; run it through `desk.py`) are in `/mnt/data/vms/remoteman-win/tools`.
+
 ## The VM and the tools
 
 - `/mnt/data/vms/remoteman-win`: remoteman's own Windows 11 VM, a reflink copy of Guesthouse's test base `offload-test`, on lab slot 2, off. Its claim is a row in `~/.cache/kvm-gpupv-main/notes/handoff.md` (local commits `750ff791`, `79daef9c`, not pushed, with no AI attribution, as that repo's rules ask). The owner's `windows-11` and `offload-test` were never touched.
