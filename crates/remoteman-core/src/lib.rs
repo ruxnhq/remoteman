@@ -9,6 +9,7 @@ pub mod blob;
 pub mod ffi;
 pub mod host;
 #[cfg(unix)]
+pub mod receive;
 pub mod relay;
 
 use std::net::ToSocketAddrs;
@@ -18,7 +19,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-pub use remoteman_proto::control::{Chroma, Codec, Display, Mode, Placement};
+pub use remoteman_proto::control::{Chroma, Codec, Display, Mode, Placement, Side};
 pub use remoteman_proto::input::{Button, Event, TouchPhase};
 pub use remoteman_proto::keys;
 pub use remoteman_proto::{PORT, PROTO};
@@ -49,6 +50,11 @@ pub struct Options {
     /// This app draws the cursor itself: the host leaves it out of the picture and reports its
     /// shape and position through [`Handler::cursor_shape`] and [`Handler::cursor_at`].
     pub cursor: bool,
+    /// The password of the host's user, to unlock a locked host with: given on a second
+    /// try, after the first failed with "the host refused: locked: ...".
+    pub unlock: Option<String>,
+    /// Only into a session that is already running on the host: never its login screen.
+    pub attach_only: bool,
 }
 
 /// The host's cursor image: premultiplied RGBA, rows top to bottom. Zero size: no cursor.
@@ -98,7 +104,17 @@ pub trait Handler: Send + 'static {
     fn blob(&mut self, _event: &BlobEvent) {}
     /// How far connecting has got. Called on the connecting thread, before
     /// [`Client::connect`] returns; after [`Stage::Display`] come `stream` and the first `frame`.
+    /// The second display's picture starts (or starts afresh) as this, after this client asked
+    /// for one with `Message::Display`. Its frames come to [`Handler::frame2`].
+    fn stream2(&mut self, _info: &StreamInfo) {}
+    /// One whole frame of the second display, in order; the first after `stream2` is a
+    /// keyframe.
+    fn frame2(&mut self, _frame: &Frame, _age_us: Option<i64>) {}
     fn stage(&mut self, _stage: Stage) {}
+    /// This device is new to the host, whose owner now has `seconds` to confirm it there.
+    /// `code` is what both sides show for comparing. Called on the connecting thread, in the
+    /// middle of [`Client::connect`], which goes on waiting.
+    fn pairing(&mut self, _code: &str, _seconds: u32) {}
     /// The connection is over.
     fn closed(&mut self, reason: &str);
 }
@@ -140,6 +156,8 @@ pub fn knows_host(state: &std::path::Path, host: &str) -> bool {
 
 enum FromHost {
     Stream(StreamInfo),
+    /// The second display's picture starts (afresh).
+    Stream2(StreamInfo),
     Cursor(CursorShape),
     Message(Message),
 }
@@ -173,6 +191,30 @@ impl MicSender {
     }
 }
 
+/// Sends camera frames on a client's connection, from any thread: as [`Client::send_camera`].
+/// Sending after the client has closed does nothing.
+#[derive(Clone)]
+pub struct CameraSender(Connection, Arc<std::sync::Mutex<(u16, u32)>>);
+
+impl CameraSender {
+    pub fn send(&self, data: &[u8], key: bool, time_us: u64) {
+        send_camera(&self.0, &self.1, data, key, time_us);
+    }
+}
+
+fn send_camera(conn: &Connection, camera: &std::sync::Mutex<(u16, u32)>, data: &[u8], key: bool, time_us: u64) {
+    let Some(max) = conn.max_datagram_size() else { return };
+    let (epoch, number) = {
+        let mut camera = camera.lock().unwrap();
+        let now = *camera;
+        camera.1 = camera.1.wrapping_add(1);
+        now
+    };
+    for d in remoteman_proto::video::fragment_as(media::KIND_CAMERA, data, key, false, epoch, number, time_us, max) {
+        let _ = conn.send_datagram(d.into());
+    }
+}
+
 /// Why a host closed the connection: the codes of docs/PROTOCOL.md, "Connection".
 pub const CLOSE_DROPPED: u32 = 2;
 pub const CLOSE_REVOKED: u32 = 3;
@@ -183,7 +225,7 @@ pub struct Client {
     tasks: tokio::runtime::Handle,
     control: tokio::sync::mpsc::Sender<Message>,
     /// The camera: how many times it was switched on, and the next frame's number.
-    camera: std::sync::Mutex<(u16, u32)>,
+    camera: Arc<std::sync::Mutex<(u16, u32)>>,
     conn: Connection,
     _endpoint: Endpoint,
     input: tokio::sync::mpsc::UnboundedSender<Event>,
@@ -219,20 +261,30 @@ impl Client {
         let o_delay = o.test_delay_lost_ms.filter(|ms| *ms > 0);
         handler.stage(Stage::Handshake);
         let (endpoint, conn, fingerprint) = connect(addr, &identity, expect).await?;
-        if !known.exists() {
+        let new_here = !known.exists();
+        if new_here {
             std::fs::create_dir_all(known.parent().unwrap())?;
             std::fs::write(&known, &fingerprint)?;
         }
+        // A host that turns a new device down is not kept: the next try starts from nothing.
+        let forget = |e: anyhow::Error| {
+            if new_here {
+                let _ = std::fs::remove_file(&known);
+            }
+            e
+        };
 
         let clock = Instant::now();
         let now_us = move || clock.elapsed().as_micros() as u64;
         handler.stage(Stage::Hello);
         let (mut send, mut recv) = conn.open_bi().await?;
-        write_message(&mut send, &Message::ClientHello { proto: remoteman_proto::PROTO, name: o.name, display: o.display, decoders: o.decoders, cursor: o.cursor }).await?;
+        write_message(&mut send, &Message::ClientHello { proto: remoteman_proto::PROTO, name: o.name, display: o.display, decoders: o.decoders, cursor: o.cursor, unlock: o.unlock, way_in: o.attach_only.then(|| "attach".to_owned()) }).await?;
         let (host_name, host_os, host_features) = loop {
             match read_message(&mut recv).await?.context("the host closed the connection")? {
                 Message::HostHello { name, os, features, .. } => break (name, os, features),
-                Message::Error { code, message } => bail!("the host refused: {code}: {message}"),
+                Message::Error { code, message } => return Err(forget(anyhow::anyhow!("the host refused: {code}: {message}"))),
+                // New here, and the host's owner is being asked: show the code and wait.
+                Message::Pairing { seconds } => handler.pairing(&remoteman_transport::pair_code(&fingerprint, &identity.fingerprint), seconds),
                 _ => {}
             }
         };
@@ -269,8 +321,9 @@ impl Client {
             let mut best = u64::MAX;
             while let Ok(Some(m)) = read_message(&mut recv).await {
                 match m {
-                    Message::Stream { epoch, mode, width, height, refresh, colour } => {
-                        let _ = epoch_tx.send(FromHost::Stream(StreamInfo { epoch, mode, width, height, refresh, colour }));
+                    Message::Stream { epoch, mode, width, height, refresh, colour, index } => {
+                        let info = StreamInfo { epoch, mode, width, height, refresh, colour };
+                        let _ = epoch_tx.send(if index == 0 { FromHost::Stream(info) } else { FromHost::Stream2(info) });
                     }
                     Message::Cursor { width, height, hot_x, hot_y, rgba } => {
                         let rgba = remoteman_proto::control::decode_bytes(&rgba).unwrap_or_default();
@@ -292,7 +345,7 @@ impl Client {
                     Message::Error { code, message } => {
                         let _ = failed.send(format!("{code}: {message}"));
                     }
-                    m @ (Message::SoundFormat { .. } | Message::CameraKeyframe | Message::Status { .. } | Message::FileResult { .. } | Message::Features { .. }) => {
+                    m @ (Message::SoundFormat { .. } | Message::CameraKeyframe | Message::Status { .. } | Message::FileResult { .. } | Message::Features { .. } | Message::Display { .. }) => {
                         let _ = epoch_tx.send(FromHost::Message(m));
                     }
                     _ => {}
@@ -349,7 +402,21 @@ impl Client {
             let (mut started, mut need_key, mut missed) = (false, true, None::<u32>);
             let mut asked = None::<Instant>;
             let mut dropped = 0u32;
+            // Datagrams that came ahead of the `stream` message they belong to (the two travel
+            // apart and may arrive in either order): kept until it has come. Without this the
+            // first frames of a picture, its keyframe among them, are thrown away, and on a
+            // desktop where nothing moves no other frame follows.
+            // The second display's picture: put together apart, and mended more simply (a
+            // keyframe is asked for after any loss).
+            let mut second = Reassembler::of(remoteman_proto::video::KIND_VIDEO2);
+            let (mut started2, mut need_key2, mut asked2) = (false, true, None::<Instant>);
+            let mut early = std::collections::VecDeque::new();
+            let mut replay = std::collections::VecDeque::new();
             let reason = loop {
+                // Kept datagrams go first, in the order they came.
+                let d = if let Some(d) = replay.pop_front() {
+                    d
+                } else {
                 tokio::select! {
                     biased;
                     Some(reason) = closed_rx.recv() => break reason,
@@ -358,21 +425,77 @@ impl Client {
                             r.reset(info.epoch);
                             (started, need_key, missed) = (true, true, None);
                             handler.stream(&info);
+                            replay.extend(early.drain(..));
+                            continue;
                         }
-                        FromHost::Cursor(shape) => handler.cursor_shape(&shape),
-                        FromHost::Message(m) => handler.message(&m),
+                        FromHost::Stream2(info) => {
+                            second.reset(info.epoch);
+                            (started2, need_key2, asked2) = (true, true, None);
+                            handler.stream2(&info);
+                            continue;
+                        }
+                        FromHost::Cursor(shape) => {
+                            handler.cursor_shape(&shape);
+                            continue;
+                        }
+                        FromHost::Message(m) => {
+                            handler.message(&m);
+                            continue;
+                        }
                     },
-                    Some(event) = blob_rx.recv() => handler.blob(&event),
-                    d = video.read_datagram() => {
-                        let d = match d {
-                            Ok(d) => d,
-                            Err(e) => break e.to_string(),
-                        };
+                    Some(event) = blob_rx.recv() => {
+                        handler.blob(&event);
+                        continue;
+                    }
+                    d = video.read_datagram() => match d {
+                        Ok(d) => d,
+                        Err(e) => break e.to_string(),
+                    },
+                }
+                };
+                {
+                    {
+                        // A picture's datagram for a stream this side hasn't heard of yet (none
+                        // at all, or a newer one than the one it knows): kept for when it has.
+                        let ahead = d.first() == Some(&KIND_VIDEO) && (!started || d.get(2..4).is_some_and(|e| { let e = u16::from_le_bytes([e[0], e[1]]); e != r.epoch() && e.wrapping_sub(r.epoch()) < 0x8000 }));
+                        if ahead {
+                            // (A few megabytes at most: older ones give way.)
+                            if early.len() >= 4096 {
+                                early.pop_front();
+                            }
+                            early.push_back(d);
+                            continue;
+                        }
                         if !started {
                             continue;
                         }
                         match d.first() {
                             Some(&KIND_VIDEO) => {}
+                            Some(&remoteman_proto::video::KIND_VIDEO2) => {
+                                if !started2 {
+                                    continue;
+                                }
+                                let frame = match second.push(&d) {
+                                    Ok(Some(f)) => f,
+                                    Ok(None) => continue,
+                                    Err(e) => break format!("bad video datagram: {e}"),
+                                };
+                                if second.take_lost().is_some() {
+                                    need_key2 = true;
+                                }
+                                if need_key2 && !frame.key {
+                                    // Leans on something missed: ask for a whole picture
+                                    // (again, if the host has had time to answer).
+                                    if asked2.is_none_or(|t| t.elapsed() > Duration::from_millis(100)) && ctl_tx.try_send(Message::DisplayKeyframe { index: 1 }).is_ok() {
+                                        asked2 = Some(Instant::now());
+                                    }
+                                    continue;
+                                }
+                                need_key2 = false;
+                                let age = (*offset_rx.borrow()).map(|offset| now_us() as i64 + offset - frame.capture_us as i64);
+                                handler.frame2(&frame, age);
+                                continue;
+                            }
                             Some(&KIND_CURSOR) => {
                                 if let Ok(c) = CursorAt::parse(&d) {
                                     handler.cursor_at(c.x, c.y, c.visible);
@@ -445,7 +568,7 @@ impl Client {
             runtime: None,
             tasks: tokio::runtime::Handle::current(),
             control,
-            camera: std::sync::Mutex::new((0, 0)),
+            camera: Arc::new(std::sync::Mutex::new((0, 0))),
             conn,
             _endpoint: endpoint,
             input,
@@ -491,16 +614,12 @@ impl Client {
     /// Never blocks: fragments the network can't take are dropped, and the host asks for a
     /// keyframe ([`Handler::message`] with `Message::CameraKeyframe`).
     pub fn send_camera(&self, data: &[u8], key: bool, time_us: u64) {
-        let Some(max) = self.conn.max_datagram_size() else { return };
-        let (epoch, number) = {
-            let mut camera = self.camera.lock().unwrap();
-            let now = *camera;
-            camera.1 = camera.1.wrapping_add(1);
-            now
-        };
-        for d in remoteman_proto::video::fragment_as(media::KIND_CAMERA, data, key, false, epoch, number, time_us, max) {
-            let _ = self.conn.send_datagram(d.into());
-        }
+        send_camera(&self.conn, &self.camera, data, key, time_us);
+    }
+
+    /// For sending this device's camera from the thread that encodes it.
+    pub fn camera_sender(&self) -> CameraSender {
+        CameraSender(self.conn.clone(), self.camera.clone())
     }
 
     /// Start sending a blob (`media::BLOB_CLIPBOARD` or `media::BLOB_FILE`) with this JSON

@@ -67,6 +67,17 @@ typedef struct rm_callbacks {
     // thread inside rm_client_connect, before it returns; if it fails, the last stage given is
     // the one that failed. After 3 come on_stream and the first on_frame.
     void (*on_stage)(void *ctx, uint8_t stage);
+    // This device is new to the host, whose owner now has `seconds` to confirm it there: show
+    // `code` (six digits, "123 456"), which the host shows too, for comparing. Called on the
+    // thread inside rm_client_connect, which goes on waiting: it returns with a session after a
+    // yes, and fails with "the host refused: not_paired: ..." after a no or when the time is
+    // up. `code` is valid only during the call. May be NULL.
+    void (*on_pairing)(void *ctx, const char *code, uint32_t seconds);
+    // The second display's picture (after rm_client_second_display): exactly as on_stream and
+    // on_frame, with its own epochs and frame numbers. It needs its own decoder. May be NULL.
+    // (Added last: rebuild everything that fills this struct when taking this header.)
+    void (*on_stream2)(void *ctx, uint16_t epoch, uint8_t codec, uint16_t chroma, uint8_t depth, uint32_t width, uint32_t height, uint32_t refresh, uint8_t hdr);
+    void (*on_frame2)(void *ctx, const uint8_t *data, size_t len, uint8_t key, uint32_t number, uint64_t capture_us, int64_t age_us);
 } rm_callbacks;
 
 // Forget a host this device paired with (`host` as given to rm_client_connect): its key is
@@ -101,6 +112,18 @@ void rm_client_features(const rm_client *client, char *out, size_t len);
 // One feature message, as JSON: {"t":"sound","on":true}, mic, camera, configure, clipboard,
 // file_result. Returns 1, or 0 if the core doesn't know the message. Never blocks.
 int32_t rm_client_send_message(const rm_client *client, const char *json);
+// A second display in this session (docs/PROTOCOL.md, "A second display"), for hosts with the
+// feature "displays". `on` non-zero: ask for one of this size in pixels (again while it is on:
+// change its size); 0: give it back (the size is ignored). Its picture comes to on_stream2 and
+// on_frame2. If the host can't make it, or takes it away, on_message gets
+// {"t":"display","index":1,"on":false,"message":"..."}. A decoder that lost its place asks for
+// a keyframe with rm_client_send_message: {"t":"display_keyframe","index":1} (losses on the
+// network are seen to by the core). `side`: which side of the host's other displays it sits
+// on, 0 right, 1 left, 2 above, 3 below (asking again with another side moves it). Never blocks.
+void rm_client_second_display(const rm_client *client, int32_t on, uint32_t width, uint32_t height, float scale, uint32_t refresh, uint8_t side);
+// Which display the pointer events after this are on: 0 the first, 1 the second. Send it when
+// the pointer goes from one picture to the other; positions are fractions of that display.
+void rm_client_pointer_on(const rm_client *client, uint8_t index);
 // One packet of this device's microphone (Opus), after {"t":"mic","on":true,...}. `seq` counts
 // up by one; `start` 1 for the first after a pause. Never blocks.
 void rm_client_send_mic(const rm_client *client, const uint8_t *data, size_t len, uint8_t start, uint32_t seq, uint64_t time_us);
@@ -232,6 +255,19 @@ void rm_host_set_features(const rm_host *host, const char *features);
 void rm_host_set_pairing(const rm_host *host, int32_t on);
 int32_t rm_host_pairing(const rm_host *host);
 
+// Pairing confirmed by the host's owner (docs/PROTOCOL.md, "Pairing"). With confirming on, a
+// device that comes while pairing is on is not trusted yet: it is told to wait, and both sides
+// show the same six digits. rm_host_pending copies who is waiting into `out` as JSON,
+// {"name":"...","fingerprint":"...","code":"123 456","seconds":42} (`seconds`: how long the
+// owner still has, of 60), and returns its length (`len` or more: cut short; 0 and an empty
+// string: nobody is waiting): ask it about once a second while pairing is on or was just used.
+// rm_host_decide answers: 1 trusts the device from now on and lets it in, 0 turns it away;
+// it returns 1 if a device was waiting. Off to begin with: a device is then trusted as soon as
+// it connects while pairing is on.
+void rm_host_set_confirm(const rm_host *host, int32_t on);
+size_t rm_host_pending(const rm_host *host, char *out, size_t len);
+int32_t rm_host_decide(const rm_host *host, int32_t accept);
+
 // The devices this host trusts, as JSON copied into `out`, in the order they were paired:
 // [{"fingerprint":"...","name":"...","connected":false}]. `name` is what the device called
 // itself in its last hello (the address it paired from until then). Returns the length of the
@@ -272,6 +308,22 @@ rm_blob *rm_host_blob_open(const rm_host *host, uint8_t kind, const char *header
 // The picture starts afresh as `accept` says (another size after a configure message, another
 // codec): the client is told, the next frame sent must be a keyframe, and frames count from 0.
 int32_t rm_host_restart(const rm_host *host, const rm_accept *accept);
+
+// A second display (docs/PROTOCOL.md, "A second display"), for hosts that list the feature
+// "displays". The client's {"t":"display","index":1,"on":true,"display":{...}} comes to
+// on_message (again while it is on: another size or side; "side" is "left", "above" or
+// "below", and left out for the right), as do "on":false (it gives the display
+// back) and {"t":"display_keyframe","index":1} (the next frame of it must be a keyframe).
+// rm_host_second_start: its picture starts, or starts afresh, as `accept` says; the client is
+// told, the next frame must be a keyframe, and frames count from 0. rm_host_send_frame2: one
+// encoded frame of it, as rm_host_send_frame, from that display's own encoder thread.
+// rm_host_second_stop: it is gone (it could not be made, or the host took it away); `message`
+// says why, for the client to show, NULL for nothing. Each returns 1 if a client is connected.
+// Its bitrate is the host's choice: a configure message's ceiling is for the first picture.
+// Input says which display the pointer is on with kind 8 (`slot`: 0 the first, 1 the second).
+int32_t rm_host_second_start(const rm_host *host, const rm_accept *accept);
+int32_t rm_host_send_frame2(const rm_host *host, const uint8_t *data, size_t len, uint8_t key, uint64_t capture_us);
+int32_t rm_host_second_stop(const rm_host *host, const char *message);
 
 // Stop listening, drop the client, and free the host.
 void rm_host_stop(rm_host *host);

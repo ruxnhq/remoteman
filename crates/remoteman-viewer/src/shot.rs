@@ -16,7 +16,9 @@
 //!   scrolling page of the open dialog)
 //! - `keys?` and `size?` print whether keys go to the other computer, and the window's size
 //! - `share` (the clipboard), `copy=TEXT` (as if copied in this window), `clipboard?` (print
-//!   what this clipboard holds), `sendfile=PATH`
+//!   what this clipboard holds), `sendfile=PATH`, `offers?` (print which lines of the sharing
+//!   menu can be chosen), `unlock=PASSWORD` (type it into a locked computer's page), `reach?=ADDRESS` (print what is known of a computer), `second` (add or remove the second display), `second?` (print how it stands), `pointer?` (print whether the pointer is captured and how far it has
+//!   been sent)
 //! - things that can't happen yet, to see how they are laid out: `pair-code=NAME` (the code
 //!   dialog, with a made-up code), `asleep=ADDRESS` (the asleep page), `state=asleep:ADDRESS`
 //!   or `state=online:ADDRESS` (shown in the list only with `Features::presence`)
@@ -205,10 +207,55 @@ pub fn run(app: &Rc<App>, script: String) {
                         app.window.set_default_size(w.parse().unwrap_or(900), h.parse().unwrap_or(680));
                     }
                 }
+                // Where the picture's place is in the window, for checking that what is drawn
+                // and where the pointer is taken to be agree.
+                "place?" => {
+                    let stack = &app.video.stack;
+                    let at = stack.compute_point(&app.window, &graphene::Point::new(0.0, 0.0)).map(|p| (p.x(), p.y()));
+                    println!("~ window {} x {}, picture's place {} x {} at {:?}, bar {} tall, the middle of the window is {:?} of the picture", app.window.width(), app.window.height(), stack.width(), stack.height(), at, app.view.bar_height(), app.video.fraction(stack.width() as f64 / 2.0, stack.height() as f64 / 2.0));
+                }
                 "size?" => println!("~ window {} x {}, default {:?}", app.window.width(), app.window.height(), app.window.default_size()),
                 "keys?" => println!("~ keys go to the other computer: {}", app.forwarding()),
                 // Sharing: the clipboard on, a copy made here, what this clipboard holds, a file.
                 "share" => app.set_clipboard(true),
+                "pointer?" => {
+                    let held = app.capture.borrow_mut().as_mut().map(|c| c.take().1);
+                    let (dx, dy) = app.moved.get();
+                    println!("~ pointer captured: {}, held now: {}, sent {dx:.0},{dy:.0}", held.is_some(), held == Some(true));
+                }
+                "reach?" => {
+                    let reach = match app.reach_of(value) {
+                        Some(Reach::Online) => "online",
+                        Some(Reach::Asleep) => "asleep",
+                        Some(Reach::Unreachable) => "not reachable",
+                        None => "not known",
+                    };
+                    let cards = app.store.borrow().find(value).map_or(0, |c| c.cards.split(',').filter(|c| !c.is_empty()).count());
+                    println!("~ {value} is {reach}; {cards} network cards remembered");
+                }
+                // A locked computer's password, typed into its page and sent.
+                "unlock" => {
+                    let mut found = None;
+                    each(app.window.upcast_ref(), &mut |w| {
+                        if let Some(entry) = w.downcast_ref::<gtk::PasswordEntry>() {
+                            found = Some(entry.clone());
+                        }
+                    });
+                    match found {
+                        Some(entry) => {
+                            entry.set_text(value);
+                            entry.emit_by_name::<()>("activate", &[]);
+                        }
+                        None => println!("no password field"),
+                    }
+                }
+                // The second display: add or remove it, and say how it stands.
+                "second" => app.toggle_second(),
+                "second?" => match app.second.borrow().as_ref() {
+                    Some(second) => println!("~ second display: a window, {} pictures shown, {} x {}", second.video.shown_total.get(), second.video.size.get().0, second.video.size.get().1),
+                    None => println!("~ second display: none"),
+                },
+                "offers?" => println!("~ the sharing menu: clipboard {}, files {}, shared {}", app.view.offers().0, app.view.offers().1, app.view.clipboard_shown()),
                 "copy" => app.window.clipboard().set_text(value),
                 "clipboard?" => app.window.clipboard().read_text_async(gtk::gio::Cancellable::NONE, |text| {
                     println!("~ this clipboard holds: {}", text.ok().flatten().map(|t| t.to_string()).unwrap_or_default());

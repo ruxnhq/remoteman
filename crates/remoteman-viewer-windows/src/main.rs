@@ -110,6 +110,8 @@ fn run() -> anyhow::Result<u32> {
         test_drop_one_in: None,
         test_delay_lost_ms: None,
         cursor: true,
+        unlock: None,
+        attach_only: false,
     };
     say!("connecting to {} for {}x{} at {} Hz", args.host, args.size.0, args.size.1, refresh);
     let client = Arc::new(Client::connect(options, feed)?);

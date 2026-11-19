@@ -9,7 +9,7 @@ printf 'copied on the desktop: žluťoučký kůň ✓' > "$RM_LOGS/desktop.txt"
 printf 'wait 3\nclip copied on the device: příliš ✓\nwait 9\n' > "$RM_LOGS/steps.txt"
 rm -f "$RM_LOGS/pasted.txt"
 dbus-run-session -- sh -c '
-  bin="$RM_ROOT/target/release"
+  bin="${RM_BIN:-$RM_ROOT/target/release}"
   mutter --headless --wayland --no-x11 --wayland-display rm-clip-e2e >"$RM_LOGS/mutter.log" 2>&1 &
   mpid=$!
   sleep 2

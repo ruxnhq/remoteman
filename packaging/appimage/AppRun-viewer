@@ -1,0 +1,6 @@
+#!/bin/sh
+# The viewer's AppImage starts here. The program finds the libraries packed with it by
+# itself; its icon is found through XDG_DATA_DIRS.
+here=$(dirname "$(readlink -f "$0")")
+export XDG_DATA_DIRS="$here/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+exec "$here/usr/bin/remoteman" "$@"

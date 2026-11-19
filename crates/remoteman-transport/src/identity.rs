@@ -11,6 +11,15 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use sha2::{Digest, Sha256};
 
 /// The SHA-256 of a certificate's DER bytes, as 64 hex digits.
+/// The six digits a host and a device both show while they pair, for their owner to compare:
+/// made from both keys' fingerprints, so anything standing between the two, which would have
+/// to show each a key of its own, makes the two codes differ.
+pub fn pair_code(host: &str, device: &str) -> String {
+    let digest = Sha256::digest(format!("remoteman pairing\n{}\n{}", host.trim().to_ascii_lowercase(), device.trim().to_ascii_lowercase()));
+    let number = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000;
+    format!("{:03} {:03}", number / 1000, number % 1000)
+}
+
 pub fn fingerprint(cert: &[u8]) -> String {
     hex::encode(Sha256::digest(cert))
 }

@@ -31,6 +31,8 @@ pub struct Video {
     pub stack: gtk::Stack,
     /// The C helper's state for `gl` (null until the first picture).
     gl_view: Cell<*mut std::ffi::c_void>,
+    /// The decoder's GPU context `gl_view` was made for.
+    gl_context: Cell<*mut std::ffi::c_void>,
     /// An NVDEC picture waiting for `gl` to draw it.
     gl_pending: RefCell<Option<Picture>>,
     /// The surface last drawn; holding it keeps the decoder's GPU context alive under `gl_view`.
@@ -78,6 +80,7 @@ impl Video {
             gl: gl.clone(),
             stack,
             gl_view: Cell::new(std::ptr::null_mut()),
+            gl_context: Cell::new(std::ptr::null_mut()),
             gl_pending: RefCell::new(None),
             gl_last: RefCell::new(None),
             gl_dump: Cell::new(false),
@@ -136,6 +139,19 @@ impl Video {
         let (dw, dh) = (vw as f64 * scale, vh as f64 * scale);
         let (ox, oy) = ((ww - dw) / 2.0, (wh - dh) / 2.0);
         (((x - ox) / dw).clamp(0.0, 1.0) as f32, ((y - oy) / dh).clamp(0.0, 1.0) as f32)
+    }
+
+    /// The other way: where a spot of the remote display is in the picture widget, and how
+    /// many of this widget's units one remote pixel takes. `None` before the first picture.
+    pub fn spot(&self, fx: f32, fy: f32) -> Option<(f64, f64, f64)> {
+        let (vw, vh) = self.size.get();
+        let (ww, wh) = (self.stack.width() as f64, self.stack.height() as f64);
+        if vw == 0 || vh == 0 || ww <= 0.0 || wh <= 0.0 {
+            return None;
+        }
+        let scale = (ww / vw as f64).min(wh / vh as f64);
+        let (dw, dh) = (vw as f64 * scale, vh as f64 * scale);
+        Some(((ww - dw) / 2.0 + fx as f64 * dw, (wh - dh) / 2.0 + fy as f64 * dh, scale))
     }
 
     /// The picture as something GTK can draw. `None`: GTK refused it, and the decoder has been
@@ -203,7 +219,16 @@ impl Video {
                 // SAFETY: GTK has made the widget's GL context current for this call; the
                 // pointers are a live CUDA surface, kept by `hold`.
                 unsafe {
+                    // Another decoder (the picture started afresh at another size, or in
+                    // another codec) has a GPU context of its own: the helper made for the
+                    // old one goes while that context is still held (`gl_last`), and a new
+                    // one is made. Drawing the new decoder's pictures through the old
+                    // context crashed.
+                    if !self.gl_view.get().is_null() && self.gl_context.get() != context as *mut std::ffi::c_void {
+                        rm_glview_free(self.gl_view.replace(std::ptr::null_mut()));
+                    }
                     if self.gl_view.get().is_null() {
+                        self.gl_context.set(context as *mut std::ffi::c_void);
                         let mut err = [0 as std::ffi::c_char; 256];
                         let v = rm_glview_new(context as *mut _, err.as_mut_ptr(), 256);
                         if v.is_null() {

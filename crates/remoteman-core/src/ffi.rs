@@ -5,7 +5,7 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
 
-use crate::{BlobEvent, BlobSender, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, StreamInfo, TouchPhase};
+use crate::{BlobEvent, BlobSender, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, Side, StreamInfo, TouchPhase};
 
 /// The app's callbacks. They are called from the core's threads, one at a time, with `ctx`.
 #[repr(C)]
@@ -40,6 +40,18 @@ pub struct RmCallbacks {
     /// inside `rm_client_connect`, before it returns; if it fails, the last stage given is the
     /// one that failed. After 3 come `on_stream` and the first `on_frame`.
     pub on_stage: Option<extern "C" fn(ctx: *mut c_void, stage: u8)>,
+    /// This device is new to the host, whose owner now has `seconds` to confirm it there:
+    /// show `code` (six digits, "123 456"), which the host shows too, for comparing. Called
+    /// on the thread inside `rm_client_connect`, which goes on waiting: it returns with a
+    /// session after a yes, and fails with "the host refused: not_paired: ..." after a no or
+    /// when the time is up. `code` is valid only during the call.
+    pub on_pairing: Option<extern "C" fn(ctx: *mut c_void, code: *const c_char, seconds: u32)>,
+    /// The second display's picture starts (or starts afresh), after
+    /// `rm_client_second_display`: as `on_stream`.
+    pub on_stream2: Option<extern "C" fn(ctx: *mut c_void, epoch: u16, codec: u8, chroma: u16, depth: u8, width: u32, height: u32, refresh: u32, hdr: u8)>,
+    /// One whole frame of the second display: as `on_frame`. (The last field: a caller built
+    /// against an older header must not be given a struct that ends before it.)
+    pub on_frame2: Option<extern "C" fn(ctx: *mut c_void, data: *const u8, len: usize, key: u8, number: u32, capture_us: u64, age_us: i64)>,
 }
 
 // SAFETY: the app promises its context may be used from another thread, one call at a time.
@@ -78,6 +90,19 @@ impl Handler for RmCallbacks {
         }
     }
 
+    fn stream2(&mut self, s: &StreamInfo) {
+        if let Some(f) = self.on_stream2 {
+            let chroma = if s.mode.chroma == Chroma::C444 { 444 } else { 420 };
+            f(self.ctx, s.epoch, (s.mode.codec == Codec::Av1) as u8, chroma, s.mode.depth, s.width, s.height, s.refresh, (s.colour == "bt2020-pq") as u8);
+        }
+    }
+
+    fn frame2(&mut self, frame: &Frame, age_us: Option<i64>) {
+        if let Some(f) = self.on_frame2 {
+            f(self.ctx, frame.data.as_ptr(), frame.data.len(), frame.key as u8 | (frame.recovery as u8) << 1, frame.number, frame.capture_us, age_us.unwrap_or(-1));
+        }
+    }
+
     fn cursor_shape(&mut self, s: &CursorShape) {
         if let Some(f) = self.on_cursor_shape {
             f(self.ctx, s.rgba.as_ptr(), s.width, s.height, s.hot_x, s.hot_y);
@@ -111,6 +136,13 @@ impl Handler for RmCallbacks {
     fn stage(&mut self, stage: crate::Stage) {
         if let Some(f) = self.on_stage {
             f(self.ctx, stage as u8);
+        }
+    }
+
+    fn pairing(&mut self, code: &str, seconds: u32) {
+        if let Some(f) = self.on_pairing {
+            let code = CString::new(code).unwrap_or_default();
+            f(self.ctx, code.as_ptr(), seconds);
         }
     }
 
@@ -191,11 +223,27 @@ pub unsafe extern "C" fn rm_client_connect(
 ) -> *mut Client {
     let (host, state, name, decoders, options) = unsafe { (text(host), text(state_dir), text(name), text(decoders), text(options)) };
     let mut placement = Placement::Extend;
+    let mut unlock = None;
+    let mut attach_only = false;
     for pair in options.split(';').map(str::trim).filter(|p| !p.is_empty()) {
         match pair.split_once('=') {
             Some(("placement", "extend")) => placement = Placement::Extend,
             Some(("placement", "main")) => placement = Placement::Main,
             Some(("placement", "only")) => placement = Placement::Only,
+            Some(("placement", "mirror")) => placement = Placement::Mirror,
+            Some(("way-in", "attach")) => attach_only = true,
+            Some(("way-in", "any")) => attach_only = false,
+            // The host user's password, as hex of its UTF-8 bytes (it may hold any character).
+            Some(("unlock-hex", hex)) => {
+                let bytes: Option<Vec<u8>> = (0..hex.len() / 2).map(|i| u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()).collect();
+                match bytes.filter(|_| hex.len() % 2 == 0).and_then(|b| String::from_utf8(b).ok()) {
+                    Some(password) => unlock = Some(password),
+                    None => {
+                        report(err, err_len, "unlock-hex is not hex of UTF-8 text");
+                        return std::ptr::null_mut();
+                    }
+                }
+            }
             _ => {
                 report(err, err_len, &format!("unknown option {pair}"));
                 return std::ptr::null_mut();
@@ -214,7 +262,7 @@ pub unsafe extern "C" fn rm_client_connect(
             }
         });
     }
-    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh, placement }, decoders: modes, test_drop_one_in: None, test_delay_lost_ms: None, cursor: callbacks.on_cursor_shape.is_some() };
+    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh, placement }, decoders: modes, test_drop_one_in: None, test_delay_lost_ms: None, cursor: callbacks.on_cursor_shape.is_some(), unlock, attach_only };
     match Client::connect(options, callbacks) {
         Ok(c) => Box::into_raw(Box::new(c)),
         Err(e) => {
@@ -370,6 +418,31 @@ input!(/// A key by USB HID usage (page 7), modifiers included.
     rm_client_key(usage: u16, down: u8) => Event::Key { usage, down: down != 0 });
 input!(/// A finger: phase 0 down, 1 move, 2 up; `slot` tells fingers apart.
     rm_client_touch(phase: u8, slot: u8, x: f32, y: f32) => Event::Touch { phase: match phase { 0 => TouchPhase::Down, 2 => TouchPhase::Up, _ => TouchPhase::Move }, slot, x, y });
+
+input!(/// Which display the pointer events after this are on: 0 the first, 1 the second. Send
+    /// it when the pointer goes from one picture to the other.
+    rm_client_pointer_on(index: u8) => Event::Display(index));
+
+/// Ask the host for a second display in this session (`on` non-zero), of this size in pixels,
+/// or give it back (`on` 0; the size is ignored). Only for hosts with the feature `displays`.
+/// Its picture comes to `on_stream2` and `on_frame2`; if the host can't make it, or takes it
+/// away, `on_message` gets `{"t":"display","index":1,"on":false,"message":"..."}`. Asking
+/// again while it is on changes its size or its side. `side`: which side of the host's other
+/// displays it sits on, 0 right, 1 left, 2 above, 3 below.
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_second_display(client: *const Client, on: i32, width: u32, height: u32, scale: f32, refresh: u32, side: u8) {
+    let side = match side {
+        1 => Side::Left,
+        2 => Side::Above,
+        3 => Side::Below,
+        _ => Side::Right,
+    };
+    let display = (on != 0).then_some(remoteman_proto::control::Display { width, height, scale, refresh, placement: Default::default() });
+    unsafe { &*client }.send_message(Message::Display { index: 1, on: on != 0, display, side, message: String::new() });
+}
 
 /// Text typed through an on-screen keyboard or input method (UTF-8).
 ///
@@ -533,6 +606,8 @@ impl HostHandler for RmHostCallbacks {
                 i.kind = 7;
                 text = Some(CString::new(s.replace('\0', " ")).unwrap_or_default());
             }
+            // Which display the pointer is on (`slot`: 0 the first, 1 the second).
+            Event::Display(index) => (i.kind, i.slot) = (8, index),
         }
         if let Some(t) = &text {
             i.text = t.as_ptr();
@@ -631,6 +706,53 @@ pub unsafe extern "C" fn rm_host_blob_open(host: *const Host, kind: u8, header: 
 pub unsafe extern "C" fn rm_host_restart(host: *const Host, accept: *const RmAccept) -> i32 {
     match unsafe { &*host }.link() {
         Some(l) => l.restart(accepted(unsafe { &*accept })) as i32,
+        None => 0,
+    }
+}
+
+/// The second display's picture starts (or starts afresh) as `accept` says, after the client
+/// asked with a `display` message (which comes to `on_message`): the client is told, the next
+/// frame given to `rm_host_send_frame2` must be a keyframe, and its frames count from 0.
+/// Returns 1 if a client is connected.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `accept` must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_second_start(host: *const Host, accept: *const RmAccept) -> i32 {
+    match unsafe { &*host }.link() {
+        Some(l) => l.second().restart(accepted(unsafe { &*accept })) as i32,
+        None => 0,
+    }
+}
+
+/// One encoded frame of the second display: as `rm_host_send_frame`, from that display's own
+/// encoder thread.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `data` must be readable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_send_frame2(host: *const Host, data: *const u8, len: usize, key: u8, capture_us: u64) -> i32 {
+    match unsafe { &*host }.link() {
+        Some(l) => l.second().send_frame(unsafe { std::slice::from_raw_parts(data, len) }, key != 0, capture_us) as i32,
+        None => 0,
+    }
+}
+
+/// The second display is gone: it could not be made, the host took it away, or the client
+/// gave it back (then this is not needed, and does no harm). `message` says why, for the
+/// client to show; null for nothing. Send no more of its frames after this. Returns 1 if a
+/// client is connected.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `message` must be null or a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_second_stop(host: *const Host, message: *const c_char) -> i32 {
+    match unsafe { &*host }.link() {
+        Some(l) => {
+            let message = if message.is_null() { String::new() } else { unsafe { text(message) } };
+            l.send_message(Message::Display { index: 1, on: false, display: None, side: Side::Right, message });
+            1
+        }
         None => 0,
     }
 }
@@ -748,6 +870,42 @@ pub unsafe extern "C" fn rm_host_set_pairing(host: *const Host, on: i32) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rm_host_pairing(host: *const Host) -> i32 {
     unsafe { &*host }.pairing() as i32
+}
+
+/// Whether a new device waits for this host's owner before it is trusted (off to begin with:
+/// it is trusted as soon as it connects while pairing is on). With it on, a device that
+/// comes while pairing is on is held: `rm_host_pending` says who and with what code, and
+/// `rm_host_decide` answers.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_set_confirm(host: *const Host, on: i32) {
+    unsafe { &*host }.set_confirm(on != 0);
+}
+
+/// The device waiting to be confirmed, as JSON copied into `out`:
+/// `{"name":"...","fingerprint":"...","code":"123 456","seconds":42}` (`seconds`: how long
+/// the owner still has). Returns the JSON's length, so a result of `len` or more means it was
+/// cut short; 0, and an empty string, when no device is waiting.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `out` must be writable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_pending(host: *const Host, out: *mut c_char, len: usize) -> usize {
+    let json = unsafe { &*host }.pending().and_then(|p| serde_json::to_string(&p).ok()).unwrap_or_default();
+    report(out, len, &json);
+    json.len()
+}
+
+/// Answer for the waiting device: trust it from now on (1), or turn it away (0). Returns 1 if
+/// a device was waiting, 0 if none was.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_decide(host: *const Host, accept: i32) -> i32 {
+    unsafe { &*host }.decide(accept != 0) as i32
 }
 
 /// The connected client's session clock in microseconds, to stamp frames with at capture; 0

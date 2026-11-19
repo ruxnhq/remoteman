@@ -70,6 +70,9 @@ mod decode;
 pub mod loopback;
 mod picture;
 mod pw;
+mod source;
+
+pub use source::Source;
 
 /// How long after the last new picture the current one is sent again, and how often from then
 /// on: 5 a second.

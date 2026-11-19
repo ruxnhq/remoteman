@@ -35,6 +35,38 @@ pub async fn session_kind() -> Result<SessionKind> {
     Ok(SessionKind { class: session.get_property("Class").await?, remote: session.get_property("Remote").await? })
 }
 
+/// This user's graphical session, as logind knows it.
+async fn own_session(system: &Connection) -> Result<Proxy<'static>> {
+    let user = Proxy::new(system, LOGIND, "/org/freedesktop/login1/user/self", "org.freedesktop.login1.User").await?;
+    let (_id, path): (String, OwnedObjectPath) = user.get_property("Display").await.context("this user has no graphical session")?;
+    Ok(Proxy::new(system, LOGIND, path, "org.freedesktop.login1.Session").await?)
+}
+
+/// Whether this user's session is locked (as its desktop last told logind).
+pub async fn locked() -> Result<bool> {
+    let system = Connection::system().await.context("the system bus")?;
+    Ok(own_session(&system).await?.get_property("LockedHint").await?)
+}
+
+/// Lock this user's session, or unlock it: logind passes the request to the desktop, which
+/// does it (a user may ask this of their own session; nobody else's). Unlocking waits, for a
+/// few seconds at most, until the desktop says it is unlocked, and fails if it doesn't.
+pub async fn set_locked(lock: bool) -> Result<()> {
+    let system = Connection::system().await.context("the system bus")?;
+    let session = own_session(&system).await?;
+    session.call::<_, _, ()>(if lock { "Lock" } else { "Unlock" }, &()).await.context(if lock { "ask for the session to be locked" } else { "ask for the session to be unlocked" })?;
+    if !lock {
+        for _ in 0..40 {
+            if !session.get_property::<bool>("LockedHint").await.unwrap_or(true) {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        anyhow::bail!("the desktop stayed locked");
+    }
+    Ok(())
+}
+
 /// End this desktop session, with no questions asked on screen.
 pub async fn log_out() -> Result<()> {
     let bus = Connection::session().await.context("session bus")?;

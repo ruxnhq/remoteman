@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Connecting and what can go wrong</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.rm{--desk:#D5DEF3;--bg:#F3F3F3;--pane:#FAFAFA;--card:#FFFFFF;--line:rgba(0,0,0,.1);--tx:#1B1B1B;--t2:#5A5A5A;--ac:#2458F5;--on:#FFFFFF;--at:#1D4BDB;--sub:rgba(0,0,0,.05);--ok:#0F7B0F;--warn:#8A5200;--bad:#C42B1C;--sh:0 10px 30px rgba(0,0,0,.2);font-family:"Segoe UI Variable Text","Segoe UI",Inter,system-ui,sans-serif;font-size:14px;line-height:20px;color:var(--tx);box-sizing:border-box}
+.rm.dark{--desk:#0B1437;--bg:#202020;--pane:#2A2A2A;--card:#2D2D2D;--line:rgba(255,255,255,.11);--tx:#FFFFFF;--t2:#C8C8C8;--ac:#8AB0FF;--on:#0B1437;--at:#9DBCFF;--sub:rgba(255,255,255,.07);--ok:#6CCB5F;--warn:#F5C26B;--bad:#FF99A4;--sh:0 10px 30px rgba(0,0,0,.55)}
+.rm *{box-sizing:border-box}
+.rm button{font:inherit;color:inherit}
+.c{font-size:12px;line-height:16px;color:var(--t2)}
+.btn{height:32px;padding:0 14px;border-radius:4px;border:1px solid var(--line);background:var(--card);display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.btn.ac{background:var(--ac);color:var(--on);border-color:transparent;font-weight:600}
+.ic{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+.st{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:24px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:10px}
+.st h2{margin:0;font-size:20px;line-height:28px;font-weight:600}
+.st .big{width:40px;height:40px;stroke-width:1.1;color:var(--t2)}
+.st .acts{display:flex;gap:8px;margin-top:8px}
+.lbl{position:absolute;left:12px;top:10px;font-size:11px;font-weight:600;color:var(--t2);letter-spacing:.03em;text-transform:uppercase}
+</style>
+</helmet>
+<div class="rm {{theme}}" style="width: 1280px; height: 700px; padding: 28px; background: var(--desk); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 16px">
+<div class="st" style="position: relative">
+<span class="lbl">Connecting</span>
+<svg width="40" height="40" viewBox="0 0 40 40" role="img" aria-label="Working"><circle cx="20" cy="20" r="16" fill="none" stroke="var(--line)" stroke-width="4"/><path d="M20 4a16 16 0 0116 16" fill="none" stroke="var(--ac)" stroke-width="4" stroke-linecap="round"/></svg>
+<h2>Connecting to Workshop PC</h2>
+<div class="c" style="max-width: 300px">Asking Workshop PC for a 2560 × 1440 display at 144 Hz…</div>
+<div class="c" style="display: flex; gap: 14px"><span style="color: var(--ok)">Found</span><span style="color: var(--ok)">Reached</span><span style="color: var(--ok)">Keys checked</span><span style="color: var(--tx); font-weight: 600">Display</span></div>
+<div class="acts"><button class="btn">Cancel</button></div>
+</div>
+<div class="st" style="position: relative">
+<span class="lbl">Asleep</span>
+<svg class="ic big" viewBox="0 0 16 16" aria-hidden="true"><path d="M13 9.5A5.5 5.5 0 016.5 3 5.5 5.5 0 1013 9.5z"/></svg>
+<h2>Studio Mac is asleep</h2>
+<div class="c" style="max-width: 300px">It was last used from this PC yesterday. Waking it over the network takes a few seconds.</div>
+<div class="acts"><button class="btn ac">Wake and connect</button><button class="btn">Back</button></div>
+</div>
+<div class="st" style="position: relative">
+<span class="lbl">No answer</span>
+<svg class="ic big" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8" rx="1.5"/><path d="M6 14h4M8 11v3M6.5 5.5l3 3M9.5 5.5l-3 3"/></svg>
+<h2>Can't reach Attic PC</h2>
+<div class="c" style="max-width: 300px">No answer after 10 seconds at attic.local. It may be off, on another network, or its firewall may be closed to remoteman.</div>
+<div class="acts"><button class="btn ac">Try again</button><button class="btn">Edit address…</button><button class="btn">Back</button></div>
+</div>
+<div class="st" style="position: relative">
+<span class="lbl">Not paired any more</span>
+<svg class="ic big" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="7" width="9" height="6.5" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 015 0v2"/></svg>
+<h2>Workshop PC doesn't know this PC</h2>
+<div class="c" style="max-width: 300px">It answered, but this PC is no longer on its list of paired devices. Put it in pairing mode and pair again.</div>
+<div class="acts"><button class="btn ac">Pair again…</button><button class="btn">Back</button></div>
+</div>
+<div class="st" style="position: relative">
+<span class="lbl">Refused, or ended</span>
+<svg class="ic big" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 5v3.5M8 11h.01"/></svg>
+<h2>Workshop PC closed the connection</h2>
+<div class="c" style="max-width: 300px">It answered, and said: sharing is paused on this computer.</div>
+<div class="acts"><button class="btn ac">Connect again</button><button class="btn">Back</button></div>
+</div>
+<div class="st" style="position: relative">
+<span class="lbl">Nothing paired yet</span>
+<svg width="48" height="48" viewBox="0 0 16 16" aria-hidden="true"><rect width="16" height="16" rx="3.5" fill="#2458F5"/><rect x="6" y="5" width="7" height="5" rx="1.2" fill="none" stroke="#fff" stroke-width="1.2"/><path d="M2.5 6h2M2 7.8h2.5M3 9.5h1.5" stroke="#fff" stroke-width="1.1" stroke-linecap="round"/></svg>
+<h2>No computers yet</h2>
+<div class="c" style="max-width: 300px">See and use another computer's screen from this one. Pair a Linux PC, a Mac or another Windows PC that runs the remoteman host.</div>
+<div class="acts"><button class="btn ac">Pair a computer</button></div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"light"},"$preview":{"width":1280,"height":700}}'>
+class Component extends DCLogic {
+renderVals() {
+return { theme: (this.props.theme ?? 'light') === 'dark' ? 'dark' : 'light' };
+}
+}
+</script>
+</body>
+</html>

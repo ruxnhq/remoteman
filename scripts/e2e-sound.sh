@@ -11,7 +11,7 @@ ffmpeg -v error -y -f lavfi -i "sine=frequency=1000:duration=2" -ac 2 -ar 48000 
 printf 'wait 2\nsound on\nwait 5\nmic 350\nwait 1\nsound off\n' > "$RM_LOGS/steps.txt"
 rm -f "$RM_LOGS/mic.wav"
 dbus-run-session -- sh -c '
-  bin="$RM_ROOT/target/release"
+  bin="${RM_BIN:-$RM_ROOT/target/release}"
   mutter --headless --wayland --no-x11 --wayland-display rm-sound-e2e >"$RM_LOGS/mutter.log" 2>&1 &
   mpid=$!
   sleep 2

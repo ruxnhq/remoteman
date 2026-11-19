@@ -1,0 +1,19 @@
+[package]
+name = "remoteman-tray"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Linux: the host's face for its owner: an icon in the top bar with a menu, and a window with
+# the paired devices and the switches. It owns nothing: the host is a user service, and this
+# talks to it over its control socket and to systemd.
+[[bin]]
+name = "remoteman-tray"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+gtk = { package = "gtk4", version = "0.11", features = ["v4_20"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }

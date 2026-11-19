@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Host first run</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.rm{--desk:#0B1437;--bg:#202020;--pane:#2A2A2A;--card:#2D2D2D;--line:rgba(255,255,255,.11);--tx:#FFFFFF;--t2:#C8C8C8;--ac:#8AB0FF;--on:#0B1437;--at:#9DBCFF;--sub:rgba(255,255,255,.07);--ok:#6CCB5F;--warn:#F5C26B;--bad:#FF99A4;--sh:0 10px 30px rgba(0,0,0,.55);font-family:"Segoe UI Variable Text","Segoe UI",Inter,system-ui,sans-serif;font-size:14px;line-height:20px;color:var(--tx);box-sizing:border-box}
+.rm.light{--desk:#D5DEF3;--bg:#F3F3F3;--pane:#FAFAFA;--card:#FFFFFF;--line:rgba(0,0,0,.1);--tx:#1B1B1B;--t2:#5A5A5A;--ac:#2458F5;--on:#FFFFFF;--at:#1D4BDB;--sub:rgba(0,0,0,.05);--ok:#0F7B0F;--warn:#8A5200;--bad:#C42B1C;--sh:0 10px 30px rgba(0,0,0,.2)}
+.rm *{box-sizing:border-box}
+.rm button{font:inherit;color:inherit}
+.win{background:var(--bg);border:1px solid var(--line);border-radius:8px;box-shadow:var(--sh);overflow:hidden;display:flex;flex-direction:column}
+.tb{height:40px;display:flex;align-items:center;gap:10px;padding-left:14px;font-size:12px;flex:none}
+.cap{margin-left:auto;display:flex}
+.cap span{width:46px;height:40px;display:flex;align-items:center;justify-content:center}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px}
+.row{display:flex;align-items:center;gap:14px;padding:10px 16px;min-height:64px}
+.row+.row{border-top:1px solid var(--line)}
+.g{flex:1;min-width:0}
+.c{font-size:12px;line-height:16px;color:var(--t2)}
+.btn{height:32px;padding:0 14px;border-radius:4px;border:1px solid var(--line);background:var(--card);display:inline-flex;align-items:center;justify-content:center;gap:8px;white-space:nowrap}
+.btn.ac{background:var(--ac);color:var(--on);border-color:transparent;font-weight:600}
+.tg{width:40px;height:20px;border-radius:10px;border:1px solid var(--t2);background:transparent;position:relative;padding:0;flex:none}
+.tg::after{content:"";position:absolute;left:3px;top:3px;width:12px;height:12px;border-radius:6px;background:var(--t2)}
+.tg.on{background:var(--ac);border-color:var(--ac)}
+.tg.on::after{left:23px;background:var(--on)}
+.ic{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+.n{width:24px;height:24px;border-radius:12px;border:1px solid var(--t2);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;flex:none}
+.n.ok{border-color:var(--ok);color:var(--ok)}
+</style>
+</helmet>
+<div class="rm {{theme}}" style="width: 1040px; height: 660px; padding: 28px 150px; background: var(--desk); display: flex">
+<div class="win" style="flex: 1">
+<div class="tb">
+<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect width="16" height="16" rx="3.5" fill="#0B1437" stroke="#2458F5"/><rect x="3" y="5" width="7" height="5" rx="1.2" fill="#2458F5"/><path d="M11.5 6h2M11.5 7.8h2.5M11.5 9.5h1.5" stroke="#fff" stroke-width="1.1" stroke-linecap="round"/></svg>
+<span>remoteman host</span>
+<div class="cap" aria-hidden="true"><span><svg class="ic" viewBox="0 0 16 16"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></span></div>
+</div>
+<div style="flex: 1; padding: 8px 32px 24px; display: flex; flex-direction: column; gap: 16px">
+<div><h1 style="margin: 0; font-size: 24px; line-height: 32px; font-weight: 600">Let your devices use this PC</h1><div class="c">Three things are set up once. Each needs an administrator, and Windows asks before each.</div></div>
+<div class="card">
+<div class="row"><span class="n ok" role="img" aria-label="Done"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg></span><div class="g"><div style="font-weight: 600">Display driver</div><div class="c">Gives each device a monitor of its own on this PC, at the device's size and refresh rate. To send this PC's picture to your device.</div></div><span class="c" style="color: var(--ok)">Installed</span></div>
+<div class="row"><span class="n">2</span><div class="g"><div style="font-weight: 600">Background service</div><div class="c">Keeps sharing on before anyone signs in, and passes on the sign-in screen and Windows' own permission prompts. Without it a device connects only while you are signed in.</div></div><button class="btn ac">Turn on</button></div>
+<div class="row"><span class="n">3</span><div class="g"><div style="font-weight: 600">Firewall</div><div class="c">Lets paired devices reach remoteman on private networks, on UDP port 7791.</div></div><button class="btn">Allow</button></div>
+<div class="row"><span class="n" style="border-style: dashed" aria-hidden="true"></span><div class="g"><div style="font-weight: 600">Open remoteman when I sign in</div><div class="c">Shows the icon in the notification area</div></div><button class="tg on" aria-pressed="true" aria-label="Open remoteman when I sign in"></button></div>
+</div>
+<div class="c">Nothing else is asked now. Sound, the device's microphone and camera, the clipboard and files are each set up when you first turn them on in Settings.</div>
+<div style="margin-top: auto; display: flex; justify-content: flex-end; gap: 8px"><button class="btn">Not now</button><button class="btn ac">Continue to pairing</button></div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark"},"$preview":{"width":1040,"height":660}}'>
+class Component extends DCLogic {
+renderVals() {
+return { theme: (this.props.theme ?? 'dark') === 'light' ? 'light' : 'dark' };
+}
+}
+</script>
+</body>
+</html>

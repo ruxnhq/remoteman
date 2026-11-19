@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::Result;
@@ -20,11 +20,22 @@ pub struct Shared {
     pub picture: Mutex<Option<Picture>>,
     /// The host's newest cursor shape, until the window takes it.
     pub cursor: Mutex<Option<CursorShape>>,
+    /// Where the host's cursor is now, as fractions of its display, and whether it is on it:
+    /// the newest report, until the window takes it.
+    pub cursor_at: Mutex<Option<(f32, f32, bool)>>,
     /// Why the session ended, once it has.
     pub closed: Mutex<Option<String>>,
     /// What is decoding, e.g. "av1 (cuda) 2752×2064".
     pub decoder: Mutex<String>,
     pub decoded: AtomicU32,
+    /// Frames the core handed over, frames the decoder was given and pictures it gave, since
+    /// they were last read for the log.
+    pub handed: AtomicU32,
+    pub fed: AtomicU32,
+    pub pictures: AtomicU32,
+    /// The decoder has been given frames for a while and has given no picture: ask the host
+    /// for a keyframe (set by the decode thread, taken by the window).
+    pub stuck: AtomicBool,
     /// Pictures the window never showed because a newer one arrived first.
     pub replaced: AtomicU32,
     /// The newest frame's age when it was decoded, in microseconds (0: not known yet).
@@ -41,11 +52,33 @@ pub struct Shared {
     pub sound: Mutex<Option<remoteman_audio::Player>>,
     /// What records this device's microphone for the computer, while it is on.
     pub microphone: Mutex<Option<remoteman_audio::MicCapture>>,
+    /// What reads this device's camera for the computer, while it is on, and how many frames
+    /// it has sent.
+    pub camera: Mutex<Option<remoteman_camera::Source>>,
+    pub camera_frames: AtomicU32,
+    /// The computer has been told the camera is on (it may still be opening).
+    camera_told: std::sync::atomic::AtomicBool,
+    /// Counts the times the camera was switched on or off.
+    camera_turn: AtomicU32,
+    /// Why the camera couldn't be opened, until the window says so and lets the button out.
+    pub camera_failed: Mutex<Option<String>>,
     /// What was copied on the computer, whole, until the window takes it: its type and bytes.
     pub copies: Mutex<Vec<(String, Vec<u8>)>>,
     /// What became of files sent to the computer, until the window says so: whether it
     /// arrived, and where it was put or why not.
     pub results: Mutex<Vec<(bool, String)>>,
+    /// What the computer offers now: what it said at the start, then whatever it has said since
+    /// (its owner can switch the clipboard and files on and off while a device is connected).
+    pub features: Mutex<Vec<String>>,
+    /// The computer changed what it offers, until the window has caught up.
+    pub features_changed: std::sync::atomic::AtomicBool,
+    /// The computer said the second display is gone, and why, until the window has closed it.
+    pub second_gone: Mutex<Option<String>>,
+    /// Where files from the computer go.
+    pub folder: Mutex<PathBuf>,
+    /// What became of files the computer sent, until the window answers it and says so: the
+    /// computer's number for the file, and where it was put or why not.
+    pub received: Mutex<Vec<remoteman_core::receive::Outcome>>,
     /// Counts the copies and the files sent.
     copy_seq: AtomicU32,
     file_seq: AtomicU32,
@@ -58,9 +91,14 @@ enum Msg {
 
 struct Feed {
     tx: mpsc::SyncSender<Msg>,
+    /// To the second display's decoder.
+    tx2: mpsc::SyncSender<Msg>,
     shared: Arc<Shared>,
     /// Copies from the computer that are still arriving.
     arriving: HashMap<u32, (String, Vec<u8>)>,
+    /// Files from the computer that are still arriving.
+    files: remoteman_core::receive::Receiver,
+    pairing: Arc<Mutex<Option<(String, u32)>>>,
 }
 
 impl Handler for Feed {
@@ -73,14 +111,35 @@ impl Handler for Feed {
         // Every frame leans on the one before, so none may be skipped here: if the decoder
         // falls behind, this waits, and the loss shows up upstream as a keyframe request.
         self.shared.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
+        self.shared.handed.fetch_add(1, Ordering::Relaxed);
         let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us));
+    }
+
+    fn stream2(&mut self, info: &StreamInfo) {
+        let _ = self.tx2.send(Msg::Stream(info.clone()));
+    }
+
+    fn frame2(&mut self, frame: &Frame, age_us: Option<i64>) {
+        let _ = self.tx2.send(Msg::Frame(frame.data.clone(), age_us));
+    }
+
+    fn pairing(&mut self, code: &str, seconds: u32) {
+        *self.pairing.lock().unwrap() = Some((code.to_owned(), seconds));
     }
 
     fn cursor_shape(&mut self, shape: &CursorShape) {
         *self.shared.cursor.lock().unwrap() = Some(shape.clone());
     }
 
+    fn cursor_at(&mut self, x: f32, y: f32, visible: bool) {
+        *self.shared.cursor_at.lock().unwrap() = Some((x, y, visible));
+    }
+
     fn blob(&mut self, event: &BlobEvent) {
+        let folder = self.shared.folder.lock().unwrap().clone();
+        if let Some(outcome) = self.files.blob(event, &folder) {
+            self.shared.received.lock().unwrap().push(outcome);
+        }
         match event {
             BlobEvent::Open { id, kind, header } if *kind == BLOB_CLIPBOARD => {
                 if let Ok(h) = serde_json::from_str::<ClipboardHeader>(header) {
@@ -108,8 +167,21 @@ impl Handler for Feed {
     }
 
     fn message(&mut self, message: &Message) {
-        if let Message::FileResult { ok, message, .. } = message {
-            self.shared.results.lock().unwrap().push((*ok, message.clone()));
+        match message {
+            Message::FileResult { ok, message, .. } => self.shared.results.lock().unwrap().push((*ok, message.clone())),
+            // The computer lost a frame of the camera: the next one is whole.
+            Message::CameraKeyframe => {
+                if let Some(camera) = self.shared.camera.lock().unwrap().as_ref() {
+                    camera.keyframe();
+                }
+            }
+            // The computer took the second display away (or couldn't make it).
+            Message::Display { index: 1, on: false, message, .. } => *self.shared.second_gone.lock().unwrap() = Some(message.clone()),
+            Message::Features { features } => {
+                *self.shared.features.lock().unwrap() = features.clone();
+                self.shared.features_changed.store(true, Ordering::Relaxed);
+            }
+            _ => {}
         }
     }
 
@@ -125,9 +197,76 @@ impl Handler for Feed {
     }
 }
 
+/// Start a thread that decodes one picture stream into `shared` (its newest picture, its
+/// figures, and why it stopped if it did).
+fn decoding(shared: Arc<Shared>) -> Result<mpsc::SyncSender<Msg>> {
+    let (tx, rx) = mpsc::sync_channel::<Msg>(8);
+    let s = shared;
+    std::thread::Builder::new().name("decode".into()).spawn(move || {
+        let mut decoder: Option<Decoder> = None;
+        // Frames given to the decoder since its last picture, and when the first of them was.
+        let mut barren: (u32, Option<std::time::Instant>) = (0, None);
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                Msg::Stream(info) => match Decoder::new(info.mode.codec) {
+                    Ok(d) => {
+                        *s.decoder.lock().unwrap() = format!("{} {}×{}", d.name, info.width, info.height);
+                        decoder = Some(d);
+                    }
+                    Err(e) => {
+                        *s.closed.lock().unwrap() = Some(format!("{e:#}"));
+                        return;
+                    }
+                },
+                Msg::Frame(data, age) => {
+                    let Some(d) = decoder.as_mut() else { continue };
+                    if s.no_dmabuf.load(Ordering::Relaxed) {
+                        d.stop_exporting();
+                    }
+                    let t = std::time::Instant::now();
+                    s.fed.fetch_add(1, Ordering::Relaxed);
+                    match d.decode(&data) {
+                        Ok(Some(picture)) => {
+                            barren = (0, None);
+                            s.pictures.fetch_add(1, Ordering::Relaxed);
+                            let took = t.elapsed().as_micros() as u32;
+                            s.decode_us_max.fetch_max(took, Ordering::Relaxed);
+                            s.decoded.fetch_add(1, Ordering::Relaxed);
+                            if let Some(a) = age {
+                                s.age_us.store((a.max(0) as u64) + took as u64, Ordering::Relaxed);
+                            }
+                            if s.picture.lock().unwrap().replace(picture).is_some() {
+                                s.replaced.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        // No picture for this frame. One or two at a start is the decoder
+                        // warming up; frame after frame for half a second is a decoder that
+                        // has lost its footing, and only a keyframe gets it back. Nothing
+                        // was lost on the way, so nothing else will ask for one.
+                        Ok(None) => {
+                            barren = (barren.0 + 1, barren.1.or(Some(t)));
+                            if barren.0 >= 3 && barren.1.is_some_and(|since| since.elapsed() > std::time::Duration::from_millis(500)) {
+                                s.stuck.store(true, Ordering::Relaxed);
+                                barren = (0, None);
+                            }
+                        }
+                        Err(e) => {
+                            *s.closed.lock().unwrap() = Some(format!("{e:#}"));
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    })?;
+    Ok(tx)
+}
+
 pub struct Session {
     pub client: Client,
     pub shared: Arc<Shared>,
+    /// The second display's side: its newest picture and figures.
+    pub second: Arc<Shared>,
 }
 
 pub struct Request {
@@ -136,12 +275,24 @@ pub struct Request {
     pub pair: bool,
     pub display: Display,
     pub decoders: Vec<Mode>,
+    /// The computer's cursor comes apart from the picture, for this window's pointer to wear;
+    /// otherwise the computer draws it into the picture.
+    pub cursor: bool,
+    /// The computer's user's password, if it said it is locked and this is the try after.
+    pub unlock: Option<String>,
+    /// Only into a session already running on the computer: never its login screen.
+    pub attach_only: bool,
+    /// Where files from the computer go.
+    pub folder: PathBuf,
+    /// Told the code to show, and the seconds there are, if the computer holds this device
+    /// until its owner has confirmed it.
+    pub pairing: Arc<Mutex<Option<(String, u32)>>>,
 }
 
 impl Session {
     /// Whether the computer offers a feature (`sound`, `clipboard`, `files`, ...).
     pub fn offers(&self, feature: &str) -> bool {
-        self.client.host_features.iter().any(|f| f == feature)
+        self.shared.features.lock().unwrap().iter().any(|f| f == feature)
     }
 
     /// Play the computer's sound on this device's default output, or stop. While it plays
@@ -194,6 +345,57 @@ impl Session {
         Ok(name)
     }
 
+    /// Let the computer use this device's camera, or stop. `from`: a PipeWire camera node to
+    /// read and no other, instead of the default camera. The camera is opened on a thread of
+    /// its own, since one that doesn't answer takes seconds to give up on: if it can't be
+    /// opened, the window hears why through `Shared::camera_failed`.
+    pub fn set_camera(&self, on: bool, from: Option<&str>) {
+        let off = Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 };
+        // Each change of mind has a number, so a camera that opens after it was switched off
+        // again is let go of.
+        let turn = self.shared.camera_turn.fetch_add(1, Ordering::Relaxed) + 1;
+        if !on {
+            // (Never held while a camera stops: the computer's requests for a keyframe take
+            // the lock too, on the connection's own thread.)
+            let had = self.shared.camera.lock().unwrap().take();
+            drop(had);
+            if self.shared.camera_told.swap(false, Ordering::Relaxed) {
+                self.client.send_message(off);
+                println!("camera: {} frames sent", self.shared.camera_frames.swap(0, Ordering::Relaxed));
+            }
+            return;
+        }
+        if self.shared.camera_told.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        // Said first: frames that reach the computer before it are thrown away there.
+        self.client.send_message(Message::Camera { on: true, codec: "h264".into(), width: 1280, height: 720, fps: 30 });
+        let began = std::time::Instant::now();
+        let (sender, shared, from) = (self.client.camera_sender(), self.shared.clone(), from.map(str::to_owned));
+        let started = std::thread::Builder::new().name("camera-start".into()).spawn(move || {
+            let counted = shared.clone();
+            let opened = remoteman_camera::Source::start(from.as_deref(), move |data, key| {
+                counted.camera_frames.fetch_add(1, Ordering::Relaxed);
+                sender.send(data, key, began.elapsed().as_micros() as u64);
+            });
+            let current = || shared.camera_turn.load(Ordering::Relaxed) == turn;
+            match opened {
+                Ok(source) => {
+                    let mut camera = shared.camera.lock().unwrap();
+                    if current() {
+                        *camera = Some(source);
+                    }
+                    // (Otherwise it was switched off meanwhile, and the camera is let go of here.)
+                }
+                Err(e) if current() => *shared.camera_failed.lock().unwrap() = Some(format!("{e:#}")),
+                Err(_) => {}
+            }
+        });
+        if let Err(e) = started {
+            *self.shared.camera_failed.lock().unwrap() = Some(e.to_string());
+        }
+    }
+
     /// Let the computer use this device's microphone, or stop. `from`: a PipeWire node to
     /// record and no other, instead of the default microphone.
     pub fn set_microphone(&self, on: bool, from: Option<&str>) -> Result<()> {
@@ -239,53 +441,18 @@ impl Session {
     /// Connect (this blocks) and start decoding.
     pub fn start(r: Request) -> Result<Self> {
         let shared = Arc::new(Shared::default());
-        let (tx, rx) = mpsc::sync_channel::<Msg>(8);
-        let s = shared.clone();
-        std::thread::Builder::new().name("decode".into()).spawn(move || {
-            let mut decoder: Option<Decoder> = None;
-            while let Ok(msg) = rx.recv() {
-                match msg {
-                    Msg::Stream(info) => match Decoder::new(info.mode.codec) {
-                        Ok(d) => {
-                            *s.decoder.lock().unwrap() = format!("{} {}×{}", d.name, info.width, info.height);
-                            decoder = Some(d);
-                        }
-                        Err(e) => {
-                            *s.closed.lock().unwrap() = Some(format!("{e:#}"));
-                            return;
-                        }
-                    },
-                    Msg::Frame(data, age) => {
-                        let Some(d) = decoder.as_mut() else { continue };
-                        if s.no_dmabuf.load(Ordering::Relaxed) {
-                            d.stop_exporting();
-                        }
-                        let t = std::time::Instant::now();
-                        match d.decode(&data) {
-                            Ok(Some(picture)) => {
-                                let took = t.elapsed().as_micros() as u32;
-                                s.decode_us_max.fetch_max(took, Ordering::Relaxed);
-                                s.decoded.fetch_add(1, Ordering::Relaxed);
-                                if let Some(a) = age {
-                                    s.age_us.store((a.max(0) as u64) + took as u64, Ordering::Relaxed);
-                                }
-                                if s.picture.lock().unwrap().replace(picture).is_some() {
-                                    s.replaced.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                *s.closed.lock().unwrap() = Some(format!("{e:#}"));
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-        })?;
+        *shared.folder.lock().unwrap() = r.folder.clone();
+        let tx = decoding(shared.clone())?;
+        // The second display's picture, when there is one, is decoded apart and kept apart.
+        let second = Arc::new(Shared::default());
+        let tx2 = decoding(second.clone())?;
         let hostname = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "Linux".into());
-        let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, test_drop_one_in: None, test_delay_lost_ms: None, cursor: true };
-        let client = Client::connect(options, Feed { tx, shared: shared.clone(), arriving: HashMap::new() })?;
-        Ok(Self { client, shared })
+        let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, test_drop_one_in: None, test_delay_lost_ms: None, unlock: r.unlock.clone(), attach_only: r.attach_only, cursor: r.cursor };
+        let client = Client::connect(options, Feed { tx, tx2, shared: shared.clone(), arriving: HashMap::new(), files: Default::default(), pairing: r.pairing.clone() })?;
+        // What it said in its hello, unless it has already said otherwise since.
+        if !shared.features_changed.load(Ordering::Relaxed) {
+            *shared.features.lock().unwrap() = client.host_features.clone();
+        }
+        Ok(Self { client, shared, second })
     }
 }

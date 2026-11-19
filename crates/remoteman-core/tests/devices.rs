@@ -59,6 +59,8 @@ fn options(host: &Host, state: &PathBuf, name: &str, pair: bool) -> Options {
         test_drop_one_in: None,
         test_delay_lost_ms: None,
         cursor: false,
+        unlock: None,
+        attach_only: false,
     }
 }
 

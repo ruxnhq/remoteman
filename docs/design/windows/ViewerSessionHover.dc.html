@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session, full screen with hover bar</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.rm{--pane:#2A2A2A;--line:rgba(255,255,255,.13);--tx:#FFFFFF;--t2:#C8C8C8;--at:#9DBCFF;--sub:rgba(255,255,255,.08);--ok:#6CCB5F;--bad:#FF99A4;--sh:0 10px 30px rgba(0,0,0,.55);font-family:"Segoe UI Variable Text","Segoe UI",Inter,system-ui,sans-serif;font-size:14px;line-height:20px;color:var(--tx);box-sizing:border-box}
+.rm *{box-sizing:border-box}
+.rm button{font:inherit;color:inherit}
+.c{font-size:12px;line-height:16px;color:var(--t2)}
+.ic{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+.tbtn{height:32px;min-width:36px;padding:0 9px;border-radius:4px;border:0;background:transparent;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}
+.tbtn.on{background:var(--sub);color:var(--at)}
+.sep{width:1px;height:20px;background:var(--line);margin:0 4px}
+.fly{background:var(--pane);border:1px solid var(--line);border-radius:8px;box-shadow:var(--sh);padding:4px}
+.mi{display:flex;align-items:center;gap:12px;padding:0 12px;height:36px;border-radius:4px;width:100%;border:0;background:transparent;text-align:left}
+.kb{margin-left:auto;font-size:12px;color:var(--t2)}
+.hr{height:1px;background:var(--line);margin:4px 0}
+.tg{width:40px;height:20px;border-radius:10px;border:1px solid #9DBCFF;background:#9DBCFF;position:relative;padding:0;flex:none}
+.tg::after{content:"";position:absolute;left:23px;top:3px;width:12px;height:12px;border-radius:6px;background:#0B1437}
+</style>
+</helmet>
+<div class="rm" style="width: 1280px; height: 800px; position: relative; background: #1B2540; overflow: hidden">
+<div style="position: absolute; left: 0; right: 0; top: 0; height: 28px; background: #0E1424" aria-hidden="true"></div>
+<div style="position: absolute; left: 110px; top: 150px; width: 600px; height: 420px; border-radius: 10px; background: #F4F5F7; overflow: hidden" aria-hidden="true"><div style="height: 38px; background: #E3E5EA"></div><div style="margin: 22px 24px; height: 12px; width: 300px; background: #C9CDD6; border-radius: 6px"></div><div style="margin: 14px 24px; height: 12px; width: 440px; background: #D9DCE3; border-radius: 6px"></div><div style="margin: 14px 24px; height: 12px; width: 380px; background: #D9DCE3; border-radius: 6px"></div></div>
+<div style="position: absolute; left: 640px; top: 320px; width: 540px; height: 360px; border-radius: 10px; background: #232B3D; overflow: hidden; border: 1px solid #36405A" aria-hidden="true"><div style="height: 38px; background: #2C3650"></div><div style="margin: 22px 24px; height: 10px; width: 220px; background: #5FD08A; border-radius: 5px"></div><div style="margin: 12px 24px; height: 10px; width: 340px; background: #46536F; border-radius: 5px"></div></div>
+<div style="position: absolute; left: 0; right: 0; top: 10px; display: flex; flex-direction: column; align-items: center; gap: 6px">
+<div style="height: 44px; padding: 0 6px; border-radius: 8px; background: rgba(32,32,32,.94); border: 1px solid var(--line); box-shadow: var(--sh); display: flex; align-items: center; gap: 2px">
+<span style="font-weight: 600; margin: 0 4px 0 10px">Workshop PC</span>
+<span class="c" style="margin-right: 8px; display: flex; align-items: center; gap: 6px"><span style="width: 8px; height: 8px; border-radius: 4px; background: var(--ok)"></span>144 Hz</span>
+<span class="sep"></span>
+<button class="tbtn" style="color: var(--bad)">Disconnect</button>
+<span class="sep"></span>
+<button class="tbtn on" aria-expanded="true"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="4" width="13" height="8" rx="1.5"/><path d="M4 7h.01M6.5 7h.01M9 7h.01M11.5 7h.01M5 9.5h6"/></svg>Send keys</button>
+<button class="tbtn"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="8" rx="1.5"/><path d="M6 14h4M8 11v3"/></svg>Display</button>
+<button class="tbtn"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 5h7M13 5h1M2 11h1M7 11h7"/><circle cx="11" cy="5" r="1.6"/><circle cx="5" cy="11" r="1.6"/></svg>Picture</button>
+<span class="sep"></span>
+<button class="tbtn on" aria-pressed="true" aria-label="Sound, on"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6.5h2l3-2.5v8l-3-2.5h-2zM10.5 6a3 3 0 010 4M12.3 4.3a5.5 5.5 0 010 7.4"/></svg></button>
+<button class="tbtn" aria-pressed="false" aria-label="Microphone, off"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="6" y="2" width="4" height="7" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V14"/></svg></button>
+<button class="tbtn" aria-pressed="false" aria-label="Camera, off"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="4.5" width="9" height="7" rx="1.5"/><path d="M10.5 7l4-2v6l-4-2"/></svg></button>
+<button class="tbtn" aria-label="Clipboard and files"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 4.5h4l1.5 1.5h7.5v6.5h-13z"/></svg></button>
+<span class="sep"></span>
+<button class="tbtn" aria-label="Leave full screen (F11)"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2.5V6H2.5M13.5 6H10V2.5M10 13.5V10h3.5M2.5 10H6v3.5"/></svg></button>
+<button class="tbtn" aria-label="More"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true" style="stroke-width: 2"><path d="M3.5 8h.01M8 8h.01M12.5 8h.01"/></svg></button>
+</div>
+<div class="fly" style="width: 348px; margin-right: 150px">
+<button class="mi">Ctrl+Alt+Delete<span class="kb">Windows can't pass this one on</span></button>
+<button class="mi">Win<span class="kb">Super on Linux, Command on a Mac</span></button>
+<button class="mi">Win+L<span class="kb">Locks the other computer</span></button>
+<button class="mi">Alt+Tab</button>
+<button class="mi">Alt+F4</button>
+<button class="mi">Ctrl+Shift+Esc</button>
+<button class="mi">Print Screen</button>
+<div class="hr"></div>
+<div class="mi" style="height: auto; padding: 8px 12px"><div style="flex: 1"><div>Send system shortcuts to the computer</div><div class="c">Alt+Tab, the Windows key and others go to it while this window is in front</div></div><button class="tg" aria-pressed="true" aria-label="Send system shortcuts to the computer"></button></div>
+<div class="mi" style="height: auto; padding: 8px 12px"><div style="flex: 1"><div>Release the keyboard</div><div class="c">Gives shortcuts back to this PC</div></div><span class="kb">Ctrl+Alt+Shift</span></div>
+</div>
+</div>
+<div style="position: absolute; left: 24px; bottom: 20px; padding: 6px 12px; border-radius: 6px; background: rgba(18,18,22,.86); border: 1px solid var(--line); font-size: 12px; color: #D5DBE8">Nothing but the picture until the pointer reaches the top edge. The bar slides away again after two seconds.</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

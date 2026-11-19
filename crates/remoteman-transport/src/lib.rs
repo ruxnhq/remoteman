@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-pub use identity::{Identity, Trust, fingerprint};
+pub use identity::{Identity, Trust, fingerprint, pair_code};
 pub use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use remoteman_proto::control::{Message, body_len};
 

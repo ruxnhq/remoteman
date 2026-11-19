@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session menus</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.rm{--desk:#D5DEF3;--pane:#FAFAFA;--card:#FFFFFF;--line:rgba(0,0,0,.1);--tx:#1B1B1B;--t2:#5A5A5A;--ac:#2458F5;--on:#FFFFFF;--at:#1D4BDB;--sub:rgba(0,0,0,.05);--warn:#8A5200;--sh:0 10px 30px rgba(0,0,0,.2);font-family:"Segoe UI Variable Text","Segoe UI",Inter,system-ui,sans-serif;font-size:14px;line-height:20px;color:var(--tx);box-sizing:border-box}
+.rm.dark{--desk:#0B1437;--pane:#2A2A2A;--card:#2D2D2D;--line:rgba(255,255,255,.11);--tx:#FFFFFF;--t2:#C8C8C8;--ac:#8AB0FF;--on:#0B1437;--at:#9DBCFF;--sub:rgba(255,255,255,.07);--warn:#F5C26B;--sh:0 10px 30px rgba(0,0,0,.55)}
+.rm *{box-sizing:border-box}
+.rm button{font:inherit;color:inherit}
+.c{font-size:12px;line-height:16px;color:var(--t2)}
+.ic{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.3;stroke-linecap:round;stroke-linejoin:round}
+.fly{background:var(--pane);border:1px solid var(--line);border-radius:8px;box-shadow:var(--sh);padding:4px}
+.mi{display:flex;align-items:center;gap:12px;padding:8px 12px;min-height:36px;border-radius:4px;width:100%;border:0;background:transparent;text-align:left}
+.mi.sel{background:var(--sub)}
+.g{flex:1;min-width:0}
+.kb{margin-left:auto;font-size:12px;color:var(--t2);white-space:nowrap}
+.hr{height:1px;background:var(--line);margin:4px 0}
+.sec{font-size:12px;font-weight:600;color:var(--t2);padding:8px 12px 2px}
+.rd{width:16px;height:16px;border-radius:8px;border:1px solid var(--t2);flex:none}
+.rd.on{border:4px solid var(--ac)}
+.tg{width:40px;height:20px;border-radius:10px;border:1px solid var(--t2);background:transparent;position:relative;padding:0;flex:none}
+.tg::after{content:"";position:absolute;left:3px;top:3px;width:12px;height:12px;border-radius:6px;background:var(--t2)}
+.tg.on{background:var(--ac);border-color:var(--ac)}
+.tg.on::after{left:23px;background:var(--on)}
+.tag{font-size:11px;line-height:16px;padding:1px 8px;border-radius:9px;border:1px solid var(--warn);color:var(--warn);white-space:nowrap}
+.cb{height:32px;padding:0 10px;border-radius:4px;border:1px solid var(--line);background:var(--card);display:flex;align-items:center;gap:8px;width:100%}
+.lbl{font-size:12px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:var(--tx)}
+</style>
+</helmet>
+<div class="rm {{theme}}" style="width: 1280px; height: 800px; padding: 28px; background: var(--desk); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; align-items: start">
+<div style="display: flex; flex-direction: column; gap: 10px">
+<div class="lbl">Display</div>
+<div class="fly">
+<div class="sec">Where this display sits</div>
+<button class="mi sel"><span class="rd on"></span><span class="g">Extra display<span class="c" style="display: block">Beside the computer's own displays, which stay on</span></span></button>
+<button class="mi"><span class="rd"></span><span class="g">Main display<span class="c" style="display: block">Its own displays stay on as secondary ones</span></span></button>
+<button class="mi"><span class="rd"></span><span class="g">Only display<span class="c" style="display: block">Its own screens turn off while you are connected</span></span></button>
+<div class="hr"></div>
+<div class="sec">Size and rate</div>
+<button class="mi"><span class="g">Size</span><span class="kb">Follows this window</span></button>
+<button class="mi"><span class="g">Refresh rate</span><span class="kb">This monitor's, 144 Hz</span></button>
+<div class="mi"><span class="g">HDR<span class="c" style="display: block">When the computer offers it and this monitor is in HDR</span></span><button class="tg" aria-pressed="false" aria-label="HDR"></button></div>
+<div class="mi"><span class="g">Variable refresh rate<span class="c" style="display: block">Shows each frame when it arrives, in full screen</span></span><button class="tg on" aria-pressed="true" aria-label="Variable refresh rate"></button></div>
+<div class="hr"></div>
+<button class="mi">Add a second display…</button>
+<button class="mi"><span class="g">Mirror a monitor of Workshop PC</span><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4l4 4-4 4"/></svg></button>
+</div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px">
+<div class="lbl">Picture</div>
+<div class="fly">
+<div class="sec">Picture quality</div>
+<button class="mi sel"><span class="rd on"></span><span class="g">Automatic<span class="c" style="display: block">Picks the best stream this PC decodes on its graphics card</span></span></button>
+<button class="mi"><span class="rd"></span><span class="g">Sharp text (4:4:4)<span class="c" style="display: block">Full colour detail for small text, at a higher bitrate</span></span></button>
+<button class="mi"><span class="rd"></span><span class="g">HEVC</span></button>
+<button class="mi"><span class="rd"></span><span class="g">AV1</span></button>
+<div class="hr"></div>
+<div class="sec">Bitrate limit</div>
+<div style="padding: 6px 12px 10px">
+<div style="height: 4px; border-radius: 2px; background: var(--line); position: relative" role="img" aria-label="Bitrate limit, 40 megabits a second"><div style="position: absolute; left: 0; top: 0; height: 4px; width: 62%; border-radius: 2px; background: var(--ac)"></div><div style="position: absolute; left: 62%; top: -8px; width: 20px; height: 20px; margin-left: -10px; border-radius: 10px; background: var(--card); border: 5px solid var(--ac)"></div></div>
+<div class="c" style="display: flex; justify-content: space-between; margin-top: 12px"><span>Up to 40 Mb/s</span><span>Now 22 Mb/s</span></div>
+</div>
+<div class="hr"></div>
+<div class="mi"><span class="g">Show figures</span><span class="kb">Ctrl+Alt+Shift+I</span><button class="tg on" aria-pressed="true" aria-label="Show figures"></button></div>
+</div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px">
+<div class="lbl">Sound, microphone, camera</div>
+<div class="fly">
+<div class="mi"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6.5h2l3-2.5v8l-3-2.5h-2zM10.5 6a3 3 0 010 4M12.3 4.3a5.5 5.5 0 010 7.4"/></svg><span class="g">Play the computer's sound here</span><button class="tg on" aria-pressed="true" aria-label="Play the computer's sound here"></button></div>
+<div style="padding: 0 12px 8px 40px"><div class="cb"><span class="g">Speakers, the default</span><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></div></div>
+<div class="hr"></div>
+<div class="mi"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="6" y="2" width="4" height="7" rx="2"/><path d="M3.5 8a4.5 4.5 0 009 0M8 12.5V14"/></svg><span class="g">Let the computer use this microphone</span><button class="tg" aria-pressed="false" aria-label="Let the computer use this microphone"></button></div>
+<div style="padding: 0 12px 8px 40px"><div class="cb"><span class="g">Headset microphone</span><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></div></div>
+<div class="hr"></div>
+<div class="mi"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="4.5" width="9" height="7" rx="1.5"/><path d="M10.5 7l4-2v6l-4-2"/></svg><span class="g">Let the computer use this camera</span><button class="tg" aria-pressed="false" aria-label="Let the computer use this camera"></button></div>
+<div style="padding: 0 12px 8px 40px"><div class="cb"><span class="g">Webcam</span><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></div></div>
+<div class="hr"></div>
+<div class="c" style="padding: 6px 12px 8px">Windows asks for the microphone or the camera the first time one is switched on, never before.</div>
+</div>
+</div>
+<div style="display: flex; flex-direction: column; gap: 10px">
+<div class="lbl">Clipboard and files</div>
+<div class="fly">
+<div class="mi"><span class="g">Share the clipboard<span class="c" style="display: block">Text and images copied on either side can be pasted on the other</span></span><button class="tg" aria-pressed="false" aria-label="Share the clipboard"></button></div>
+<div class="hr"></div>
+<button class="mi"><span class="g">Send a file…</span></button>
+<div class="mi"><span class="g">Receive files<span class="c" style="display: block">Saved to Downloads, never over an existing file</span></span><button class="tg" aria-pressed="false" aria-label="Receive files"></button></div>
+<div class="c" style="padding: 6px 12px 8px">Both are off until you turn them on, for each computer.</div>
+</div>
+<div class="lbl" style="margin-top: 14px">More</div>
+<div class="fly">
+<button class="mi">Settings for this computer…</button>
+<button class="mi">Settings</button>
+<div class="hr"></div>
+<div class="sec">Session window</div>
+<button class="mi sel"><span class="rd on"></span><span class="g">Title bar</span></button>
+<button class="mi"><span class="rd"></span><span class="g">Show the bar on hover</span></button>
+<div class="hr"></div>
+<button class="mi">About remoteman</button>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["light","dark"],"default":"dark"},"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+renderVals() {
+return { theme: (this.props.theme ?? 'dark') === 'light' ? 'light' : 'dark' };
+}
+}
+</script>
+</body>
+</html>

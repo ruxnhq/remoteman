@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use remoteman_core::media::{BLOB_CLIPBOARD, BLOB_FILE, ClipboardHeader, FileHeader};
-use remoteman_core::{BlobEvent, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, StreamInfo, TouchPhase};
+use remoteman_core::{BlobEvent, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, Side, StreamInfo, TouchPhase};
 
 fn pct(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() { 0.0 } else { sorted[((sorted.len() - 1) as f64 * p) as usize] }
@@ -66,6 +66,8 @@ struct Seen {
     closed: Option<String>,
     /// Every frame handed over, the first two seconds' included (what --out has saved).
     saved: u32,
+    /// The second display: its frames and how many of them were keyframes.
+    second: (u32, u32),
     /// Sound packets, how many were missing in between, and the last one's number.
     sound: (u32, u32, Option<u32>),
     /// The sound decoded, left channel only, up to half a minute of it.
@@ -84,6 +86,16 @@ struct Watcher {
 }
 
 impl Handler for Watcher {
+    fn stream2(&mut self, s: &StreamInfo) {
+        println!("second display: {:?} {:?} {}-bit, {}x{} at {} Hz", s.mode.codec, s.mode.chroma, s.mode.depth, s.width, s.height, s.refresh);
+    }
+
+    fn frame2(&mut self, frame: &Frame, _age_us: Option<i64>) {
+        let mut s = self.seen.lock().unwrap();
+        s.second.0 += 1;
+        s.second.1 += frame.key as u32;
+    }
+
     fn stream(&mut self, s: &StreamInfo) {
         println!("stream: {:?} {:?} {}-bit, {}x{} at {} Hz, {}", s.mode.codec, s.mode.chroma, s.mode.depth, s.width, s.height, s.refresh, s.colour);
         if let Some(f) = self.record.as_mut() {
@@ -186,6 +198,8 @@ fn main() -> Result<()> {
     let host = args.next().context("usage: remoteman-testclient HOST:PORT [options]")?;
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let (mut state, mut pair, mut size, mut scale, mut refresh, mut secs) = (home.join(".local/state/remoteman"), false, (2752u32, 2064u32), 2.0f32, 120u32, 10u64);
+    let mut unlock = None::<String>;
+    let mut attach_only = false;
     let (mut out, mut record, mut demo, mut cursor, mut decoders) = (None::<PathBuf>, None::<PathBuf>, false, false, "av1,hevc444,hevc".to_owned());
     let mut circle = false;
     let mut script = None::<PathBuf>;
@@ -212,6 +226,10 @@ fn main() -> Result<()> {
             "--pointer-demo" => circle = true,
             "--script" => script = Some(value()?.into()),
             "--cursor" => cursor = true,
+            // The host user's password, for a host that is locked (tests only: it shows in the process list).
+            "--unlock" => unlock = Some(value()?),
+            // Only into a session already running on the host: never its login screen.
+            "--attach-only" => attach_only = true,
             "--drop-one-in" => drop_one_in = Some(value()?.parse()?),
             "--delay-lost" => delay_lost = Some(value()?.parse()?),
             "--placement" => {
@@ -219,6 +237,7 @@ fn main() -> Result<()> {
                     "extend" => Placement::Extend,
                     "main" => Placement::Main,
                     "only" => Placement::Only,
+                    "mirror" => Placement::Mirror,
                     other => bail!("unknown placement {other}"),
                 }
             }
@@ -248,7 +267,7 @@ fn main() -> Result<()> {
         None => None,
     };
     let watcher = Watcher { decoder: None, seen: seen.clone(), file, record, warm: Instant::now() + Duration::from_secs(2) };
-    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement }, decoders, test_drop_one_in: drop_one_in, test_delay_lost_ms: delay_lost, cursor };
+    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement }, decoders, test_drop_one_in: drop_one_in, test_delay_lost_ms: delay_lost, unlock: unlock.clone(), attach_only, cursor };
     let client = Client::connect(options, watcher)?;
     println!("host: {} ({}), features {:?}, fingerprint {}", client.host_name, client.host_os, client.host_features, &client.host_fingerprint[..12]);
 
@@ -297,6 +316,27 @@ fn main() -> Result<()> {
                     let text = std::fs::read_to_string(rest.trim()).with_context(|| format!("line {}: read {}", i + 1, rest.trim()))?;
                     client.send(Event::Text(text.trim_end_matches('\n').to_owned()));
                 }
+                // A second display of this size beside the first (`display2 off` takes it away),
+                // and which display the pointer steps that follow are on.
+                "display2" => {
+                    let message = match rest.trim() {
+                        "off" => Message::Display { index: 1, on: false, display: None, side: Side::Right, message: String::new() },
+                        asked => {
+                            // `display2 WxH left`: on that side of everything else.
+                            let (size, side) = asked.split_once(' ').unwrap_or((asked, "right"));
+                            let side = match side.trim() {
+                                "left" => Side::Left,
+                                "above" => Side::Above,
+                                "below" => Side::Below,
+                                _ => Side::Right,
+                            };
+                            let (w, h) = size.split_once('x').with_context(|| format!("line {}: display2 WxH [left|above|below] or off", i + 1))?;
+                            Message::Display { index: 1, on: true, display: Some(Display { width: w.parse()?, height: h.parse()?, scale: 1.0, refresh: 60, placement: Placement::Extend }), side, message: String::new() }
+                        }
+                    };
+                    client.send_message(message);
+                }
+                "target" => client.send(Event::Display(rest.trim().parse().with_context(|| format!("line {}: target 0 or 1", i + 1))?)),
                 "mark" => println!("mark {}: {} frames so far", rest.trim(), seen.lock().unwrap().saved),
                 "sound" => client.send_message(Message::Sound { on: rest.trim() == "on" }),
                 "mic" => {
@@ -439,6 +479,9 @@ fn main() -> Result<()> {
     }
     let n = s.arrivals.len();
     println!("frames {n}, lost {}, keyframes {}, recovery points {}, loss reports {}", stats.lost, s.keys, s.recoveries, stats.keyframe_requests);
+    if s.second.0 > 0 {
+        println!("second display: {} frames, {} keyframes", s.second.0, s.second.1);
+    }
     if n > 2 {
         let span = (s.arrivals[n - 1] - s.arrivals[0]).as_secs_f64();
         let mut iv: Vec<f64> = s.arrivals.windows(2).map(|p| (p[1] - p[0]).as_secs_f64() * 1000.0).collect();
