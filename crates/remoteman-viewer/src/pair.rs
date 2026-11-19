@@ -132,6 +132,7 @@ pub fn open(app: &Rc<App>, address: Option<&str>, start: bool) {
                             Problem::NotPaired => format!("{host} is not in pairing mode. Start pairing there and try again."),
                             Problem::Changed => format!("{host} is not the computer this device was paired with at that address. Forget that one first."),
                             Problem::Refused(said) => format!("{host} said: {said}"),
+                            Problem::LoggingIn(_) => format!("{host} is logging its user in. Try again in a moment."),
                             Problem::Locked(_) => format!("{host} is locked. Unlock it there, or pair first and then connect to it."),
                             _ => e,
                         });

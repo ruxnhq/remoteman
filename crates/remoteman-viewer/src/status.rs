@@ -31,6 +31,9 @@ pub enum Problem {
     Changed,
     /// The computer answered and said no; with its reason.
     Refused(String),
+    /// The computer is logging its user in (or unlocking) for this device and will take it in
+    /// a moment; with what it said.
+    LoggingIn(String),
     /// The computer is locked and takes its user's password to let this device in; with what
     /// it said (who the user is, or that the last password was wrong).
     Locked(String),
@@ -38,12 +41,18 @@ pub enum Problem {
     Ended(String),
 }
 
+/// How many times a computer that says it is logging in is tried again before the person is
+/// asked.
+const LOGGING_IN_TRIES: u32 = 10;
+
 /// Sort out the core's error text.
 pub fn classify(error: &str) -> Problem {
     if error.contains("isn't the host that was paired") {
         Problem::Changed
     } else if error.contains("isn't paired") || error.contains("the host refused: not_paired") {
         Problem::NotPaired
+    } else if let Some((_, said)) = error.split_once("the host refused: logging_in: ") {
+        Problem::LoggingIn(said.to_owned())
     } else if let Some((_, said)) = error.split_once("the host refused: locked: ") {
         Problem::Locked(said.to_owned())
     } else if let Some((_, said)) = error.split_once("the host refused: ") {
@@ -64,6 +73,8 @@ pub fn ended(reason: &str, shown: bool) -> Problem {
     let said = reason.split_once("closed by peer: ").map(|(_, m)| m.rsplit_once(" (code ").map_or(m, |(m, _)| m));
     match said {
         Some("bye") | Some("done") => Problem::Ended("The computer closed the connection.".into()),
+        // It is getting its user's session ready: try again shortly.
+        Some(words) if !shown && words.starts_with("logging in: ") => Problem::LoggingIn(words["logging in: ".len()..].to_owned()),
         // It is locked, and takes its user's password with the next try.
         Some(words) if !shown && words.starts_with("locked: ") => Problem::Locked(words["locked: ".len()..].to_owned()),
         // It let this device in and then gave a reason for not going on.
@@ -229,6 +240,32 @@ pub fn problem(app: &Rc<App>, target: &Target, problem: Problem) -> adw::Navigat
             });
             buttons.append(&settings);
             ("dialog-warning-symbolic", format!("{name} Has a Different Key"), format!("What answered at {} is not the computer this device was paired with. If it has been set up again, forget it and pair it anew.", target.address))
+        }
+        Problem::LoggingIn(said) => {
+            // Tried again by itself every few seconds, for half a minute; then it is the
+            // person's turn.
+            let tries = app.logging_in.get() + 1;
+            app.logging_in.set(tries);
+            if tries <= LOGGING_IN_TRIES {
+                let (app, target, attempt) = (app.clone(), target.clone(), tries);
+                gtk::glib::timeout_add_seconds_local_once(3, move || {
+                    // (Unless the person has gone elsewhere or tried by hand meanwhile.)
+                    if app.logging_in.get() == attempt && !app.streaming() {
+                        app.connect(target, false);
+                    }
+                });
+                extra.append(&adw::Spinner::builder().width_request(32).height_request(32).halign(gtk::Align::Center).build());
+            } else {
+                app.logging_in.set(0);
+                buttons.append(&again("Try Again"));
+            }
+            if app.args.ui.is_some() {
+                println!("~ logging in: try {tries}");
+            }
+            // The computer's own words, as a sentence.
+            let mut words = said.chars();
+            let said: String = words.next().map(|first| first.to_uppercase().chain(words).collect()).unwrap_or_default();
+            ("system-users-symbolic", format!("{name} Is Logging In for You"), format!("It was locked or logged out. {}{}", said, if said.ends_with('.') { "" } else { "." }))
         }
         Problem::Locked(said) => {
             // The password goes to the computer with the next try and is kept nowhere here.

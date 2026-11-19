@@ -73,6 +73,8 @@ pub struct App {
     pub pairing: std::sync::Arc<std::sync::Mutex<Option<(String, u32)>>>,
     /// The password typed for a locked computer, for the next try and no longer.
     pub unlock: RefCell<Option<String>>,
+    /// How many tries in a row a computer has answered that it is logging in.
+    pub logging_in: Cell<u32>,
     pub capture: RefCell<Option<crate::capture::Capture>>,
     /// How far a captured pointer has been sent in this run, for tests.
     pub moved: Cell<(f64, f64)>,
@@ -730,6 +732,9 @@ impl App {
             self.video.stack.set_cursor(pointer.as_ref());
         }
         if let Some(p) = picture {
+            // A picture: whatever the computer was doing before it let this device in is over.
+            // (Not sooner: a computer that is logging in answers the hello and then closes.)
+            self.logging_in.set(0);
             self.video.show(p);
         }
         if let Some(reason) = closed {
@@ -846,6 +851,7 @@ pub fn build(application: &adw::Application, args: Args) {
         nearby: RefCell::new(Vec::new()),
         pairing: Default::default(),
         unlock: RefCell::new(None),
+        logging_in: Cell::new(0),
         capture: RefCell::new(None),
         moved: Cell::new((0.0, 0.0)),
         fingers: RefCell::new(Vec::new()),

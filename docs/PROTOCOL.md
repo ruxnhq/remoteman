@@ -31,6 +31,10 @@ A host whose desktop is locked may let a paired device in all the same, if its o
 
 While a host is unlocked for a device this way it may give the device another placement than it asked for (the Linux host makes the device's display the only one, so that an unlocked desktop is not shown on the computer's own screens; a device that asked to mirror is shown them as it asked). The host locks again when the device leaves.
 
+### A host that logs its user in by itself
+
+Some hosts neither show a login or lock screen nor ask for a password: they log their user in, or unlock, for a paired device (the Mac host, where its owner has switched that on and given it the password once). That takes a few seconds, during which there is no session to show. Such a host answers the hello with `{"t":"error","code":"logging_in","message":"..."}` and closes, its closing reason beginning `logging in: `. A client says so, waits about three seconds and connects again, by itself, some ten times before it asks its user. Through the core a host's handler gets this by refusing with words that begin `logging in: `.
+
 ## Finding a host
 
 A host that can be reached from the network says so with DNS-SD (Bonjour, Avahi): a service of type `_remoteman._udp` whose instance name is the computer's name and whose port is the one it listens on. Its text records:
