@@ -195,6 +195,7 @@ mod windows_main {
                 // For tests: stop by itself after this long.
                 "--seconds" => seconds = Some(value()?.parse().context("--seconds N")?),
                 // For tests: a window that shows HDR content on the device's monitor.
+                "--probe-mic" => {}
                 "--test-hdr-window" => test_hdr = Some(value()?.parse().context("--test-hdr-window SECONDS")?),
                 "--probe" => probing = Some(false),
                 "--probe-picture" => probing = Some(true),
@@ -220,6 +221,10 @@ mod windows_main {
                 tracing_subscriber::fmt().with_max_level(level).with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
             }
             None => tracing_subscriber::fmt().with_max_level(level).with_ansi(false).init(),
+        }
+        if std::env::args().any(|a| a == "--probe-mic") {
+            crate::sound::probe_formats();
+            return Ok(());
         }
         if let Some(seconds) = test_hdr {
             return crate::testhdr::run(seconds).inspect_err(|e| tracing::error!("{e:#}"));
