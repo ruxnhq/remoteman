@@ -104,6 +104,10 @@ pub struct App {
     pub capture: RefCell<Option<crate::capture::Capture>>,
     /// How far a captured pointer has been sent in this run, for tests.
     pub moved: Cell<(f64, f64)>,
+    /// The other computer's cursor as it last said: its image, the image's size and the spot
+    /// in it that points (in the other display's pixels); and where it last said it was.
+    pub remote_pointer: RefCell<Option<(gdk::Texture, (u32, u32), (i32, i32))>>,
+    pub remote_at: Cell<Option<(f32, f32, bool)>>,
     /// The fingers on a touchscreen that the other computer knows of: each one's place in
     /// this list is its number there.
     pub fingers: RefCell<Vec<Option<usize>>>,
@@ -321,7 +325,7 @@ impl App {
         let (placement, quality) = self.choices(&target.address);
         let display = self.display_for(Some(&target.address), placement);
         self.asked.set(Some((display.width, display.height)));
-        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display, decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, unlock: self.unlock.borrow_mut().take(), attach_only: self.store.borrow().find(&target.address).is_some_and(|c| c.attach_only), folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
+        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display, decoders: self.decoders(quality), cursor: self.store.borrow().settings.input.draw_pointer, unlock: self.unlock.borrow_mut().take(), attach_only: self.store.borrow().find(&target.address).is_some_and(|c| c.attach_only), folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
         let app = self.clone();
         glib::spawn_future_local(async move {
             let result = match gio::spawn_blocking(move || Session::start(request)).await {
@@ -411,6 +415,7 @@ impl App {
         }
         // The computer draws its pointer into the picture: this window's own is in the way.
         if !input.draw_pointer || input.capture {
+            // (Captured, the other computer's pointer is drawn over the picture where it is.)
             self.video.stack.set_cursor(gdk::Cursor::from_name("none", None).as_ref());
         }
         self.released.set(false);
@@ -496,7 +501,11 @@ impl App {
     pub fn hold_pointer(&self, hold: bool) {
         if !hold {
             if self.capture.borrow_mut().take().is_some() {
-                self.video.stack.set_cursor(None);
+                // This pointer is its owner's again: the one drawn over the picture goes, and
+                // this one wears the other computer's cursor as it does when not captured.
+                self.view.draw_pointer(None, (0.0, 0.0), (0.0, 0.0), (0.0, 0.0));
+                let worn = self.remote_pointer.borrow().as_ref().map(|(texture, _, hot)| gdk::Cursor::from_texture(texture, hot.0, hot.1, None));
+                self.video.stack.set_cursor(worn.as_ref());
             }
             return;
         }
@@ -818,17 +827,38 @@ impl App {
             Some(s) => (s.shared.picture.lock().unwrap().take(), s.shared.closed.lock().unwrap().clone(), s.shared.cursor.lock().unwrap().take()),
             None => return,
         };
+        let captured = self.capture.borrow().is_some();
         if let Some(c) = cursor {
             // The other computer's cursor becomes this window's own pointer, so it moves with
             // the hand and not a pipeline's delay later. Its image is in the other display's
             // pixels; GDK counts in this one's, so it is scaled to match.
-            let pointer = if c.width == 0 {
-                gdk::Cursor::from_name("none", None)
-            } else {
-                let texture = gdk::MemoryTexture::new(c.width as i32, c.height as i32, gdk::MemoryFormat::R8g8b8a8Premultiplied, &glib::Bytes::from_owned(c.rgba), c.width as usize * 4);
-                Some(gdk::Cursor::from_texture(&texture, c.hot_x, c.hot_y, None))
-            };
-            self.video.stack.set_cursor(pointer.as_ref());
+            let texture = (c.width > 0).then(|| gdk::MemoryTexture::new(c.width as i32, c.height as i32, gdk::MemoryFormat::R8g8b8a8Premultiplied, &glib::Bytes::from_owned(c.rgba), c.width as usize * 4).upcast::<gdk::Texture>());
+            *self.remote_pointer.borrow_mut() = texture.clone().map(|t| (t, (c.width, c.height), (c.hot_x, c.hot_y)));
+            // (A captured pointer has no place of its own to wear it: see below.)
+            if !captured {
+                let pointer = match &texture {
+                    Some(t) => Some(gdk::Cursor::from_texture(t, c.hot_x, c.hot_y, None)),
+                    None => gdk::Cursor::from_name("none", None),
+                };
+                self.video.stack.set_cursor(pointer.as_ref());
+            }
+        }
+        // A captured pointer is where the other computer says its cursor is, so that is where
+        // it is drawn: over the picture, at once, not in the picture a pipeline's delay later.
+        let at = self.session.borrow().as_ref().and_then(|s| s.shared.cursor_at.lock().unwrap().take());
+        if at.is_some() {
+            self.remote_at.set(at);
+        }
+        if captured {
+            let drawn = self.remote_pointer.borrow();
+            match (drawn.as_ref(), self.remote_at.get()) {
+                (Some((texture, size, hot)), Some((x, y, true))) => {
+                    if let Some((px, py, k)) = self.video.spot(x, y) {
+                        self.view.draw_pointer(Some(texture), (size.0 as f64 * k, size.1 as f64 * k), (hot.0 as f64 * k, hot.1 as f64 * k), (px, py));
+                    }
+                }
+                _ => self.view.draw_pointer(None, (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)),
+            }
         }
         if let Some(p) = picture {
             // A picture: whatever the computer was doing before it let this device in is over.
@@ -996,6 +1026,8 @@ pub fn build(application: &adw::Application, args: Args) {
         pointer_on: Cell::new(0),
         capture: RefCell::new(None),
         moved: Cell::new((0.0, 0.0)),
+        remote_pointer: RefCell::new(None),
+        remote_at: Cell::new(None),
         fingers: RefCell::new(Vec::new()),
         said_placement: Cell::new(args.placement),
         reach: RefCell::new(HashMap::new()),

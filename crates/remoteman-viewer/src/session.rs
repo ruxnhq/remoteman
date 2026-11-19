@@ -126,6 +126,10 @@ impl Figures {
 /// The session's part of the window.
 pub struct View {
     pub toolbar: adw::ToolbarView,
+    /// The other computer's pointer drawn over the picture, while this one's is captured: a
+    /// layer over the picture and the image on it.
+    pointer_layer: gtk::Fixed,
+    pointer_image: gtk::Picture,
     header: adw::HeaderBar,
     title: adw::WindowTitle,
     disconnect: gtk::Button,
@@ -233,6 +237,10 @@ pub fn build(video: &Video) -> View {
     let overlay = gtk::Overlay::builder().child(&video.stack).build();
     overlay.add_overlay(&figures.root);
     overlay.add_css_class("rm-video");
+    let pointer_layer = gtk::Fixed::builder().can_target(false).overflow(gtk::Overflow::Hidden).build();
+    let pointer_image = gtk::Picture::builder().can_shrink(true).content_fit(gtk::ContentFit::Fill).visible(false).build();
+    pointer_layer.put(&pointer_image, 0.0, 0.0);
+    overlay.add_overlay(&pointer_layer);
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
@@ -242,6 +250,8 @@ pub fn build(video: &Video) -> View {
 
     View {
         toolbar,
+        pointer_layer,
+        pointer_image,
         header,
         title,
         disconnect,
@@ -315,6 +325,19 @@ impl View {
 
     /// Whether this computer gives a device a second display: the line is there for those
     /// that do.
+    /// The other computer's pointer, drawn here: its image (`None`: nothing to draw), the
+    /// image's size and the spot in it that points, in this widget's units, and where that
+    /// spot is over the picture.
+    pub fn draw_pointer(&self, image: Option<&gdk::Texture>, size: (f64, f64), hot: (f64, f64), at: (f64, f64)) {
+        let Some(image) = image else { return self.pointer_image.set_visible(false) };
+        if self.pointer_image.paintable().as_ref() != Some(image.upcast_ref()) {
+            self.pointer_image.set_paintable(Some(image));
+        }
+        self.pointer_image.set_size_request(size.0.round() as i32, size.1.round() as i32);
+        self.pointer_layer.move_(&self.pointer_image, at.0 - hot.0, at.1 - hot.1);
+        self.pointer_image.set_visible(true);
+    }
+
     /// How tall the window's bar is, whether it has been shown yet or not.
     pub fn bar_height(&self) -> i32 {
         match self.header.height() {

@@ -141,6 +141,19 @@ impl Video {
         (((x - ox) / dw).clamp(0.0, 1.0) as f32, ((y - oy) / dh).clamp(0.0, 1.0) as f32)
     }
 
+    /// The other way: where a spot of the remote display is in the picture widget, and how
+    /// many of this widget's units one remote pixel takes. `None` before the first picture.
+    pub fn spot(&self, fx: f32, fy: f32) -> Option<(f64, f64, f64)> {
+        let (vw, vh) = self.size.get();
+        let (ww, wh) = (self.stack.width() as f64, self.stack.height() as f64);
+        if vw == 0 || vh == 0 || ww <= 0.0 || wh <= 0.0 {
+            return None;
+        }
+        let scale = (ww / vw as f64).min(wh / vh as f64);
+        let (dw, dh) = (vw as f64 * scale, vh as f64 * scale);
+        Some(((ww - dw) / 2.0 + fx as f64 * dw, (wh - dh) / 2.0 + fy as f64 * dh, scale))
+    }
+
     /// The picture as something GTK can draw. `None`: GTK refused it, and the decoder has been
     /// told to send the slower kind.
     fn texture(&self, p: Picture) -> Option<gdk::Texture> {

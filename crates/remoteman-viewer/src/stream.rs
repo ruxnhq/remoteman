@@ -20,6 +20,9 @@ pub struct Shared {
     pub picture: Mutex<Option<Picture>>,
     /// The host's newest cursor shape, until the window takes it.
     pub cursor: Mutex<Option<CursorShape>>,
+    /// Where the host's cursor is now, as fractions of its display, and whether it is on it:
+    /// the newest report, until the window takes it.
+    pub cursor_at: Mutex<Option<(f32, f32, bool)>>,
     /// Why the session ended, once it has.
     pub closed: Mutex<Option<String>>,
     /// What is decoding, e.g. "av1 (cuda) 2752×2064".
@@ -126,6 +129,10 @@ impl Handler for Feed {
 
     fn cursor_shape(&mut self, shape: &CursorShape) {
         *self.shared.cursor.lock().unwrap() = Some(shape.clone());
+    }
+
+    fn cursor_at(&mut self, x: f32, y: f32, visible: bool) {
+        *self.shared.cursor_at.lock().unwrap() = Some((x, y, visible));
     }
 
     fn blob(&mut self, event: &BlobEvent) {
