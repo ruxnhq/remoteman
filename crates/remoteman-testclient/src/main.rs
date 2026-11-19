@@ -15,7 +15,7 @@
 //!                          wait SECONDS | move X Y | click X Y | key enter|tab|esc|space|HEX
 //!                          text WORDS | textfile PATH | mark NAME
 //!                          sound on|off | mic PACKETS | camera FRAMES | clip WORDS
-//!                          file PATH | bitrate BITS | resize WxH
+//!                          file PATH | bitrate BITS | resize WxH | keyframe
 //!                        X and Y are fractions of the display. `textfile` types a file's
 //!                        contents without showing them. `mark` prints how many frames have
 //!                        arrived, to find that moment in a stream saved with --out.
@@ -397,6 +397,11 @@ fn main() -> Result<()> {
                     }
                     blob.finish();
                 }
+                // Ask for a keyframe, as a client whose decoder refused a frame does.
+                "keyframe" => {
+                    println!("keyframe asked for at {} frames", seen.lock().unwrap().saved);
+                    client.send_message(Message::Keyframe);
+                }
                 "bitrate" => client.send_message(Message::Configure { display: None, bitrate: Some(rest.trim().parse().with_context(|| format!("line {}: bitrate BITS", i + 1))?), decoders: None }),
                 "resize" => {
                     let (w, h) = rest.trim().split_once('x').with_context(|| format!("line {}: resize WxH", i + 1))?;
@@ -479,6 +484,8 @@ fn main() -> Result<()> {
     }
     let n = s.arrivals.len();
     println!("frames {n}, lost {}, keyframes {}, recovery points {}, loss reports {}", stats.lost, s.keys, s.recoveries, stats.keyframe_requests);
+    // The first two seconds' frames included: what --out saved.
+    println!("handed over {} frames in all", s.saved);
     if s.second.0 > 0 {
         println!("second display: {} frames, {} keyframes", s.second.0, s.second.1);
     }

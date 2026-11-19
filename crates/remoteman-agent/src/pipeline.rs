@@ -8,8 +8,8 @@ use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
 use remoteman_capture::{self as capture, Event, QuitSender};
-use remoteman_encode::{Codec, Config, Encoder, How};
-use remoteman_gpu::{Chroma, Converter};
+use remoteman_encode::{Codec, Config, How};
+use remoteman_gpu::Chroma;
 use remoteman_core::host::Link;
 use remoteman_core::{self as control, CursorShape, Message};
 
@@ -64,12 +64,8 @@ impl Pipeline {
             control::Codec::Hevc => Codec::Hevc,
             control::Codec::Av1 => Codec::Av1,
         };
-        anyhow::ensure!(mode.depth == 10, "only 10-bit is wired up");
-        let mut conv = Converter::new(width, height, chroma, SLOTS).context("Vulkan converter")?;
-        let modifiers = conv.modifiers()?;
-        anyhow::ensure!(!modifiers.is_empty(), "this GPU offers no DMA-BUF layout for the compositor's format");
-        let pitch = conv.pitch;
-        let inputs: Vec<(i32, u64)> = conv.slots.iter_mut().map(|s| (std::mem::replace(&mut s.fd, -1), s.size)).collect();
+        // NVENC behind the Vulkan converter, or VA-API: whichever GPU the compositor is on.
+        let (mut conv, modifiers, opener) = crate::gpu::open(width, height, mode, fps, bitrate, SLOTS)?;
 
         // Two may wait and one may be encoding, so with four slots the next to write is free.
         let (tx, rx) = mpsc::sync_channel::<Converted>(2);
@@ -85,15 +81,11 @@ impl Pipeline {
         let out = link.clone();
         let encoder = std::thread::Builder::new().name("encode".into()).spawn(move || {
             let opened = (|| {
-                let mut enc = Encoder::new(&Config { codec, chroma444: chroma == Chroma::C444, width, height, fps, bitrate, preset: 1, long_term: refs.map_or(2, |r| r.1), short_term: refs.map(|r| r.0) })?;
-                for (fd, size) in inputs {
-                    enc.add_input(fd, size, pitch)?;
-                }
-                anyhow::Ok(enc)
+                opener.open(&Config { codec, chroma444: chroma == Chroma::C444, width, height, fps, bitrate, preset: 1, long_term: refs.map_or(2, |r| r.1), short_term: refs.map(|r| r.0) })
             })();
             let mut enc = match opened {
                 Ok(e) => {
-                    let _ = ready_tx.send(Ok(e.note.clone()));
+                    let _ = ready_tx.send(Ok(e.note().to_owned()));
                     e
                 }
                 Err(e) => {
@@ -260,7 +252,7 @@ impl Pipeline {
                 );
             }
         })?;
-        let note = ready_rx.recv().context("encoder thread died")?.context("NVENC")?;
+        let note = ready_rx.recv().context("encoder thread died")?.context("encoder")?;
         tracing::info!(?codec, ?chroma, width, height, fps, bitrate, "encoder ready ({note})");
 
         let actual_scale = Arc::new(AtomicU32::new(scale.to_bits()));
@@ -286,7 +278,7 @@ impl Pipeline {
                     conv.reset_images();
                 }
                 Event::Frame(f) => {
-                    if (f.width, f.height) != (conv.width, conv.height) {
+                    if (f.width, f.height) != conv.size() {
                         return;
                     }
                     let capture_us = link.now_us();
