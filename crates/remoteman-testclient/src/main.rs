@@ -13,9 +13,10 @@
 //!     --pointer-demo     move the pointer in a circle and nothing else (safe on a desktop in use)
 //!     --script FILE      send input from a script while running, one step a line:
 //!                          wait SECONDS | move X Y | click X Y | key enter|tab|esc|space|HEX
+//!                          moveby DX DY | scroll DX DY (both in display pixels)
 //!                          text WORDS | textfile PATH | mark NAME
 //!                          sound on|off | mic PACKETS | camera FRAMES | clip WORDS
-//!                          file PATH | bitrate BITS | resize WxH
+//!                          file PATH | bitrate BITS | resize WxH | keyframe
 //!                        X and Y are fractions of the display. `textfile` types a file's
 //!                        contents without showing them. `mark` prints how many frames have
 //!                        arrived, to find that moment in a stream saved with --out.
@@ -147,6 +148,10 @@ impl Handler for Watcher {
 
     fn message(&mut self, message: &Message) {
         println!("host says: {}", serde_json::to_string(message).unwrap_or_default());
+    }
+
+    fn pairing(&mut self, code: &str, seconds: u32) {
+        println!("pairing: this device is new to the host; its owner has {seconds} s to confirm the code {code}");
     }
 
     fn sound(&mut self, packet: &Packet) {
@@ -299,6 +304,14 @@ fn main() -> Result<()> {
                     std::thread::sleep(Duration::from_millis(60));
                     client.send(Event::Button { button: Button::Left, down: false });
                 }
+                "moveby" => {
+                    let (dx, dy) = xy()?;
+                    client.send(Event::PointerBy { dx, dy });
+                }
+                "scroll" => {
+                    let (dx, dy) = xy()?;
+                    client.send(Event::Scroll { dx, dy });
+                }
                 "key" => {
                     let usage = match rest.trim() {
                         "enter" => 0x28,
@@ -397,6 +410,11 @@ fn main() -> Result<()> {
                     }
                     blob.finish();
                 }
+                // Ask for a keyframe, as a client whose decoder refused a frame does.
+                "keyframe" => {
+                    println!("keyframe asked for at {} frames", seen.lock().unwrap().saved);
+                    client.send_message(Message::Keyframe);
+                }
                 "bitrate" => client.send_message(Message::Configure { display: None, bitrate: Some(rest.trim().parse().with_context(|| format!("line {}: bitrate BITS", i + 1))?), decoders: None }),
                 "resize" => {
                     let (w, h) = rest.trim().split_once('x').with_context(|| format!("line {}: resize WxH", i + 1))?;
@@ -479,6 +497,8 @@ fn main() -> Result<()> {
     }
     let n = s.arrivals.len();
     println!("frames {n}, lost {}, keyframes {}, recovery points {}, loss reports {}", stats.lost, s.keys, s.recoveries, stats.keyframe_requests);
+    // The first two seconds' frames included: what --out saved.
+    println!("handed over {} frames in all", s.saved);
     if s.second.0 > 0 {
         println!("second display: {} frames, {} keyframes", s.second.0, s.second.1);
     }

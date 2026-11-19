@@ -39,6 +39,10 @@ While a host is unlocked for a device this way it may give the device another pl
 
 A host that can both bring a device into a session that is already running and show it a login screen when there is none (the Linux daemon) lists `way_in` in its features. A client may then say `"way_in":"attach"` in its hello: only a session that is already running, never a login screen. Left out, the host uses whatever way fits. With `attach` and nobody logged in, the host refuses with an ordinary error saying so. A host with one way in takes no notice.
 
+### A stream every decoder can follow
+
+A host's video must stay decodable by a decoder that keeps only the pictures each frame's own reference set names, and nothing longer. Found with a Mac host: VideoToolbox's HEVC numbers pictures with 11 bits, and the frame at each wrap (every 2048 frames) names four earlier pictures where every other frame names one; a decoder that has let the other three go, as FFmpeg's does, refuses that frame and every frame after it. A host whose encoder does this forces a keyframe before the count wraps. A client whose decoder refuses a frame with nothing lost on the way may ask for a keyframe with `{"t":"keyframe"}`, and the host answers as it does after a loss.
+
 ### A second display
 
 A host that can give one device two displays in one session lists `displays` in its features.

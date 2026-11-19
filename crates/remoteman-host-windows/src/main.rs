@@ -1,0 +1,335 @@
+//! `remoteman-host`: the Windows host. It streams a monitor of the display driver to one client
+//! at a time (a new one takes over) and puts the client's input into the desktop.
+//!
+//!     remoteman-host [--listen ADDR:PORT] [--state DIR] [--pair] [--name NAME] [--log FILE]
+//!                    [--bitrate MBIT] [--mode keep|listed|any] [--allow files,clipboard]
+//!                    [--encoder auto|nvenc|mf] [--seconds N]
+//!     remoteman-host --probe | --probe-picture [--log FILE]
+//!     remoteman-host ctl [--port PORT] WORDS
+//!
+//! `--ask` keeps pairing open and asks the owner, in a small window of Windows' own on the
+//! desktop, about each new device that comes: its name and the six-digit code it should be
+//! showing, Yes or No (No if the minute passes). This is the owner's way until the tray icon
+//! is made. `--pair` trusts the first unknown device to connect, with no question. The owner's way is `ctl pair on`: the
+//! device that comes then waits, `ctl status` shows it with a six-digit code that the device
+//! shows too, and `ctl pair accept` or `ctl pair decline` answers it. `ctl` speaks to the
+//! running host (from an elevated prompt): `status`, `pair on|off|accept|decline`, `allow
+//! clipboard|files on|off`, `drop`, `revoke FINGERPRINT`.
+//!
+//! `--allow files,clipboard`: paired devices may put files into this user's Downloads folder,
+//! and share the clipboard (text) both ways. Both are off unless said, here or with `ctl
+//! allow`, which is remembered.
+//!
+//! `--probe` only looks: it opens the display driver, says what it finds (the driver, its frame
+//! channel, the monitor's modes, the adapter, the shared textures) and exits. Run it first on
+//! a new machine. `--probe-picture` goes on to take one frame, convert it and encode it once
+//! with each codec, to show how far the picture path gets with no client.
+//!
+//! `--mode` says how far the host may go to give a client its own size: `keep` streams the
+//! monitor as it is, `listed` switches to the client's size if the monitor offers it, `any`
+//! (the default) also has the driver add the size when it doesn't, which re-creates the monitor.
+//! The monitor is put back when the client goes.
+//!
+//! It must run elevated (the display driver's device lets in Administrators and SYSTEM only)
+//! and in the user's own desktop session (input, the cursor and mode changes work nowhere
+//! else): see `input.rs`.
+//!
+//! The first time it listens on anything but loopback, Windows Firewall asks the user whether
+//! to let it, and until the answer is "Allow" it keeps a rule that blocks it from other
+//! computers. Tests on the same machine can listen on 127.0.0.1 and are never asked.
+//!
+//! Everything here is Windows-only; on other systems this builds to a stub so that the
+//! workspace builds whole.
+
+#[cfg(windows)]
+mod capture;
+#[cfg(windows)]
+mod clipboard;
+#[cfg(windows)]
+mod control;
+#[cfg(windows)]
+mod files;
+#[cfg(windows)]
+mod sound;
+#[cfg(windows)]
+mod convert;
+#[cfg(windows)]
+mod cursor;
+#[cfg(windows)]
+mod display;
+#[cfg(windows)]
+mod encode;
+#[cfg(windows)]
+mod input;
+#[cfg(windows)]
+mod mf;
+#[cfg(windows)]
+mod pipeline;
+#[cfg(windows)]
+mod probe;
+#[cfg(windows)]
+mod session;
+#[cfg(windows)]
+mod vdd;
+
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("remoteman-host is the Windows host; on Linux the host is remoteman-agent");
+    std::process::exit(1);
+}
+
+#[cfg(windows)]
+fn main() -> anyhow::Result<()> {
+    windows_main::main()
+}
+
+#[cfg(windows)]
+mod windows_main {
+    use std::net::SocketAddr;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use anyhow::{Context, Result};
+    use remoteman_core::host::{Host, HostOptions};
+    use windows::Win32::Media::timeBeginPeriod;
+    use windows::Win32::System::Console::SetConsoleCtrlHandler;
+    use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
+    use windows::core::BOOL;
+
+    use crate::display::{Fit, Screen};
+    use crate::{probe, session};
+
+    /// Ctrl-C, the console closing, or the user signing out.
+    static STOP: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "system" fn on_console(_event: u32) -> BOOL {
+        STOP.store(true, Ordering::Relaxed);
+        true.into()
+    }
+
+    fn state_dir() -> PathBuf {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")).join("remoteman")
+    }
+
+    pub fn main() -> Result<()> {
+        let mut listen: SocketAddr = format!("0.0.0.0:{}", remoteman_core::PORT).parse()?;
+        let (mut pair, mut state, mut bitrate, mut drop_one_in) = (false, state_dir(), 40u32, None::<u32>);
+        let (mut name, mut log, mut seconds, mut probing, mut fit) = (None::<String>, None::<PathBuf>, None::<u64>, None::<bool>, Fit::Any);
+        let (mut allow_files, mut allow_clipboard) = (false, false);
+        let mut ask = false;
+        let mut args = std::env::args().skip(1).peekable();
+        // Not a host at all: a word with the one that is running.
+        if args.peek().map(String::as_str) == Some("ctl") {
+            args.next();
+            let mut port = remoteman_core::PORT;
+            if args.peek().map(String::as_str) == Some("--port") {
+                args.next();
+                port = args.next().context("--port needs a value")?.parse().context("--port PORT")?;
+            }
+            let words: Vec<String> = args.collect();
+            print!("{}", crate::control::ask(port, &words.join(" "))?);
+            return Ok(());
+        }
+        // For looking into the display driver by hand: send it one of its text commands.
+        if args.peek().map(String::as_str) == Some("--driver") {
+            args.next();
+            let text: Vec<String> = args.collect();
+            crate::vdd::Driver::open()?.command(&text.join(" "))?;
+            println!("sent");
+            return Ok(());
+        }
+        // For tests and repairs: put the driver's first monitor into a mode for good, as the
+        // main display (`--first-mode 1920x1080x60`).
+        if args.peek().map(String::as_str) == Some("--first-mode") {
+            args.next();
+            let said = args.next().context("--first-mode WxHxR")?;
+            let n: Vec<u32> = said.split('x').filter_map(|v| v.parse().ok()).collect();
+            anyhow::ensure!(n.len() == 3, "--first-mode WxHxR");
+            crate::display::set_first(crate::display::Mode { width: n[0], height: n[1], refresh: n[2] })?;
+            println!("set");
+            return Ok(());
+        }
+        // For tests and repairs: take an output (\\.\DISPLAY1) out of the desktop.
+        if args.peek().map(String::as_str) == Some("--detach") {
+            args.next();
+            crate::display::detach(&args.next().context("--detach OUTPUT")?)?;
+            println!("detached");
+            return Ok(());
+        }
+        while let Some(a) = args.next() {
+            let mut value = || args.next().with_context(|| format!("{a} needs a value"));
+            match a.as_str() {
+                "--listen" => listen = value()?.parse().context("--listen ADDR:PORT")?,
+                "--state" => state = value()?.into(),
+                "--bitrate" => bitrate = value()?.parse().context("--bitrate in Mbit/s")?,
+                "--pair" => pair = true,
+                "--ask" => ask = true,
+                // Which encoder: the card's own (NVENC on NVIDIA, Media Foundation's on any
+                // other), or one of the two whatever the card.
+                "--encoder" => crate::encode::WHICH.store(
+                    match value()?.as_str() {
+                        "auto" => crate::encode::AUTO,
+                        "nvenc" => crate::encode::NVENC,
+                        "mf" => crate::encode::ANY_MAKERS,
+                        other => anyhow::bail!("--encoder {other}: auto, nvenc, mf"),
+                    },
+                    Ordering::Relaxed,
+                ),
+                "--allow" => {
+                    for what in value()?.split(',') {
+                        match what.trim() {
+                            "files" => allow_files = true,
+                            "clipboard" => allow_clipboard = true,
+                            other => anyhow::bail!("--allow {other}: files, clipboard"),
+                        }
+                    }
+                }
+                "--name" => name = Some(value()?),
+                "--log" => log = Some(value()?.into()),
+                // For tests: stop by itself after this long.
+                "--seconds" => seconds = Some(value()?.parse().context("--seconds N")?),
+                "--probe" => probing = Some(false),
+                "--probe-picture" => probing = Some(true),
+                "--mode" => {
+                    fit = match value()?.as_str() {
+                        "keep" => Fit::Keep,
+                        "listed" => Fit::Listed,
+                        "any" => Fit::Any,
+                        other => anyhow::bail!("--mode {other}: keep, listed, any"),
+                    }
+                }
+                // For tests: lose one video packet in this many.
+                "--test-drop-one-in" => drop_one_in = Some(value()?.parse().context("--test-drop-one-in N")?),
+                other => anyhow::bail!("unknown option {other}"),
+            }
+        }
+
+        let level = if std::env::var_os("REMOTEMAN_DEBUG").is_some() { tracing::Level::DEBUG } else { tracing::Level::INFO };
+        match &log {
+            // To a file, for runs nobody watches (and nothing to colour there).
+            Some(path) => {
+                let file = std::fs::OpenOptions::new().create(true).append(true).open(path).with_context(|| format!("--log {}", path.display()))?;
+                tracing_subscriber::fmt().with_max_level(level).with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
+            }
+            None => tracing_subscriber::fmt().with_max_level(level).with_ansi(false).init(),
+        }
+        // Anything that goes wrong is in the log before the process ends.
+        let result = run(listen, state, pair, name, bitrate, drop_one_in, seconds, probing, fit, (allow_files, allow_clipboard), ask);
+        if let Err(e) = &result {
+            tracing::error!("{e:#}");
+        }
+        result
+    }
+
+    /// Keep pairing open, and put each new device to the owner in a window of Windows' own.
+    fn ask_owner(host: std::sync::Weak<Host>) {
+        use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW};
+        let spawned = std::thread::Builder::new().name("ask".into()).spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(300));
+                let Some(h) = host.upgrade() else { break };
+                h.set_confirm(true);
+                let Some(device) = h.pending() else {
+                    // (Pairing closes itself after each device.)
+                    if !h.pairing() {
+                        h.set_pairing(true);
+                    }
+                    continue;
+                };
+                // The host isn't held while the question stands, so it can stop meanwhile.
+                drop(h);
+                let text = format!("\"{}\" wants to see and control this computer.\n\nIt should be showing the code {}.\n\nLet it in, now and from now on?", device.name, device.code);
+                tracing::info!(device = device.name, code = device.code, "a new device: asking on the desktop");
+                // SAFETY: plain call with two live strings; it returns when the owner answers.
+                let answer = unsafe { MessageBoxW(None, &windows::core::HSTRING::from(text), windows::core::w!("Remoteman Host"), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND) };
+                let Some(h) = host.upgrade() else { break };
+                // (False: the minute passed before the answer, and the device was turned away.)
+                let stood = h.decide(answer == IDYES);
+                tracing::info!(device = device.name, let_in = answer == IDYES, in_time = stood, "the owner answered");
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::warn!("couldn't start asking about new devices: {e}");
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(listen: SocketAddr, state: PathBuf, pair: bool, name: Option<String>, bitrate: u32, drop_one_in: Option<u32>, seconds: Option<u64>, probing: Option<bool>, fit: Fit, allow: (bool, bool), ask: bool) -> Result<()> {
+        // Sizes and places in real pixels, whatever scale the desktop is drawn at: the cursor's
+        // place, the monitor's corner and the pointer's target must all be in the picture's own.
+        // SAFETY: plain call, before any window exists.
+        if let Err(e) = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) } {
+            tracing::warn!("couldn't ask Windows for real pixels ({e}); on a scaled desktop the pointer will be off");
+        }
+        // Sleeps of a few milliseconds (the cursor's) are that long, not a whole 15 ms tick.
+        // SAFETY: plain call.
+        unsafe { timeBeginPeriod(1) };
+        if let Some(picture) = probing {
+            return probe::run(picture);
+        }
+
+        let screen = Screen::open()?;
+        let name = name.or_else(|| std::env::var("COMPUTERNAME").ok()).unwrap_or_else(|| "windows".into());
+        // What the owner switched on earlier holds until switched off; `--allow` adds to it
+        // for this run.
+        let allowed = crate::control::Allowed::default();
+        let saved = crate::control::load(&state);
+        allowed.files.store(allow.0 || saved.0, Ordering::Relaxed);
+        allowed.clipboard.store(allow.1 || saved.1, Ordering::Relaxed);
+        // A device's microphone needs a virtual sound device to be played into.
+        let (sink, outputs) = crate::sound::find_microphone_sink();
+        allowed.microphone.store(sink.is_some(), Ordering::Relaxed);
+        match &sink {
+            Some(name) => tracing::info!(into = name, "a device's microphone can be taken"),
+            None => tracing::info!(?outputs, "no virtual microphone here (Steam's \"Steam Streaming Microphone\" or VB-CABLE): a device's microphone can't be taken"),
+        }
+        let mut screen = screen;
+        let own = fit != Fit::Keep && screen.has_own();
+        allowed.own_monitor.store(own, Ordering::Relaxed);
+        allowed.second.store(own && screen.has_second(), Ordering::Relaxed);
+        if !own {
+            tracing::info!("the display driver has no second monitor to give (its settings say one monitor, or `--mode keep`): a device gets the one monitor at its own size");
+        }
+        let features = crate::control::features(&allowed);
+        tracing::info!(?features, "what this host does");
+        let options = HostOptions { listen, state: state.clone(), name, os: "windows".into(), features, pair, test_drop_one_in: drop_one_in };
+        let host = std::sync::Arc::new(Host::start(options, session::Host::new(screen, bitrate * 1_000_000, fit, allowed.clone()))?);
+        crate::control::serve(host.address.port(), std::sync::Arc::downgrade(&host), allowed, state);
+        tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
+        if pair {
+            tracing::info!("pairing: the next unknown device to connect will be trusted");
+        }
+        if ask {
+            tracing::info!("pairing: each new device is asked about on the desktop");
+            ask_owner(std::sync::Arc::downgrade(&host));
+        }
+
+        // SAFETY: a handler that only sets a flag.
+        if let Err(e) = unsafe { SetConsoleCtrlHandler(Some(on_console), true) } {
+            tracing::warn!("no Ctrl-C handler ({e}); stop this process to end it");
+        }
+        let began = Instant::now();
+        while !STOP.load(Ordering::Relaxed) && seconds.is_none_or(|s| began.elapsed() < Duration::from_secs(s)) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        tracing::info!("stopping");
+        // Stopping the host drops the client; its handler, on a thread of the core's, then lets
+        // go of the client's keys and puts the monitor back. Give it the moment that takes.
+        // (The control thread holds the host only while it answers.)
+        let mut host = Some(host);
+        for _ in 0..20 {
+            match std::sync::Arc::try_unwrap(host.take().unwrap()) {
+                Ok(h) => {
+                    h.stop();
+                    break;
+                }
+                Err(still) => host = Some(still),
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(host);
+        std::thread::sleep(Duration::from_millis(700));
+        Ok(())
+    }
+}

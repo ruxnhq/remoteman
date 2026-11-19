@@ -27,6 +27,19 @@ fn part_of(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// Give a file that has arrived whole its name, never in place of a file that is there: a
+/// plain rename would replace one that appeared under that name while this one was arriving
+/// (saved by a program, or put there by its user).
+pub fn settle(part: &Path, done: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(part, done) {
+        Ok(()) => std::fs::remove_file(part),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        // A disk that has no links: the gap between looking and renaming is all there is.
+        Err(_) if done.exists() => Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "a file of that name appeared meanwhile")),
+        Err(_) => std::fs::rename(part, done),
+    }
+}
+
 /// What became of a file: the sender's number for it, and where it was put or why not. It
 /// is what the `file_result` message says.
 pub type Outcome = (u32, Result<PathBuf, String>);
@@ -79,7 +92,7 @@ impl Receiver {
             BlobEvent::Close { id, complete } => {
                 let f = self.files.remove(id)?;
                 let whole = *complete && f.got == f.size;
-                let result = if whole { f.file.sync_all().and_then(|()| std::fs::rename(&f.part, &f.done)).map_err(|e| e.to_string()) } else { Err("it didn't arrive whole".to_owned()) };
+                let result = if whole { f.file.sync_all().and_then(|()| settle(&f.part, &f.done)).map_err(|e| e.to_string()) } else { Err("it didn't arrive whole".to_owned()) };
                 if result.is_err() {
                     let _ = std::fs::remove_file(&f.part);
                 }
@@ -101,6 +114,23 @@ impl Drop for Receiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_that_appeared_meanwhile_is_not_replaced() {
+        let dir = std::env::temp_dir().join(format!("remoteman-receive-meanwhile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut r = Receiver::default();
+        assert!(r.blob(&BlobEvent::Open { id: 1, kind: BLOB_FILE, header: serde_json::to_string(&FileHeader { id: 7, name: "notes.txt".into(), size: 3 }).unwrap() }, &dir).is_none());
+        r.blob(&BlobEvent::Data { id: 1, bytes: b"new".to_vec() }, &dir);
+        // Something else saves a file of that name while this one is on its way.
+        std::fs::write(dir.join("notes.txt"), b"the user's own").unwrap();
+        let (id, result) = r.blob(&BlobEvent::Close { id: 1, complete: true }, &dir).unwrap();
+        assert_eq!(id, 7);
+        assert_eq!(std::fs::read(dir.join("notes.txt")).unwrap(), b"the user's own", "a file that was there was replaced");
+        assert!(result.is_err());
+        assert!(!dir.join("notes.txt.part").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn open(id: u32, name: &str, size: u64) -> BlobEvent {
         BlobEvent::Open { id, kind: BLOB_FILE, header: serde_json::to_string(&FileHeader { id: id + 100, name: name.into(), size }).unwrap() }

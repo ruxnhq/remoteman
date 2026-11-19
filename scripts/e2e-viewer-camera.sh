@@ -7,7 +7,9 @@
 # camera that appears on the second host, which must be the test pattern. The nodes exist on
 # this user's PipeWire for the seconds the test runs; a real webcam is never opened.
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
-export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT_A="${RM_PORT_A:-7792}" RM_PORT_B="${RM_PORT_B:-7793}"
+# The two hosts listen on RM_PORT_A and RM_PORT_B (7792 and 7793), or on RM_PORT and the port
+# 101 above it when only that is given, as every other script takes its port.
+export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT_A="${RM_PORT_A:-${RM_PORT:-7792}}" RM_PORT_B="${RM_PORT_B:-$(( ${RM_PORT:-7692} + 101 ))}"
 enc=libx264; ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264 || enc=libopenh264
 ffmpeg -v error -y -f lavfi -i "testsrc2=size=1280x720:rate=30" -t 30 -c:v $enc -bf 0 -g 60 -pix_fmt yuv420p -bsf:v h264_mp4toannexb -f h264 "$RM_LOGS/clip.h264" || { echo "SKIP: no ffmpeg with a software H.264 encoder"; exit 0; }
 printf 'wait 2\ncamerafile %s\nwait 1\n' "$RM_LOGS/clip.h264" > "$RM_LOGS/steps.txt"

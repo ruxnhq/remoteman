@@ -3,13 +3,16 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
+
 use remoteman_core::{Chroma, Codec, Mode};
 
 pub struct Args {
-    pub host: String,
+    /// A computer to connect to at once; `None`: the app opens on its list.
+    pub host: Option<String>,
     pub pair: bool,
     pub state: PathBuf,
-    pub size: (u32, u32),
+    /// `None`: this monitor's own (or what the computer's settings say).
+    pub size: Option<(u32, u32)>,
     /// `None`: the monitor's own rate.
     pub refresh: Option<u32>,
     /// What to offer the host if the card decodes it, most preferred first.
@@ -20,9 +23,22 @@ pub struct Args {
     pub stats: bool,
     pub input_demo: bool,
     pub log: Option<PathBuf>,
+    /// Pictures of the window with nobody there: the screens and states to go through, by
+    /// name (`walk.rs`), with a made-up list and no network. `all`: every one.
+    pub ui: Option<String>,
+    /// Where those pictures go.
+    pub shots: Option<PathBuf>,
+    /// With `--ui`: the dark colours.
+    pub dark: Option<bool>,
+    /// Start the computer's sound with the session.
+    pub sound: bool,
+    /// Add a second display once the session has started.
+    pub second: bool,
+    /// For tests: a file whose first line is typed as the password of a locked computer.
+    pub password_from: Option<PathBuf>,
 }
 
-const USAGE: &str = "usage: remoteman-windows HOST:PORT [--pair] [--state DIR] [--size WxH] [--refresh HZ] [--decoders av1,hevc] [--seconds N] [--fullscreen] [--shot FILE.png] [--stats] [--input-demo] [--log FILE]";
+const USAGE: &str = "usage: remoteman [HOST:PORT] [--pair] [--state DIR] [--size WxH] [--refresh HZ] [--decoders av1,hevc] [--seconds N] [--fullscreen] [--shot FILE.png] [--stats] [--input-demo] [--log FILE] [--sound] [--ui STEPS --shots DIR [--dark|--light]]";
 
 fn mode(word: &str) -> Option<Mode> {
     // 4:4:4 isn't offered: D3D11VA hands 4:2:0 pictures out as P010, and what a 4:4:4 one looks
@@ -40,13 +56,13 @@ fn default_state() -> PathBuf {
 }
 
 pub fn parse() -> Result<Args> {
-    let mut words = std::env::args().skip(1);
-    let host = words.next().filter(|h| !h.starts_with("--")).ok_or_else(|| anyhow!(USAGE))?;
+    let mut words = std::env::args().skip(1).peekable();
+    let host = words.next_if(|h| !h.starts_with("--"));
     let mut args = Args {
         host,
         pair: false,
         state: default_state(),
-        size: (1920, 1080),
+        size: None,
         refresh: None,
         decoders: vec![mode("av1").unwrap(), mode("hevc").unwrap()],
         seconds: None,
@@ -55,6 +71,12 @@ pub fn parse() -> Result<Args> {
         stats: false,
         input_demo: false,
         log: None,
+        ui: None,
+        shots: None,
+        dark: None,
+        sound: false,
+        second: false,
+        password_from: None,
     };
     while let Some(arg) = words.next() {
         let mut value = || words.next().ok_or_else(|| anyhow!("{arg} needs a value"));
@@ -64,7 +86,7 @@ pub fn parse() -> Result<Args> {
             "--size" => {
                 let v = value()?;
                 let (w, h) = v.split_once('x').context("--size WxH")?;
-                args.size = (w.parse()?, h.parse()?);
+                args.size = Some((w.parse()?, h.parse()?));
             }
             "--refresh" => args.refresh = Some(value()?.parse()?),
             "--decoders" => {
@@ -77,8 +99,16 @@ pub fn parse() -> Result<Args> {
             "--stats" => args.stats = true,
             "--input-demo" => args.input_demo = true,
             "--log" => args.log = Some(value()?.into()),
+            "--ui" => args.ui = Some(value()?),
+            "--shots" => args.shots = Some(value()?.into()),
+            "--dark" => args.dark = Some(true),
+            "--light" => args.dark = Some(false),
+            "--sound" => args.sound = true,
+            "--second" => args.second = true,
+            "--password-from" => args.password_from = Some(value()?.into()),
             other => bail!("unknown option {other}\n{USAGE}"),
         }
     }
+    anyhow::ensure!(args.ui.is_none() || args.shots.is_some(), "--ui needs --shots DIR");
     Ok(args)
 }

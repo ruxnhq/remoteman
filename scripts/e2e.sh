@@ -13,6 +13,7 @@
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
 export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT="${RM_PORT:-7799}"
 export RM_CLIENT_ARGS="$*"
+rm -f "$RM_LOGS/rc"
 dbus-run-session -- sh -c '
   bin="$RM_ROOT/target/release"
   mutter --headless --wayland --no-x11 --wayland-display rm-e2e $RM_MUTTER_ARGS >"$RM_LOGS/mutter.log" 2>&1 &
@@ -30,6 +31,8 @@ dbus-run-session -- sh -c '
   ( sleep 6; gdctl show >"$RM_LOGS/monitors-during.txt" 2>&1 ) &
   "$bin/remoteman-testclient" 127.0.0.1:$RM_PORT --pair --state "$RM_LOGS/state" $RM_CLIENT_ARGS
   rc=$?
+  # (The status of this shell is lost behind the filter below: kept here for the script.)
+  echo $rc > "$RM_LOGS/rc"
   sleep 1; gdctl show >"$RM_LOGS/monitors-after.txt" 2>&1
   sleep 0.5
   kill $cpid $apid 2>/dev/null; sleep 0.5; kill $mpid 2>/dev/null
@@ -37,3 +40,5 @@ dbus-run-session -- sh -c '
   exit $rc
 ' 2>&1 | grep -vE "dbus-daemon|fusermount|Gdk-Message|A connection to the bus|portal|keyring|^$"
 echo "logs: $RM_LOGS"
+# The test client's or the viewer's own verdict is this script's.
+exit "$(cat "$RM_LOGS/rc" 2>/dev/null || echo 1)"

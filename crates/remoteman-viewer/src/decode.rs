@@ -146,13 +146,29 @@ fn open_hw(codec: &ff::Codec) -> Option<(HwDevice, String)> {
         if !codec_has_hw(codec, kind) {
             continue;
         }
-        let mut dev = ptr::null_mut();
-        // SAFETY: on success `dev` receives a new reference we then own.
-        let err = unsafe { ffi::av_hwdevice_ctx_create(&mut dev, kind, ptr::null(), ptr::null_mut(), 0) };
-        if err >= 0 && !dev.is_null() {
-            // SAFETY: a static string for every known type.
-            let name = unsafe { CStr::from_ptr(ffi::av_hwdevice_get_type_name(kind)) }.to_string_lossy().into_owned();
-            return Some((HwDevice(dev), name));
+        // VA-API is asked of each graphics card in turn (`REMOTEMAN_VAAPI_DEVICE` names one):
+        // FFmpeg's own choice is the first card, which on a computer with two is as likely
+        // the one that can't (an NVIDIA card has no VA-API of its own) as the one that can.
+        let nodes: Vec<Option<std::ffi::CString>> = if kind == ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI {
+            let mut found: Vec<String> = match std::env::var("REMOTEMAN_VAAPI_DEVICE") {
+                Ok(one) => vec![one],
+                Err(_) => std::fs::read_dir("/dev/dri").map(|d| d.flatten().map(|e| e.path().to_string_lossy().into_owned()).filter(|p| p.contains("renderD")).collect()).unwrap_or_default(),
+            };
+            found.sort();
+            found.into_iter().filter_map(|p| std::ffi::CString::new(p).ok()).map(Some).chain([None]).collect()
+        } else {
+            vec![None]
+        };
+        for node in nodes {
+            let mut dev = ptr::null_mut();
+            // SAFETY: on success `dev` receives a new reference we then own; the path, if any,
+            // is a valid C string for the length of the call.
+            let err = unsafe { ffi::av_hwdevice_ctx_create(&mut dev, kind, node.as_ref().map_or(ptr::null(), |n| n.as_ptr()), ptr::null_mut(), 0) };
+            if err >= 0 && !dev.is_null() {
+                // SAFETY: a static string for every known type.
+                let name = unsafe { CStr::from_ptr(ffi::av_hwdevice_get_type_name(kind)) }.to_string_lossy().into_owned();
+                return Some((HwDevice(dev), name));
+            }
         }
     }
     None

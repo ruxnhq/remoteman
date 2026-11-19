@@ -534,6 +534,12 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
     }
 }
 
+/// A frame that nothing has followed for this long is sent once more. On a desktop where
+/// nothing moves no later frame comes, and a later frame is the only way a client notices that
+/// one went missing: without this, whatever the network lost of the last frame before the
+/// picture went still was never shown. A client that has the frame drops the copy unseen.
+const REPEAT_AFTER: Duration = Duration::from_millis(100);
+
 /// One client's session. The flag in the result says whether the handler's `connected` ran (and
 /// so whether `left` is owed).
 async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, trust: &Trust, features: Vec<String>, held: Option<Arc<Confirm>>) -> Result<bool, (bool, anyhow::Error)> {
@@ -634,13 +640,44 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         let mut sent = 0u32;
         // The second display's picture: how often it has started afresh, and its frame count.
         let (mut epoch2, mut number2) = (0u16, 0u32);
-        while let Some(out) = frame_rx.recv().await {
+        // The last frame sent of each picture, and when it goes out once more if nothing has
+        // followed it (see `REPEAT_AFTER`).
+        // With the datagram size it was cut for: the copy is cut the same way, so that it fits the pieces
+        // the client already holds, and goes only while datagrams of that size are still taken
+        // (the limit grows in a connection's first moments, and can shrink on a bad path).
+        let mut last: [Option<(Frame, u16, u32, tokio::time::Instant, usize)>; 2] = [None, None];
+        loop {
+            let due = last.iter().flatten().map(|l| l.3).min();
+            let out = match due {
+                Some(due) => match tokio::time::timeout_at(due, frame_rx.recv()).await {
+                    Ok(out) => out,
+                    Err(_) => {
+                        let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
+                        for (index, slot) in last.iter_mut().enumerate() {
+                            if slot.as_ref().is_some_and(|l| l.3 <= tokio::time::Instant::now()) {
+                                let (f, epoch, number, _, cut) = slot.take().unwrap();
+                                if cut > max {
+                                    continue;
+                                }
+                                let kind = if index == 0 { remoteman_proto::video::KIND_VIDEO } else { remoteman_proto::video::KIND_VIDEO2 };
+                                for d in remoteman_proto::video::fragment_as(kind, &f.data, f.key, f.recovery, epoch, number, f.capture_us, cut) {
+                                    conn.send_datagram_wait(d.into()).await?;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                },
+                None => frame_rx.recv().await,
+            };
+            let Some(out) = out else { break };
             let f = match out {
                 Out::Second(second) => {
                     match *second {
                         Out::Restart(a) => {
                             epoch2 = epoch2.wrapping_add(1);
                             number2 = 0;
+                            last[1] = None;
                             let m = Message::Stream { epoch: epoch2, mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 1 };
                             write_message(&mut *send.lock().await, &m).await?;
                         }
@@ -649,6 +686,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                             for d in remoteman_proto::video::fragment_as(remoteman_proto::video::KIND_VIDEO2, &f.data, f.key, f.recovery, epoch2, number2, f.capture_us, max) {
                                 conn.send_datagram_wait(d.into()).await?;
                             }
+                            last[1] = Some((f, epoch2, number2, tokio::time::Instant::now() + REPEAT_AFTER, max));
                             number2 = number2.wrapping_add(1);
                         }
                         Out::Second(_) => {}
@@ -660,6 +698,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     number = 0;
                     answer.store(0, std::sync::atomic::Ordering::Relaxed);
+                    last[0] = None;
                     let m = Message::Stream { epoch: now(), mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 0 };
                     write_message(&mut *send.lock().await, &m).await?;
                     continue;
@@ -676,6 +715,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             if f.key || f.recovery {
                 answer.store(number.wrapping_add(1), std::sync::atomic::Ordering::Relaxed);
             }
+            last[0] = Some((f, now(), number, tokio::time::Instant::now() + REPEAT_AFTER, max));
             number = number.wrapping_add(1);
         }
         // The handler dropped its link without the client leaving: nothing more to send.
@@ -828,22 +868,67 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     if conn.close_reason().is_some() { Ok(true) } else { result.map(|()| true).map_err(yes) }
 }
 
+/// Hand on every whole event at the front of `buf` and take them out of it. An event that is
+/// whole but can't be read (a button this version doesn't know, text that isn't UTF-8) is
+/// stepped over: ending here would leave the client with a picture and no input for the rest
+/// of its session, and nothing to tell it so. Only a type this version doesn't know at all
+/// ends the input, since there is no telling where its event stops (docs/PROTOCOL.md, "Input").
+fn take_events(buf: &mut Vec<u8>, mut sink: impl FnMut(Event)) -> Result<()> {
+    let mut at = 0;
+    let result = loop {
+        match Event::parse(&buf[at..]) {
+            Ok(Some((event, used))) => {
+                at += used;
+                sink(event);
+            }
+            Ok(None) => break Ok(()),
+            Err(e) => match Event::length(&buf[at..]) {
+                Some(n) if buf.len() - at >= n => at += n,
+                _ => break Err(e.into()),
+            },
+        }
+    };
+    buf.drain(..at);
+    result
+}
+
 async fn read_input(mut stream: RecvStream, first: u8, calls: &mpsc::Sender<Call>) -> Result<()> {
     // `first` was read off the stream to see what it was.
     let mut buf = vec![first];
     let mut chunk = [0u8; 4096];
     while let Some(n) = stream.read(&mut chunk).await? {
         buf.extend_from_slice(&chunk[..n]);
-        let mut at = 0;
-        while let Some((event, used)) = Event::parse(&buf[at..])? {
-            at += used;
-            if calls.send(Call::Input(event)).is_err() {
-                bail!("the host is shutting down");
-            }
+        let mut gone = false;
+        take_events(&mut buf, |event| gone |= calls.send(Call::Input(event)).is_err())?;
+        if gone {
+            bail!("the host is shutting down");
         }
-        buf.drain(..at);
     }
     // The input stream closing isn't the session ending: wait for the connection to say so.
     std::future::pending::<()>().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use remoteman_proto::input::Button;
+
+    #[test]
+    fn input_goes_on_after_an_event_that_cannot_be_read() {
+        let mut buf = Vec::new();
+        Event::Key { usage: 4, down: true }.write(&mut buf);
+        buf.extend_from_slice(&[3, 9, 1]); // a button this version doesn't know
+        buf.extend_from_slice(&[7, 2, 0, 0xff, 0xfe]); // text that isn't UTF-8
+        buf.extend_from_slice(&[6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // a touch phase it doesn't know
+        Event::Button { button: Button::Left, down: true }.write(&mut buf);
+        buf.extend_from_slice(&[5, 4]); // half a key
+        let mut got = Vec::new();
+        take_events(&mut buf, |e| got.push(e)).expect("input ended at an event that could have been stepped over");
+        assert_eq!(got, [Event::Key { usage: 4, down: true }, Event::Button { button: Button::Left, down: true }]);
+        assert_eq!(buf, [5, 4]);
+        // A type nobody knows still ends it: its length can't be known.
+        let mut buf = vec![99, 1, 2];
+        assert!(take_events(&mut buf, |_| ()).is_err());
+    }
 }

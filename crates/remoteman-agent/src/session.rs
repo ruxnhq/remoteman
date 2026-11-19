@@ -11,17 +11,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use remoteman_core::media::{BLOB_CLIPBOARD, BLOB_FILE, CLIPBOARD_LIMIT, ClipboardHeader, FileHeader, safe_file_name};
 use remoteman_desktop::clipboard::{self, Clipboard};
 use remoteman_audio::{DefaultSink, MicSource, SpeakerSink};
-use remoteman_core::{BlobEvent, Chroma, Codec, Display, Event, Message, Mode, Packet, Side};
+use remoteman_core::{BlobEvent, Display, Event, Message, Mode, Packet, Side};
 use remoteman_desktop::mutter::VirtualDisplay;
 
 use crate::pipeline::{Pipeline, Settings};
 
-/// What this host encodes.
-const MODES: [Mode; 3] = [
-    Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 },
-    Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 },
-    Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 },
-];
+/// What this host encodes: depends on the GPU (`crate::gpu`).
+fn modes() -> Vec<Mode> {
+    crate::gpu::modes()
+}
 
 /// A client being served.
 /// A second display in the same session: a monitor and a picture of its own.
@@ -247,7 +245,7 @@ impl Agent {
 
     fn start_picture(&mut self, name: String, screen: Display, decoders: Vec<Mode>, cursor: bool, ceiling: u32, link: Link) -> Result<Accept, String> {
         // The client's order of preference decides.
-        let mode = decoders.iter().copied().find(|m| MODES.contains(m)).ok_or("no video mode in common")?;
+        let mode = decoders.iter().copied().find(|m| modes().contains(m)).ok_or("no video mode in common")?;
         if screen.width % 2 != 0 || screen.height % 2 != 0 || screen.width < 64 || screen.height < 64 || screen.width > 8192 || screen.height > 8192 {
             return Err("display sizes must be even, from 64 to 8192".into());
         }
@@ -747,7 +745,7 @@ impl Agent {
         }
         let screen = display.unwrap_or(l.screen);
         let decoders = decoders.unwrap_or_else(|| l.decoders.clone());
-        let mode = decoders.iter().copied().find(|m| MODES.contains(m));
+        let mode = decoders.iter().copied().find(|m| modes().contains(m));
         if screen == l.screen && mode == Some(l.mode) {
             return;
         }
@@ -771,11 +769,13 @@ impl Agent {
         if let Some(mode) = mode {
             link.restart(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into() });
         }
-        if let Err(e) = self.start(name.clone(), screen, decoders, cursor, ceiling, link.clone()) {
+        // (Not `start`, which locks a computer that was unlocked for a device left with no
+        // picture: this device is still here, and gets the picture it had back.)
+        if let Err(e) = self.start_picture(name.clone(), screen, decoders, cursor, ceiling, link.clone()) {
             // Back to what worked, rather than leave the client with nothing.
             tracing::warn!("couldn't start that picture ({e}); going back to the one before");
             let refresh = was_screen.refresh.clamp(1, 240);
-            if let Some(mode) = was_decoders.iter().copied().find(|m| MODES.contains(m)) {
+            if let Some(mode) = was_decoders.iter().copied().find(|m| modes().contains(m)) {
                 link.restart(Accept { mode, width: was_screen.width, height: was_screen.height, refresh, colour: "bt709".into() });
             }
             if let Err(e) = self.start(name, was_screen, was_decoders, cursor, ceiling, link) {
@@ -832,7 +832,7 @@ impl Agent {
             BlobEvent::Close { id, complete } => {
                 let Some(f) = l.files.remove(id) else { return };
                 let whole = *complete && f.got == f.size;
-                let result = if whole { f.file.sync_all().and_then(|()| std::fs::rename(&f.part, &f.done)).map_err(|e| e.to_string()) } else { Err("it didn't arrive whole".to_owned()) };
+                let result = if whole { f.file.sync_all().and_then(|()| remoteman_core::receive::settle(&f.part, &f.done)).map_err(|e| e.to_string()) } else { Err("it didn't arrive whole".to_owned()) };
                 match result {
                     Ok(()) => {
                         tracing::info!(file = %f.done.display(), bytes = f.got, "a file from the device");
