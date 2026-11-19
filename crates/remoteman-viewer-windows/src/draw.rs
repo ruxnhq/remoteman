@@ -476,6 +476,10 @@ pub fn start(gpu: Gpu, scene: Arc<Scene>, hwnd: HWND, shot: Option<PathBuf>) -> 
     let hwnd = hwnd.0 as isize;
     Ok(std::thread::Builder::new().name("draw".into()).spawn(move || {
         if let Err(e) = run(gpu, &scene, HWND(hwnd as *mut _), shot) {
+            // (The window going is how it ends; what fails after that is nothing.)
+            if scene.quit.load(Ordering::Relaxed) {
+                return;
+            }
             say!("drawing stopped: {e:#}");
             *scene.failed.lock().unwrap() = Some(format!("{e:#}"));
             scene.wake_window();

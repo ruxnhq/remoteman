@@ -317,6 +317,8 @@ pub struct App {
     logging_in: u32,
     /// When to try the computer on the problem page again by itself.
     pub retry_at: Option<Instant>,
+    /// The stream's size and rate as the bar last said them.
+    shown_format: Option<(u32, u32, u32)>,
     /// A line of news over the window, until it has been read.
     pub toast: Option<(String, Instant)>,
 }
@@ -376,6 +378,7 @@ impl App {
             logging_in: 0,
             retry_at: None,
             toast: None,
+            shown_format: None,
             args,
             gpu,
             scene,
@@ -681,6 +684,12 @@ impl App {
             self.dirty = true;
         }
         self.arrivals();
+        // The bar says what the stream is, which may have changed.
+        let format = self.format();
+        if format != self.shown_format {
+            self.shown_format = format;
+            self.dirty = true;
+        }
         // A picture: whatever the computer was doing before it let this PC in is over.
         if self.logging_in != 0 && self.session.as_ref().is_some_and(|s| s.shared.presented_total.load(Ordering::Relaxed) > 0) {
             self.logging_in = 0;

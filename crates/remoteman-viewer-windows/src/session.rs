@@ -195,7 +195,7 @@ pub fn view(app: &App, ui: &mut Ui) {
             let slide = if app.menu.is_some() { 1.0 } else { app.bar_slide };
             let list = pieces(app, s, true);
             let labels: f32 = list.iter().map(|p| width(ui, p, true) + 2.0).sum();
-            let w = (labels + 10.0).min(ui.w - 16.0);
+            let w = (labels + 12.0).min(ui.w - 16.0);
             let r = rect(((ui.w - w) / 2.0).round(), (-54.0 + 64.0 * slide).round(), w, BAR);
             ui.ops.push(Op::Shadow { r, radius: 8.0, strength: theme::OVER.shadow });
             ui.fill(r, 8.0, theme::OVER_BAR);

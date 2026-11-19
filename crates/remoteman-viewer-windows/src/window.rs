@@ -822,7 +822,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                         win.event(|app| app.update(Msg::ToggleFullscreen));
                     }
                 } else if session && ctrl && alt && shift && vk == 0x49 {
-                    win.event(|app| app.update(Msg::ToggleFigures));
+                    // (Not the three keys alone: this is no giving back of the keyboard.)
+                    win.chord.set(false);
+                    if l.0 & (1 << 30) == 0 {
+                        win.event(|app| app.update(Msg::ToggleFigures));
+                    }
                 } else if win.forwarding() {
                     let mut scancode = ((l.0 >> 16) & 0xFF) as u16;
                     if scancode == 0 {
@@ -903,7 +907,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             WM_TIMER => win.tick(),
             WM_CLOSE => {
                 win.release_keys();
-                win.event(|app| app.closing());
+                win.event(|app| {
+                    app.closing();
+                    app.scene.quit.store(true, Ordering::Relaxed);
+                });
                 let _ = DestroyWindow(hwnd);
             }
             WM_DESTROY => PostQuitMessage(0),
