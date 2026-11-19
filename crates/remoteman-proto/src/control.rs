@@ -82,6 +82,10 @@ pub enum Message {
         /// (`cursor`) and position (cursor datagrams) instead.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cursor: bool,
+        /// The password of the host's user, for a host that is locked and answered an
+        /// earlier hello with the error `locked` (docs/PROTOCOL.md, "A locked host").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unlock: Option<String>,
     },
     HostHello {
         proto: u32,

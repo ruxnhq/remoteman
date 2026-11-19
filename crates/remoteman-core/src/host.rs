@@ -50,6 +50,9 @@ pub struct ClientInfo {
     /// It draws the cursor itself: leave the cursor out of the picture and report it through
     /// [`Link::cursor_shape`] and [`Link::cursor_at`].
     pub cursor: bool,
+    /// The password it sent to unlock a locked host with, if it sent one. Never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlock: Option<String>,
 }
 
 /// What the host will send, in answer to a client's hello.
@@ -512,7 +515,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     let no = |e: anyhow::Error| (false, e);
     let clock = Instant::now();
     let (mut send, mut recv) = conn.accept_bi().await.context("control stream").map_err(no)?;
-    let Some(Message::ClientHello { proto, name, display, decoders, cursor }) = read_message(&mut recv).await.map_err(no)? else {
+    let Some(Message::ClientHello { proto, name, display, decoders, cursor, unlock }) = read_message(&mut recv).await.map_err(no)? else {
         return Err(no(anyhow::anyhow!("the first message wasn't client_hello")));
     };
     // A new device, held for the owner's word: it is told to wait (and can show the code),
@@ -561,7 +564,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     let (cursor_tx, mut cursor_rx) = tokio::sync::mpsc::unbounded_channel::<CursorMsg>();
     let link = Link { frames: frame_tx, cursor: cursor_tx, clock };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let info = ClientInfo { name, fingerprint, display, decoders, cursor };
+    let info = ClientInfo { name, fingerprint, display, decoders, cursor, unlock };
     // Reachable through `Host::link` before the handler hears of the client, so nothing it
     // sends from the start is lost.
     *current_link.lock().unwrap() = Some(link.clone());
@@ -570,7 +573,13 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         Ok(Ok(a)) => a,
         Ok(Err(message)) => {
             current_link.lock().unwrap().take();
-            let _ = write_message(&mut send, &Message::Error { code: "failed".into(), message: message.clone() }).await;
+            // A handler that says "locked: ..." means the client may try again with its
+            // user's password in the hello; anything else is a plain failure.
+            let (code, said) = match message.strip_prefix("locked: ") {
+                Some(said) => ("locked", said),
+                None => ("failed", message.as_str()),
+            };
+            let _ = write_message(&mut send, &Message::Error { code: code.into(), message: said.to_owned() }).await;
             // The handler refused, so it holds nothing for this client.
             return Err(no(anyhow::anyhow!(message)));
         }

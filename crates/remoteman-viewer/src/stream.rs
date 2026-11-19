@@ -181,6 +181,8 @@ pub struct Request {
     /// The computer's cursor comes apart from the picture, for this window's pointer to wear;
     /// otherwise the computer draws it into the picture.
     pub cursor: bool,
+    /// The computer's user's password, if it said it is locked and this is the try after.
+    pub unlock: Option<String>,
     /// Where files from the computer go.
     pub folder: PathBuf,
     /// Told the code to show, and the seconds there are, if the computer holds this device
@@ -386,7 +388,7 @@ impl Session {
             }
         })?;
         let hostname = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "Linux".into());
-        let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, test_drop_one_in: None, test_delay_lost_ms: None, cursor: r.cursor };
+        let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, test_drop_one_in: None, test_delay_lost_ms: None, unlock: r.unlock.clone(), cursor: r.cursor };
         let client = Client::connect(options, Feed { tx, shared: shared.clone(), arriving: HashMap::new(), files: Default::default(), pairing: r.pairing.clone() })?;
         // What it said in its hello, unless it has already said otherwise since.
         if !shared.features_changed.load(Ordering::Relaxed) {

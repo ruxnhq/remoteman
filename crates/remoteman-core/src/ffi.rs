@@ -205,12 +205,24 @@ pub unsafe extern "C" fn rm_client_connect(
 ) -> *mut Client {
     let (host, state, name, decoders, options) = unsafe { (text(host), text(state_dir), text(name), text(decoders), text(options)) };
     let mut placement = Placement::Extend;
+    let mut unlock = None;
     for pair in options.split(';').map(str::trim).filter(|p| !p.is_empty()) {
         match pair.split_once('=') {
             Some(("placement", "extend")) => placement = Placement::Extend,
             Some(("placement", "main")) => placement = Placement::Main,
             Some(("placement", "only")) => placement = Placement::Only,
             Some(("placement", "mirror")) => placement = Placement::Mirror,
+            // The host user's password, as hex of its UTF-8 bytes (it may hold any character).
+            Some(("unlock-hex", hex)) => {
+                let bytes: Option<Vec<u8>> = (0..hex.len() / 2).map(|i| u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()).collect();
+                match bytes.filter(|_| hex.len() % 2 == 0).and_then(|b| String::from_utf8(b).ok()) {
+                    Some(password) => unlock = Some(password),
+                    None => {
+                        report(err, err_len, "unlock-hex is not hex of UTF-8 text");
+                        return std::ptr::null_mut();
+                    }
+                }
+            }
             _ => {
                 report(err, err_len, &format!("unknown option {pair}"));
                 return std::ptr::null_mut();
@@ -229,7 +241,7 @@ pub unsafe extern "C" fn rm_client_connect(
             }
         });
     }
-    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh, placement }, decoders: modes, test_drop_one_in: None, test_delay_lost_ms: None, cursor: callbacks.on_cursor_shape.is_some() };
+    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh, placement }, decoders: modes, test_drop_one_in: None, test_delay_lost_ms: None, cursor: callbacks.on_cursor_shape.is_some(), unlock };
     match Client::connect(options, callbacks) {
         Ok(c) => Box::into_raw(Box::new(c)),
         Err(e) => {

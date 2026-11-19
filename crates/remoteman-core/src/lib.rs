@@ -50,6 +50,9 @@ pub struct Options {
     /// This app draws the cursor itself: the host leaves it out of the picture and reports its
     /// shape and position through [`Handler::cursor_shape`] and [`Handler::cursor_at`].
     pub cursor: bool,
+    /// The password of the host's user, to unlock a locked host with: given on a second
+    /// try, after the first failed with "the host refused: locked: ...".
+    pub unlock: Option<String>,
 }
 
 /// The host's cursor image: premultiplied RGBA, rows top to bottom. Zero size: no cursor.
@@ -265,7 +268,7 @@ impl Client {
         let now_us = move || clock.elapsed().as_micros() as u64;
         handler.stage(Stage::Hello);
         let (mut send, mut recv) = conn.open_bi().await?;
-        write_message(&mut send, &Message::ClientHello { proto: remoteman_proto::PROTO, name: o.name, display: o.display, decoders: o.decoders, cursor: o.cursor }).await?;
+        write_message(&mut send, &Message::ClientHello { proto: remoteman_proto::PROTO, name: o.name, display: o.display, decoders: o.decoders, cursor: o.cursor, unlock: o.unlock }).await?;
         let (host_name, host_os, host_features) = loop {
             match read_message(&mut recv).await?.context("the host closed the connection")? {
                 Message::HostHello { name, os, features, .. } => break (name, os, features),

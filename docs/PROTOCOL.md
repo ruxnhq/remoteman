@@ -21,6 +21,16 @@ A host lets a device it doesn't know past the handshake only while its owner has
 
 The code is made from both keys: the first four bytes of SHA-256 over the text `remoteman pairing`, a newline, the host key's fingerprint, a newline and the device key's fingerprint (both in lower-case hex), as a big-endian number modulo 1,000,000, shown as two groups of three digits. Each side makes it from the key it sees the other use, so something in between, which would have to show each side a key of its own, makes the two codes differ. A client that doesn't know the `pairing` message simply waits for its hello.
 
+## A locked host
+
+A host whose desktop is locked may let a paired device in all the same, if its owner has said so: by the device's key alone, or with the password of the host's user as well.
+
+- A host that wants the password answers the hello with `{"t":"error","code":"locked","message":"..."}` and closes the connection, with the same words as its closing reason, begun with `locked: ` (a client sees one or the other, depending on which arrives first). `message` is for people: whose password is wanted, or that the last one was wrong.
+- The client asks its user and connects again with the password in the hello: `"unlock":"..."` in `client_hello`. It travels inside the connection's encryption, to a host whose key the device already holds, and is never stored by the host. A wrong one gets the same answer again; after several the host takes no more for a while.
+- A host that is locked and set to let nobody in answers with an ordinary error.
+
+While a host is unlocked for a device this way it may give the device another placement than it asked for (the Linux host makes the device's display the only one, so that an unlocked desktop is not shown on the computer's own screens; a device that asked to mirror is shown them as it asked). The host locks again when the device leaves.
+
 ## Finding a host
 
 A host that can be reached from the network says so with DNS-SD (Bonjour, Avahi): a service of type `_remoteman._udp` whose instance name is the computer's name and whose port is the one it listens on. Its text records:

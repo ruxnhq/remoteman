@@ -66,6 +66,10 @@ fn set_notifies(on: bool) -> std::io::Result<()> {
     }
 }
 
+/// What gets a paired device in while this computer is locked: as the host says it, and as
+/// the window does.
+const UNLOCKS: [(&str, &str); 3] = [("off", "Can't get in"), ("password", "Gets in with my password"), ("key", "Gets in without a password")];
+
 /// What the icon's menu asks of the program.
 enum Cmd {
     Open,
@@ -184,6 +188,7 @@ struct Ui {
     rows: RefCell<Vec<gtk::Widget>>,
     clipboard: adw::SwitchRow,
     files: adw::SwitchRow,
+    unlock: adw::ComboRow,
     address: adw::ActionRow,
     key: adw::ActionRow,
     /// The widgets are being set from the host's state, not by the person.
@@ -294,7 +299,9 @@ impl Ui {
         }
         let none = |text: &str| adw::ActionRow::builder().title(text).sensitive(false).build();
         match &state {
-            State::Sharing { fingerprint, port, pairing, clipboard, files, devices, .. } => {
+            State::Sharing { fingerprint, port, pairing, clipboard, files, unlock, devices, .. } => {
+                self.unlock.set_sensitive(true);
+                self.unlock.set_selected(UNLOCKS.iter().position(|u| u.0 == unlock).unwrap_or(0) as u32);
                 self.pairing.set_revealed(*pairing);
                 self.pair.set_sensitive(!pairing);
                 self.clipboard.set_sensitive(true);
@@ -320,6 +327,7 @@ impl Ui {
                 self.pair.set_sensitive(false);
                 self.clipboard.set_sensitive(false);
                 self.files.set_sensitive(false);
+                self.unlock.set_sensitive(false);
                 self.address.set_subtitle("Shown while sharing is on");
                 self.key.set_subtitle("Shown while sharing is on");
                 let row = none("Shown while sharing is on");
@@ -423,6 +431,13 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let sharing_what = adw::PreferencesGroup::builder().title("Clipboard and files").build();
     sharing_what.add(&clipboard);
     sharing_what.add(&files);
+    let unlock = adw::ComboRow::builder()
+        .title("A paired device")
+        .subtitle("Unlocked for a device, this computer's own screens stay off unless the device mirrors them, and it locks again when the device leaves")
+        .model(&gtk::StringList::new(&UNLOCKS.map(|u| u.1)))
+        .build();
+    let locked = adw::PreferencesGroup::builder().title("When this computer is locked").build();
+    locked.add(&unlock);
     let address = adw::ActionRow::builder().title("Address").subtitle("").subtitle_selectable(true).css_classes(["property"]).build();
     let key = adw::ActionRow::builder().title("Key fingerprint").subtitle("").subtitle_selectable(true).css_classes(["property"]).build();
     let reach = adw::PreferencesGroup::builder().title("Address and key").description("What to enter on a device to reach this computer. A device shows the same fingerprint once it is paired.").build();
@@ -432,6 +447,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     devices_page.add(&pair_group);
     devices_page.add(&devices);
     devices_page.add(&sharing_what);
+    devices_page.add(&locked);
     devices_page.add(&reach);
 
     // About.
@@ -469,6 +485,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         rows: RefCell::new(Vec::new()),
         clipboard,
         files,
+        unlock,
         address,
         key,
         setting: Cell::new(false),
@@ -513,6 +530,14 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     ui.pairing.connect_button_clicked({
         let ui = ui.clone();
         move |_| ui.tell("pair off")
+    });
+    ui.unlock.connect_selected_notify({
+        let ui = ui.clone();
+        move |row| {
+            if !ui.setting.get() {
+                ui.tell(&format!("allow unlock {}", UNLOCKS[(row.selected() as usize).min(UNLOCKS.len() - 1)].0));
+            }
+        }
     });
     for (row, what) in [(&ui.clipboard, "clipboard"), (&ui.files, "files")] {
         let ui = ui.clone();
@@ -607,7 +632,7 @@ mod tests {
     fn the_icon_has_a_shape_for_each_state() {
         let (tx, _rx) = mpsc::channel();
         let mut icon = Icon { state: State::Paused, name: "desk".into(), tx };
-        let sharing = |client| State::Sharing { fingerprint: String::new(), port: 7791, pairing: false, clipboard: false, files: false, client, devices: Vec::new(), sent: host::Sent::default(), pending: None };
+        let sharing = |client| State::Sharing { fingerprint: String::new(), port: 7791, pairing: false, clipboard: false, files: false, unlock: String::new(), client, devices: Vec::new(), sent: host::Sent::default(), pending: None };
         let device = host::Client { name: "pad".into(), since: 0, width: 1, height: 1, refresh: 60, placement: String::new(), picture: String::new(), sound: false };
         let mut names = Vec::new();
         for state in [State::Paused, State::Failed("why".into()), sharing(None), sharing(Some(device))] {
