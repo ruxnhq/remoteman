@@ -20,7 +20,18 @@ public partial class App : Application
         // The theme has to be chosen before any window exists.
         if (Options.Theme is ApplicationTheme theme) RequestedTheme = theme;
         InitializeComponent();
-        UnhandledException += (_, e) => Log.Say($"unhandled: {e.Exception}");
+        UnhandledException += (_, e) =>
+        {
+            Log.Say($"unhandled: {e.Exception}");
+            // Without --log (as the Start menu starts it), still leave the reason somewhere.
+            if (Options.LogFile is null)
+                try
+                {
+                    string dir = Packaging.IsPackaged ? Windows.Storage.ApplicationData.Current.LocalFolder.Path : Path.GetTempPath();
+                    File.AppendAllText(Path.Combine(dir, "remoteman-crash.log"), $"{DateTime.Now:s} {e.Exception}{Environment.NewLine}");
+                }
+                catch { }
+        };
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)

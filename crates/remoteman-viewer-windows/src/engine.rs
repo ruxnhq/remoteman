@@ -347,6 +347,13 @@ fn start(words: Vec<String>, notify: Notify) -> Result<()> {
     if let Some(path) = &args.log {
         crate::log::to_file(path)?;
     }
+    // A panic ends the app (it can't unwind out of the engine's C functions): say why first,
+    // since a window app has no stderr to see it on.
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        say!("panic: {info}");
+        default(info);
+    }));
     let gpu = crate::gpu::Gpu::open()?;
     say!("engine: gpu {}", gpu.name);
     let mut decoders: Vec<Mode> = Vec::new();
