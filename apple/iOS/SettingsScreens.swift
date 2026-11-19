@@ -35,9 +35,9 @@ struct ComputerSettingsScreen: View {
                                 Thumbnail(computer: c).frame(width: 96, height: 72)
                                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(c.name).font(Theme.headline)
-                                    Text(c.osLine).font(Theme.subhead).foregroundStyle(Theme.secondary)
-                                    StatusLine(computer: c, short: false)
+                                    Text(c.name).font(Theme.headline).lineLimit(1).truncationMode(.middle)
+                                    Text(c.osLine).font(Theme.subhead).foregroundStyle(Theme.secondary).lineLimit(1).truncationMode(.middle)
+                                    StatusLine(computer: c, short: true)
                                 }
                                 Spacer(minLength: 4)
                                 Button("Connect") {
