@@ -462,7 +462,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func bitrate(for p: Picture) -> Int {
         let own = options.bitrate > 0 ? options.bitrate : (p.width * p.height >= 3840 * 2160 ? 40_000_000 : 25_000_000)
-        return limit > 0 ? max(500_000, min(own, limit)) : own
+        // A device's ceiling is taken up to 300 Mbit/s: it may ask for more than this host would
+        // choose by itself, and the encoder uses what the picture needs under it.
+        return limit > 0 ? max(500_000, min(limit, 300_000_000)) : own
     }
 
     private func fill(_ accept: UnsafeMutablePointer<rm_accept>, _ p: Picture) {

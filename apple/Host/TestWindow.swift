@@ -88,7 +88,34 @@ final class TestWindow {
     /// that every burst has a last frame.
     static var bursts = false
 
+    /// `--test-noise yes`: the whole window is fresh noise at every refresh, the hardest picture
+    /// an encoder gets (for measuring it at high bitrates).
+    static var noise = false
+    private var noiseImages: [CGImage] = []
+    private let noiseLayer = CALayer()
+    private func makeNoise() {
+        let w = 960, h = 540
+        for _ in 0..<6 {
+            var px = [UInt8](repeating: 0, count: w * h * 4)
+            px.withUnsafeMutableBytes { arc4random_buf($0.baseAddress, $0.count) }
+            if let p = CGDataProvider(data: Data(px) as CFData),
+                let i = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue), provider: p, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+            { noiseImages.append(i) }
+        }
+        noiseLayer.frame = CGRect(origin: .zero, size: size)
+        noiseLayer.magnificationFilter = .nearest
+        window?.contentView?.layer?.insertSublayer(noiseLayer, at: 0)
+    }
+
     @objc private func tick() {
+        if Self.noise {
+            if noiseImages.isEmpty { makeNoise() }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            if !noiseImages.isEmpty { noiseLayer.contents = noiseImages[n % noiseImages.count] }
+            CATransaction.commit()
+        }
         if Self.bursts, CACurrentMediaTime().truncatingRemainder(dividingBy: 1.5) > 0.4 { return }
         n += 1
         rateCount += 1

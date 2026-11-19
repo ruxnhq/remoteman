@@ -291,6 +291,15 @@ struct ComputerSettings: View {
                         }
                         .labelsHidden().fixedSize().id(sideChanged)
                     }
+                    Row("Bitrate, at most", caption: "Automatic lets the computer choose (25 to 40 Mbit/s from a Mac). More can look better on a fast network when the whole screen moves; it does not make a still desktop sharper.") {
+                        Picker("Bitrate, at most", selection: Binding(
+                            get: { ViewerSession.BitrateCap.saved(for: ViewerSession.key(for: c.address)) },
+                            set: { ViewerSession.BitrateCap.save($0, for: ViewerSession.key(for: c.address)); sideChanged += 1 })
+                        ) {
+                            ForEach(ViewerSession.BitrateCap.choices, id: \.self) { Text(ViewerSession.BitrateCap.label($0)).tag($0) }
+                        }
+                        .labelsHidden().fixedSize().id(sideChanged)
+                    }
                     Row("A second display goes", caption: "Which side of the computer's other displays it sits on. Applies the next time one is added.") {
                         Picker("A second display goes", selection: Binding(
                             get: { ViewerSession.SecondSide.saved(for: ViewerSession.key(for: c.address)) },

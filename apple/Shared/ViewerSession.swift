@@ -109,6 +109,14 @@ final class ViewerSession: ObservableObject {
         return ViewerPrefs.hdr && h > 1.05 ? h : nil
     }
 
+    /// The most a computer's picture may use, chosen per computer, in Mbit/s (0: the computer decides).
+    enum BitrateCap {
+        static let choices = [0, 20, 50, 100, 150, 300, 500]
+        static func label(_ m: Int) -> String { m == 0 ? "Automatic" : "\(m) Mbit/s" }
+        static func saved(for host: String) -> Int { UserDefaults.standard.integer(forKey: "bitrateCap." + host) }
+        static func save(_ m: Int, for host: String) { UserDefaults.standard.set(m, forKey: "bitrateCap." + host) }
+    }
+
     /// A computer's address as sessions know it (with the port).
     static func key(for address: String) -> String { address.contains(":") ? address : address + ":7791" }
 
@@ -744,8 +752,11 @@ final class ViewerSession: ObservableObject {
                         if self.remembered("mic"), AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { self.setMic(true) }
                         if self.remembered("camera"), AVCaptureDevice.authorizationStatus(for: .video) == .authorized { self.setCamera(true) }
                     }
+                    // The ceiling chosen for this computer; on mobile data the saving one, if lower.
+                    let cap = BitrateCap.saved(for: self.target) * 1_000_000
+                    if cap > 0, self.bitrateLimit == 0, self.has("configure") { self.setBitrateLimit(cap) }
                     #if os(iOS)
-                        if Self.onMobileData, ViewerPrefs.saveData, self.bitrateLimit == 0, self.has("configure") {
+                        if Self.onMobileData, ViewerPrefs.saveData, self.bitrateLimit == 0 || self.bitrateLimit > ViewerPrefs.mobileLimit, self.has("configure") {
                             self.setBitrateLimit(ViewerPrefs.mobileLimit)
                             self.notice = "On mobile data: the picture is kept to \(ViewerPrefs.mobileLimit / 1_000_000) Mb/s."
                         }

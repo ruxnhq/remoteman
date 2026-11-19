@@ -69,6 +69,7 @@ while !args.isEmpty {
     case "--test-window": options.testWindow = yes()
     case "--keep-last": HostEncoder.keepsLast = yes()
     case "--test-bright": TestWindow.bright = yes()
+    case "--test-noise": TestWindow.noise = yes()
     case "--test-bursts": TestWindow.bursts = yes()
     case "--encoder": HostEncoder.testMode = value()
     case "--pace": options.pace = yes()

@@ -91,6 +91,17 @@ struct ComputerSettingsScreen: View {
                             )
                             .id(sideChanged)
                             ChoiceRow(
+                                title: "Bitrate, at most",
+                                value: Binding(
+                                    get: { String(ViewerSession.BitrateCap.saved(for: target(c))) },
+                                    set: { v in
+                                        ViewerSession.BitrateCap.save(Int(v) ?? 0, for: target(c))
+                                        sideChanged += 1
+                                    }),
+                                choices: ViewerSession.BitrateCap.choices.map { (String($0), ViewerSession.BitrateCap.label($0)) }
+                            )
+                            .id(sideChanged)
+                            ChoiceRow(
                                 title: "A second display goes",
                                 value: Binding(
                                     get: { String(ViewerSession.SecondSide.saved(for: target(c)).rawValue) },
