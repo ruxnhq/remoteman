@@ -203,12 +203,21 @@ Guesthouse's, not ours.)
 prompt, uninstalling from Settings > Apps, and the failure path (the message, exit code 1) have
 not been run or seen.
 
-**What the VM could not show:** the VM already had Guesthouse's own build of the same driver
-(same INF and DLL) as a display device. `pnputil` therefore kept the existing package (`oem3.inf`,
-signed by Guesthouse's certificate) instead of adding ours, and the installer only updated the
-device that was there; so the uninstaller rightly left both alone. **The path every real PC
-takes (a new driver package signed by our certificate, a display device made, both removed by
-the uninstaller) has not run.** Nor has: a standard (not administrator) user, for whom the task
+**The fresh-PC driver path [V]** (with the owner's leave, 10:26 to 10:30 PST): Guesthouse's
+own driver package and display device were taken out of the VM and its settings folder moved
+aside, so the VM looked like a PC that never had the driver. The installer then added a new
+driver package signed by its own certificate ("remoteman display driver, this machine only"),
+made the display device, wrote `C:\VirtualDisplayDriver` and recorded all three; a fresh device
+paired through `ctl` and got the desktop (`host-3-session-fresh-driver.png`). The uninstaller
+then removed the device, the package, the certificate and the settings folder along with the
+task, the rule and the files: compared with the snapshot taken before Guesthouse's driver was
+taken out, the only differences were Guesthouse's own driver (taken out on purpose) and
+Windows' non-present monitor entries, which Windows keeps for every monitor it has seen. Then
+Guesthouse's driver was put back with Guesthouse's `sign-and-install.ps1` from the same files
+(a new per-machine certificate of Guesthouse's; the old package couldn't be exported first) and
+its settings restored.
+
+Nor has: a standard (not administrator) user, for whom the task
 starts the host unelevated and it can't open the driver's device (it needs an administrator
 until the host has a service of its own); a PC without automatic logon (the host starts at
 logon, not at boot: no session, no host; the sign-in screen needs the service that isn't built);
