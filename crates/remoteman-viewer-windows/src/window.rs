@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use remoteman_core::{Button, Event};
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BLACK_BRUSH, DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW, GetStockObject, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow, ScreenToClient};
-use windows::Win32::System::DataExchange::{AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData};
+use windows::Win32::System::DataExchange::{AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
@@ -88,6 +88,8 @@ struct Win {
     pointer_on: Cell<u8>,
     /// The pointer is held in the window and its raw movement is sent.
     captured: Cell<bool>,
+    /// The clipboard's count of changes when this program last put a picture there itself.
+    own_copy: Cell<u32>,
 }
 
 thread_local! {
@@ -175,6 +177,114 @@ pub fn clipboard_set(text: &str) {
         }
         let _ = CloseClipboard();
     }
+}
+
+/// The picture on this PC's clipboard as a PNG, if it holds one: as a program put it there
+/// under the name "PNG", or made from the plain bitmap every program gives.
+pub fn clipboard_get_picture() -> Option<Vec<u8>> {
+    use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
+    const CF_DIB: u32 = 8;
+    let hwnd = win().map(|w| w.hwnd.get()).unwrap_or(0);
+    // SAFETY: the clipboard is opened and closed here; each block is read within its size.
+    unsafe {
+        OpenClipboard(Some(HWND(hwnd as *mut _))).ok()?;
+        let read = |format: u32| -> Option<Vec<u8>> {
+            let global = HGLOBAL(GetClipboardData(format).ok()?.0);
+            let at = GlobalLock(global) as *const u8;
+            if at.is_null() {
+                return None;
+            }
+            let bytes = std::slice::from_raw_parts(at, GlobalSize(global)).to_vec();
+            let _ = GlobalUnlock(global);
+            Some(bytes)
+        };
+        let png = read(RegisterClipboardFormatW(w!("PNG"))).filter(|b| b.starts_with(&[0x89, b'P', b'N', b'G']));
+        let dib = if png.is_none() { read(CF_DIB) } else { None };
+        let _ = CloseClipboard();
+        if png.is_some() {
+            return png;
+        }
+        // A plain bitmap: its header, then rows from the bottom up, blue first.
+        let dib = dib?;
+        if dib.len() < size_of::<BITMAPINFOHEADER>() {
+            return None;
+        }
+        let head = std::ptr::read_unaligned(dib.as_ptr() as *const BITMAPINFOHEADER);
+        let (w, h, bits) = (head.biWidth as usize, head.biHeight.unsigned_abs() as usize, head.biBitCount as usize);
+        // Plain colours only (or the three masks some programs put after the header).
+        if w == 0 || h == 0 || !(bits == 24 || bits == 32) || !(head.biCompression == 0 || head.biCompression == 3) {
+            return None;
+        }
+        let start = head.biSize as usize + if head.biCompression == 3 && head.biSize == 40 { 12 } else { 0 };
+        let stride = (w * bits / 8).div_ceil(4) * 4;
+        if dib.len() < start + stride * h {
+            return None;
+        }
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            let row = if head.biHeight > 0 { h - 1 - y } else { y };
+            let line = &dib[start + row * stride..];
+            for x in 0..w {
+                let p = &line[x * bits / 8..];
+                rgb.extend_from_slice(&[p[2], p[1], p[0]]);
+            }
+        }
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, w as u32, h as u32);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().ok()?.write_image_data(&rgb).ok()?;
+        Some(png)
+    }
+}
+
+/// Put a picture (a PNG) on this PC's clipboard: as it is, under the name programs look for,
+/// and as the plain bitmap every program takes.
+pub fn clipboard_set_picture(data: &[u8]) -> bool {
+    use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
+    const CF_DIB: u32 = 8;
+    let hwnd = win().map(|w| w.hwnd.get()).unwrap_or(0);
+    let decoder = png::Decoder::new(std::io::Cursor::new(data));
+    let Ok(mut reader) = decoder.read_info() else { return false };
+    let mut pixels = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+    let Ok(info) = reader.next_frame(&mut pixels) else { return false };
+    let (w, h) = (info.width as usize, info.height as usize);
+    let step = match (info.color_type, info.bit_depth) {
+        (png::ColorType::Rgba, png::BitDepth::Eight) => 4,
+        (png::ColorType::Rgb, png::BitDepth::Eight) => 3,
+        _ => return false,
+    };
+    let head = BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: w as i32, biHeight: h as i32, biPlanes: 1, biBitCount: 32, biSizeImage: (w * h * 4) as u32, ..Default::default() };
+    let mut dib = vec![0u8; size_of::<BITMAPINFOHEADER>() + w * h * 4];
+    // SAFETY: the header is written into room made for it.
+    unsafe { std::ptr::write_unaligned(dib.as_mut_ptr() as *mut BITMAPINFOHEADER, head) };
+    for y in 0..h {
+        let from = &pixels[(h - 1 - y) * info.line_size..];
+        let to = &mut dib[size_of::<BITMAPINFOHEADER>() + y * w * 4..];
+        for x in 0..w {
+            let p = &from[x * step..];
+            to[x * 4..x * 4 + 4].copy_from_slice(&[p[2], p[1], p[0], if step == 4 { p[3] } else { 255 }]);
+        }
+    }
+    // SAFETY: each block is allocated for its bytes, filled, and handed to the clipboard.
+    unsafe {
+        if OpenClipboard(Some(HWND(hwnd as *mut _))).is_err() {
+            return false;
+        }
+        let _ = EmptyClipboard();
+        for (format, bytes) in [(RegisterClipboardFormatW(w!("PNG")), data), (CF_DIB, &dib[..])] {
+            if let Ok(global) = GlobalAlloc(GMEM_MOVEABLE, bytes.len()) {
+                let at = GlobalLock(global) as *mut u8;
+                if !at.is_null() {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), at, bytes.len());
+                    let _ = GlobalUnlock(global);
+                    let _ = SetClipboardData(format, Some(HANDLE(global.0)));
+                }
+            }
+        }
+        let _ = CloseClipboard();
+    }
+    true
 }
 
 /// Ask for a file to send. `None`: nothing was chosen.
@@ -284,6 +394,7 @@ pub fn create(mut app: App) -> Result<HWND> {
             second: RefCell::new(None),
             pointer_on: Cell::new(0),
             captured: Cell::new(false),
+            own_copy: Cell::new(0),
         });
         WIN.with(|w| *w.borrow_mut() = Some(state.clone()));
         state.app.borrow().scene.hwnd.store(hwnd.0 as isize, Ordering::Relaxed);
@@ -451,6 +562,14 @@ impl Win {
                     }
                 }
                 Effect::SetClipboard(text) => clipboard_set(&text),
+                Effect::SetClipboardPicture(png) => {
+                    if clipboard_set_picture(&png) {
+                        // What this put there is not this PC's own copy: not to be sent back.
+                        self.own_copy.set(GetClipboardSequenceNumber());
+                    } else {
+                        say!("clipboard: the picture from the computer is of a kind that isn't put on this clipboard");
+                    }
+                }
                 Effect::PickFolder => {
                     if let Some(folder) = pick_folder(hwnd) {
                         self.event(|app| app.set_folder(&folder));
@@ -468,11 +587,7 @@ impl Win {
                     }
                 }
                 Effect::CloseSecond => self.close_second(),
-                Effect::ReadClipboard => {
-                    if let Some(text) = clipboard_get() {
-                        self.event(|app| app.copied_here(text));
-                    }
-                }
+                Effect::ReadClipboard => self.copied(),
             }
         }
     }
@@ -505,6 +620,25 @@ impl Win {
         say!("window: {}", if on { "full screen" } else { "out of full screen" });
         self.event(|app| app.set_fullscreen(on));
         self.resync(hwnd);
+    }
+
+    /// This PC's clipboard changed (or sharing has just begun): text if it holds any, else a
+    /// picture, goes to the computer.
+    fn copied(&self) {
+        // SAFETY: a plain query.
+        if unsafe { GetClipboardSequenceNumber() } == self.own_copy.get() {
+            return;
+        }
+        match clipboard_get().filter(|t| !t.is_empty()) {
+            Some(text) => {
+                self.event(|app| app.copied_here(text));
+            }
+            None => {
+                if let Some(png) = clipboard_get_picture() {
+                    self.event(|app| app.copied_picture(png));
+                }
+            }
+        }
     }
 
     /// Take the second display's window away, and its draw thread with it.
@@ -1171,9 +1305,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             WM_CLIPBOARDUPDATE => {
                 // Only looked at while a session shares it.
                 if win.ask(|app| app.session.as_ref().is_some_and(|s| s.clipboard_on)).unwrap_or(false) {
-                    if let Some(text) = clipboard_get() {
-                        win.event(|app| app.copied_here(text));
-                    }
+                    win.copied();
                 }
             }
             // The draw thread paints all of it.

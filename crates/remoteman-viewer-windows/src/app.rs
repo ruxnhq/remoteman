@@ -169,6 +169,8 @@ pub enum Effect {
     PickFile,
     /// Put this text on this PC's clipboard.
     SetClipboard(String),
+    /// Put this picture (a PNG) on this PC's clipboard.
+    SetClipboardPicture(Vec<u8>),
     /// Read this PC's clipboard; text on it comes to `App::copied_here`.
     ReadClipboard,
     /// Ask for a folder; the answer comes to `App::set_folder`.
@@ -821,11 +823,18 @@ impl App {
             news.push(if ok { format!("Sent: it is at {said}") } else { format!("The file wasn't taken: {said}") });
         }
         // Only the newest copy matters.
-        if let (Some(text), true) = (copy, s.clipboard_on) {
-            say!("clipboard: {} characters of text from the computer", text.chars().count());
-            s.from_computer = Some(text.clone());
-            s.sent_copy = None;
-            self.effects.push(Effect::SetClipboard(text));
+        if let (Some((kind, bytes)), true) = (copy, s.clipboard_on) {
+            if kind.starts_with("text/plain") {
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                say!("clipboard: {} characters of text from the computer", text.chars().count());
+                s.from_computer = Some(text.clone());
+                s.sent_copy = None;
+                self.effects.push(Effect::SetClipboard(text));
+            } else if kind == "image/png" {
+                say!("clipboard: a picture of {} bytes from the computer", bytes.len());
+                s.sent_copy = None;
+                self.effects.push(Effect::SetClipboardPicture(bytes));
+            }
         }
         for line in news {
             self.say(&line);
@@ -953,6 +962,21 @@ impl App {
         }
         say!("received files go to {}", folder.display());
         self.dirty = true;
+    }
+
+    /// This PC's clipboard holds a picture and no text: it goes to the computer as a PNG.
+    pub fn copied_picture(&mut self, png: Vec<u8>) {
+        use remoteman_core::media::{BLOB_CLIPBOARD, CLIPBOARD_LIMIT, ClipboardHeader};
+        let Some(s) = self.session.as_mut() else { return };
+        if !s.clipboard_on || !s.offers("clipboard") || png.is_empty() || png.len() as u64 > CLIPBOARD_LIMIT {
+            return;
+        }
+        s.sent_copy = None;
+        let Some(client) = &s.client else { return };
+        let header = ClipboardHeader { seq: s.shared.copy_seq.fetch_add(1, Ordering::Relaxed) + 1, mime: "image/png".into(), size: png.len() as u64 };
+        let blob = client.open_blob(BLOB_CLIPBOARD, serde_json::to_string(&header).unwrap_or_default());
+        say!("clipboard: a picture of {} bytes sent to the computer", png.len());
+        let _ = std::thread::Builder::new().name("copy".into()).spawn(move || blob.write(&png) && blob.finish());
     }
 
     /// Send a file to the session's computer, which decides where it goes and answers when it

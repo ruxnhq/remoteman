@@ -89,8 +89,9 @@ pub struct Shared {
     /// The computer is asking its owner about this PC: the code both sides show, and the
     /// seconds its owner has.
     pub pairing: Mutex<Option<(String, u32)>>,
-    /// Text copied on the computer, until the window puts it on this clipboard.
-    pub copies: Mutex<Vec<String>>,
+    /// What was copied on the computer (its kind, `text/plain…` or `image/png`, and its
+    /// bytes), until the window puts it on this clipboard.
+    pub copies: Mutex<Vec<(String, Vec<u8>)>>,
     /// What the computer said of files sent to it: whether it has them, and where or why not.
     pub results: Mutex<Vec<(bool, String)>>,
     /// What became of files the computer sent, until the window answers it and says so here.
@@ -290,12 +291,9 @@ impl Handler for Feed {
                 }
             }
             BlobEvent::Close { id, complete } => {
-                // Text only: a picture copied on the computer is not put on this clipboard yet.
-                if let (Some((kind, bytes)), true) = (self.arriving.remove(id), *complete) {
-                    if kind.starts_with("text/plain") {
-                        self.shared.copies.lock().unwrap().push(String::from_utf8_lossy(&bytes).into_owned());
-                        self.wake_window();
-                    }
+                if let (Some(copy), true) = (self.arriving.remove(id), *complete) {
+                    self.shared.copies.lock().unwrap().push(copy);
+                    self.wake_window();
                 }
             }
         }
