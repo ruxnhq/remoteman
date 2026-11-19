@@ -40,13 +40,48 @@ pub struct VirtualDisplay {
     stream_path: String,
     /// The PipeWire node carrying the monitor's picture.
     pub node: u32,
+    /// Not a monitor of the client's own but one of the computer's, shown as it is: its size
+    /// in pixels, its refresh rate and the scale the desktop draws it at.
+    pub mirrored: Option<Mirrored>,
+}
+
+/// The monitor a mirroring client is shown.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mirrored {
+    pub width: u32,
+    pub height: u32,
+    pub refresh: u32,
+    pub scale: f32,
+}
+
+/// The computer's main monitor (or its first, if none is marked so): its connector and what a
+/// client mirroring it needs to know.
+fn main_monitor(state: &DisplayState) -> Option<(String, Mirrored)> {
+    let (_, monitors, logical, _) = state;
+    let chosen = logical.iter().find(|l| l.4).or_else(|| logical.first())?;
+    let connector = &chosen.5.first()?.0;
+    let monitor = monitors.iter().find(|m| &m.0.0 == connector)?;
+    let mode = monitor.1.iter().find(|mode| mode.6.get("is-current").and_then(|v| bool::try_from(v).ok()).unwrap_or(false))?;
+    // A monitor turned on its side is as tall as its mode is wide.
+    let turned = matches!(chosen.3, 1 | 3 | 5 | 7);
+    let (width, height) = if turned { (mode.2, mode.1) } else { (mode.1, mode.2) };
+    Some((connector.clone(), Mirrored { width: width as u32, height: height as u32, refresh: mode.3.round().max(1.0) as u32, scale: chosen.2 as f32 }))
+}
+
+/// What a client that asks to mirror would be shown now: the computer's main monitor.
+pub async fn mirror_target() -> Result<Mirrored> {
+    let conn = Connection::session().await.context("session bus")?;
+    let state = display_state(&conn).await.context("the computer's displays")?;
+    main_monitor(&state).map(|(_, what)| what).context("this computer has no monitor to mirror")
 }
 
 impl VirtualDisplay {
     /// Make a virtual monitor. Its size and refresh rate come from the PipeWire stream format
     /// the caller then asks for on `node`. With `cursor_apart` the cursor is left out of the
     /// picture and comes as metadata on the stream; otherwise it is drawn into the picture.
-    pub async fn create(cursor_apart: bool) -> Result<Self> {
+    /// With `mirror` no monitor is made: the computer's main monitor is recorded as it is
+    /// (`mirrored` says what it is), and the client's input lands on it.
+    pub async fn create(cursor_apart: bool, mirror: bool) -> Result<Self> {
         let conn = Connection::session().await.context("session bus")?;
         let version: i32 = Proxy::new(&conn, SCREENCAST, "/org/gnome/Mutter/ScreenCast", SCREENCAST)
             .await?
@@ -84,9 +119,17 @@ impl VirtualDisplay {
         let mut props = HashMap::new();
         // 1: drawn into the picture. 2: as metadata.
         props.insert("cursor-mode", Value::from(if cursor_apart { 2u32 } else { 1u32 }));
-        // A real monitor to the desktop, not "the screen is being shared".
-        props.insert("is-platform", Value::from(true));
-        let stream_path: OwnedObjectPath = cast.call("RecordVirtual", &(props,)).await?;
+        let mut mirrored = None;
+        let stream_path: OwnedObjectPath = if mirror {
+            let state = display_state(&conn).await.context("the computer's displays")?;
+            let (connector, what) = main_monitor(&state).context("this computer has no monitor to mirror")?;
+            mirrored = Some(what);
+            cast.call("RecordMonitor", &(connector.as_str(), props)).await.context("record the monitor")?
+        } else {
+            // A real monitor to the desktop, not "the screen is being shared".
+            props.insert("is-platform", Value::from(true));
+            cast.call("RecordVirtual", &(props,)).await?
+        };
         let stream = Proxy::new(&conn, SCREENCAST, stream_path.clone(), "org.gnome.Mutter.ScreenCast.Stream").await?;
         let mut added = stream.receive_signal("PipeWireStreamAdded").await?;
 
@@ -102,7 +145,7 @@ impl VirtualDisplay {
         // nowhere (seen on a login screen, where the first thing a user does is click a name).
         // A move by nothing makes the pointer without moving it.
         let _ = remote.call::<_, _, ()>("NotifyPointerMotionRelative", &(0.0f64, 0.0f64)).await;
-        Ok(Self { conn, before, remote, stream_path: stream_path.to_string(), node })
+        Ok(Self { conn, before, remote, stream_path: stream_path.to_string(), node, mirrored })
     }
 
     /// Put this display where the client wants it among the computer's own: beside them, as
@@ -119,10 +162,11 @@ impl VirtualDisplay {
     /// display goes, the set changes back and Mutter returns to the layout it has stored for
     /// the computer's own screens, without being asked, even if this program has died.
     pub fn place(&self, placement: Placement) -> impl Future<Output = Result<()>> + Send + 'static {
-        let (conn, before) = (self.conn.clone(), self.before.clone());
+        let (conn, before, mirrored) = (self.conn.clone(), self.before.clone(), self.mirrored.is_some());
         async move {
-            // Nothing of the computer's own to put back or to place this one among.
-            if before.layout.is_empty() {
+            // Nothing of the computer's own to put back or to place this one among, or no
+            // monitor of the client's own to place.
+            if before.layout.is_empty() || mirrored {
                 return Ok(());
             }
             // The layout may change under us between reading it and applying ours (the serial

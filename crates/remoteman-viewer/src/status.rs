@@ -91,6 +91,7 @@ fn placement_words(placement: Placement, name: &str) -> (String, &'static str) {
         Placement::Extend => (format!("This display will be an extra display for {name}"), "Beside its own displays, which stay on"),
         Placement::Main => (format!("This display will be {name}'s main display"), "Its own displays stay on as secondary ones"),
         Placement::Only => (format!("This display will be {name}'s only display"), "Its own screens turn off while you are connected"),
+        Placement::Mirror => (format!("This display will show {name}'s main monitor"), "As it is, at that monitor's size"),
     }
 }
 

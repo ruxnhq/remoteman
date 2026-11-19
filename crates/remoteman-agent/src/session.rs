@@ -156,8 +156,21 @@ impl Agent {
         if screen.width % 2 != 0 || screen.height % 2 != 0 || screen.width < 64 || screen.height < 64 || screen.width > 8192 || screen.height > 8192 {
             return Err("display sizes must be even, from 64 to 8192".into());
         }
-        let refresh = screen.refresh.clamp(1, 240);
-        let desktop = self.runtime.block_on(VirtualDisplay::create(cursor)).map_err(|e| format!("{e:#}"))?;
+        let mut screen = screen;
+        let mut refresh = screen.refresh.clamp(1, 240);
+        let mirror = screen.placement == remoteman_core::Placement::Mirror;
+        let desktop = self.runtime.block_on(VirtualDisplay::create(cursor, mirror)).map_err(|e| format!("{e:#}"))?;
+        // Mirroring: the picture is the monitor's, at its size and scale, and no faster
+        // than the client asked for.
+        if let Some(m) = desktop.mirrored {
+            if m.width % 2 != 0 || m.height % 2 != 0 {
+                self.runtime.block_on(desktop.close());
+                return Err(format!("this computer's monitor is {} by {}: an odd size can't be sent", m.width, m.height));
+            }
+            (screen.width, screen.height, screen.scale) = (m.width, m.height, m.scale);
+            refresh = refresh.min(m.refresh.clamp(1, 240));
+            tracing::info!(width = m.width, height = m.height, refresh, "mirroring this computer's main monitor");
+        }
         let settings = Settings {
             node: desktop.node,
             width: screen.width,
@@ -196,6 +209,7 @@ impl Agent {
                 remoteman_core::Placement::Extend => "extend",
                 remoteman_core::Placement::Main => "main",
                 remoteman_core::Placement::Only => "only",
+                remoteman_core::Placement::Mirror => "mirror",
             };
             let picture = format!("{} {}-bit{}", if mode.codec == remoteman_core::Codec::Av1 { "AV1" } else { "HEVC" }, mode.depth, if mode.chroma == remoteman_core::Chroma::C444 { " 4:4:4" } else { "" });
             *now = Some(Now { name: l.name.clone(), since, width: screen.width, height: screen.height, refresh, placement, picture, sound: self.sound.is_some() });
@@ -480,6 +494,14 @@ impl Agent {
         let (was_screen, was_decoders) = (old.screen, old.decoders.clone());
         drop(old.pipeline);
         self.runtime.block_on(old.desktop.close());
+        // A mirrored picture has the monitor's size, which the client must hear before its
+        // first frame.
+        let mut screen = screen;
+        if screen.placement == remoteman_core::Placement::Mirror {
+            if let Ok(m) = self.runtime.block_on(remoteman_desktop::mutter::mirror_target()) {
+                (screen.width, screen.height, screen.scale, screen.refresh) = (m.width, m.height, m.scale, screen.refresh.min(m.refresh));
+            }
+        }
         let refresh = screen.refresh.clamp(1, 240);
         if let Some(mode) = mode {
             link.restart(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into() });

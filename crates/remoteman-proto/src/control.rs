@@ -39,6 +39,10 @@ pub enum Placement {
     Main = 1,
     /// The only display: the host's own screens are off while the client is connected.
     Only = 2,
+    /// No display of the client's own: it is shown the host's main monitor as it is, at that
+    /// monitor's size, and its input lands there. A host that doesn't list `mirror` among
+    /// its features reads this as an extra display.
+    Mirror = 3,
     /// An extra display beside the host's own. Also what a placement this version doesn't know
     /// is read as.
     #[default]

@@ -196,6 +196,7 @@ pub unsafe extern "C" fn rm_client_connect(
             Some(("placement", "extend")) => placement = Placement::Extend,
             Some(("placement", "main")) => placement = Placement::Main,
             Some(("placement", "only")) => placement = Placement::Only,
+            Some(("placement", "mirror")) => placement = Placement::Mirror,
             _ => {
                 report(err, err_len, &format!("unknown option {pair}"));
                 return std::ptr::null_mut();

@@ -295,7 +295,7 @@ impl App {
         // What each choice of quality asks the computer for first.
         let first = |q: Quality| self.decoders(q).first().map(mode_name).unwrap_or_default();
         let sharp = if self.decoders(Quality::Sharp).first().is_some_and(|m| m.chroma == Chroma::C444) { first(Quality::Sharp) } else { String::new() };
-        self.view.begin(&name, can_place, placement, quality, (first(Quality::Automatic), sharp));
+        self.view.begin(&name, can_place, session.offers("mirror"), placement, quality, (first(Quality::Automatic), sharp));
         self.view.show_figures(self.store.borrow().settings.figures);
         self.video.attach(session.shared.clone());
         self.shown_before.set(self.video.shown_total.get());

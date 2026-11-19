@@ -54,7 +54,7 @@ impl Saved {
 
 /// What the host offers, given what is allowed now.
 pub fn features(allowed: &Allowed) -> Vec<String> {
-    let mut features: Vec<String> = ["video", "input", "cursor", "placement", "configure", "sound", "mic", "camera"].map(String::from).to_vec();
+    let mut features: Vec<String> = ["video", "input", "cursor", "placement", "mirror", "configure", "sound", "mic", "camera"].map(String::from).to_vec();
     if allowed.files.load(Ordering::Relaxed) {
         features.push("files".into());
     }
