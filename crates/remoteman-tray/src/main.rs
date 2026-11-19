@@ -70,6 +70,7 @@ fn set_notifies(on: bool) -> std::io::Result<()> {
 enum Cmd {
     Open,
     Pair,
+    Send,
     Disconnect,
     Pause,
     Resume,
@@ -150,6 +151,9 @@ impl ksni::Tray for Icon {
         menu.push(MenuItem::Separator);
         let sharing = matches!(self.state, State::Sharing { .. });
         if matches!(self.state, State::Sharing { client: Some(_), .. }) {
+            if matches!(self.state, State::Sharing { files: true, .. }) {
+                menu.push(act("Send a File to the Device…", || Cmd::Send));
+            }
             menu.push(act("Disconnect", || Cmd::Disconnect));
         }
         menu.push(if sharing { act("Pause Sharing", || Cmd::Pause) } else { act("Resume Sharing", || Cmd::Resume) });
@@ -223,6 +227,16 @@ impl Ui {
                 note.set_body(Some(&format!("It is using {} now.", self.name)));
                 self.app.send_notification(Some("device"), &note);
                 println!("notified: {name} connected");
+            }
+        }
+        // The device answered for a file sent to it.
+        let sent = |s: &State| if let State::Sharing { sent, .. } = s { Some(sent.clone()) } else { None };
+        if let (Some(before), Some(now)) = (self.shown.borrow().as_ref().and_then(sent), sent(&state)) {
+            if now.answered > before.answered {
+                let note = gtk::gio::Notification::new(if now.ok { "The device has the file" } else { "The file didn't reach the device" });
+                note.set_body(Some(&now.said));
+                self.app.send_notification(Some("file"), &note);
+                self.toast(&if now.ok { format!("The device has the file: {}", now.said) } else { format!("The file didn't reach the device: {}", now.said) });
             }
         }
         if let Some(icon) = self.icon.borrow().as_ref() {
@@ -314,6 +328,18 @@ impl Ui {
             Cmd::Pair => {
                 self.tell("pair on");
                 self.open("devices");
+            }
+            Cmd::Send => {
+                let ui = self.clone();
+                gtk::FileDialog::builder().title("Send a File to the Device").build().open(None::<&gtk::Window>, gtk::gio::Cancellable::NONE, move |chosen| {
+                    if let Some(path) = chosen.ok().and_then(|f| f.path()) {
+                        match host::ask(&format!("send {}", path.display())).as_deref() {
+                            Some("ok") => ui.toast("Sending the file"),
+                            Some(other) => ui.toast(other),
+                            None => ui.toast("The host isn't running"),
+                        }
+                    }
+                });
             }
             Cmd::Disconnect => self.tell("drop"),
             Cmd::Pause => self.share(false),
@@ -542,7 +568,7 @@ mod tests {
     fn the_icon_has_a_shape_for_each_state() {
         let (tx, _rx) = mpsc::channel();
         let mut icon = Icon { state: State::Paused, name: "desk".into(), tx };
-        let sharing = |client| State::Sharing { fingerprint: String::new(), port: 7791, pairing: false, clipboard: false, files: false, client, devices: Vec::new() };
+        let sharing = |client| State::Sharing { fingerprint: String::new(), port: 7791, pairing: false, clipboard: false, files: false, client, devices: Vec::new(), sent: host::Sent::default() };
         let device = host::Client { name: "pad".into(), since: 0, width: 1, height: 1, refresh: 60, placement: String::new(), picture: String::new(), sound: false };
         let mut names = Vec::new();
         for state in [State::Paused, State::Failed("why".into()), sharing(None), sharing(Some(device))] {

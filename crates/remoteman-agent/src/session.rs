@@ -70,6 +70,9 @@ pub struct Allowed {
     pub clipboard: Arc<std::sync::atomic::AtomicBool>,
     /// The client being served, for whoever asks how things stand (the control socket).
     pub now: Arc<std::sync::Mutex<Option<Now>>>,
+    /// What the device said became of the last file sent to it: how many have been answered,
+    /// whether that one arrived, and where it put it or why not.
+    pub sent: Arc<std::sync::Mutex<(u32, bool, String)>>,
 }
 
 /// The client being served, as the host's owner is shown it.
@@ -633,6 +636,12 @@ impl HostHandler for Agent {
                 }
             }
             Message::Mic { on, .. } => self.take_microphone(*on),
+            // The device's word on a file this computer sent it.
+            Message::FileResult { ok, message, .. } => {
+                tracing::info!(ok, said = message, "the device answered for a file sent to it");
+                let mut sent = self.allowed.sent.lock().unwrap();
+                *sent = (sent.0 + 1, *ok, message.clone());
+            }
             Message::Camera { on, codec, width, height, fps } => self.take_camera(*on, codec, *width, *height, *fps),
             _ => {}
         }

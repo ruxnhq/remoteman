@@ -160,8 +160,9 @@ impl App {
             scale = m.scale() as f32;
             w = (g.width() as f64 * m.scale()).round() as u32;
             h = (g.height() as f64 * m.scale()).round() as u32;
-            // Decoding and uploading is sized for 120 a second for now.
-            refresh = ((m.refresh_rate() as f64 / 1000.0).round() as u32).clamp(30, 120);
+            // Decoding and uploading is sized for 120 a second for now. Without the match, 60:
+            // what every display and every stream can do.
+            refresh = if self.store.borrow().settings.match_refresh { ((m.refresh_rate() as f64 / 1000.0).round() as u32).clamp(30, 120) } else { 60 };
         }
         if let Some((sw, sh)) = self.args.size {
             (w, h) = (sw, sh);
@@ -219,7 +220,7 @@ impl App {
         let id = self.attempt.get().wrapping_add(1);
         self.attempt.set(id);
         let (placement, quality) = self.choices(&target.address);
-        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture } };
+        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, folder: self.store.borrow().receive_folder() };
         let app = self.clone();
         glib::spawn_future_local(async move {
             let result = match gio::spawn_blocking(move || Session::start(request)).await {
@@ -652,6 +653,22 @@ impl App {
     /// word of files sent.
     fn arrivals(&self) {
         self.follow_features();
+        // Files the computer sent: it is told what became of each, and so is the person here.
+        let received = self.session.borrow().as_ref().map(|s| std::mem::take(&mut *s.shared.received.lock().unwrap())).unwrap_or_default();
+        for (id, outcome) in received {
+            if let Some(s) = self.session.borrow().as_ref() {
+                s.client.send_message(remoteman_core::Message::FileResult { id, ok: outcome.is_ok(), message: match &outcome { Ok(at) => at.display().to_string(), Err(why) => why.clone() } });
+            }
+            match outcome {
+                Ok(at) => {
+                    self.toast(&format!("A file from the computer: {}", at.display()));
+                    if self.args.ui.is_some() {
+                        println!("~ received {}", at.display());
+                    }
+                }
+                Err(why) => self.toast(&format!("A file from the computer didn't arrive: {why}")),
+            }
+        }
         // A camera that couldn't be opened: say why, and let its button out (which tells the
         // computer it is off again).
         let failed = self.session.borrow().as_ref().and_then(|s| s.shared.camera_failed.lock().unwrap().take());
