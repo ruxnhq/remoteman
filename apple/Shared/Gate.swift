@@ -5,7 +5,8 @@ import LocalAuthentication
 
 enum Gate {
     /// What this device calls it: "Face ID", "Touch ID", or "your passcode".
-    static var name: String {
+    /// Asked of the system once: screens name it in every row they draw.
+    static let name: String = {
         let c = LAContext()
         _ = c.canEvaluatePolicy(.deviceOwnerAuthentication, error: nil)
         switch c.biometryType {
@@ -19,7 +20,7 @@ enum Gate {
                 return "your passcode"
             #endif
         }
-    }
+    }()
 
     /// Calls `then` on the main thread with whether the person proved it is them. A device with
     /// neither biometrics nor a passcode lets everyone through: there is nothing to ask.

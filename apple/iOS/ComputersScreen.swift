@@ -185,6 +185,13 @@ struct ComputersScreen: View {
                     StatusLine(computer: c, short: false)
                 }
                 Spacer(minLength: 0)
+                Button { editing = c } label: {
+                    Image(systemName: "slider.horizontal.3").font(.system(size: 18, weight: .medium)).foregroundStyle(Theme.label)
+                        .frame(width: 40, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Settings for \(c.name)")
                 Menu {
                     menuItems(c)
                 } label: {
@@ -228,21 +235,33 @@ struct ComputersScreen: View {
         InsetGroup {
             ForEach(Array(store.computers.enumerated()), id: \.element.id) { i, c in
                 VStack(spacing: 0) {
-                    Button { model.connect(c) } label: {
-                        HStack(spacing: 12) {
-                            Thumbnail(computer: c).frame(width: 76, height: 57)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(c.name).font(Theme.headline).foregroundStyle(Theme.label).lineLimit(1)
-                                Text(c.osLine).font(Theme.subhead).foregroundStyle(Theme.secondary).lineLimit(1)
-                                StatusLine(computer: c, short: true)
+                    // Tapping the computer connects; its settings are one tap away at the end of the row.
+                    HStack(spacing: 0) {
+                        Button { model.connect(c) } label: {
+                            HStack(spacing: 12) {
+                                Thumbnail(computer: c).frame(width: 76, height: 57)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(c.name).font(Theme.headline).foregroundStyle(Theme.label).lineLimit(1)
+                                    Text(c.osLine).font(Theme.subhead).foregroundStyle(Theme.secondary).lineLimit(1)
+                                    StatusLine(computer: c, short: true)
+                                }
+                                Spacer(minLength: 4)
                             }
-                            Spacer(minLength: 4)
-                            Image(systemName: "chevron.right").font(.system(size: 13, weight: .bold)).foregroundStyle(Theme.tertiary)
+                            .padding(.leading, 14).padding(.vertical, 10)
+                            .contentShape(Rectangle())
                         }
-                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Connect to \(c.name)")
+                        Button { editing = c } label: {
+                            Image(systemName: "slider.horizontal.3").font(.system(size: 19, weight: .medium)).foregroundStyle(Theme.tint)
+                                .frame(width: 52, height: 57)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Settings for \(c.name)")
+                        .padding(.trailing, 6)
                     }
-                    .buttonStyle(.plain)
                     .contextMenu { menuItems(c) }
                     if i < store.computers.count - 1 {
                         Rectangle().fill(Theme.separator).frame(height: 0.5).padding(.leading, 102)
