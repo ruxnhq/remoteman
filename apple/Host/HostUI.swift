@@ -571,15 +571,15 @@ private struct UnattendedGroup: View {
 
     var body: some View {
         CardGroup(
-            "When this Mac is locked or nobody is logged in",
-            footnote: "The password stays on this Mac: in your keychain for the lock screen, and in a file only the system can read for the login window. It is typed for you only when a device you have paired connects. Anyone holding a paired device can then get into this Mac, so revoke a device you lose. After a restart with FileVault on, the disk has to be unlocked at this Mac first."
+            "When this Mac is locked",
+            footnote: "The password stays in your keychain on this Mac and is typed for you only when a device you have paired connects. Anyone holding a paired device can then get into this Mac, so revoke a device you lose. It covers the lock screen, which is also where this Mac lands after a restart with automatic login. After a log out, someone has to log in at the Mac."
         ) {
             Row(
-                "Log in and unlock for paired devices",
+                "Unlock for paired devices",
                 caption: controller.unattendedNote.isEmpty
                     ? (controller.unattendedOn
-                        ? "On\(Unattended.coversLoginWindow ? "" : " for the lock screen only"). A paired device that connects is let straight in to your desktop."
-                        : "Enter this Mac's login password once. macOS then asks for an administrator's password to set it up.")
+                        ? "On. A paired device that connects while this Mac is locked is let straight in to your desktop."
+                        : "Enter this Mac's login password once.")
                     : controller.unattendedNote
             ) {
                 if controller.unattendedOn {

@@ -1,15 +1,17 @@
-// Logging in, and unlocking, for a paired device. The Mac's owner gives the host their Mac
-// password once; after that a paired device that connects while the Mac is locked, or at its
-// login window, is let in without anyone typing: the host fills in the password field itself,
-// through the accessibility interface, and the device is shown the desktop. Neither the lock
-// screen nor the login window is ever captured, so macOS has nothing to ask.
+// Unlocking for a paired device. The Mac's owner gives the host their Mac password once; after
+// that a paired device that connects while the Mac is locked is let in without anyone typing:
+// the host clicks the lock screen's password field and types the password as key presses, and
+// the device is shown the desktop. The lock screen is never captured.
 //
-// Where the password is kept, and only if the owner turns this on:
-// - for the lock screen: in the owner's login keychain, readable by this app;
-// - for the login window (nobody logged in): in a file only root can read, because the agent
-//   that runs there is root and no user's keychain is open. Writing it takes an administrator's
-//   password.
-// It is never sent anywhere and never logged.
+// What is known to work, and what isn't (macOS 27):
+// - A click in the field followed by key presses with their own key codes, then Return, unlocks.
+// - Text put into the field through the accessibility interface shows there but is not taken;
+//   nor are the field's confirm action, its button, or key presses that carry only characters.
+// - The login window (nobody logged in) is not covered: an agent there, run by the system, did
+//   not get this far. With automatic login on, a restart ends at the lock screen, which is.
+//
+// The password is kept in the owner's login keychain, only if they turn this on. It is never
+// sent anywhere and never logged.
 import AppKit
 import ApplicationServices
 import Foundation
@@ -28,8 +30,8 @@ enum Unattended {
         return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess
     }
 
-    /// Whether the login window's copy is there too.
-    static var coversLoginWindow: Bool { FileManager.default.fileExists(atPath: rootFile) }
+    /// Whether something from the login-window attempt is still on this Mac.
+    static var leftovers: Bool { FileManager.default.fileExists(atPath: rootFile) || LoginWindow.installed }
 
     private static func keychainPassword() -> String? {
         let q: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecReturnData: true]
@@ -66,55 +68,36 @@ enum Unattended {
         }
     }
 
-    /// Keep the password (both copies) and install the login window's agent, or take all of it
-    /// away. One administrator prompt. Returns what came of it ("" when the owner cancelled).
+    /// Keep the password for unlocking, or take it away. Keeping it needs no administrator:
+    /// it goes into the owner's own keychain. Taking it away also removes what an earlier
+    /// version put in place for the login window (that asks for an administrator's password).
+    /// Returns what came of it ("" when the owner cancelled).
     static func set(_ password: String?, stateDir: String, listen: String, name: String) -> String {
         let base: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: service]
-        var commands: [String] = []
-        var temp: URL?
         if let password {
             // A wrong password would be typed into the lock screen again and again: refused here.
             if isRight(password) == false { return "That isn't this Mac account's password. Nothing was changed." }
-            guard let binary = Bundle.main.executablePath, binary.hasPrefix("/Applications/") else {
-                return "Move remoteman host into the Applications folder first: the login window starts it from there."
-            }
-            // The root copy goes through a file only this user can read, then only root.
-            let t = FileManager.default.temporaryDirectory.appendingPathComponent("remoteman-\(UUID().uuidString)")
-            guard FileManager.default.createFile(atPath: t.path, contents: Data(password.utf8), attributes: [.posixPermissions: 0o600]) else {
-                return "It didn't work: the password couldn't be handed over."
-            }
-            temp = t
-            guard let agent = LoginWindow.agentDescription(binary: binary, stateDir: stateDir, listen: listen, name: name) else {
-                try? FileManager.default.removeItem(at: t)
-                return "It didn't work: the agent's description couldn't be written."
-            }
-            commands = [
-                "mkdir -p '/Library/Application Support/remoteman-host'",
-                "install -m 600 -o root -g wheel '\(t.path)' '\(rootFile)'",
-                "cp '\(agent.path)' '\(LoginWindow.plist)'", "chown root:wheel '\(LoginWindow.plist)'", "chmod 644 '\(LoginWindow.plist)'",
-            ]
-        } else {
-            commands = ["rm -f '\(rootFile)' '\(LoginWindow.plist)'"]
-        }
-        let shell = commands.joined(separator: " && ").replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        var error: NSDictionary?
-        NSAppleScript(source: "do shell script \"\(shell)\" with administrator privileges")?.executeAndReturnError(&error)
-        if let temp { try? FileManager.default.removeItem(at: temp) }
-        if let error {
-            let cancelled = (error[NSAppleScript.errorNumber] as? Int) == -128
-            return cancelled ? "" : "It didn't work: \(error[NSAppleScript.errorMessage] as? String ?? "unknown")"
-        }
-        SecItemDelete(base as CFDictionary)
-        if let password {
+            SecItemDelete(base as CFDictionary)
             var add = base
             add[kSecAttrAccount] = NSUserName()
             add[kSecValueData] = Data(password.utf8)
             add[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             let status = SecItemAdd(add as CFDictionary, nil)
-            if status != errSecSuccess { return "Kept for the login window, but not for the lock screen (keychain error \(status))." }
+            guard status == errSecSuccess else { return "It didn't work: the keychain refused (\(status))." }
+            hostLog("host: unlocking for paired devices is on")
+            return "On."
         }
-        hostLog("host: logging in for paired devices is \(password == nil ? "off" : "on")")
-        return password == nil ? "Off. The password was removed from this Mac." : "On."
+        if FileManager.default.fileExists(atPath: rootFile) || LoginWindow.installed {
+            let shell = "rm -f '\(rootFile)' '\(LoginWindow.plist)'"
+            var error: NSDictionary?
+            NSAppleScript(source: "do shell script \"\(shell)\" with administrator privileges")?.executeAndReturnError(&error)
+            if let error, (error[NSAppleScript.errorNumber] as? Int) != -128 {
+                return "It didn't work: \(error[NSAppleScript.errorMessage] as? String ?? "unknown")"
+            }
+        }
+        SecItemDelete(base as CFDictionary)
+        hostLog("host: unlocking for paired devices is off")
+        return "Off. The password was removed from this Mac."
     }
 
     // MARK: The screens
