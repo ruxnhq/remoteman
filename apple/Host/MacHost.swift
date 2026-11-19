@@ -232,6 +232,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private let second = HostSecondDisplay()
     private var aimedAtSecond = false
     private var sent = 0, bytes = 0, encodeMs = 0.0, dropped = 0, keyframes = 0
+    private var captureMs = 0.0, captured = 0, ageMs = 0.0
 
     init(options: Options) {
         self.options = options
@@ -1082,12 +1083,15 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             let cc = String(bytes: [24, 16, 8, 0].map { UInt8((f >> $0) & 0xff) }, encoding: .ascii) ?? "?"
             hostLog("host: capture delivers \(CVPixelBufferGetWidth(pb))×\(CVPixelBufferGetHeight(pb)) '\(cc)'")
         }
-        // The timestamp is the capture time on the host clock; a busy encoder drops the frame.
-        if let enc, !enc.encode(pb, pts: sb.presentationTimeStamp) {
-            lock.lock()
-            dropped += 1
-            lock.unlock()
-        }
+        // The timestamp is the time the frame was shown, on the host clock; how long capture took
+        // to hand it over is counted for the log. A busy encoder drops the frame.
+        let waited = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()) - sb.presentationTimeStamp) * 1000
+        let taken = enc?.encode(pb, pts: sb.presentationTimeStamp) ?? true
+        lock.lock()
+        captureMs += waited
+        captured += 1
+        if !taken { dropped += 1 }
+        lock.unlock()
     }
 
     private func send(_ o: HostEncoder.Output) {
@@ -1105,6 +1109,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         sent += 1
         bytes += o.annexB.count
         encodeMs += o.encodeMs
+        ageMs += max(0, age) * 1000
         lock.unlock()
     }
 
@@ -1115,10 +1120,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private func stats() {
         lock.lock()
         let line = sent > 0 || dropped > 0
-            ? String(format: "host: %d fps, %d kbit/s, encode %.2f ms, %d dropped (busy), %d keyframe requests", sent, bytes * 8 / 1000, encodeMs / Double(max(sent, 1)), dropped, keyframes)
+            ? String(format: "host: %d fps, %d kbit/s, capture %.2f ms, encode %.2f ms, %.2f ms old when sent, %d dropped (busy), %d keyframe requests", sent, bytes * 8 / 1000, captureMs / Double(max(captured, 1)), encodeMs / Double(max(sent, 1)), ageMs / Double(max(sent, 1)), dropped, keyframes)
             : nil
         let fps = sent, bits = bytes * 8
-        sent = 0; bytes = 0; encodeMs = 0; dropped = 0
+        sent = 0; bytes = 0; encodeMs = 0; dropped = 0; captureMs = 0; captured = 0; ageMs = 0
         lock.unlock()
         if let line { hostLog(line) }
         onStats?(fps, bits)

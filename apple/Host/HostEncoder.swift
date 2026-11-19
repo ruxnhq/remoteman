@@ -17,6 +17,9 @@ final class HostEncoder {
         let encodeMs: Double
     }
 
+    /// For measuring only (`--encoder`): "plain" (as shipped), "realtime", or "lowlatency".
+    static var testMode = "plain"
+
     let width: Int, height: Int
     private var session: VTCompressionSession?
     private let lock = NSLock()
@@ -36,7 +39,9 @@ final class HostEncoder {
         // The ordinary rate control, not the low-latency one: with reordering off it too gives
         // each frame back before the next goes in, and the hardware takes about half as long
         // over a frame (espalier measured it on an M4).
-        let spec = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary
+        var specKeys: [CFString: Any] = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true]
+        if Self.testMode == "lowlatency" { specKeys[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = true }
+        let spec = specKeys as CFDictionary
         let status = VTCompressionSessionCreate(
             allocator: nil, width: Int32(width), height: Int32(height), codecType: kCMVideoCodecType_HEVC,
             encoderSpecification: spec, imageBufferAttributes: nil, compressedDataAllocator: nil,
@@ -45,7 +50,7 @@ final class HostEncoder {
         let props: [(CFString, Any)] = [
             // Not "real time": that lets the encoder take its time up to the frame rate; this
             // has it finish each frame as fast as it can.
-            (kVTCompressionPropertyKey_RealTime, false),
+            (kVTCompressionPropertyKey_RealTime, Self.testMode != "plain"),
             (kVTCompressionPropertyKey_AllowFrameReordering, false),
                         (kVTCompressionPropertyKey_ExpectedFrameRate, fps),
             (kVTCompressionPropertyKey_AverageBitRate, bitrate),
