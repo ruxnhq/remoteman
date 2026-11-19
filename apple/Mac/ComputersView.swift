@@ -242,14 +242,19 @@ struct ComputerDetail: View {
     }
 
     /// The last picture would be here; there is none to show yet, so the frame is dimmed.
-    private var thumbnail: some View {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(Tokens.thumbnail)
-            .saturation(Features.thumbnails ? 1 : 0.2)
-            .brightness(Features.thumbnails ? 0 : -0.25)
-            .frame(width: 336, height: 210)
-            .overlay(Image(systemName: computer.symbol).font(.system(size: 52, weight: .light)).foregroundStyle(.white.opacity(0.7)))
-            .accessibilityHidden(true)
+    @ViewBuilder private var thumbnail: some View {
+        if let image = model.store.thumbnail(computer.id) {
+            Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                .frame(width: 336, height: 210)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .accessibilityLabel("The last picture of \(computer.name)")
+        } else {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Tokens.thumbnail)
+                .frame(width: 336, height: 210)
+                .overlay(Image(systemName: computer.symbol).font(.system(size: 52, weight: .light)).foregroundStyle(.white.opacity(0.7)))
+                .accessibilityHidden(true)
+        }
     }
 
     private var card: some View {

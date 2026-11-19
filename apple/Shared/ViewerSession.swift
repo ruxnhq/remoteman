@@ -1,8 +1,10 @@
 // One viewing session: a source of frames (a host through the core, or a recording), the
 // decoder, the renderer, and the numbers for the stats overlay.
+import AVFoundation
 import Combine
 import CoreMedia
 import Foundation
+import Network
 import RemotemanCore
 import VideoToolbox
 
@@ -144,7 +146,26 @@ final class ViewerSession: ObservableObject {
 
     func has(_ feature: String) -> Bool { features.contains(feature) }
 
-    private func remembered(_ what: String) -> Bool { UserDefaults.standard.bool(forKey: "\(what).\(target)") }
+    /// What was chosen for this computer last time; where nothing was, what the settings say.
+    private func remembered(_ what: String) -> Bool {
+        if let chosen = UserDefaults.standard.object(forKey: "\(what).\(target)") as? Bool { return chosen }
+        switch what {
+        case "sound": return ViewerPrefs.soundDefault
+        case "clipboard": return ViewerPrefs.clipboardDefault
+        default: return false
+        }
+    }
+
+    #if os(iOS)
+        /// Whether this device is on mobile data now.
+        private static let path: NWPathMonitor = {
+            let m = NWPathMonitor()
+            m.start(queue: .global(qos: .utility))
+            return m
+        }()
+        static func watchNetwork() { _ = path }
+        static var onMobileData: Bool { path.currentPath.usesInterfaceType(.cellular) }
+    #endif
     private func remember(_ what: String, _ on: Bool) { UserDefaults.standard.set(on, forKey: "\(what).\(target)") }
 
     /// Play the computer's sound here. While on, the computer's own speakers are silent.
@@ -159,6 +180,7 @@ final class ViewerSession: ObservableObject {
     /// This device's microphone as a microphone on the computer. Never switched on by itself.
     func setMic(_ on: Bool) {
         guard let client, has("mic"), on != micOn else { return }
+        remember("mic", on)
         if !on {
             micOn = false
             mic?.stop()
@@ -189,6 +211,7 @@ final class ViewerSession: ObservableObject {
     /// This device's camera as a camera on the computer. Never switched on by itself.
     func setCamera(_ on: Bool) {
         guard let client, has("camera"), on != cameraOn else { return }
+        remember("camera", on)
         if !on {
             cameraOn = false
             camera?.stop()
@@ -354,6 +377,8 @@ final class ViewerSession: ObservableObject {
         var list: [String] = []
         if VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) { list.append("av1") }
         if VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) { list += ["hevc444", "hevc"] }
+        // "Sharp text": full colour detail (4:4:4) ahead of everything else.
+        if ViewerPrefs.sharp, let i = list.firstIndex(of: "hevc444") { list.insert(list.remove(at: i), at: 0) }
         return list.joined(separator: ",")
     }
 
@@ -454,9 +479,21 @@ final class ViewerSession: ObservableObject {
                     }
                     self.state = .streaming(hostName.isEmpty ? target : hostName)
                     self.startStats()
-                    // What was on for this computer last time comes back on; the microphone never does.
+                    // What was on for this computer last time comes back on. The microphone and
+                    // camera only for those who asked for that, and only where the system has
+                    // already said yes (so that nothing is asked as a session starts).
                     if self.remembered("sound") { self.setSound(true) }
                     if self.remembered("clipboard") { self.setClipboard(true) }
+                    if ViewerPrefs.rememberMedia {
+                        if self.remembered("mic"), AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { self.setMic(true) }
+                        if self.remembered("camera"), AVCaptureDevice.authorizationStatus(for: .video) == .authorized { self.setCamera(true) }
+                    }
+                    #if os(iOS)
+                        if Self.onMobileData, ViewerPrefs.saveData, self.bitrateLimit == 0, self.has("configure") {
+                            self.setBitrateLimit(ViewerPrefs.mobileLimit)
+                            self.notice = "On mobile data: the picture is kept to \(ViewerPrefs.mobileLimit / 1_000_000) Mb/s."
+                        }
+                    #endif
                 }
             } catch {
                 DispatchQueue.main.async {

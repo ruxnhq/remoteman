@@ -20,6 +20,8 @@ struct Computer: Codable, Identifiable, Equatable {
     var macs: [String]?
     /// Send the wake signal before connecting.
     var wake: Bool?
+    /// Face ID before connecting: nil follows the setting, "always", "never".
+    var auth: String?
 
     var osLine: String {
         switch os {

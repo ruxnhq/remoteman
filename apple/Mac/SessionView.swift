@@ -636,21 +636,36 @@ enum SessionMenus {
         menu.minimumWidth = width
         let facts = StreamFacts(session.statsText)
         menu.header("Picture quality")
+        func quality(_ v: String) {
+            guard (ViewerPrefs.sharp ? "sharp" : "auto") != v else { return }
+            UserDefaults.standard.set(v, forKey: ViewerPrefs.qualityKey)
+            // The computer chooses the stream as a session starts: join again.
+            model.reconnect(rejoin: true)
+        }
         menu.addItem(
             ActionItem(
-                "Automatic", hint: facts.codec == "–" ? "" : "\(facts.codec) now", checked: true,
+                "Automatic", hint: !ViewerPrefs.sharp && facts.codec != "–" ? "\(facts.codec) now" : "", checked: !ViewerPrefs.sharp,
                 enabled: Features.pictureQuality, width: width
-            ) {})
+            ) { quality("auto") })
         menu.addItem(
-            ActionItem("Sharp Text (4:4:4)", hint: "HEVC, uses more data", enabled: Features.pictureQuality, width: width) {})
+            ActionItem(
+                "Sharp Text (4:4:4)", hint: ViewerPrefs.sharp && facts.codec != "–" ? "\(facts.codec) now" : "HEVC, uses more data",
+                checked: ViewerPrefs.sharp, enabled: Features.pictureQuality, width: width
+            ) { quality("sharp") })
         menu.addItem(ActionItem("HDR", hint: "Mirror an HDR monitor first", enabled: Features.hdr, width: width) {})
         menu.addItem(.separator())
         menu.header("Refresh rate")
-        let rate = facts.refresh ?? model.requested?.refresh ?? 60
+        let top = NSScreen.main?.maximumFramesPerSecond ?? 60
+        let can60 = Features.refreshRateChoice && top > 60
+        func full(_ on: Bool) {
+            guard ViewerPrefs.fullRefresh != on else { return }
+            UserDefaults.standard.set(on, forKey: ViewerPrefs.fullRefreshKey)
+            model.reconnect()
+        }
         menu.addItem(
-            ActionItem("\(rate) Hz", hint: "This display", checked: true, enabled: Features.refreshRateChoice, width: width) {})
-        if rate != 60 {
-            menu.addItem(ActionItem("60 Hz", enabled: Features.refreshRateChoice, width: width) {})
+            ActionItem("\(top) Hz", hint: "This display", checked: ViewerPrefs.fullRefresh || top <= 60, enabled: can60, width: width) { full(true) })
+        if top > 60 {
+            menu.addItem(ActionItem("60 Hz", checked: !ViewerPrefs.fullRefresh, enabled: can60, width: width) { full(false) })
         }
         menu.addItem(.separator())
         menu.header("The most the picture may use")

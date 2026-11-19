@@ -53,3 +53,25 @@ enum InputSettings {
         }
     }
 }
+
+/// What a session starts with, and what guards starting one.
+enum ViewerPrefs {
+    static let qualityKey = "picture.quality"  // "auto" or "sharp" (4:4:4 first)
+    static let fullRefreshKey = "picture.fullRefresh"  // the Mac: ask for the display's own rate, not 60
+    static let soundDefaultKey = "sound.default"  // for a computer where it was never chosen
+    static let clipboardDefaultKey = "clipboard.default"
+    static let rememberMediaKey = "media.remember"  // microphone and camera come back on as they were left
+    static let saveDataKey = "mobile.saveData"
+    static let requireAuthKey = "security.requireAuth"
+    /// What the picture may use on mobile data when data is being saved.
+    static let mobileLimit = 5_000_000
+
+    private static var d: UserDefaults { .standard }
+    static var sharp: Bool { d.string(forKey: qualityKey) == "sharp" }
+    static var fullRefresh: Bool { d.object(forKey: fullRefreshKey) as? Bool ?? true }
+    static var soundDefault: Bool { d.bool(forKey: soundDefaultKey) }
+    static var clipboardDefault: Bool { d.bool(forKey: clipboardDefaultKey) }
+    static var rememberMedia: Bool { d.bool(forKey: rememberMediaKey) }
+    static var saveData: Bool { d.object(forKey: saveDataKey) as? Bool ?? true }
+    static var requireAuth: Bool { d.bool(forKey: requireAuthKey) }
+}

@@ -12,7 +12,7 @@ enum Features {
     /// Waking a sleeping computer over the network.
     static let wake = true
     /// Face ID before connecting, and filling the login password with it.
-    static let faceID = false
+    static let faceID = true
     /// The computer's login screen when nobody is logged in, and the choice of way in.
     static let remoteLogin = false
     /// The computer's sound on this device, and this device's microphone and camera on it.
@@ -22,13 +22,15 @@ enum Features {
     static let clipboard = true
     static let files = true
     /// Picture quality, bitrate limit, size ("More space"), HDR.
-    static let pictureQuality = false
+    static let pictureQuality = true
     static let bitrateLimit = true
     static let displaySize = true
     static let hdr = false
     /// Choosing where the sound plays and whether it starts by itself; a lower limit on mobile data.
-    static let soundChoice = false
-    static let mobileData = false
+    static let soundChoice = true
+    static let mobileData = true
+    /// A question each time before the camera is shared.
+    static let cameraAsk = false
     /// A display on an external monitor, and mirroring one of the computer's monitors.
     static let moreDisplays = false
     /// The finger as a trackpad, and the pointer options that go with it.

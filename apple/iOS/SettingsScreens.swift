@@ -71,8 +71,14 @@ struct ComputerSettingsScreen: View {
                             footer: "Automatic attaches to your session when you're logged in at the computer, and shows its login screen when nobody is."
                         ) {
                             Row(title: "Way in") { RowValue(text: "Automatic", chevron: true) }.available(Features.remoteLogin)
-                            Row(title: "Require Face ID to connect") { Toggle("", isOn: .constant(false)).labelsHidden() }
-                                .available(Features.faceID)
+                            Row(title: "Require \(Gate.name) to connect", subtitle: ViewerPrefs.requireAuth ? "On for every computer, in Settings" : nil) {
+                                Toggle("", isOn: Binding(get: { c.auth == "always" || (c.auth == nil && ViewerPrefs.requireAuth) }, set: { on in
+                                    var u = c
+                                    u.auth = on ? "always" : (ViewerPrefs.requireAuth ? "never" : nil)
+                                    store.update(u)
+                                })).labelsHidden()
+                            }
+                            .available(Features.faceID)
                             Row(
                                 title: "Wake it before connecting",
                                 subtitle: (c.macs ?? []).isEmpty ? "Its network card isn't known yet: it is learned when the computer is seen on this network" : nil,
@@ -86,11 +92,17 @@ struct ComputerSettingsScreen: View {
                             }
                             .available(Features.wake && !(c.macs ?? []).isEmpty)
                         }
-                        InsetGroup(header: "During a session") {
-                            Row(title: "Picture quality") { RowValue(text: "Automatic", chevron: true) }.available(Features.pictureQuality)
-                            Row(title: "Sound") { RowValue(text: "Plays on this \(device)", chevron: true) }.available(Features.soundChoice)
-                            Row(title: "Camera and microphone", last: true) { RowValue(text: "Off until I turn them on", chevron: true) }
-                                .available(Features.soundChoice)
+                        InsetGroup(
+                            header: "During a session",
+                            footer: "What happens when a session with this computer starts. Switching the sound in a session changes this too."
+                        ) {
+                            Row(title: "Play its sound on this \(device)", last: true) {
+                                Toggle("", isOn: Binding(
+                                    get: { UserDefaults.standard.object(forKey: "sound." + target(c)) as? Bool ?? ViewerPrefs.soundDefault },
+                                    set: { UserDefaults.standard.set($0, forKey: "sound." + target(c)) })
+                                ).labelsHidden()
+                            }
+                            .available(Features.soundChoice)
                         }
                         InsetGroup(header: "Address", footer: c.fingerprint.map { "Key fingerprint \(short($0))" }) {
                             Row(title: "Address", last: true) {
@@ -134,6 +146,9 @@ struct ComputerSettingsScreen: View {
         }
     }
 
+    /// The computer's address as the session knows it.
+    private func target(_ c: Computer) -> String { c.address.contains(":") ? c.address : c.address + ":7791" }
+
     private func short(_ f: String) -> String {
         let u = f.uppercased()
         guard u.count >= 12 else { return u }
@@ -154,6 +169,11 @@ struct SettingsScreen: View {
     @AppStorage(InputSettings.twoFingerRightKey) private var twoFinger = true
     @AppStorage(InputSettings.naturalScrollKey) private var natural = true
     @AppStorage(InputSettings.pointerSpeedKey) private var pointerSpeed = "medium"
+    @AppStorage(ViewerPrefs.qualityKey) private var quality = "auto"
+    @AppStorage(ViewerPrefs.saveDataKey) private var saveData = true
+    @AppStorage(ViewerPrefs.soundDefaultKey) private var soundDefault = false
+    @AppStorage(ViewerPrefs.rememberMediaKey) private var rememberMedia = false
+    @AppStorage(ViewerPrefs.requireAuthKey) private var requireAuth = false
     private var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
 
     var body: some View {
@@ -204,20 +224,35 @@ struct SettingsScreen: View {
                         Row(title: "Show the session handle", last: true) { Toggle("", isOn: $showHandle).labelsHidden() }
                     }
                     InsetGroup(header: "Picture and sound") {
-                        Row(title: "Default quality") { RowValue(text: "Automatic", chevron: true) }.available(Features.pictureQuality)
-                        Row(title: "On mobile data") { RowValue(text: "Save data", chevron: true) }.available(Features.mobileData)
-                        Row(title: "Play the computer's sound") { Toggle("", isOn: .constant(false)).labelsHidden() }.available(Features.soundChoice)
+                        ChoiceRow(title: "Default quality", value: $quality, choices: [("auto", "Automatic"), ("sharp", "Sharp text (4:4:4)")])
+                            .available(Features.pictureQuality)
+                        ChoiceRow(
+                            title: "On mobile data",
+                            value: Binding(get: { saveData ? "save" : "same" }, set: { saveData = $0 == "save" }),
+                            choices: [("save", "Save data (5 Mb/s)"), ("same", "As on Wi-Fi")]
+                        )
+                        .available(Features.mobileData)
+                        Row(title: "Play the computer's sound", subtitle: "For a computer where you haven't chosen yet") {
+                            Toggle("", isOn: $soundDefault).labelsHidden()
+                        }
+                        .available(Features.soundChoice)
+                        ChoiceRow(
+                            title: "Microphone and camera",
+                            value: Binding(get: { rememberMedia ? "left" : "off" }, set: { rememberMedia = $0 == "left" }),
+                            choices: [("off", "Off until I turn them on"), ("left", "As I left them")]
+                        )
+                        .available(Features.soundChoice)
                         Row(title: "Show figures in new sessions", last: true) { Toggle("", isOn: $figures).labelsHidden() }
                     }
                     InsetGroup(
                         header: "Security",
                         footer: "Passwords stay in this \(device)'s keychain and travel only over the encrypted link to a paired computer."
                     ) {
-                        Row(title: "Require Face ID to connect") { Toggle("", isOn: .constant(false)).labelsHidden() }.available(Features.faceID)
+                        Row(title: "Require \(Gate.name) to connect") { Toggle("", isOn: $requireAuth).labelsHidden() }.available(Features.faceID)
                         Row(title: "Fill login passwords with Face ID") { Toggle("", isOn: .constant(false)).labelsHidden() }
-                            .available(Features.faceID)
+                            .available(Features.remoteLogin)
                         Row(title: "Ask before sharing the camera", last: true) { Toggle("", isOn: .constant(true)).labelsHidden() }
-                            .available(Features.soundChoice)
+                            .available(Features.cameraAsk)
                     }
                     if !store.computers.isEmpty {
                         InsetGroup(

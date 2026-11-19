@@ -121,7 +121,17 @@ final class AppModel: ObservableObject {
 
     // MARK: Connecting and leaving
 
+    /// Touch ID (or the Mac's password) first, for a computer that asks for it.
     func connect(_ c: SavedComputer) {
+        guard !session.isActive, active == nil else { return }
+        let ask = c.auth == "always" || (c.auth.isEmpty && ViewerPrefs.requireAuth)
+        guard ask, !automated else { return connectNow(c) }
+        Gate.pass(for: c.name) { [weak self] ok in
+            if ok { self?.connectNow(c) }
+        }
+    }
+
+    private func connectNow(_ c: SavedComputer) {
         guard !session.isActive, active == nil else { return }
         errors[c.id] = nil
         selection = c.id
@@ -151,20 +161,35 @@ final class AppModel: ObservableObject {
 
     func disconnect() {
         reconnecting = false
+        keepThumbnail()
         session.disconnect()
     }
 
     /// Leave and join again, for what can only be said at the start: where this display sits
     /// among the computer's own, and its size.
-    func reconnect(placement: ViewerSession.Placement? = nil) {
+    /// The picture now, kept as the computer's thumbnail.
+    func keepThumbnail() {
+        guard !automated, let id = active, hasPicture, let image = session.renderer?.snapshot() else { return }
+        store.saveThumbnail(image, for: id)
+    }
+
+    /// 60 Hz for those who turned the display's full rate off.
+    private func capped(_ d: ViewerSession.Display) -> ViewerSession.Display {
+        var d = d
+        if !ViewerPrefs.fullRefresh { d.refresh = min(d.refresh, 60) }
+        return d
+    }
+
+    /// `rejoin`: for what the computer is only told as a session starts (which stream it sends).
+    func reconnect(placement: ViewerSession.Placement? = nil, rejoin: Bool = false) {
         guard let id = active, case .streaming = session.state else { return }
         if let placement { store.update(id) { $0.place = placement } }
         guard let c = store[id] else { return }
         let size = pictureSize.width > 0 ? pictureSize : CGSize(width: 1280, height: 748)
-        let display = DeviceDisplay.current(
-            for: size, displayScale: window?.backingScaleFactor ?? 2, measured: session.refreshMeter.rate)
+        let display = capped(DeviceDisplay.current(
+            for: size, displayScale: window?.backingScaleFactor ?? 2, measured: session.refreshMeter.rate))
         // A computer that can change it in place does; the picture starts afresh by itself.
-        if session.reconfigure(display: display, placement: c.place) {
+        if !rejoin, session.reconfigure(display: display, placement: c.place) {
             requested = display
             return
         }
@@ -268,8 +293,8 @@ final class AppModel: ObservableObject {
                 w.setFrame(f, display: true, animate: true)
             }
         }
-        return DeviceDisplay.current(
-            for: size, displayScale: window?.backingScaleFactor ?? 2, measured: session.refreshMeter.rate)
+        return capped(DeviceDisplay.current(
+            for: size, displayScale: window?.backingScaleFactor ?? 2, measured: session.refreshMeter.rate))
     }
 
     /// The session's controls are drawn over the picture, not in a title bar.

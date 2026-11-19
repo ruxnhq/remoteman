@@ -57,6 +57,12 @@ private struct FixedPopUp: View {
 struct GeneralSettings: View {
     @AppStorage(AppModel.WindowControls.key) private var controls = AppModel.WindowControls.titleBar.rawValue
     @AppStorage(AppModel.showFiguresKey) private var showFigures = false
+    @AppStorage(ViewerPrefs.qualityKey) private var quality = "auto"
+    @AppStorage(ViewerPrefs.fullRefreshKey) private var fullRefresh = true
+    @AppStorage(ViewerPrefs.soundDefaultKey) private var sound = false
+    @AppStorage(ViewerPrefs.clipboardDefaultKey) private var clipboard = false
+    @AppStorage(ViewerPrefs.rememberMediaKey) private var rememberMedia = false
+    @AppStorage(ViewerPrefs.requireAuthKey) private var requireAuth = false
 
     var body: some View {
         SettingsPage {
@@ -73,33 +79,57 @@ struct GeneralSettings: View {
                 }
             }
             CardGroup("Picture") {
-                Row("Default quality", caption: "Automatic picks the best stream the computer and this Mac both handle.") {
-                    FixedPopUp(title: "Default quality", value: "Automatic", flag: Features.pictureQuality)
+                Row(
+                    "Default quality",
+                    caption: "Automatic picks the best stream the computer and this Mac both handle. Sharp Text asks for full colour detail (4:4:4) first, which uses more data. Applies from the next connection."
+                ) {
+                    Picker("Default quality", selection: $quality) {
+                        Text("Automatic").tag("auto")
+                        Text("Sharp Text (4:4:4)").tag("sharp")
+                    }
+                    .labelsHidden().fixedSize().available(Features.pictureQuality)
                 }
-                Row("Use this display's full refresh rate (\(NSScreen.main?.maximumFramesPerSecond ?? 60) Hz)") {
-                    FixedSwitch(title: "Use this display's full refresh rate", value: true, flag: Features.refreshRateChoice)
+                Row("Use this display's full refresh rate (\(NSScreen.main?.maximumFramesPerSecond ?? 60) Hz)", caption: "Off, the computer is asked for 60 Hz.") {
+                    Toggle("Use this display's full refresh rate", isOn: $fullRefresh).labelsHidden().toggleStyle(.switch)
+                        .available(Features.refreshRateChoice)
                 }
                 Row("Show figures when a session starts") {
                     Toggle("Show figures when a session starts", isOn: $showFigures).labelsHidden().toggleStyle(.switch)
                 }
             }
             CardGroup("Sound and sharing") {
-                Row("Play the computer's sound on this Mac") {
-                    FixedSwitch(title: "Play the computer's sound on this Mac", value: false, flag: Features.defaultsForSharing)
+                Row(
+                    "Play the computer's sound on this Mac",
+                    caption: "For a computer where you haven't chosen yet. Afterwards each computer keeps what you last chose in its session."
+                ) {
+                    Toggle("Play the computer's sound on this Mac", isOn: $sound).labelsHidden().toggleStyle(.switch)
+                        .available(Features.defaultsForSharing)
                 }
-                Row("Clipboard") {
-                    FixedPopUp(title: "Clipboard", value: "Shared both ways", flag: Features.defaultsForSharing)
+                Row("Clipboard", caption: "Also for a computer where you haven't chosen yet, and only if the computer allows it.") {
+                    Picker("Clipboard", selection: $clipboard) {
+                        Text("Off until I turn it on").tag(false)
+                        Text("Shared both ways").tag(true)
+                    }
+                    .labelsHidden().fixedSize().available(Features.defaultsForSharing)
                 }
-                Row("Save received files to") {
-                    FixedPopUp(title: "Save received files to", value: "Downloads", flag: Features.defaultsForSharing)
+                Row(
+                    "Microphone and camera",
+                    caption: "As I left them: a computer you had them on for gets them again when you connect."
+                ) {
+                    Picker("Microphone and camera", selection: $rememberMedia) {
+                        Text("Off until I turn them on").tag(false)
+                        Text("As I left them").tag(true)
+                    }
+                    .labelsHidden().fixedSize().available(Features.defaultsForSharing)
                 }
+                Row("Received files are saved to", value: "Downloads", dim: true)
             }
             CardGroup("Security") {
                 Row(
                     "Require Touch ID to connect",
                     caption: "Touch ID or your Mac password, each time. You can change this for a single computer under Computers."
                 ) {
-                    FixedSwitch(title: "Require Touch ID to connect", value: false, flag: Features.touchID)
+                    Toggle("Require Touch ID to connect", isOn: $requireAuth).labelsHidden().toggleStyle(.switch).available(Features.touchID)
                 }
             }
         }
@@ -231,7 +261,12 @@ struct ComputerSettings: View {
                         PlacementPicker(computer: c)
                     }
                     Row("Require Touch ID to connect") {
-                        FixedPopUp(title: "Require Touch ID to connect", value: "Use the default (off)", flag: Features.touchID)
+                        Picker("Require Touch ID to connect", selection: Binding(get: { c.auth }, set: { v in store.update(c.id) { $0.auth = v } })) {
+                            Text("Use the default (\(ViewerPrefs.requireAuth ? "on" : "off"))").tag("")
+                            Text("Always").tag("always")
+                            Text("Never").tag("never")
+                        }
+                        .labelsHidden().fixedSize().available(Features.touchID)
                     }
                     Row(
                         "Wake it before connecting",

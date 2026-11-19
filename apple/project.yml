@@ -107,6 +107,7 @@ targets:
         UILaunchScreen: {}
         NSLocalNetworkUsageDescription: remoteman connects to your PC on the local network to show and control its desktop.
         NSBonjourServices: [_remoteman._udp]
+        NSFaceIDUsageDescription: remoteman can ask for Face ID before it connects to a computer, when you switch that on.
         # 120 Hz on iPhones with ProMotion; iPads need nothing.
         CADisableMinimumFrameDurationOnPhone: true
         # Clicks and drags from a trackpad or mouse arrive as pointer events, not fake touches.

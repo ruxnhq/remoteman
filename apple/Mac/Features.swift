@@ -11,7 +11,7 @@ enum Features {
     /// "Wake", "Wake and Connect", "Send Wake Signal", "Wake it over the network".
     static let wake = true
     /// The last picture as a thumbnail in the detail header.
-    static let thumbnails = false
+    static let thumbnails = true
     /// The computer's sound on this Mac.
     static let sound = true
     static let microphone = true
@@ -21,18 +21,18 @@ enum Features {
     static let fileTransfer = true
     /// The settings that say what sound, clipboard and received files do by default (in a
     /// session each is switched from its control, and remembered for that computer).
-    static let defaultsForSharing = false
+    static let defaultsForSharing = true
     /// Automatic / Sharp Text (4:4:4) as a choice ("Picture", "Default quality").
-    static let pictureQuality = false
+    static let pictureQuality = true
     static let hdr = false
     /// 120 Hz / 60 Hz as a choice, "Use this display's full refresh rate".
-    static let refreshRateChoice = false
+    static let refreshRateChoice = true
     /// "Limit Bitrate…".
     static let bitrateLimit = true
     /// The stream's bitrate among the figures.
     static let bitrateFigure = true
     /// "Require Touch ID to connect" and the Touch ID prompt while connecting.
-    static let touchID = false
+    static let touchID = true
     /// The computer's own login screen when nobody is logged in, and "Fill Password with Touch ID".
     static let remoteLogin = false
     /// Mirroring one of the computer's monitors.

@@ -46,6 +46,7 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+        ViewerSession.watchNetwork()
         // Looking by itself only once the person has asked for it (and the system has been answered).
         if Nearby.wanted, !CommandLine.arguments.contains(where: { $0.hasPrefix("--") }) { Nearby.shared.look() }
         session.showStats = UserDefaults.standard.bool(forKey: "figuresInNewSessions")
@@ -55,7 +56,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Face ID (or the passcode) first, for a computer that asks for it.
     func connect(_ c: Computer) {
+        let ask = c.auth == "always" || (c.auth == nil && ViewerPrefs.requireAuth)
+        guard ask else { return connectNow(c) }
+        Gate.pass(for: c.name) { [weak self] ok in
+            if ok { self?.connectNow(c) } else { Haptics.failure() }
+        }
+    }
+
+    private func connectNow(_ c: Computer) {
         current = c
         // A computer that may be asleep is woken first; one that is awake takes no notice.
         if c.wake == true, let macs = c.macs, !macs.isEmpty, Nearby.shared.seen(fingerprint: c.fingerprint) == nil {

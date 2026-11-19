@@ -26,6 +26,8 @@ struct SavedComputer: Codable, Identifiable, Equatable {
     var macs: [String] = []
     /// Send the wake signal before connecting.
     var wake = false
+    /// Touch ID before connecting: "" follows the setting in General, "always", "never".
+    var auth = ""
 
     init(name: String, address: String) {
         self.name = name
@@ -48,6 +50,7 @@ struct SavedComputer: Codable, Identifiable, Equatable {
         fingerprint = try c.decodeIfPresent(String.self, forKey: .fingerprint) ?? ""
         macs = try c.decodeIfPresent([String].self, forKey: .macs) ?? []
         wake = try c.decodeIfPresent(Bool.self, forKey: .wake) ?? false
+        auth = try c.decodeIfPresent(String.self, forKey: .auth) ?? ""
     }
 
     var place: ViewerSession.Placement {
@@ -119,7 +122,35 @@ final class ComputerStore: ObservableObject {
         save()
     }
 
+    // MARK: The last picture of each computer
+
+    private static func thumbnailURL(_ id: SavedComputer.ID) -> URL? {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        let dir = base.appendingPathComponent("remoteman/thumbnails", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent(id.uuidString + ".jpg")
+    }
+
+    func thumbnail(_ id: SavedComputer.ID) -> NSImage? { Self.thumbnailURL(id).flatMap { NSImage(contentsOf: $0) } }
+
+    func saveThumbnail(_ image: CGImage, for id: SavedComputer.ID) {
+        guard let url = Self.thumbnailURL(id) else { return }
+        // Small: it is shown at 336 points across.
+        let k = min(1, 1008 / CGFloat(image.width))
+        let w = Int(CGFloat(image.width) * k), h = Int(CGFloat(image.height) * k)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        guard let small = ctx.makeImage() else { return }
+        let data = NSBitmapImageRep(cgImage: small).representation(using: .jpeg, properties: [.compressionFactor: 0.8])
+        try? data?.write(to: url)
+        objectWillChange.send()
+    }
+
     func remove(_ id: SavedComputer.ID) {
+        if let url = Self.thumbnailURL(id) { try? FileManager.default.removeItem(at: url) }
         let address = self[id]?.address
         computers.removeAll { $0.id == id }
         if let address, !computers.contains(where: { $0.address == address }) { ViewerSession.forget(host: address) }
