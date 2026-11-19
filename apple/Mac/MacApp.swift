@@ -100,6 +100,45 @@ final class AppModel: ObservableObject {
             self.reconnect()
         }
     }
+    /// For testing (`--follow-test`): connect to the first saved computer with its picture
+    /// following the window, resize the window as a hand would, print what was asked each time.
+    func followTest() {
+        // `--follow-test address`: a computer added for the test and removed after it.
+        let args = CommandLine.arguments
+        let address = args.firstIndex(of: "--follow-test").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? ""
+        var made: SavedComputer.ID?
+        if !address.isEmpty {
+            var new = SavedComputer(name: "remoteman-test-follow", address: address)
+            new.pairOnConnect = true
+            store.add(new)
+            made = new.id
+        }
+        guard let c = made.flatMap({ store[$0] }) ?? store.computers.first else { print("follow-test: no saved computer"); exit(1) }
+        let key = ViewerSession.key(for: c.address)
+        let before = ViewerSession.PictureSize.saved(for: key)
+        ViewerSession.PictureSize.window.save(for: key)
+        func say(_ what: String) {
+            let r = requested.map { "\($0.width)x\($0.height)@\($0.refresh)" } ?? "none"
+            print("follow-test: \(what): window \(Int(window?.frame.width ?? 0))x\(Int(window?.frame.height ?? 0)), picture area \(Int(pictureSize.width))x\(Int(pictureSize.height)), asked \(r), picture \(hasPicture), \(session.statsText.split(separator: "\n").first ?? "")")
+        }
+        func resize(_ w: CGFloat, _ h: CGFloat) {
+            guard let win = window else { return }
+            var f = win.frame
+            f.origin.y += f.height - h
+            f.size = NSSize(width: w, height: h)
+            win.setFrame(f, display: true)
+        }
+        connectNow(c)
+        let steps: [(Double, () -> Void)] = [
+            (6, { say("connected") }), (6.1, { resize(1000, 700) }), (10, { say("after 1000x700") }),
+            (10.1, { resize(1500, 900) }), (14, { say("after 1500x900") }),
+            (14.1, { resize(1100, 760) }), (14.5, { resize(1180, 800) }), (19, { say("after two quick resizes ending 1180x800") }),
+            (24, { say("five seconds later, nothing touched") }),
+            (24.1, { [self] in disconnect(); before.save(for: key); if let made { store.remove(made) }; print("follow-test: done"); exit(0) }),
+        ]
+        for (t, f) in steps { DispatchQueue.main.asyncAfter(deadline: .now() + t, execute: f) }
+    }
+
     /// Mirroring a monitor has the monitor's size, not the window's.
     private var automatedResizeOff: Bool { active.flatMap { store[$0]?.place } == .mirror }
     weak var window: NSWindow? { didSet { if window !== oldValue { watchWindow() } } }
@@ -523,6 +562,7 @@ struct RootView: View {
                 let size = geo.size
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     if UIShots.directory != nil { return UIShots.run(model: model) }
+                    if CommandLine.arguments.contains("--follow-test") { return model.followTest() }
                     Automation.run(
                         session: session,
                         display: DeviceDisplay.current(for: size, displayScale: displayScale, measured: session.refreshMeter.rate))
