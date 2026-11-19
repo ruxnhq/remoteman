@@ -30,6 +30,9 @@ final class CoreClient: SharingLink {
     /// `flags`: bit 0 a keyframe, bit 1 a recovery point (an ordinary frame to the decoder, the
     /// first one after a loss).
     var onFrame: ((UnsafeRawBufferPointer, _ flags: UInt8, _ number: UInt32, _ captureUs: UInt64, _ ageUs: Int64) -> Void)?
+    /// The second display's picture (after `secondDisplay(on: true, …)`), as onStream and onFrame.
+    var onStream2: ((StreamInfo) -> Void)?
+    var onFrame2: ((UnsafeRawBufferPointer, _ flags: UInt8, _ number: UInt32, _ captureUs: UInt64, _ ageUs: Int64) -> Void)?
     var onClosed: ((String) -> Void)?
     /// The host's cursor image (nil: no cursor) and its hotspot, in the host display's pixels.
     /// Setting this before connecting is what makes the host leave the cursor out of the picture.
@@ -143,6 +146,17 @@ final class CoreClient: SharingLink {
                 let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
                 print("remoteman: the computer is waiting for its owner; pairing code \(code.map { String(cString: $0) } ?? "?"), \(seconds) s")
                 me.onPairing?(code.map { String(cString: $0) } ?? "", Int(seconds))
+            },
+            on_stream2: { ctx, _, codec, chroma, depth, width, height, refresh, hdr in
+                let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
+                me.onStream2?(
+                    StreamInfo(
+                        codec: Codec(rawValue: codec) ?? .hevc, chroma: Int(chroma), depth: Int(depth),
+                        width: Int(width), height: Int(height), refresh: Int(refresh), hdr: hdr != 0))
+            },
+            on_frame2: { ctx, data, len, key, number, captureUs, ageUs in
+                let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
+                me.onFrame2?(UnsafeRawBufferPointer(start: data, count: len), key, number, captureUs, ageUs)
             })
         var err = [CChar](repeating: 0, count: 512)
         let h = rm_client_connect(
@@ -226,6 +240,12 @@ final class CoreClient: SharingLink {
         return s
     }
 
+    /// Ask for a second display of this size (again while on: another size), or give it back.
+    func secondDisplay(on: Bool, width: Int = 0, height: Int = 0, scale: Float = 1, refresh: Int = 60) {
+        with { rm_client_second_display($0, on ? 1 : 0, UInt32(width), UInt32(height), scale, UInt32(refresh)) }
+    }
+    /// Which display the pointer and touch events after this are on: 0 the first, 1 the second.
+    func pointerOn(_ index: UInt8) { with { rm_client_pointer_on($0, index) } }
     func pointerTo(x: Float, y: Float) { with { rm_client_pointer_to($0, x, y) } }
     func pointerBy(dx: Float, dy: Float) { with { rm_client_pointer_by($0, dx, dy) } }
     func button(_ b: UInt8, down: Bool) { with { rm_client_button($0, b, down ? 1 : 0) } }

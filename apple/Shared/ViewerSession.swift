@@ -72,6 +72,75 @@ final class ViewerSession: ObservableObject {
     @Published var report: String?
 
     let renderer = VideoRenderer()
+    /// The second display's picture, on a computer that lists "displays" (a second window on
+    /// the Mac, an external monitor on iPad).
+    let renderer2 = VideoRenderer()
+    @Published private(set) var secondOn = false
+    /// What the second display was last asked to be.
+    private(set) var secondDisplay: Display?
+    private var decoder2: VideoDecoder?
+    private var aimed: UInt8 = 0
+
+    /// Ask the computer for a second display of this size (again: another size), or give it back.
+    func setSecondDisplay(_ d: Display?) {
+        guard let client, has("displays") else { return }
+        secondDisplay = d
+        if let d {
+            client.secondDisplay(on: true, width: d.width, height: d.height, scale: d.scale, refresh: d.refresh)
+            secondOn = true
+        } else {
+            client.secondDisplay(on: false)
+            endSecond()
+        }
+    }
+
+    private func endSecond() {
+        secondOn = false
+        pipeLock.lock()
+        let d = decoder2
+        decoder2 = nil
+        pipeLock.unlock()
+        d?.invalidate()
+        renderer2?.clear()
+        if aimed != 0 {
+            aimed = 0
+            client?.pointerOn(0)
+        }
+    }
+
+    /// Pointer and touch events after this are on that display (0 the first, 1 the second).
+    /// Said to the computer only when it changes.
+    func aim(_ index: UInt8) {
+        guard index != aimed, let c = input else { return }
+        aimed = index
+        c.pointerOn(index)
+    }
+
+    private func stream2Started(_ info: StreamInfo) {
+        let d = VideoDecoder(
+            info: info,
+            onFrame: { [weak self] f in
+                self?.renderer2?.submit(
+                    VideoRenderer.Frame(pixelBuffer: f.pixelBuffer, number: f.number, ageUs: f.ageUs, receivedNs: f.receivedNs))
+            },
+            // A picture that can't be decoded: ask for a whole one.
+            onError: { [weak self] _ in self?.client?.send(["t": "display_keyframe", "index": 1]) })
+        pipeLock.lock()
+        let old = decoder2
+        decoder2 = d
+        pipeLock.unlock()
+        old?.invalidate()
+    }
+
+    private func frame2(_ data: UnsafeRawBufferPointer, key: Bool, number: UInt32, captureUs: UInt64, ageUs: Int64) {
+        pipeLock.lock()
+        defer { pipeLock.unlock() }
+        // A frame or two can still arrive just after the display was given back.
+        guard let decoder2 else { return }
+        do { try decoder2.decode(data, key: key, number: number, captureUs: captureUs, ageUs: ageUs) } catch {
+            client?.send(["t": "display_keyframe", "index": 1])
+        }
+    }
     /// The display link's real rate, measured while the connect form is showing.
     let refreshMeter = RefreshMeter()
     private(set) var client: CoreClient?
@@ -380,6 +449,16 @@ final class ViewerSession: ObservableObject {
             DispatchQueue.main.async { self.camera?.keyframe() }
         case "file_result":
             sharing.fileResult(m)
+        case "display":
+            // The computer couldn't make the second display, or took it away.
+            if (m["index"] as? NSNumber)?.intValue == 1, m["on"] as? Bool == false {
+                let why = m["message"] as? String
+                DispatchQueue.main.async {
+                    guard self.generation == gen else { return }
+                    self.endSecond()
+                    self.notice = why.map { "The second display ended: \($0)" } ?? "The second display ended."
+                }
+            }
         default:
             break
         }
@@ -497,6 +576,10 @@ final class ViewerSession: ObservableObject {
                         sharing.blob(what: what, id: id, kind: kind, header: header, data: data, complete: complete)
                     }
                     c.onStream = { [weak self] info in self?.streamStarted(info) }
+                    c.onStream2 = { [weak self] info in self?.stream2Started(info) }
+                    c.onFrame2 = { [weak self] data, flags, number, captureUs, ageUs in
+                        self?.frame2(data, key: flags & 1 != 0, number: number, captureUs: captureUs, ageUs: ageUs)
+                    }
                     c.onFrame = { [weak self] data, flags, number, captureUs, ageUs in
                         self?.frame(
                             data, key: flags & 1 != 0, recovery: flags & 2 != 0, number: number, captureUs: captureUs,
@@ -665,6 +748,15 @@ final class ViewerSession: ObservableObject {
         pipeLock.unlock()
         d?.invalidate()
         renderer?.clear()
+        pipeLock.lock()
+        let d2 = decoder2
+        decoder2 = nil
+        pipeLock.unlock()
+        d2?.invalidate()
+        renderer2?.clear()
+        secondOn = false
+        secondDisplay = nil
+        aimed = 0
         soundSetup.async { [sound] in sound.stop() }
         mic?.stop()
         mic = nil
