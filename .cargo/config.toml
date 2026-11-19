@@ -1,0 +1,5 @@
+# Windows programs carry the C runtime inside them (the static CRT), so neither the viewer's
+# engine DLL nor the host needs VCRUNTIME140.dll, which a clean Windows does not have and the
+# Store's checks would miss. Only the Universal CRT that Windows 10 and 11 have is used.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

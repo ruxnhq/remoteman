@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 
@@ -49,7 +50,11 @@ public static unsafe partial class Engine
     }
 
     /// `{"do": WHAT, ...}`: what people did, for the engine to decide.
-    public static bool Do(string what, object? with = null)
+    public static bool Do(string what) => Do<object>(what, null);
+
+    // Generic, with the properties kept, so that trimming .NET (the MSIX build) keeps the
+    // properties of the anonymous objects passed here.
+    public static bool Do<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)] T>(string what, T? with) where T : class
     {
         var o = with is null ? new JsonObject() : JsonSerializerHelper.ToObject(with);
         o["do"] = what;
@@ -70,10 +75,10 @@ public static unsafe partial class Engine
 
 static class JsonSerializerHelper
 {
-    public static JsonObject ToObject(object o)
+    public static JsonObject ToObject<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)] T>(T o) where T : class
     {
         var result = new JsonObject();
-        foreach (var p in o.GetType().GetProperties())
+        foreach (var p in typeof(T).GetProperties())
         {
             var v = p.GetValue(o);
             result[p.Name] = v switch

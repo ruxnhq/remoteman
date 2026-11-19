@@ -42,13 +42,30 @@
     <GenerateAppInstallerFile>false</GenerateAppInstallerFile>
     <AppxBundle>Never</AppxBundle>
     <AppxPackageDir>$(MSBuildProjectDirectory)\bin\AppPackages\</AppxPackageDir>
+    <AppxPackageTestDir>$(AppxPackageDir)</AppxPackageTestDir>
+    <!-- .NET is inside the package (self-contained), trimmed: only the assemblies that say
+         they are safe to trim (.NET's own, the WinRT projections) are cut down. -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
   </PropertyGroup>
   <ItemGroup Condition="'$(Packaged)' == 'true'">
     <AppxManifest Include="Package.appxmanifest" />
     <Content Include="Assets\*.png" CopyToOutputDirectory="PreserveNewest" />
+    <!-- WinUI's projection is kept whole: trimmed, the window's own SystemBackdrop
+         (StayingMica, a subclass of a WinUI type) fails to load ("Failed to assign to property
+         'Microsoft.UI.Xaml.Window.SystemBackdrop'") and the app closes at once. -->
+    <TrimmerRootAssembly Include="Microsoft.WinUI" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.7.0" />
+    <!-- The Windows App SDK's parts the viewer uses, not the whole Microsoft.WindowsAppSDK:
+         that one also brings its AI, ML (ONNX Runtime and DirectML, 42 MB), Widgets and Search
+         parts into the app. -->
+    <PackageReference Include="Microsoft.WindowsAppSDK.Base" Version="[2.7.0]" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Foundation" Version="2.7.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.7.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.WinUI" Version="2.7.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.DWrite" Version="2.7.0" />
+    <PackageReference Include="Microsoft.WindowsAppSDK.Runtime" Version="[2.7.0]" />
   </ItemGroup>
   <ItemGroup>
     <!-- The engine and FFmpeg's DLLs, put beside the program by build.ps1. -->
