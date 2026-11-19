@@ -411,6 +411,9 @@ impl Client {
             let mut second = Reassembler::of(remoteman_proto::video::KIND_VIDEO2);
             let (mut started2, mut need_key2, mut asked2) = (false, true, None::<Instant>);
             let mut early = std::collections::VecDeque::new();
+            // The same for the second display's picture, whose first frame is as likely to
+            // be its only one.
+            let mut early2 = std::collections::VecDeque::new();
             let mut replay = std::collections::VecDeque::new();
             let reason = loop {
                 // Kept datagrams go first, in the order they came.
@@ -432,6 +435,7 @@ impl Client {
                             second.reset(info.epoch);
                             (started2, need_key2, asked2) = (true, true, None);
                             handler.stream2(&info);
+                            replay.extend(early2.drain(..));
                             continue;
                         }
                         FromHost::Cursor(shape) => {
@@ -464,6 +468,14 @@ impl Client {
                                 early.pop_front();
                             }
                             early.push_back(d);
+                            continue;
+                        }
+                        let ahead2 = d.first() == Some(&remoteman_proto::video::KIND_VIDEO2) && (!started2 || d.get(2..4).is_some_and(|e| { let e = u16::from_le_bytes([e[0], e[1]]); e != second.epoch() && e.wrapping_sub(second.epoch()) < 0x8000 }));
+                        if ahead2 {
+                            if early2.len() >= 4096 {
+                                early2.pop_front();
+                            }
+                            early2.push_back(d);
                             continue;
                         }
                         if !started {

@@ -769,7 +769,9 @@ impl Agent {
         if let Some(mode) = mode {
             link.restart(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into() });
         }
-        if let Err(e) = self.start(name.clone(), screen, decoders, cursor, ceiling, link.clone()) {
+        // (Not `start`, which locks a computer that was unlocked for a device left with no
+        // picture: this device is still here, and gets the picture it had back.)
+        if let Err(e) = self.start_picture(name.clone(), screen, decoders, cursor, ceiling, link.clone()) {
             // Back to what worked, rather than leave the client with nothing.
             tracing::warn!("couldn't start that picture ({e}); going back to the one before");
             let refresh = was_screen.refresh.clamp(1, 240);
@@ -830,7 +832,7 @@ impl Agent {
             BlobEvent::Close { id, complete } => {
                 let Some(f) = l.files.remove(id) else { return };
                 let whole = *complete && f.got == f.size;
-                let result = if whole { f.file.sync_all().and_then(|()| std::fs::rename(&f.part, &f.done)).map_err(|e| e.to_string()) } else { Err("it didn't arrive whole".to_owned()) };
+                let result = if whole { f.file.sync_all().and_then(|()| remoteman_core::receive::settle(&f.part, &f.done)).map_err(|e| e.to_string()) } else { Err("it didn't arrive whole".to_owned()) };
                 match result {
                     Ok(()) => {
                         tracing::info!(file = %f.done.display(), bytes = f.got, "a file from the device");

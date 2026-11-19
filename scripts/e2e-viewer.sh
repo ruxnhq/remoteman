@@ -6,6 +6,7 @@
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
 export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT="${RM_PORT:-7798}"
 export RM_VIEWER_ARGS="${*:---quit-after 10}"
+rm -f "$RM_LOGS/rc"
 # The viewer's own screen.
 dbus-run-session -- mutter --headless --wayland --no-x11 --wayland-display rm-view --virtual-monitor 2752x2064@120 >"$RM_LOGS/mutter-view.log" 2>&1 &
 vpid=$!
@@ -21,6 +22,8 @@ dbus-run-session -- sh -c '
   cpid=$!
   env -u DISPLAY WAYLAND_DISPLAY=rm-view GDK_BACKEND=wayland "$bin/remoteman" 127.0.0.1:$RM_PORT --pair --state "$RM_LOGS/state" --size 2752x2064 --scale 2 --refresh 120 $RM_VIEWER_ARGS 2>"$RM_LOGS/viewer.err"
   rc=$?
+  # (The status of this shell is lost behind the filter below: kept here for the script.)
+  echo $rc > "$RM_LOGS/rc"
   sleep 0.5
   kill $cpid $apid 2>/dev/null; sleep 0.5; kill $mpid 2>/dev/null
   wait 2>/dev/null
@@ -29,3 +32,5 @@ dbus-run-session -- sh -c '
 # End the viewer's compositor (a child of that dbus-run-session), then the session itself.
 pkill -P $vpid 2>/dev/null; kill $vpid 2>/dev/null; wait $vpid 2>/dev/null
 echo "logs: $RM_LOGS"
+# The test client's or the viewer's own verdict is this script's.
+exit "$(cat "$RM_LOGS/rc" 2>/dev/null || echo 1)"
