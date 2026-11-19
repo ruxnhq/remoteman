@@ -26,6 +26,8 @@ pub struct Painter {
     /// The paths of each icon, made once.
     paths: HashMap<(Icon, usize), ID2D1PathGeometry>,
     logo: Option<ID2D1PathGeometry>,
+    /// The other computer's pointer as Direct2D holds it, by which image it was made from.
+    pointer: Option<(usize, ID2D1Bitmap)>,
 }
 
 fn color(c: Color) -> D2D1_COLOR_F {
@@ -57,7 +59,7 @@ impl Painter {
             let brush = dc.CreateSolidColorBrush(&color(Color::WHITE), None)?;
             let style = D2D1_STROKE_STYLE_PROPERTIES { startCap: D2D1_CAP_STYLE_ROUND, endCap: D2D1_CAP_STYLE_ROUND, dashCap: D2D1_CAP_STYLE_ROUND, lineJoin: D2D1_LINE_JOIN_ROUND, miterLimit: 10.0, dashStyle: D2D1_DASH_STYLE_SOLID, dashOffset: 0.0 };
             let round = std::ops::Deref::deref(&factory).CreateStrokeStyle(&style, None)?;
-            Ok(Self { factory, dc, brush, round, fonts: Fonts::new()?, paths: HashMap::new(), logo: None })
+            Ok(Self { factory, dc, brush, round, fonts: Fonts::new()?, paths: HashMap::new(), logo: None, pointer: None })
         }
     }
 
@@ -236,6 +238,19 @@ impl Painter {
                             if sheet.w > 0.0 && sheet.h > 0.0 {
                                 self.dc.FillRoundedRectangle(&rounded(sheet, (radius + grow).max(1.0)), &self.brush);
                             }
+                        }
+                    }
+                    Op::Pointer { image, r } => {
+                        let key = std::sync::Arc::as_ptr(image) as usize;
+                        if self.pointer.as_ref().is_none_or(|p| p.0 != key) {
+                            // Premultiplied RGBA as it came; Direct2D wants the blue first.
+                            let bgra: Vec<u8> = image.rgba.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], p[3]]).collect();
+                            let properties = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0 };
+                            let made = std::ops::Deref::deref(&self.dc).CreateBitmap(D2D_SIZE_U { width: image.width, height: image.height }, Some(bgra.as_ptr() as *const _), image.width * 4, &properties);
+                            self.pointer = made.ok().map(|b| (key, b));
+                        }
+                        if let Some((_, bitmap)) = &self.pointer {
+                            std::ops::Deref::deref(&self.dc).DrawBitmap(bitmap, Some(&rect_f(*r)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
                         }
                     }
                     Op::Clip(r) => {

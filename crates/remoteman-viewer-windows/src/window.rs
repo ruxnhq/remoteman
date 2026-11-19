@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use remoteman_core::{Button, Event};
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BLACK_BRUSH, DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW, GetStockObject, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow, ScreenToClient};
-use windows::Win32::System::DataExchange::{AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData};
+use windows::Win32::System::DataExchange::{AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
@@ -86,6 +86,10 @@ struct Win {
     second: RefCell<Option<(isize, std::thread::JoinHandle<()>, std::sync::Arc<crate::stream::Shared>)>>,
     /// Which display of the session the pointer was last on (0: this window's).
     pointer_on: Cell<u8>,
+    /// The pointer is held in the window and its raw movement is sent.
+    captured: Cell<bool>,
+    /// The clipboard's count of changes when this program last put a picture there itself.
+    own_copy: Cell<u32>,
 }
 
 thread_local! {
@@ -175,6 +179,114 @@ pub fn clipboard_set(text: &str) {
     }
 }
 
+/// The picture on this PC's clipboard as a PNG, if it holds one: as a program put it there
+/// under the name "PNG", or made from the plain bitmap every program gives.
+pub fn clipboard_get_picture() -> Option<Vec<u8>> {
+    use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
+    const CF_DIB: u32 = 8;
+    let hwnd = win().map(|w| w.hwnd.get()).unwrap_or(0);
+    // SAFETY: the clipboard is opened and closed here; each block is read within its size.
+    unsafe {
+        OpenClipboard(Some(HWND(hwnd as *mut _))).ok()?;
+        let read = |format: u32| -> Option<Vec<u8>> {
+            let global = HGLOBAL(GetClipboardData(format).ok()?.0);
+            let at = GlobalLock(global) as *const u8;
+            if at.is_null() {
+                return None;
+            }
+            let bytes = std::slice::from_raw_parts(at, GlobalSize(global)).to_vec();
+            let _ = GlobalUnlock(global);
+            Some(bytes)
+        };
+        let png = read(RegisterClipboardFormatW(w!("PNG"))).filter(|b| b.starts_with(&[0x89, b'P', b'N', b'G']));
+        let dib = if png.is_none() { read(CF_DIB) } else { None };
+        let _ = CloseClipboard();
+        if png.is_some() {
+            return png;
+        }
+        // A plain bitmap: its header, then rows from the bottom up, blue first.
+        let dib = dib?;
+        if dib.len() < size_of::<BITMAPINFOHEADER>() {
+            return None;
+        }
+        let head = std::ptr::read_unaligned(dib.as_ptr() as *const BITMAPINFOHEADER);
+        let (w, h, bits) = (head.biWidth as usize, head.biHeight.unsigned_abs() as usize, head.biBitCount as usize);
+        // Plain colours only (or the three masks some programs put after the header).
+        if w == 0 || h == 0 || !(bits == 24 || bits == 32) || !(head.biCompression == 0 || head.biCompression == 3) {
+            return None;
+        }
+        let start = head.biSize as usize + if head.biCompression == 3 && head.biSize == 40 { 12 } else { 0 };
+        let stride = (w * bits / 8).div_ceil(4) * 4;
+        if dib.len() < start + stride * h {
+            return None;
+        }
+        let mut rgb = Vec::with_capacity(w * h * 3);
+        for y in 0..h {
+            let row = if head.biHeight > 0 { h - 1 - y } else { y };
+            let line = &dib[start + row * stride..];
+            for x in 0..w {
+                let p = &line[x * bits / 8..];
+                rgb.extend_from_slice(&[p[2], p[1], p[0]]);
+            }
+        }
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, w as u32, h as u32);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().ok()?.write_image_data(&rgb).ok()?;
+        Some(png)
+    }
+}
+
+/// Put a picture (a PNG) on this PC's clipboard: as it is, under the name programs look for,
+/// and as the plain bitmap every program takes.
+pub fn clipboard_set_picture(data: &[u8]) -> bool {
+    use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
+    const CF_DIB: u32 = 8;
+    let hwnd = win().map(|w| w.hwnd.get()).unwrap_or(0);
+    let decoder = png::Decoder::new(std::io::Cursor::new(data));
+    let Ok(mut reader) = decoder.read_info() else { return false };
+    let mut pixels = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+    let Ok(info) = reader.next_frame(&mut pixels) else { return false };
+    let (w, h) = (info.width as usize, info.height as usize);
+    let step = match (info.color_type, info.bit_depth) {
+        (png::ColorType::Rgba, png::BitDepth::Eight) => 4,
+        (png::ColorType::Rgb, png::BitDepth::Eight) => 3,
+        _ => return false,
+    };
+    let head = BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: w as i32, biHeight: h as i32, biPlanes: 1, biBitCount: 32, biSizeImage: (w * h * 4) as u32, ..Default::default() };
+    let mut dib = vec![0u8; size_of::<BITMAPINFOHEADER>() + w * h * 4];
+    // SAFETY: the header is written into room made for it.
+    unsafe { std::ptr::write_unaligned(dib.as_mut_ptr() as *mut BITMAPINFOHEADER, head) };
+    for y in 0..h {
+        let from = &pixels[(h - 1 - y) * info.line_size..];
+        let to = &mut dib[size_of::<BITMAPINFOHEADER>() + y * w * 4..];
+        for x in 0..w {
+            let p = &from[x * step..];
+            to[x * 4..x * 4 + 4].copy_from_slice(&[p[2], p[1], p[0], if step == 4 { p[3] } else { 255 }]);
+        }
+    }
+    // SAFETY: each block is allocated for its bytes, filled, and handed to the clipboard.
+    unsafe {
+        if OpenClipboard(Some(HWND(hwnd as *mut _))).is_err() {
+            return false;
+        }
+        let _ = EmptyClipboard();
+        for (format, bytes) in [(RegisterClipboardFormatW(w!("PNG")), data), (CF_DIB, &dib[..])] {
+            if let Ok(global) = GlobalAlloc(GMEM_MOVEABLE, bytes.len()) {
+                let at = GlobalLock(global) as *mut u8;
+                if !at.is_null() {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), at, bytes.len());
+                    let _ = GlobalUnlock(global);
+                    let _ = SetClipboardData(format, Some(HANDLE(global.0)));
+                }
+            }
+        }
+        let _ = CloseClipboard();
+    }
+    true
+}
+
 /// Ask for a file to send. `None`: nothing was chosen.
 fn pick_file(hwnd: HWND) -> Option<PathBuf> {
     let mut name = [0u16; 2048];
@@ -190,6 +302,25 @@ fn pick_file(hwnd: HWND) -> Option<PathBuf> {
     // SAFETY: the structure and the buffer it points at live through the call.
     let chosen = unsafe { GetOpenFileNameW(&mut ask) }.as_bool();
     chosen.then(|| PathBuf::from(String::from_utf16_lossy(&name[..name.iter().position(|c| *c == 0).unwrap_or(0)])))
+}
+
+/// Ask for a folder, with Windows' own dialog. `None`: none was chosen.
+fn pick_folder(hwnd: HWND) -> Option<PathBuf> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree};
+    use windows::Win32::UI::Shell::{FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH};
+    // SAFETY: COM calls on this thread, which says so first; the name Windows hands back is
+    // read to its end and freed.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+        let _ = dialog.SetTitle(w!("Save received files to"));
+        dialog.SetOptions(dialog.GetOptions().ok()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
+        dialog.Show(Some(hwnd)).ok()?;
+        let name = dialog.GetResult().ok()?.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+        let path = name.to_string().ok().map(PathBuf::from);
+        CoTaskMemFree(Some(name.0 as *const _));
+        path
+    }
 }
 
 /// The size in pixels and the refresh rate of the monitor the window is on.
@@ -262,6 +393,8 @@ pub fn create(mut app: App) -> Result<HWND> {
             follow_theme,
             second: RefCell::new(None),
             pointer_on: Cell::new(0),
+            captured: Cell::new(false),
+            own_copy: Cell::new(0),
         });
         WIN.with(|w| *w.borrow_mut() = Some(state.clone()));
         state.app.borrow().scene.hwnd.store(hwnd.0 as isize, Ordering::Relaxed);
@@ -429,6 +562,19 @@ impl Win {
                     }
                 }
                 Effect::SetClipboard(text) => clipboard_set(&text),
+                Effect::SetClipboardPicture(png) => {
+                    if clipboard_set_picture(&png) {
+                        // What this put there is not this PC's own copy: not to be sent back.
+                        self.own_copy.set(GetClipboardSequenceNumber());
+                    } else {
+                        say!("clipboard: the picture from the computer is of a kind that isn't put on this clipboard");
+                    }
+                }
+                Effect::PickFolder => {
+                    if let Some(folder) = pick_folder(hwnd) {
+                        self.event(|app| app.set_folder(&folder));
+                    }
+                }
                 Effect::OpenSecond(title) => {
                     self.close_second();
                     let shared = self.ask(|app| app.session.as_ref().and_then(|s| s.shared.second.clone())).flatten();
@@ -441,11 +587,7 @@ impl Win {
                     }
                 }
                 Effect::CloseSecond => self.close_second(),
-                Effect::ReadClipboard => {
-                    if let Some(text) = clipboard_get() {
-                        self.event(|app| app.copied_here(text));
-                    }
-                }
+                Effect::ReadClipboard => self.copied(),
             }
         }
     }
@@ -480,6 +622,25 @@ impl Win {
         self.resync(hwnd);
     }
 
+    /// This PC's clipboard changed (or sharing has just begun): text if it holds any, else a
+    /// picture, goes to the computer.
+    fn copied(&self) {
+        // SAFETY: a plain query.
+        if unsafe { GetClipboardSequenceNumber() } == self.own_copy.get() {
+            return;
+        }
+        match clipboard_get().filter(|t| !t.is_empty()) {
+            Some(text) => {
+                self.event(|app| app.copied_here(text));
+            }
+            None => {
+                if let Some(png) = clipboard_get_picture() {
+                    self.event(|app| app.copied_picture(png));
+                }
+            }
+        }
+    }
+
     /// Take the second display's window away, and its draw thread with it.
     fn close_second(&self) {
         let Some((hwnd, drawing, shared)) = self.second.borrow_mut().take() else { return };
@@ -492,6 +653,35 @@ impl Win {
             let _ = DestroyWindow(HWND(hwnd as *mut _));
         }
         self.point_at(0);
+    }
+
+    /// Hold the pointer in the picture and have Windows report its raw movement, or let it go.
+    fn hold_pointer(&self, hold: bool) {
+        use windows::Win32::UI::Input::{RAWINPUTDEVICE, RIDEV_REMOVE, RAWINPUTDEVICE_FLAGS, RegisterRawInputDevices};
+        if self.captured.replace(hold) == hold {
+            return;
+        }
+        let hwnd = self.hwnd();
+        // SAFETY: structures that live through each call; the rectangle is our own client area.
+        unsafe {
+            // The mouse, as a generic desktop device.
+            let device = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: if hold { RAWINPUTDEVICE_FLAGS(0) } else { RIDEV_REMOVE }, hwndTarget: if hold { hwnd } else { HWND::default() } };
+            let _ = RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32);
+            if hold {
+                let area = self.ask(|app| app.video_pixels()).flatten().unwrap_or((0, 0, 1, 1));
+                let mut at = POINT { x: area.0, y: area.1 };
+                let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut at);
+                let _ = ClipCursor(Some(&RECT { left: at.x, top: at.y, right: at.x + area.2, bottom: at.y + area.3 }));
+                SetCursor(None);
+            } else {
+                let _ = ClipCursor(None);
+            }
+        }
+        say!("pointer: {}", if hold { "captured: its raw movement goes to the computer" } else { "let go" });
+        self.event(|app| {
+            app.captured = hold;
+            app.dirty = true;
+        });
     }
 
     /// The pointer is on this display of the session from here on (0: the first window's).
@@ -610,6 +800,11 @@ impl Win {
             } else {
                 say!("cursor: wearing the host's ({}x{}, hot spot {},{})", shape.width, shape.height, shape.hot_x, shape.hot_y);
             }
+            let image = (shape.width > 0).then(|| std::sync::Arc::new(shape));
+            self.event(|app| {
+                app.remote_cursor = image;
+                app.dirty |= app.captured;
+            });
             let old = self.cursor.replace(made);
             self.got_shape.set(true);
             self.set_cursor();
@@ -625,6 +820,10 @@ impl Win {
     }
 
     fn wanted_cursor(&self) -> Option<HCURSOR> {
+        if self.captured.get() {
+            // The computer's own is drawn over the picture instead.
+            return None;
+        }
         let (x, y) = self.mouse.get();
         let scale = self.scale();
         let pointer = self.ask(|app| (app.pointer(x as f32 / scale, y as f32 / scale), app.session.as_ref().is_some_and(|s| s.shared.cursor_gone.load(Ordering::Relaxed))));
@@ -666,6 +865,10 @@ impl Win {
                 let _ = TrackMouseEvent(&mut track);
             }
         }
+        if self.captured.get() {
+            // Its movement comes as raw input, and the interface is out of its reach.
+            return;
+        }
         let scale = self.scale();
         let taken = self.event(|app| app.mouse_move(x as f32 / scale, y as f32 / scale)).unwrap_or(true);
         // A button held on the picture keeps the pointer the other computer's, wherever it goes.
@@ -681,6 +884,11 @@ impl Win {
         let hwnd = self.hwnd();
         // SAFETY: focus and capture for our own window.
         unsafe {
+            if self.captured.get() {
+                self.send(Event::Button { button, down });
+                self.buttons.set(if down { self.buttons.get() | bit } else { self.buttons.get() & !bit });
+                return;
+            }
             if down {
                 let _ = SetFocus(Some(hwnd));
                 let taken = if self.buttons.get() != 0 {
@@ -733,6 +941,12 @@ impl Win {
             app.poll();
             app.tick();
         });
+        // A captured pointer: while the picture has this PC's attention and nothing of the
+        // app's own is open over it, and Ctrl+Alt+Shift hasn't given it back.
+        // SAFETY: a plain query.
+        let front = unsafe { GetForegroundWindow() } == self.hwnd();
+        let want = front && !self.released.get() && self.ask(|app| app.forwarding() && app.store.settings.capture).unwrap_or(false);
+        self.hold_pointer(want);
         if self.deadline.get().is_some_and(|d| Instant::now() >= d) {
             self.deadline.set(None);
             self.event(|app| app.time_up());
@@ -980,6 +1194,22 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 let (x, y) = point(l);
                 win.moved(x, y, true);
             }
+            // A captured pointer's raw movement.
+            WM_INPUT => {
+                use windows::Win32::UI::Input::{GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RID_INPUT, RIM_TYPEMOUSE};
+                let mut input = RAWINPUT::default();
+                let mut size = size_of::<RAWINPUT>() as u32;
+                let got = GetRawInputData(HRAWINPUT(l.0 as *mut _), RID_INPUT, Some(&mut input as *mut _ as *mut _), &mut size, size_of::<RAWINPUTHEADER>() as u32);
+                if win.captured.get() && got != u32::MAX && input.header.dwType == RIM_TYPEMOUSE.0 {
+                    let mouse = input.data.mouse;
+                    // (Bit 0 set: a device that says where it is, not how far it moved.)
+                    if mouse.usFlags.0 & 1 == 0 && (mouse.lLastX != 0 || mouse.lLastY != 0) {
+                        win.point_at(0);
+                        win.send(Event::PointerBy { dx: mouse.lLastX as f32, dy: mouse.lLastY as f32 });
+                    }
+                }
+                return pass();
+            }
             WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => win.button(Button::Left, 1, true, l),
             WM_LBUTTONUP => win.button(Button::Left, 1, false, l),
             WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => win.button(Button::Right, 2, true, l),
@@ -1042,6 +1272,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 }
             }
             WM_KILLFOCUS => {
+                win.hold_pointer(false);
                 win.release_keys();
                 win.event(|app| app.blur());
             }
@@ -1074,9 +1305,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             WM_CLIPBOARDUPDATE => {
                 // Only looked at while a session shares it.
                 if win.ask(|app| app.session.as_ref().is_some_and(|s| s.clipboard_on)).unwrap_or(false) {
-                    if let Some(text) = clipboard_get() {
-                        win.event(|app| app.copied_here(text));
-                    }
+                    win.copied();
                 }
             }
             // The draw thread paints all of it.

@@ -41,6 +41,8 @@ mod app;
 #[cfg(windows)]
 mod args;
 #[cfg(windows)]
+mod creds;
+#[cfg(windows)]
 mod cursor;
 #[cfg(windows)]
 mod decode;

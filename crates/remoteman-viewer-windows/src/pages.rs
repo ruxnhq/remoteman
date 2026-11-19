@@ -341,7 +341,7 @@ fn trouble(app: &App, ui: &mut Ui, target: &Target, problem: &Problem) {
         }
         Problem::Locked(said) => {
             if app.retry_at.is_some() {
-                return status(ui, area, Sign::Ring, &format!("Unlocking {name}"), "With the password that was given.", None, &[back]);
+                return status(ui, area, Sign::Ring, &format!("Unlocking {name}"), "With the password kept on this PC, or the one just given.", None, &[back]);
             }
             // The password goes to the computer with the next try and is kept nowhere.
             let t = ui.t;
@@ -349,7 +349,7 @@ fn trouble(app: &App, ui: &mut Ui, target: &Target, problem: &Problem) {
             let title = format!("{name} is locked");
             let title_w = (area.w - 48.0).min(560.0);
             let (title_h, words_h) = (ui.fonts.height(&title, Font::Subtitle, title_w), ui.fonts.height(&words, Font::Caption, 300.0));
-            let total = 40.0 + 10.0 + title_h + 10.0 + words_h + 18.0 + 32.0 + 12.0 + 32.0;
+            let total = 40.0 + 10.0 + title_h + 10.0 + words_h + 18.0 + 32.0 + 12.0 + 20.0 + 16.0 + 32.0;
             let cx = area.x + (area.w / 2.0).round();
             let mut y = area.y + ((area.h - total) / 2.0).round().max(8.0);
             ui.ops.push(Op::Icon { icon: Icon::Lock, x: cx - 20.0, y, size: 40.0, color: t.t2, stroke: 1.1 });
@@ -362,6 +362,12 @@ fn trouble(app: &App, ui: &mut Ui, target: &Target, problem: &Problem) {
                 ui.secret(id("locked.password"), rect(cx - 140.0, y, 280.0, 32.0), field, ON);
             }
             y += 44.0;
+            // Kept only if asked, and only if it works: in Windows' Credential Manager.
+            let label_w = ui.fonts.width("Remember it on this PC", Font::Body);
+            let x = cx - ((40.0 + 10.0 + label_w) / 2.0).round();
+            ui.toggle(id("locked.remember"), x, y, app.remember, "Kept in Windows' Credential Manager, which your sign-in protects", Msg::ToggleRemember, ON);
+            ui.label(x + 50.0, y, "Remember it on this PC", Font::Body, t.tx);
+            y += 36.0;
             let (unlock, back_w) = (ui.button_width("Unlock", Look::Accent, false), ui.button_width("Back", Look::Plain, false));
             let x = cx - ((unlock + 8.0 + back_w) / 2.0).round();
             ui.button(id("locked.unlock"), rect(x, y, unlock, 32.0), "Unlock", Look::Accent, None, Msg::Unlock, ON);
@@ -531,7 +537,7 @@ fn settings(app: &App, ui: &mut Ui) {
         room,
         "Pointer and touch",
         &[
-            row("set.pointer", "Pointer", "Captured sends raw movement, which games and 3D apps need", fixed("Follows this pointer"), gate(FEATURES.pointer_capture)),
+            row("set.pointer", "Pointer", "Captured sends raw movement, which games and 3D apps need. Ctrl+Alt+Shift lets it go", chosen(app, Choice::Pointer), gate(FEATURES.pointer_capture)),
             row("set.scroll", "Scroll direction", "", chosen(app, Choice::Scroll), gate(FEATURES.scroll_direction)),
             row("set.touch", "Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", Ctl::Toggle(false, None), gate(FEATURES.touch)),
         ],
@@ -558,7 +564,7 @@ fn settings(app: &App, ui: &mut Ui) {
         "Sharing",
         &[
             row("set.clipboard", "Share the clipboard", "Text copied on either side can be pasted on the other. For computers paired from now on", Ctl::Toggle(s.clipboard, Some(Msg::Toggle(Flag::Clipboard, None))), gate(FEATURES.clipboard)),
-            row("set.folder", "Save received files to", &app.store.receive_folder().display().to_string(), Ctl::Button("Change…", Look::Plain, None), gate(FEATURES.folder_choice)),
+            row("set.folder", "Save received files to", &app.store.receive_folder().display().to_string(), Ctl::Button("Change…", Look::Plain, Some(Msg::PickFolder)), gate(FEATURES.folder_choice)),
         ],
     );
     let version = format!("remoteman {} · ", env!("CARGO_PKG_VERSION"));
@@ -629,6 +635,7 @@ fn computer(app: &App, ui: &mut Ui, address: &str) {
         &[
             row("computer.placement", "Where this display sits", sits, chosen(app, Choice::Placement(a())), ON),
             row("computer.size", "Picture size", size, chosen(app, Choice::Size(a())), gate(FEATURES.follow_window)),
+            row("computer.side", "A second display goes", "Where the computer puts a second display you add, among its other displays", chosen(app, Choice::Side(a())), gate(FEATURES.second_display)),
             row("computer.quality", "Picture quality", "", chosen(app, Choice::Quality(a())), ON),
             row("computer.bitrate", "Bitrate limit", "", chosen(app, Choice::Bitrate(a())), ON),
         ],
