@@ -1,8 +1,9 @@
 #!/bin/sh
 # The viewer remembering a locked computer's password, with nothing real involved: a host told
 # to behave as if locked (REMOTEMAN_TEST_LOCKED_PASSWORD), and the viewer on a bus of its own
-# with a keyring of its own (a GNOME Keyring started for the test in a throwaway home: the
-# real keyring is on another bus and is never touched). The password is typed once and kept;
+# with a keyring of its own (a GNOME Keyring started for the test in a throwaway home and a
+# throwaway runtime folder: the real keyring is on another bus, its control socket is in
+# another folder, and it is never touched). The password is typed once and kept;
 # the next time the viewer is asked, it answers by itself.
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
 export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT="${RM_PORT:-7796}"
@@ -12,7 +13,8 @@ import socket, sys
 s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall((sys.argv[2] + "\n").encode()); s.shutdown(socket.SHUT_WR)
 print(s.recv(65536).decode().strip())
 PY
-mkdir -p "$RM_LOGS/home"
+mkdir -p "$RM_LOGS/home" "$RM_LOGS/run"
+chmod 700 "$RM_LOGS/run"
 dbus-run-session -- sh -c '
   bin="${RM_BIN:-$RM_ROOT/target/release}"
   mutter --headless --wayland --no-x11 --wayland-display rm-e2e >"$RM_LOGS/mutter.log" 2>&1 &
@@ -26,12 +28,15 @@ sleep 4
 tell() { python3 -I "$RM_LOGS/tell.py" "$RM_LOGS/host.sock" "$1" >/dev/null; }
 # The viewer pairs while the computer lets paired devices in by their key; then it asks.
 tell "allow unlock key"
-HOME="$RM_LOGS/home" XDG_DATA_HOME="$RM_LOGS/home/data" XDG_CONFIG_HOME="$RM_LOGS/home/config" XDG_CACHE_HOME="$RM_LOGS/home/cache" dbus-run-session -- sh -c '
+# (A runtime folder of its own: GNOME Keyring's control socket lives there, and with the
+# real one in reach `--unlock` would be handed to the user's own keyring.)
+HOME="$RM_LOGS/home" XDG_RUNTIME_DIR="$RM_LOGS/run" XDG_DATA_HOME="$RM_LOGS/home/data" XDG_CONFIG_HOME="$RM_LOGS/home/config" XDG_CACHE_HOME="$RM_LOGS/home/cache" dbus-run-session -- sh -c '
   bin="${RM_BIN:-$RM_ROOT/target/release}"
   # A keyring of the test own, unlocked with a password of the test own.
-  printf "test" | gnome-keyring-daemon --unlock --components=secrets >/dev/null 2>&1
-  # (It stays running; the newest process of that name is it. It is stopped by that number.)
-  kpid=$(pgrep -n -x gnome-keyring-d)
+  # (Kept in the foreground, so the number it is stopped by is its own.)
+  printf "test" | gnome-keyring-daemon --foreground --unlock --components=secrets >/dev/null 2>&1 &
+  kpid=$!
+  sleep 1
   mutter --headless --wayland --no-x11 --wayland-display rm-view --virtual-monitor 1920x1080@60 >"$RM_LOGS/mutter-view.log" 2>&1 &
   vpid=$!
   sleep 2
