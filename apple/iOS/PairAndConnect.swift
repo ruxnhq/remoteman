@@ -10,6 +10,8 @@ struct PairSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var address = ""
     @State private var name = ""
+    @State private var scanning = false
+    @State private var scanNote: String?
     private var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
 
     private var trimmed: String { address.trimmingCharacters(in: .whitespaces) }
@@ -27,16 +29,31 @@ struct PairSheet: View {
 
             ZStack {
                 RoundedRectangle(cornerRadius: 28, style: .continuous).fill(Color(hex: 0x17181B))
-                VStack(spacing: 10) {
-                    Image(systemName: "qrcode.viewfinder").font(.system(size: 56, weight: .ultraLight)).foregroundStyle(.white.opacity(0.6))
-                    Text("Scanning the computer's code isn't available yet").font(Theme.subhead).foregroundStyle(.white.opacity(0.7))
+                if scanning {
+                    CodeScanner { link in scanned(link) }
+                        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                } else {
+                    Button {
+                        // The camera is asked for here, when the person wants to scan.
+                        CameraSender.allowed { ok in
+                            if ok { scanning = true } else { scanNote = "remoteman isn't allowed to use the camera. Allow it in Settings, under Privacy & Security." }
+                        }
+                    } label: {
+                        VStack(spacing: 10) {
+                            Image(systemName: "qrcode.viewfinder").font(.system(size: 56, weight: .ultraLight)).foregroundStyle(.white.opacity(0.8))
+                            Text(scanNote ?? "Scan the computer's code").font(Theme.subhead).foregroundStyle(.white.opacity(0.8))
+                                .multilineTextAlignment(.center).padding(.horizontal, 16)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
             .frame(maxWidth: .infinity).frame(height: 190)
             .available(Features.qrPairing)
 
             VStack(spacing: 8) {
-                Text("Add the computer by its address").font(Theme.title2).multilineTextAlignment(.center)
+                Text("Or add the computer by its address").font(Theme.title2).multilineTextAlignment(.center)
                 Text("On the computer, start remoteman with pairing on. The first connection from this \(device) pairs the two, and no code is needed after that.")
                     .font(Theme.body).foregroundStyle(Theme.secondary).multilineTextAlignment(.center)
             }
@@ -63,6 +80,18 @@ struct PairSheet: View {
         .background(Theme.bg.ignoresSafeArea())
         .presentationDetents([.large])
         .presentationCornerRadius(40)
+    }
+
+    /// A pairing code was read: the computer is added at its first address, expected to show
+    /// the key the code named, and connected to.
+    private func scanned(_ link: PairLink) {
+        scanning = false
+        Haptics.success()
+        var c = store.add(name: link.name, address: link.addresses[0])
+        c.expect = link.fingerprint
+        store.update(c)
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { model.connect(c) }
     }
 
     private func add() {

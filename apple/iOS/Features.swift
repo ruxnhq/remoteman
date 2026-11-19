@@ -5,8 +5,8 @@ enum Features {
     /// Computers on this network that aren't paired yet ("Nearby").
     static let discovery = true
     /// Pairing by scanning the computer's QR code, and by comparing six digits.
-    static let qrPairing = false
-    static let codePairing = false
+    static let qrPairing = true
+    static let codePairing = true
     /// Knowing whether a computer is online, asleep or out of reach before connecting.
     static let presence = true
     /// Waking a sleeping computer over the network.

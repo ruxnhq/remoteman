@@ -30,6 +30,8 @@ final class AppModel: ObservableObject {
     @Published var current: Computer?
     /// What this device asks for; set from the root view's size.
     var display = ViewerSession.Display(width: 1920, height: 1080, scale: 2, refresh: 60)
+    /// A computer added from a scanned code answered with another key.
+    @Published var scanMismatch: String?
     private var watching: Any?
     private var nearby: Any?
 
@@ -152,6 +154,17 @@ final class AppModel: ObservableObject {
             current = c
         }
         guard case .streaming = state, var c = current, let host = session.client?.host else { return }
+        // Added from a scanned code: any other computer answering at that address is turned away.
+        if let expect = c.expect, !expect.isEmpty {
+            guard host.fingerprint.lowercased() == expect else {
+                session.disconnect()
+                ViewerSession.forget(host: c.address)
+                scanMismatch = "\(c.name) at \(c.address) is not the computer whose code you scanned. Nothing was paired."
+                Haptics.failure()
+                return
+            }
+            c.expect = nil
+        }
         c.paired = true
         c.lastUsed = Date()
         if !host.os.isEmpty { c.os = host.os }
@@ -205,6 +218,11 @@ struct RootView: View {
         }
         .ignoresSafeArea(edges: session.isActive ? .all : [])
         .modifier(UnlockPrompt(unlocker: model.unlocker))
+        .alert("Not the computer you scanned", isPresented: Binding(get: { model.scanMismatch != nil }, set: { if !$0 { model.scanMismatch = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.scanMismatch ?? "")
+        }
         .statusBarHidden(session.isActive)
         .persistentSystemOverlays(session.isActive ? .hidden : .automatic)
     }

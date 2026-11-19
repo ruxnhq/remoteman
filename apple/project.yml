@@ -24,6 +24,7 @@ targetTemplates:
       - Host
       - Shared/HIDKeys.swift
       - Shared/Sharing.swift
+      - Shared/PairLink.swift
       # The design's colours and card pieces, shared with the viewer.
       - Mac/Kit.swift
       - Support/Assets.xcassets

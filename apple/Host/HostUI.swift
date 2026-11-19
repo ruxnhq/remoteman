@@ -1,5 +1,6 @@
 // The host's interface: the menu-bar panel, the Settings window, "Pair a Device" and the first
 // run. What the host can't do yet is drawn as designed and disabled (Features.swift).
+import CoreImage
 import SwiftUI
 
 private enum HostWording {
@@ -433,22 +434,22 @@ struct PairDevice: View {
             Text("In the app, tap the plus button and point the camera at this code.")
                 .font(.system(size: 13)).foregroundStyle(Tokens.l2).multilineTextAlignment(.center)
 
-            // The QR code isn't there yet: its tile is, empty.
-            RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white)
-                .frame(width: 232, height: 232)
-                .overlay {
-                    VStack(spacing: 8) {
-                        Image(systemName: "qrcode").font(.system(size: 72, weight: .light))
-                        Text("Pairing with a QR code isn't available yet").font(.system(size: 11)).multilineTextAlignment(.center)
-                    }
-                    .foregroundStyle(Color.black.opacity(0.3))
-                    .padding(16)
+            // The code: this Mac's name, where it is reached, and its key's fingerprint.
+            Group {
+                if let image = QRCode.image(controller.pairLink) {
+                    Image(nsImage: image).interpolation(.none).resizable().frame(width: 216, height: 216)
+                        .accessibilityLabel("Pairing code for this Mac")
+                } else {
+                    Image(systemName: "qrcode").font(.system(size: 72, weight: .light)).foregroundStyle(Color.black.opacity(0.3))
                 }
-                .opacity(Features.qrPairing ? 1 : 0.6)
+            }
+            .frame(width: 232, height: 232)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color.white))
+            .opacity(controller.sharing ? 1 : 0.4)
 
             Card {
                 VStack(spacing: 8) {
-                    Text("For now, on the other device add this Mac by its address and choose to pair on the first connection:")
+                    Text("Or, on the other device, add this Mac by its address and pair on the first connection:")
                         .font(.system(size: 13)).foregroundStyle(Tokens.l2).multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(controller.addressToEnter).font(.system(size: 17, weight: .semibold, design: .monospaced))
@@ -608,5 +609,19 @@ private struct UnattendedGroup: View {
                     .labelsHidden().toggleStyle(.switch).disabled(!controller.unattendedOn)
             }
         }
+    }
+}
+
+/// A QR code as a picture.
+enum QRCode {
+    static func image(_ text: String) -> NSImage? {
+        guard !text.isEmpty, let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(text.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let out = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)) else { return nil }
+        let rep = NSCIImageRep(ciImage: out)
+        let image = NSImage(size: rep.size)
+        image.addRepresentation(rep)
+        return image
     }
 }

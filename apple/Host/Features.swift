@@ -3,7 +3,7 @@
 // this one place when the engine has it.
 enum Features {
     /// The QR code in "Pair a Device", for iPad and iPhone.
-    static let qrPairing = false
+    static let qrPairing = true
     /// The 6-digit code in "Pair a Device", compared on both sides.
     static let codePairing = true
     /// The list of paired devices and "Revoke…" (the core keeps the list to itself so far).

@@ -535,6 +535,15 @@ final class HostController: ObservableObject {
     }
 
     /// What to type on the other device: this Mac's network name, with the port if it isn't 7791.
+    /// What the pairing code says (PairLink): this Mac's name, its addresses and its key.
+    var pairLink: String {
+        guard !fingerprint.isEmpty else { return "" }
+        let withPort = { (h: String) in self.port == "7791" || self.port.isEmpty ? h : "\(h):\(self.port)" }
+        // Addresses first (they work without name lookup), then the Mac's own name.
+        let list = addresses.map(withPort) + [withPort(ProcessInfo.processInfo.hostName)]
+        return PairLink(name: options.name, addresses: list, fingerprint: fingerprint).url
+    }
+
     var addressToEnter: String {
         let host = ProcessInfo.processInfo.hostName
         return port == "7791" ? host : "\(host):\(port)"

@@ -24,6 +24,8 @@ struct Computer: Codable, Identifiable, Equatable {
     var auth: String?
     /// nil any way in (a running session, or the computer's login screen); "attach" only a running session.
     var wayIn: String?
+    /// From a scanned pairing code: the key this computer must show on its first connection.
+    var expect: String?
 
     var osLine: String {
         switch os {

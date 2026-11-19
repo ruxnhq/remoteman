@@ -5,7 +5,7 @@ enum Features {
     /// Finding computers on the network: the sidebar's "Nearby" section.
     static let discovery = true
     /// Pairing by comparing a 6-digit code ("Codes Match").
-    static let codePairing = false
+    static let codePairing = true
     /// Online / asleep / not reachable, "last seen", and "What remoteman tried".
     static let reachability = true
     /// "Wake", "Wake and Connect", "Send Wake Signal", "Wake it over the network".
