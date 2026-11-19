@@ -93,9 +93,17 @@ impl Quality {
             Quality::Av1 => Some(Codec::Av1),
             _ => None,
         };
+        let full = |m: &Mode| m.chroma == remoteman_core::Chroma::C444;
+        if self == Quality::Sharp {
+            // Full colour detail first; the rest behind it in case the computer can't.
+            out.sort_by_key(|m| !full(m));
+            return out;
+        }
+        // Otherwise 4:4:4 only as the last resort: it costs bitrate and, here, the CPU.
+        out.sort_by_key(full);
         if let Some(codec) = first {
             // A stable sort: the others stay as they were.
-            out.sort_by_key(|m| m.codec != codec);
+            out.sort_by_key(|m| m.codec != codec || full(m));
         }
         out
     }

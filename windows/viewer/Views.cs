@@ -511,6 +511,9 @@ public sealed class SessionBar : UserControl
     readonly Button _share = Ui.Square("", "Clipboard and files", null);
     JsonObject _state = new();
     bool _quiet;
+    /// The part of the pill the window is moved by, and the window's own buttons.
+    public readonly Grid DragArea;
+    public readonly StackPanel WindowButtons;
 
     public SessionBar()
     {
@@ -525,15 +528,24 @@ public sealed class SessionBar : UserControl
         more.Flyout = Ui.Lazy(MoreMenu);
         var full = Ui.Square("", "Full screen (F11)", () => Engine.Do("fullscreen"));
         var off = Ui.Button("Disconnect", () => Engine.Do("disconnect"), glyph: "");
+        // The words are where the window is dragged from; the buttons take clicks.
         var words = Ui.Row(10, _name, _format);
-        var tools = Ui.Row(4, off, keys, display, picture, _sound, _share, more, full);
-        var row = new Grid { ColumnSpacing = 12, Padding = new Thickness(4, 0, 8, 0) };
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        row.Children.Add(words);
-        Grid.SetColumn(tools, 1);
-        row.Children.Add(tools);
+        words.Padding = new Thickness(10, 0, 6, 0);
+        words.MaxWidth = 340;
+        DragArea = new Grid { Background = new SolidColorBrush(Colors.Transparent), Children = { words }, VerticalAlignment = VerticalAlignment.Stretch };
+        // The window's own buttons sit in the pill during a session: Windows' title bar is
+        // taken away then (MainWindow.SetSession), so they would otherwise be lost over the
+        // picture.
+        var min = Ui.Square("\uE921", "Minimise", () => App.Window?.WindowCommand("minimise"));
+        var max = Ui.Square("\uE922", "Maximise", () => App.Window?.WindowCommand("maximise"));
+        var close = Ui.Square("\uE8BB", "Close", () => App.Window?.WindowCommand("close"));
+        foreach (var b in new[] { min, max, close }) b.Background = new SolidColorBrush(Colors.Transparent);
+        WindowButtons = Ui.Row(0, min, max, close);
+        var tools = Ui.Row(4, off, keys, display, picture, _sound, _share, more, full, WindowButtons);
         tools.VerticalAlignment = VerticalAlignment.Center;
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        row.Children.Add(DragArea);
+        row.Children.Add(tools);
         Content = row;
     }
 
@@ -623,14 +635,15 @@ public sealed class SessionBar : UserControl
         var s = _state.O("session");
         var d = _state.O("decodes");
         string now = s.S("quality");
-        foreach (var (key, text, on) in new[] { ("automatic", "Automatic", true), ("sharp", "Sharp text (4:4:4)", _state.O("features").B("sharp_text")), ("hevc", "HEVC", d.B("hevc")), ("av1", "AV1", d.B("av1")) })
+        foreach (var (key, text, on) in new[] { ("automatic", "Automatic", true), ("sharp", "Sharp text (4:4:4)", _state.O("features").B("sharp_text") && d.B("hevc444")), ("hevc", "HEVC", d.B("hevc")), ("av1", "AV1", d.B("av1")) })
         {
             var r = new RadioMenuFlyoutItem { Text = text, GroupName = "quality", IsChecked = now == key, IsEnabled = on };
             r.Click += (_, _) => Engine.Do("pick", new { quality = key });
             m.Items.Add(r);
         }
         m.Items.Add(new MenuFlyoutSeparator());
-        int[] steps = { 5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 0 };
+        int[] steps = _state.A("bitrates").Select(x => (int)x!.GetValue<double>()).ToArray();
+        if (steps.Length == 0) return;
         int step = s.I("bitrate_step");
         string Limit(int i) => steps[i] == 0 ? "No limit" : $"Up to {steps[i]} Mb/s";
         var label = new TextBlock { Text = $"Bitrate limit: {Limit(step)}" };
@@ -706,7 +719,7 @@ public sealed class FiguresPanel : UserControl
             Background = new SolidColorBrush(Color.FromArgb(200, 20, 20, 20)),
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(12),
+            Margin = new Thickness(12, 60, 12, 12),
         };
         IsHitTestVisible = false;
     }

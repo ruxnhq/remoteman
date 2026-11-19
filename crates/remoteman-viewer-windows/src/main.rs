@@ -129,6 +129,14 @@ fn run() -> anyhow::Result<i32> {
         let on_card = if forced { Err(anyhow::anyhow!("REMOTEMAN_SOFTWARE=1")) } else { gpu.decodes(*mode) };
         match on_card {
             Ok(()) => decoders.push(*mode),
+            // 4:4:4 on the CPU leaves the codec's 4:2:0 where it was.
+            Err(e) if mode.chroma == remoteman_core::Chroma::C444 => match decode::can_software(mode.codec) {
+                Ok(()) => {
+                    say!("decoder {:?} 4:4:4: {e:#}; on the CPU", mode.codec);
+                    decoders.push(*mode);
+                }
+                Err(soft) => say!("decoder {:?} 4:4:4 left out: {e:#}; {soft:#}", mode.codec),
+            },
             Err(e) => match decode::use_software(mode.codec) {
                 Ok(()) => {
                     say!("decoder {:?}: not on this card ({e:#}); on the CPU instead", mode.codec);
@@ -141,7 +149,7 @@ fn run() -> anyhow::Result<i32> {
     // What the card decodes is offered first.
     decoders.sort_by_key(|m| decode::is_software(m.codec));
     // With none, the app still opens: the list, the settings and the reason are worth showing.
-    say!("decoders offered: {}", decoders.iter().map(|m| format!("{:?}", m.codec).to_lowercase()).collect::<Vec<_>>().join(", "));
+    say!("decoders offered: {}", decoders.iter().map(|m| format!("{:?}{}", m.codec, if m.chroma == remoteman_core::Chroma::C444 { "444" } else { "" }).to_lowercase()).collect::<Vec<_>>().join(", "));
     anyhow::ensure!(!decoders.is_empty() || args.host.is_none(), "this card decodes none of what was asked for");
 
     let scene = Arc::new(stream::Scene::default());

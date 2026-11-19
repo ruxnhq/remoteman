@@ -62,20 +62,42 @@ SamplerState smooth : register(s0);
 // and `last`, the last place to sample so that nothing beyond the edge is blended in.
 // `scale` turns a normalised sample into a code value at the picture's bit depth; `black`,
 // `yrange`, `mid` and `crange` are the code values of the range's ends.
+// `mode`: 0 BT.709 (SDR, as before); 1 BT.2020 with PQ, passed through to a swap chain that is
+// itself PQ BT.2020 (an HDR screen); 2 the same tone-mapped to SDR (a screen that isn't HDR).
+// `white` and `peak`: where the stream's SDR white and brightest sit, in nits.
 cbuffer Picture : register(b0) {
     float2 visible;
     float2 last;
     float scale, black, yrange, mid;
     float crange;
-    float3 unused;
+    float mode, white, peak;
 };
 
-// Limited-range BT.709, the same numbers as the Linux viewer.
+float3 pq_nits(float3 e) {
+    float3 p = pow(saturate(e), 1.0 / 78.84375);
+    return 10000.0 * pow(max(p - 0.8359375, 0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125);
+}
+
 float4 ps(Corner c) : SV_Target {
     float3 at = float3(min(c.uv * visible, last), 0);
     float y = (luma.Sample(smooth, at) * scale - black) / yrange;
     float2 cc = (chroma.Sample(smooth, at) * scale - mid) / crange;
-    return float4(y + 1.5748 * cc.y, y - 0.1873 * cc.x - 0.4681 * cc.y, y + 1.8556 * cc.x, 1);
+    if (mode < 0.5) {
+        // Limited-range BT.709, the same numbers as the Linux viewer.
+        return float4(y + 1.5748 * cc.y, y - 0.1873 * cc.x - 0.4681 * cc.y, y + 1.8556 * cc.x, 1);
+    }
+    // The BT.2020 (non-constant luminance) matrix: R'G'B' in PQ.
+    float3 e = saturate(float3(y + 1.4746 * cc.y, y - 0.16455 * cc.x - 0.57135 * cc.y, y + 1.8814 * cc.x));
+    if (mode < 1.5) return float4(e, 1);
+    // To SDR: linear light with SDR white at 1, BT.2020 to BT.709 primaries, the highlights
+    // brought down so that the stream's peak lands at white (extended Reinhard on the largest
+    // channel, which keeps hues), then the screen's gamma.
+    float3 lin = pq_nits(e) / white;
+    lin = max(mul(float3x3(1.6605, -0.5876, -0.0728, -0.1246, 1.1329, -0.0083, -0.0182, -0.1006, 1.1187), lin), 0);
+    float m = max(max(lin.r, lin.g), max(lin.b, 1e-6));
+    float w = max(peak / white, 1.0);
+    float k = (m * (1 + m / (w * w)) / (1 + m)) / m;
+    return float4(pow(saturate(lin * k), 1.0 / 2.2), 1);
 }
 ";
 
@@ -147,6 +169,8 @@ struct Drawer {
     clip: Option<Option<(i32, i32, i32, i32)>>,
     /// A panel's scale (pixels to one of the app's units) the swap chain is set to undo.
     scale: (f32, f32),
+    /// The swap chain is in PQ BT.2020 now (else sRGB).
+    pq: bool,
 }
 
 /// The picture's swap chain as it is made for a window's layer or for a panel.
@@ -182,7 +206,41 @@ fn picture_chain(gpu: &Gpu, width: u32, height: u32) -> Result<IDXGISwapChain1> 
 /// A swap chain for a panel of the WinUI 3 app; the app's thread hands it to the panel.
 #[allow(dead_code)]
 pub fn panel_chain(gpu: &Gpu, width: u32, height: u32) -> Result<IDXGISwapChain1> {
+    tearing_probe(gpu);
     picture_chain(gpu, width, height)
+}
+
+/// Variable refresh needs presenting with tearing allowed. Say whether DXGI allows it at all
+/// here, and whether a swap chain for composition (what a `SwapChainPanel` takes) can be made
+/// with it.
+fn tearing_probe(gpu: &Gpu) {
+    // SAFETY: DXGI queries with structures that live through each call.
+    unsafe {
+        let Ok(factory) = gpu.device.cast::<IDXGIDevice>().and_then(|d| d.GetAdapter()).and_then(|a| a.GetParent::<IDXGIFactory5>()) else { return };
+        let mut allowed = windows::core::BOOL(0);
+        let feature = factory.CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &mut allowed as *mut _ as *mut _, 4);
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: 64,
+            Height: 64,
+            Format: DXGI_FORMAT_R10G10B10A2_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: 2,
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+            Flags: DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 as u32,
+            ..Default::default()
+        };
+        let made = factory.CreateSwapChainForComposition(&gpu.device, &desc, None);
+        let presented = made.as_ref().ok().map(|s| s.Present(0, DXGI_PRESENT_ALLOW_TEARING));
+        say!(
+            "tearing: DXGI {} it ({feature:?}); a composition swap chain with ALLOW_TEARING: {}; presenting with it: {}",
+            if allowed.as_bool() { "allows" } else { "doesn't allow" },
+            made.as_ref().map_or_else(|e| format!("refused ({e})"), |_| "made".into()),
+            presented.map_or("not tried".into(), |p| format!("{p:?}"))
+        );
+    }
 }
 
 fn plane_formats(format: DXGI_FORMAT) -> Result<(DXGI_FORMAT, DXGI_FORMAT)> {
@@ -274,6 +332,7 @@ impl Drawer {
                 layers,
                 clip: None,
                 scale: (1.0, 1.0),
+                pq: false,
             })
         }
     }
@@ -400,6 +459,31 @@ impl Drawer {
         Ok(())
     }
 
+    /// The swap chain's colour space: PQ BT.2020 for an HDR stream on an HDR screen, sRGB else.
+    fn set_pq(&mut self, pq: bool) {
+        if pq == self.pq {
+            return;
+        }
+        use windows::Win32::Graphics::Dxgi::Common::{DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020};
+        let space = if pq { DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 } else { DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 };
+        // SAFETY: calls on the swap chain.
+        let done = unsafe {
+            self.swap.cast::<IDXGISwapChain3>().and_then(|s3| {
+                let support = s3.CheckColorSpaceSupport(space)?;
+                if support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT.0 as u32 == 0 {
+                    return Err(windows::core::Error::new(windows::core::HRESULT(-1), "not supported for presenting"));
+                }
+                s3.SetColorSpace1(space)
+            })
+        };
+        let ok = done.is_ok();
+        match done {
+            Ok(()) => say!("swap chain: {}", if pq { "PQ BT.2020 (HDR10), passed through" } else { "sRGB" }),
+            Err(e) => say!("swap chain: no {} colour space ({e}); tone-mapped to SDR instead", if pq { "PQ" } else { "sRGB" }),
+        }
+        self.pq = pq && ok;
+    }
+
     /// Draw the interface into its layer's back buffer.
     fn paint(&mut self, frame: &crate::ui::Frame) -> Result<()> {
         let Some(layers) = &mut self.layers else { return Ok(()) };
@@ -432,7 +516,7 @@ impl Drawer {
 
     /// Draw the picture's back buffer: black, and the picture (if there is one and somewhere
     /// for it to go) as large as fits `video` with its shape kept.
-    fn draw(&mut self, picture: Option<&Picture>, video: Option<(i32, i32, i32, i32)>) -> Result<()> {
+    fn draw(&mut self, picture: Option<&Picture>, video: Option<(i32, i32, i32, i32)>, colour: (bool, f32, f32)) -> Result<()> {
         let planes = match (picture, video) {
             (Some(picture), Some(_)) => Some((self.planes(picture)?, picture)),
             _ => None,
@@ -468,7 +552,9 @@ impl Drawer {
                 let (scale, black, yrange, mid, crange) = if ten { (65535.0 / 64.0, 64.0, 876.0, 512.0, 896.0) } else { (255.0, 16.0, 219.0, 128.0, 224.0) };
                 let (tw, th) = (desc.Width as f32, desc.Height as f32);
                 let (vw, vh) = (picture.width as f32, picture.height as f32);
-                let constants: [f32; 12] = [vw / tw, vh / th, (vw - 0.5) / tw, (vh - 0.5) / th, scale, black, yrange, mid, crange, 0.0, 0.0, 0.0];
+                let (hdr, white, peak) = colour;
+                let mode = if !hdr { 0.0 } else if self.pq { 1.0 } else { 2.0 };
+                let constants: [f32; 12] = [vw / tw, vh / th, (vw - 0.5) / tw, (vh - 0.5) / th, scale, black, yrange, mid, crange, mode, white, peak];
                 ctx.UpdateSubresource(&self.constants, 0, None, constants.as_ptr() as *const _, 0, 0);
                 let (ax, ay, aw, ah) = (area.0 as f32, area.1 as f32, area.2 as f32, area.3 as f32);
                 let fit = (aw / vw).min(ah / vh);
@@ -655,9 +741,12 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
             continue;
         }
         let picture = drawer.shown.take();
+        // An HDR stream: passed through where the screen is HDR, tone-mapped where it isn't.
+        let colour = session.as_ref().map_or((false, 203.0, 1000.0), |s| (s.hdr.load(Ordering::Relaxed), s.sdr_white.load(Ordering::Relaxed) as f32, s.peak.load(Ordering::Relaxed) as f32));
+        drawer.set_pq(colour.0 && scene.screen_hdr.load(Ordering::Relaxed));
         if draws {
             let _alone = DRAWING.lock().unwrap();
-            drawer.draw(picture.as_ref(), video)?;
+            drawer.draw(picture.as_ref(), video, colour)?;
         }
         let backdrop = frame.as_ref().map_or(crate::ui::Color(0.0, 0.0, 0.0, 1.0), |f| f.backdrop);
         if early {

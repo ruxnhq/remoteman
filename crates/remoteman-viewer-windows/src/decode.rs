@@ -94,6 +94,11 @@ fn find_software(codec: Codec) -> Result<*const ffi::AVCodec> {
     Ok(found)
 }
 
+/// Whether this FFmpeg can decode `codec` on the CPU.
+pub fn can_software(codec: Codec) -> Result<()> {
+    find_software(codec).map(|_| ())
+}
+
 /// From now on `codec` is decoded on the CPU. Fails if this FFmpeg can't.
 pub fn use_software(codec: Codec) -> Result<()> {
     find_software(codec)?;
@@ -106,6 +111,12 @@ pub fn use_software(codec: Codec) -> Result<()> {
 
 pub fn is_software(codec: Codec) -> bool {
     SOFTWARE.lock().unwrap().contains(&codec)
+}
+
+/// Whether this mode is decoded on the CPU: what `use_software` said for its codec, and
+/// 4:4:4 always (the card's 4:4:4 pictures aren't drawn yet).
+pub fn mode_in_software(mode: remoteman_core::Mode) -> bool {
+    mode.chroma == remoteman_core::Chroma::C444 || is_software(mode.codec)
 }
 
 /// Textures a picture decoded on the CPU is put into: one of 16 bits for the luma, one of two
@@ -140,17 +151,21 @@ impl Upload {
         texture.context("no texture")
     }
 
-    /// Put a 4:2:0 frame of 8 or 10 bits into the next pair of textures.
+    /// Put a 4:2:0 or 4:4:4 frame of 8 or 10 bits into the next pair of textures. 4:4:4 keeps
+    /// its chroma at full size: the shader samples it with the same coordinates, so nothing is
+    /// halved on the way.
     ///
     /// SAFETY: `f` is a decoded software frame in a planar 4:2:0 format, its planes valid for
     /// its size.
     unsafe fn put(&mut self, f: &ffi::AVFrame) -> Result<(ID3D11Texture2D, ID3D11Texture2D)> {
         use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM};
         let (w, h) = (f.width as usize, f.height as usize);
-        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-        let ten = f.format == ffi::AVPixelFormat::AV_PIX_FMT_YUV420P10LE as i32;
-        anyhow::ensure!(ten || f.format == ffi::AVPixelFormat::AV_PIX_FMT_YUV420P as i32, "the software decoder gave a picture format ({}) that isn't drawn", f.format);
-        if self.size != (w as u32, h as u32) {
+        use ffi::AVPixelFormat::*;
+        let full = [AV_PIX_FMT_YUV444P10LE as i32, AV_PIX_FMT_YUV444P as i32].contains(&f.format);
+        let (cw, ch) = if full { (w, h) } else { (w.div_ceil(2), h.div_ceil(2)) };
+        let ten = [AV_PIX_FMT_YUV420P10LE as i32, AV_PIX_FMT_YUV444P10LE as i32].contains(&f.format);
+        anyhow::ensure!(ten || [AV_PIX_FMT_YUV420P as i32, AV_PIX_FMT_YUV444P as i32].contains(&f.format), "the software decoder gave a picture format ({}) that isn't drawn", f.format);
+        if self.size != (w as u32, h as u32) || self.chroma.len() != cw * ch * 2 {
             self.pairs.clear();
             for _ in 0..HELD {
                 self.pairs.push((self.texture(w as u32, h as u32, DXGI_FORMAT_R16_UNORM)?, self.texture(cw as u32, ch as u32, DXGI_FORMAT_R16G16_UNORM)?));

@@ -31,8 +31,15 @@
     <Grid x:Name="Body" Grid.Row="1">
       <local:PictureView x:Name="Picture" Visibility="Collapsed" />
       <local:FiguresPanel x:Name="Figures" Visibility="Collapsed" />
-      <Border x:Name="Floating" VerticalAlignment="Top" Height="44" Visibility="Collapsed" Padding="8,0,8,0"
-              Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1" />
+      <!-- The session's bar: a pill floating over the top of the picture, as wide as its
+           controls, in in-app acrylic over the video. -->
+      <Border x:Name="Floating" VerticalAlignment="Top" HorizontalAlignment="Center" Margin="0,8,0,0" Height="44" Visibility="Collapsed" Padding="4,0,6,0"
+              CornerRadius="22" BorderThickness="1" Translation="0,0,16"
+              Background="{ThemeResource AcrylicInAppFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+        <Border.Shadow>
+          <ThemeShadow />
+        </Border.Shadow>
+      </Border>
       <ContentPresenter x:Name="PageHost" />
     </Grid>
     <InfoBar x:Name="Toast" Grid.Row="1" IsClosable="False" Severity="Informational" VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="16" MaxWidth="560" />

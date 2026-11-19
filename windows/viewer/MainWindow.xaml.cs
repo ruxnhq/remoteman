@@ -105,32 +105,52 @@ public sealed partial class MainWindow : Window
     bool _floating, _overBar;
     readonly DispatcherTimer _barAway = new() { Interval = TimeSpan.FromSeconds(2) };
 
-    /// The session's bar (`null`: no session on screen): in the title bar, or floating over the
-    /// picture at the top edge in full screen and when Settings says so.
+    /// The session's bar (`null`: no session on screen): a pill over the top of the picture,
+    /// always there, or brought out at the top edge in full screen and when Settings says so.
+    /// The picture has the whole window behind it; the window's own buttons stay where Windows
+    /// puts them, and the pill's words are what the window is moved by.
     public void SetSession(SessionBar? bar, JsonObject state)
     {
         bool floating = bar is not null && (_fullscreen || state.O("settings").B("hover_bar"));
-        TitleRow.Height = new GridLength(_fullscreen || floating ? 0 : 40);
+        TitleRow.Height = new GridLength(bar is not null ? 0 : 40);
         if (bar is null)
         {
-            BarHost.Content = null;
             Floating.Child = null;
             Floating.Visibility = Visibility.Collapsed;
-        }
-        else if (floating)
-        {
-            if (BarHost.Content is not null) BarHost.Content = null;
-            if (Floating.Child != bar) Floating.Child = bar;
+            if (_dragOn is not null) { SetTitleBar(TitleBar); _dragOn = null; }
         }
         else
         {
-            if (Floating.Child is not null) Floating.Child = null;
-            Floating.Visibility = Visibility.Collapsed;
-            if (BarHost.Content != bar) BarHost.Content = bar;
+            if (Floating.Child != bar) Floating.Child = bar;
+            if (!floating) Floating.Visibility = Visibility.Visible;
+            else if (!_floating) Floating.Visibility = Visibility.Collapsed;
+            if (_dragOn != bar.DragArea) { SetTitleBar(bar.DragArea); _dragOn = bar.DragArea; }
         }
+        BarHost.Content = null;
+        // No title bar of Windows' own during a session in a window: the pill has the buttons.
+        bool chrome = bar is null || _fullscreen;
+        if (AppWindow.Presenter is OverlappedPresenter op && chrome != _chrome)
+        {
+            op.SetBorderAndTitleBar(true, chrome);
+            _chrome = chrome;
+        }
+        if (bar is not null) bar.WindowButtons.Visibility = _fullscreen ? Visibility.Collapsed : Visibility.Visible;
         _floating = floating;
-        Logo.Visibility = TitleText.Visibility = BarHost.Content is null ? Visibility.Visible : Visibility.Collapsed;
         if (bar is not null) Figures.Update(state); else Figures.Visibility = Visibility.Collapsed;
+    }
+    UIElement? _dragOn;
+    bool _chrome = true;
+
+    /// The pill's window buttons.
+    public void WindowCommand(string what)
+    {
+        var op = AppWindow.Presenter as OverlappedPresenter;
+        switch (what)
+        {
+            case "minimise": op?.Minimize(); break;
+            case "maximise": if (op?.State == OverlappedPresenterState.Maximized) op.Restore(); else op?.Maximize(); break;
+            case "close": Close(); break;
+        }
     }
 
     /// The pointer over the picture, in the app's units: at the top edge the floating bar comes.

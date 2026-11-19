@@ -355,6 +355,14 @@ fn start(words: Vec<String>, notify: Notify) -> Result<()> {
         let on_card = if forced { Err(anyhow::anyhow!("REMOTEMAN_SOFTWARE=1")) } else { gpu.decodes(*mode) };
         match on_card {
             Ok(()) => decoders.push(*mode),
+            // 4:4:4 on the CPU leaves the codec's 4:2:0 where it was.
+            Err(e) if mode.chroma == remoteman_core::Chroma::C444 => match crate::decode::can_software(mode.codec) {
+                Ok(()) => {
+                    say!("decoder {:?} 4:4:4: {e:#}; on the CPU", mode.codec);
+                    decoders.push(*mode);
+                }
+                Err(soft) => say!("decoder {:?} 4:4:4 left out: {e:#}; {soft:#}", mode.codec),
+            },
             Err(e) => match crate::decode::use_software(mode.codec) {
                 Ok(()) => {
                     say!("decoder {:?}: not on this card ({e:#}); on the CPU instead", mode.codec);
@@ -365,7 +373,7 @@ fn start(words: Vec<String>, notify: Notify) -> Result<()> {
         }
     }
     decoders.sort_by_key(|m| crate::decode::is_software(m.codec));
-    say!("decoders offered: {}", decoders.iter().map(|m| format!("{:?}", m.codec).to_lowercase()).collect::<Vec<_>>().join(", "));
+    say!("decoders offered: {}", decoders.iter().map(|m| format!("{:?}{}", m.codec, if m.chroma == remoteman_core::Chroma::C444 { "444" } else { "" }).to_lowercase()).collect::<Vec<_>>().join(", "));
     let scene = Arc::new(Scene::default());
     let dark = args.dark.unwrap_or_else(crate::window::system_dark);
     let seconds = args.seconds;
@@ -457,8 +465,61 @@ impl Engine {
             *self.drawing.borrow_mut() = Some(drawing);
         }
         say!("engine: the panel shows the picture");
+        // (Taken out first: the app mustn't stay borrowed while the player starts.)
+        let play = self.app.borrow().args.play.clone();
+        if let Some(path) = play {
+            return self.play(&path);
+        }
         // Now there is a window: the computer named on the command line, if one was.
         self.app.borrow_mut().start();
+        self.publish();
+        Ok(())
+    }
+
+    /// For tests: a made-up session whose picture is a recorded HEVC stream, played at 60 a
+    /// second over and over through the same decoder and drawing as a real one.
+    fn play(&self, path: &std::path::Path) -> Result<()> {
+        use remoteman_core::{Chroma, Codec, Handler, Mode, StreamInfo};
+        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        // Access units start at each delimiter (HEVC NAL type 35).
+        let mut starts = Vec::new();
+        let mut i = 0;
+        while i + 4 < bytes.len() {
+            if bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1 {
+                if (bytes[i + 3] >> 1) & 0x3f == 35 {
+                    starts.push(if i > 0 && bytes[i - 1] == 0 { i - 1 } else { i });
+                }
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        anyhow::ensure!(!starts.is_empty(), "no access unit delimiters in {}", path.display());
+        starts.push(bytes.len());
+        let units: Vec<Vec<u8>> = starts.windows(2).map(|w| bytes[w[0]..w[1]].to_vec()).collect();
+        let mut app = self.app.borrow_mut();
+        let (shared, mut feed) = crate::stream::start(&app.gpu, &app.scene)?;
+        let colour = app.args.play_colour.clone();
+        let (w, h) = app.args.size.unwrap_or((1920, 1080));
+        say!("play: {} access units of {}, {colour}", units.len(), path.display());
+        let display = remoteman_core::Display { width: w, height: h, scale: 1.0, refresh: 60, placement: remoteman_core::Placement::Extend, hdr: colour != "bt709", headroom: 0.0 };
+        let target = crate::app::Target { address: "test.invalid:7791".into(), name: format!("{} (played)", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()) };
+        app.session = Some(crate::app::Session::new(None, shared, target, vec!["video".into()], display, crate::store::Quality::Automatic, 0, "linux".into()));
+        app.enter();
+        drop(app);
+        std::thread::Builder::new().name("play".into()).spawn(move || {
+            let info = StreamInfo { epoch: 1, mode: Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 }, width: w, height: h, refresh: 60, colour, sdr_white: 203, peak: 1000 };
+            feed.stream(&info);
+            let mut number = 0u32;
+            loop {
+                for (n, data) in units.iter().enumerate() {
+                    let frame = remoteman_core::Frame { key: n == 0, recovery: false, epoch: 1, number, capture_us: 0, data: data.clone() };
+                    feed.frame(&frame, None);
+                    number += 1;
+                    std::thread::sleep(Duration::from_micros(16_667));
+                }
+            }
+        })?;
         self.publish();
         Ok(())
     }
@@ -472,6 +533,16 @@ impl Engine {
         let host = HWND(self.host.get() as *mut _);
         let (mw, mh, hz, ..) = crate::window::monitor_of(host);
         let mut app = self.app.borrow_mut();
+        // Whether this screen is in HDR, which the hello says (a test may say it for it).
+        let (found, headroom) = crate::gpu::screen_hdr(host);
+        let (hdr, headroom) = match app.args.screen_hdr {
+            Some(forced) => (forced, if forced { headroom.max(1000.0 / 203.0) } else { 0.0 }),
+            None => (found, headroom),
+        };
+        if app.scene.screen_hdr.swap(hdr, Ordering::Relaxed) != hdr || app.scene.headroom.load(Ordering::Relaxed) == 0 {
+            say!("screen: {} (Windows says {}){}", if hdr { "HDR" } else { "SDR" }, if found { "HDR" } else { "SDR" }, if hdr { format!(", headroom {headroom:.1}") } else { String::new() });
+        }
+        app.scene.headroom.store(headroom.to_bits().max(1), Ordering::Relaxed);
         app.scene.client_size.store(pack(w as u32, h as u32), Ordering::Relaxed);
         app.scene.panel_scale.store(pack_scale(sx, sy), Ordering::Relaxed);
         app.scene.poke();
@@ -1028,7 +1099,7 @@ fn state(app: &App) -> Value {
             "figures": {"shown": f.shown, "decoded": f.decoded, "decode_ms": f.decode_ms, "age_ms": f.age_ms, "round_trip_ms": f.round_trip_ms, "megabits": f.megabits, "lost": f.lost, "replaced": f.replaced, "decoder": f.decoder},
         })
     });
-    let decodes = |word: &str| app.decoders.iter().any(|m| format!("{:?}", m.codec).eq_ignore_ascii_case(word));
+    let decodes = |word: &str| app.decoders.iter().any(|m| format!("{:?}", m.codec).eq_ignore_ascii_case(word) && m.chroma == remoteman_core::Chroma::C420);
     json!({
         "screen": screen,
         "dialog": dialog,
@@ -1038,10 +1109,11 @@ fn state(app: &App) -> Value {
         "session": session,
         "fullscreen": app.fullscreen,
         "monitor": [app.monitor.0, app.monitor.1, app.monitor.2],
+        "bitrates": crate::app::BITRATES,
         "captured": app.captured,
         "toast": app.toast.as_ref().map(|t| t.0.clone()),
         "remember": app.remember,
-        "decodes": {"av1": decodes("av1"), "hevc": decodes("hevc")},
+        "decodes": {"av1": decodes("av1"), "hevc": decodes("hevc"), "hevc444": app.decoders.iter().any(|m| m.chroma == remoteman_core::Chroma::C444)},
         "features": {
             "discovery": FEATURES.discovery, "presence": FEATURES.presence, "wake": FEATURES.wake, "pairing_code": FEATURES.pairing_code,
             "sound": FEATURES.sound, "microphone": FEATURES.microphone, "camera": FEATURES.camera, "clipboard": FEATURES.clipboard,
