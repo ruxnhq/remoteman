@@ -70,7 +70,12 @@ final class TestWindow {
     private var rateFrom = CACurrentMediaTime()
     private var rateCount = 0
 
+    /// For measuring (`--test-bursts yes`): move for 0.4 s, be still for 1.1 s, and so on, so
+    /// that every burst has a last frame.
+    static var bursts = false
+
     @objc private func tick() {
+        if Self.bursts, CACurrentMediaTime().truncatingRemainder(dividingBy: 1.5) > 0.4 { return }
         n += 1
         rateCount += 1
         let now = CACurrentMediaTime()

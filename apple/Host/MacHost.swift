@@ -895,6 +895,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             return "no HEVC Main10 hardware encoder for \(width)×\(height) (\(error.localizedDescription))"
         }
         enc.maxInFlight = max(1, options.inFlight)
+        enc.queue = frames
         enc.onFrame = { [weak self] o in self?.send(o) }
 
         let config = captureConfiguration(width: width, height: height, cursorApart: cursorApart)
@@ -1165,8 +1166,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func stats() {
         lock.lock()
+        let counts = encoder?.takeCounts() ?? (late: 0, stale: 0)
         let line = sent > 0 || dropped > 0 || inputs > 0
-            ? String(format: "host: %d fps, %d kbit/s, capture %.2f ms, encode %.2f ms, %.2f ms old when sent, send %.2f ms (longest %.2f), largest frame %d bytes, %d keyframes sent, longest wait for the screen %.0f ms, %d dropped (busy), %d not taken by the core, %d keyframe requests, %d input events (longest %.2f ms)", sent, bytes * 8 / 1000, captureMs / Double(max(captured, 1)), encodeMs / Double(max(sent, 1)), ageMs / Double(max(sent, 1)), sendMs / Double(max(sent, 1)), sendMax, largest, keysSent, captureGap, dropped, refused, keyframes, inputs, inputMax)
+            ? String(format: "host: %d fps, %d kbit/s, capture %.2f ms, encode %.2f ms, %.2f ms old when sent, send %.2f ms (longest %.2f), largest frame %d bytes, %d keyframes sent, longest wait for the screen %.0f ms, %d dropped (busy), %d of them sent late, %d times left stale, %d not taken by the core, %d keyframe requests, %d input events (longest %.2f ms)", sent, bytes * 8 / 1000, captureMs / Double(max(captured, 1)), encodeMs / Double(max(sent, 1)), ageMs / Double(max(sent, 1)), sendMs / Double(max(sent, 1)), sendMax, largest, keysSent, captureGap, dropped, counts.late, counts.stale, refused, keyframes, inputs, inputMax)
             : nil
         // Asked for more than the encoder does in a frame time: said once a session.
         let frameMs = 1000 / Double(max(askedFps, 1)), took = encodeMs / Double(max(sent, 1))

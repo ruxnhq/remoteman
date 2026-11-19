@@ -67,6 +67,8 @@ while !args.isEmpty {
     case "--capture": options.capture = value()
     case "--bitrate": options.bitrate = Int(value()) ?? 0
     case "--test-window": options.testWindow = yes()
+    case "--keep-last": HostEncoder.keepsLast = yes()
+    case "--test-bursts": TestWindow.bursts = yes()
     case "--encoder": HostEncoder.testMode = value()
     case "--in-flight": options.inFlight = Int(value()) ?? 2
     // For tests: so many seconds after a device connects, drop it or stop trusting it.

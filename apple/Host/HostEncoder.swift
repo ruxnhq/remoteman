@@ -29,6 +29,22 @@ final class HostEncoder {
     private var inFlight = 0
     var maxInFlight = 2
     private var forceKey = true
+    /// The newest frame that found the encoder busy. It is encoded as soon as a frame comes out:
+    /// ScreenCaptureKit sends nothing while the screen is still, so if the last frame of a burst
+    /// were simply dropped, the device would keep an old picture until something else changed.
+    private var waiting: (CVPixelBuffer, CMTime)?
+    /// Where `encode` is called from (the capture's queue); the waiting frame goes in from there too.
+    var queue: DispatchQueue?
+    /// For measuring only: off drops a busy frame for good, as before.
+    static var keepsLast = true
+    /// Counted for the log: frames encoded late from `waiting`, and times a dropped frame was
+    /// followed by nothing for a quarter of a second (the device was left with an old picture).
+    private var late = 0, stale = 0, droppedAt = 0.0
+    func takeCounts() -> (late: Int, stale: Int) {
+        lock.lock()
+        defer { late = 0; stale = 0; lock.unlock() }
+        return (late, stale)
+    }
     /// Called on VideoToolbox's thread; the encoder takes no new frame until it returns.
     var onFrame: ((Output) -> Void)?
 
@@ -87,6 +103,7 @@ final class HostEncoder {
         lock.lock()
         let s = session
         session = nil
+        waiting = nil
         lock.unlock()
         if let s { VTCompressionSessionInvalidate(s) }
     }
@@ -101,9 +118,22 @@ final class HostEncoder {
     @discardableResult
     func encode(_ pb: CVPixelBuffer, pts: CMTime) -> Bool {
         lock.lock()
-        guard let session, inFlight < maxInFlight else {
+        guard let session else {
             lock.unlock()
             return false
+        }
+        let now = CACurrentMediaTime()
+        guard inFlight < maxInFlight else {
+            if Self.keepsLast { waiting = (pb, pts) }
+            if droppedAt == 0 { droppedAt = now }
+            lock.unlock()
+            return false
+        }
+        // A newer frame goes in: the one that waited is not needed.
+        waiting = nil
+        if droppedAt > 0 {
+            if now - droppedAt > 0.25 { stale += 1 }
+            droppedAt = 0
         }
         inFlight += 1
         let force = forceKey
@@ -119,7 +149,14 @@ final class HostEncoder {
             defer {
                 self.lock.lock()
                 self.inFlight -= 1
+                let w = self.waiting
+                self.waiting = nil
+                if w != nil { self.late += 1 }
                 self.lock.unlock()
+                if let w {
+                    let again = { [weak self] in _ = self?.encode(w.0, pts: w.1) }
+                    if let q = self.queue { q.async(execute: again) } else { again() }
+                }
             }
             guard status == noErr, let sb else {
                 if status != noErr { hostLog("encoder: frame failed (\(status))") }

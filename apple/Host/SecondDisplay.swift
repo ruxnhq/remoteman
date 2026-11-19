@@ -69,6 +69,7 @@ final class HostSecondDisplay: NSObject, SCStreamOutput, SCStreamDelegate {
         do { enc = try HostEncoder(width: width, height: height, fps: fps, bitrate: bitrate, tenBit: tenBit) } catch {
             return "no hardware encoder for a second picture of \(width)×\(height) (\(error.localizedDescription))"
         }
+        enc.queue = frames
         enc.onFrame = { [weak self] o in self?.send?(o) }
         let config = SCStreamConfiguration()
         config.width = width
