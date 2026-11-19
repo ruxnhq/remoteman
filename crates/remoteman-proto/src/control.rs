@@ -272,7 +272,10 @@ mod tests {
         assert_eq!((display.width, display.refresh, display.placement), (2752, 120, Placement::Extend));
         let only = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"only"},"decoders":[]}"#).unwrap();
         assert!(matches!(only, Message::ClientHello { display: Display { placement: Placement::Only, .. }, .. }));
-        let newer = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"mirror"},"decoders":[]}"#).unwrap();
+        let mirror = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"mirror"},"decoders":[]}"#).unwrap();
+        assert!(matches!(mirror, Message::ClientHello { display: Display { placement: Placement::Mirror, .. }, .. }));
+        // A placement this version doesn't know is an extra display.
+        let newer = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"sideways"},"decoders":[]}"#).unwrap();
         assert!(matches!(newer, Message::ClientHello { display: Display { placement: Placement::Extend, .. }, .. }));
         assert_eq!(decoders[1], Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 });
         assert_eq!(serde_json::to_string(&m).unwrap(), json);
