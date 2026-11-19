@@ -7,7 +7,10 @@
 //!     remoteman-host --probe | --probe-picture [--log FILE]
 //!     remoteman-host ctl [--port PORT] WORDS
 //!
-//! `--pair` trusts the first unknown device to connect. The owner's way is `ctl pair on`: the
+//! `--ask` keeps pairing open and asks the owner, in a small window of Windows' own on the
+//! desktop, about each new device that comes: its name and the six-digit code it should be
+//! showing, Yes or No (No if the minute passes). This is the owner's way until the tray icon
+//! is made. `--pair` trusts the first unknown device to connect, with no question. The owner's way is `ctl pair on`: the
 //! device that comes then waits, `ctl status` shows it with a six-digit code that the device
 //! shows too, and `ctl pair accept` or `ctl pair decline` answers it. `ctl` speaks to the
 //! running host (from an elevated prompt): `status`, `pair on|off|accept|decline`, `allow
@@ -114,6 +117,7 @@ mod windows_main {
         let (mut pair, mut state, mut bitrate, mut drop_one_in) = (false, state_dir(), 40u32, None::<u32>);
         let (mut name, mut log, mut seconds, mut probing, mut fit) = (None::<String>, None::<PathBuf>, None::<u64>, None::<bool>, Fit::Any);
         let (mut allow_files, mut allow_clipboard) = (false, false);
+        let mut ask = false;
         let mut args = std::env::args().skip(1).peekable();
         // Not a host at all: a word with the one that is running.
         if args.peek().map(String::as_str) == Some("ctl") {
@@ -160,6 +164,7 @@ mod windows_main {
                 "--state" => state = value()?.into(),
                 "--bitrate" => bitrate = value()?.parse().context("--bitrate in Mbit/s")?,
                 "--pair" => pair = true,
+                "--ask" => ask = true,
                 // Which encoder: the card's own (NVENC on NVIDIA, Media Foundation's on any
                 // other), or one of the two whatever the card.
                 "--encoder" => crate::encode::WHICH.store(
@@ -210,15 +215,47 @@ mod windows_main {
             None => tracing_subscriber::fmt().with_max_level(level).with_ansi(false).init(),
         }
         // Anything that goes wrong is in the log before the process ends.
-        let result = run(listen, state, pair, name, bitrate, drop_one_in, seconds, probing, fit, (allow_files, allow_clipboard));
+        let result = run(listen, state, pair, name, bitrate, drop_one_in, seconds, probing, fit, (allow_files, allow_clipboard), ask);
         if let Err(e) = &result {
             tracing::error!("{e:#}");
         }
         result
     }
 
+    /// Keep pairing open, and put each new device to the owner in a window of Windows' own.
+    fn ask_owner(host: std::sync::Weak<Host>) {
+        use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_DEFBUTTON2, MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW};
+        let spawned = std::thread::Builder::new().name("ask".into()).spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(300));
+                let Some(h) = host.upgrade() else { break };
+                h.set_confirm(true);
+                let Some(device) = h.pending() else {
+                    // (Pairing closes itself after each device.)
+                    if !h.pairing() {
+                        h.set_pairing(true);
+                    }
+                    continue;
+                };
+                // The host isn't held while the question stands, so it can stop meanwhile.
+                drop(h);
+                let text = format!("\"{}\" wants to see and control this computer.\n\nIt should be showing the code {}.\n\nLet it in, now and from now on?", device.name, device.code);
+                tracing::info!(device = device.name, code = device.code, "a new device: asking on the desktop");
+                // SAFETY: plain call with two live strings; it returns when the owner answers.
+                let answer = unsafe { MessageBoxW(None, &windows::core::HSTRING::from(text), windows::core::w!("Remoteman Host"), MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND) };
+                let Some(h) = host.upgrade() else { break };
+                // (False: the minute passed before the answer, and the device was turned away.)
+                let stood = h.decide(answer == IDYES);
+                tracing::info!(device = device.name, let_in = answer == IDYES, in_time = stood, "the owner answered");
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::warn!("couldn't start asking about new devices: {e}");
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn run(listen: SocketAddr, state: PathBuf, pair: bool, name: Option<String>, bitrate: u32, drop_one_in: Option<u32>, seconds: Option<u64>, probing: Option<bool>, fit: Fit, allow: (bool, bool)) -> Result<()> {
+    fn run(listen: SocketAddr, state: PathBuf, pair: bool, name: Option<String>, bitrate: u32, drop_one_in: Option<u32>, seconds: Option<u64>, probing: Option<bool>, fit: Fit, allow: (bool, bool), ask: bool) -> Result<()> {
         // Sizes and places in real pixels, whatever scale the desktop is drawn at: the cursor's
         // place, the monitor's corner and the pointer's target must all be in the picture's own.
         // SAFETY: plain call, before any window exists.
@@ -250,6 +287,7 @@ mod windows_main {
         let mut screen = screen;
         let own = fit != Fit::Keep && screen.has_own();
         allowed.own_monitor.store(own, Ordering::Relaxed);
+        allowed.second.store(own && screen.has_second(), Ordering::Relaxed);
         if !own {
             tracing::info!("the display driver has no second monitor to give (its settings say one monitor, or `--mode keep`): a device gets the one monitor at its own size");
         }
@@ -261,6 +299,10 @@ mod windows_main {
         tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
         if pair {
             tracing::info!("pairing: the next unknown device to connect will be trusted");
+        }
+        if ask {
+            tracing::info!("pairing: each new device is asked about on the desktop");
+            ask_owner(std::sync::Arc::downgrade(&host));
         }
 
         // SAFETY: a handler that only sets a flag.

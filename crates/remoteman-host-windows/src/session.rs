@@ -49,6 +49,12 @@ struct Live {
     clipboard: Option<Clipboard>,
     /// What the client copied, on its way in: its type and the content so far.
     copied: BTreeMap<u32, (String, Vec<u8>)>,
+    /// What the picture is encoded as: a second display's picture is the same.
+    mode: Mode,
+    /// The client's second display, while it has one: its picture, and its pointer's way in.
+    second: Option<(Pipeline, Injector)>,
+    /// Which of its displays the client's pointer is on (0, or 1 for the second).
+    target: u8,
 }
 
 pub struct Host {
@@ -124,6 +130,7 @@ impl Host {
             nudge_at: (at.left, at.top),
             expect: Some((at.width, at.height)),
             held,
+            status: true,
             // The monitor changed under the stream: input and the cursor follow it.
             resized: Box::new(move |width, height| {
                 let now = display::current(&device).map(|(_, a)| a).unwrap_or(Area { width, height, ..*shared.lock().unwrap() });
@@ -146,7 +153,7 @@ impl Host {
         if !cursor_apart {
             tracing::warn!("this client doesn't draw the cursor itself, and the driver keeps it out of the frames: it will see no cursor");
         }
-        self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, common: modes, ceiling, name: name.clone(), files: Files::default(), clipboard: None, copied: BTreeMap::new() });
+        self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, common: modes, ceiling, name: name.clone(), files: Files::default(), clipboard: None, copied: BTreeMap::new(), mode: started.mode, second: None, target: 0 });
         // A new picture shares the clipboard anew.
         self.share_clipboard(self.clipboard_wanted);
         {
@@ -171,12 +178,70 @@ impl Host {
     /// Stop the picture, let go of the client's keys, and put the monitor back.
     fn stop(&mut self) -> Option<Live> {
         let mut l = self.live.take()?;
+        // The second display goes with the first.
+        if let Some((pipeline, mut injector)) = l.second.take() {
+            injector.release_all();
+            drop(pipeline);
+            self.screen.take_second();
+        }
         l.injector.release_all();
         l.cursor = None;
         if l.clipboard.take().is_some() {
             tracing::info!("the clipboard is no longer shared with the device");
         }
         Some(l)
+    }
+
+    /// Give the client a second display beside everything else, or take it away. It gets a
+    /// monitor of its own (the driver's third) and a picture of its own in the codec of the
+    /// first. Its pointer is NOT drawn into the picture, as the protocol asks: this host can't
+    /// draw a cursor into a picture yet.
+    fn second_display(&mut self, on: bool, display: Option<Display>, side: remoteman_core::Side) {
+        let Some(l) = self.live.as_mut() else { return };
+        if let Some((pipeline, mut injector)) = l.second.take() {
+            injector.release_all();
+            drop(pipeline);
+            self.screen.take_second();
+            l.target = 0;
+        }
+        let (true, Some(screen)) = (on, display) else { return };
+        let link = l.link.clone();
+        let gone = |why: String| {
+            tracing::warn!("no second display for the device: {why}");
+            link.send_message(Message::Display { index: 1, on: false, display: None, side: Default::default(), message: why })
+        };
+        if screen.width % 2 != 0 || screen.height % 2 != 0 || screen.width < 64 || screen.height < 64 || screen.width > 8192 || screen.height > 8192 {
+            return gone("display sizes must be even, from 64 to 8192".into());
+        }
+        let want = display::Mode { width: screen.width, height: screen.height, refresh: screen.refresh.clamp(1, 240) };
+        let (mode, at, monitor) = match self.screen.give_second(want, side) {
+            Ok(got) => got,
+            Err(e) => return gone(format!("{e:#}")),
+        };
+        let refresh = mode.refresh.clamp(1, 240);
+        let second = l.link.second();
+        // Said before its first frame can be sent.
+        second.restart(Accept { mode: l.mode, width: mode.width, height: mode.height, refresh, colour: "bt709".into() });
+        let area = Arc::new(Mutex::new(at));
+        let settings = pipeline::Settings {
+            driver: self.screen.driver(),
+            monitor,
+            modes: vec![l.mode],
+            fps: refresh,
+            bitrate: self.bitrate.min(40_000_000),
+            nudge_at: (at.left, at.top),
+            expect: Some((at.width, at.height)),
+            held: false,
+            status: false,
+            resized: Box::new(|_, _| {}),
+        };
+        match Pipeline::start(settings, second) {
+            Ok((pipeline, _)) => l.second = Some((pipeline, Injector::new(area))),
+            Err(e) => {
+                self.screen.take_second();
+                gone(format!("{e:#}"))
+            }
+        }
     }
 
     /// Share the clipboard with the client, both ways, or stop. Only where the computer's
@@ -327,6 +392,12 @@ impl HostHandler for Host {
                 }
             }
             Message::Mic { on, .. } => self.take_microphone(*on),
+            Message::Display { index: 1, on, display, side, .. } => self.second_display(*on, *display, *side),
+            Message::DisplayKeyframe { index: 1 } => {
+                if let Some((pipeline, _)) = self.live.as_ref().and_then(|l| l.second.as_ref()) {
+                    pipeline.request_keyframe();
+                }
+            }
             _ => {}
         }
     }
@@ -377,8 +448,17 @@ impl HostHandler for Host {
     }
 
     fn input(&mut self, event: Event) {
-        if let Some(l) = self.live.as_mut() {
-            l.injector.inject(&event);
+        let Some(l) = self.live.as_mut() else { return };
+        // Which of its displays the pointer is on from here on.
+        if let Event::Display(index) = event {
+            l.target = index;
+            return;
+        }
+        // The pointer and touches go to the display they are on; keys to the desktop.
+        let pointing = matches!(event, Event::PointerTo { .. } | Event::PointerBy { .. } | Event::Button { .. } | Event::Scroll { .. } | Event::Touch { .. });
+        match &mut l.second {
+            Some((_, injector)) if l.target == 1 && pointing => injector.inject(&event),
+            _ => l.injector.inject(&event),
         }
     }
 

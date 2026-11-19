@@ -46,6 +46,8 @@ pub struct Settings {
     /// Send nothing until [`Pipeline::release`]: for a picture that replaces another, which the
     /// client must be told of before its first frame.
     pub held: bool,
+    /// Tell the client what the picture is encoded at (the first picture's business only).
+    pub status: bool,
     /// Called when the picture's size changes under a running stream (someone changed the
     /// monitor's mode), after the client has been told.
     pub resized: Box<dyn Fn(u32, u32) + Send>,
@@ -265,7 +267,7 @@ impl Picture {
         if (old.width, old.height, old.format, old.is_hdr) != (new.width, new.height, new.format, new.is_hdr) {
             tracing::info!(from = format!("{}x{}", old.width, old.height), to = format!("{}x{}", new.width, new.height), format = new.format, hdr = new.is_hdr, "the monitor changed; the picture starts afresh");
             // Only this mode: the client has its decoder set up for it.
-            let only = Settings { driver: s.driver.clone(), monitor: s.monitor, modes: vec![self.mode], fps: s.fps, bitrate, nudge_at: s.nudge_at, expect: None, held: false, resized: Box::new(|_, _| {}) };
+            let only = Settings { driver: s.driver.clone(), monitor: s.monitor, modes: vec![self.mode], fps: s.fps, bitrate, nudge_at: s.nudge_at, expect: None, held: false, status: false, resized: Box::new(|_, _| {}) };
             let (converter, encoder, mode) = build(&self.gpu, &new, &only, bitrate)?;
             // The old encoder goes before the texture it reads from.
             self.encoder = encoder;
@@ -350,7 +352,9 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
                 Ok(()) => {
                     tracing::info!(from = rate, to = want, "bitrate");
                     rate = want;
-                    link.send_message(Message::Status { bitrate: Some(rate) });
+                    if s.status {
+                        link.send_message(Message::Status { bitrate: Some(rate) });
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("couldn't change the bitrate: {e:#}");
@@ -458,7 +462,7 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         }
         // What the picture is encoded at, said once it has begun (viewers show it) and again
         // whenever it changes.
-        if !std::mem::replace(&mut told_rate, true) {
+        if s.status && !std::mem::replace(&mut told_rate, true) {
             link.send_message(Message::Status { bitrate: Some(rate) });
         }
     }
