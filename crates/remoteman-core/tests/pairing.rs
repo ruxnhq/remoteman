@@ -51,6 +51,7 @@ fn a_new_device_waits_for_the_owners_word() {
         test_delay_lost_ms: None,
         cursor: false,
         unlock: None,
+        attach_only: false,
     };
     // The owner's answer comes from another thread while the device waits in `connect`.
     let answer = |host: &Host, shown: &mpsc::Receiver<String>, accept: bool| {

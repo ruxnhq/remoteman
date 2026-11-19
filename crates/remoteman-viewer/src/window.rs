@@ -227,7 +227,7 @@ impl App {
         let id = self.attempt.get().wrapping_add(1);
         self.attempt.set(id);
         let (placement, quality) = self.choices(&target.address);
-        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, unlock: self.unlock.borrow_mut().take(), folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
+        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, unlock: self.unlock.borrow_mut().take(), attach_only: self.store.borrow().find(&target.address).is_some_and(|c| c.attach_only), folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
         let app = self.clone();
         glib::spawn_future_local(async move {
             let result = match gio::spawn_blocking(move || Session::start(request)).await {

@@ -187,6 +187,7 @@ fn main() -> Result<()> {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let (mut state, mut pair, mut size, mut scale, mut refresh, mut secs) = (home.join(".local/state/remoteman"), false, (2752u32, 2064u32), 2.0f32, 120u32, 10u64);
     let mut unlock = None::<String>;
+    let mut attach_only = false;
     let (mut out, mut record, mut demo, mut cursor, mut decoders) = (None::<PathBuf>, None::<PathBuf>, false, false, "av1,hevc444,hevc".to_owned());
     let mut circle = false;
     let mut script = None::<PathBuf>;
@@ -215,6 +216,8 @@ fn main() -> Result<()> {
             "--cursor" => cursor = true,
             // The host user's password, for a host that is locked (tests only: it shows in the process list).
             "--unlock" => unlock = Some(value()?),
+            // Only into a session already running on the host: never its login screen.
+            "--attach-only" => attach_only = true,
             "--drop-one-in" => drop_one_in = Some(value()?.parse()?),
             "--delay-lost" => delay_lost = Some(value()?.parse()?),
             "--placement" => {
@@ -252,7 +255,7 @@ fn main() -> Result<()> {
         None => None,
     };
     let watcher = Watcher { decoder: None, seen: seen.clone(), file, record, warm: Instant::now() + Duration::from_secs(2) };
-    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement }, decoders, test_drop_one_in: drop_one_in, test_delay_lost_ms: delay_lost, unlock: unlock.clone(), cursor };
+    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement }, decoders, test_drop_one_in: drop_one_in, test_delay_lost_ms: delay_lost, unlock: unlock.clone(), attach_only, cursor };
     let client = Client::connect(options, watcher)?;
     println!("host: {} ({}), features {:?}, fingerprint {}", client.host_name, client.host_os, client.host_features, &client.host_fingerprint[..12]);
 

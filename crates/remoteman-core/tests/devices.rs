@@ -60,6 +60,7 @@ fn options(host: &Host, state: &PathBuf, name: &str, pair: bool) -> Options {
         test_delay_lost_ms: None,
         cursor: false,
         unlock: None,
+        attach_only: false,
     }
 }
 

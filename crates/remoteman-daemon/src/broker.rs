@@ -208,6 +208,11 @@ impl HostHandler for Broker {
             Some((_, uid)) => self.0.agent_of(*uid),
             None => self.0.state.lock().unwrap().agents.keys().next_back().copied(),
         });
+        // A device set to come only into a session that is already running is not shown a
+        // login screen, nor logged in by its key.
+        if found.is_none() && client.attach_only {
+            return Err("nobody is logged in at this computer, and this device is set not to use its login screen".into());
+        }
         // Not logged in: ask GDM, and remember to follow the client to wherever it logs in.
         let mut following = None;
         let id = match (found, &self.0.login, &self.0.owner) {

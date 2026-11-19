@@ -118,7 +118,7 @@ fn main() -> Result<()> {
     let shared = broker::Shared::new(owner, login, Some(&state));
     // What the agents can do. (Each agent says what it has when it attaches; until the daemon
     // tells clients per session, it lists what an agent allowed everything would have.)
-    let features = ["video", "input", "cursor", "placement", "mirror", "configure", "sound", "mic", "camera", "files", "clipboard"].map(String::from).to_vec();
+    let features = ["video", "input", "cursor", "placement", "mirror", "way_in", "configure", "sound", "mic", "camera", "files", "clipboard"].map(String::from).to_vec();
     let said_name = name.clone();
     let options = HostOptions { listen, state, name, os: "linux".into(), features, pair, test_drop_one_in: drop_one_in };
     let host = std::sync::Arc::new(Host::start(options, broker::Broker(shared.clone()))?);

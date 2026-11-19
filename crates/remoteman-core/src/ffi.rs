@@ -206,12 +206,15 @@ pub unsafe extern "C" fn rm_client_connect(
     let (host, state, name, decoders, options) = unsafe { (text(host), text(state_dir), text(name), text(decoders), text(options)) };
     let mut placement = Placement::Extend;
     let mut unlock = None;
+    let mut attach_only = false;
     for pair in options.split(';').map(str::trim).filter(|p| !p.is_empty()) {
         match pair.split_once('=') {
             Some(("placement", "extend")) => placement = Placement::Extend,
             Some(("placement", "main")) => placement = Placement::Main,
             Some(("placement", "only")) => placement = Placement::Only,
             Some(("placement", "mirror")) => placement = Placement::Mirror,
+            Some(("way-in", "attach")) => attach_only = true,
+            Some(("way-in", "any")) => attach_only = false,
             // The host user's password, as hex of its UTF-8 bytes (it may hold any character).
             Some(("unlock-hex", hex)) => {
                 let bytes: Option<Vec<u8>> = (0..hex.len() / 2).map(|i| u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()).collect();
@@ -241,7 +244,7 @@ pub unsafe extern "C" fn rm_client_connect(
             }
         });
     }
-    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh, placement }, decoders: modes, test_drop_one_in: None, test_delay_lost_ms: None, cursor: callbacks.on_cursor_shape.is_some(), unlock };
+    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh, placement }, decoders: modes, test_drop_one_in: None, test_delay_lost_ms: None, cursor: callbacks.on_cursor_shape.is_some(), unlock, attach_only };
     match Client::connect(options, callbacks) {
         Ok(c) => Box::into_raw(Box::new(c)),
         Err(e) => {
