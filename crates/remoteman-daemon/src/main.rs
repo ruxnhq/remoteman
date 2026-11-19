@@ -1,9 +1,10 @@
 //! `remotemand`: the system service of a Linux host.
 //!
 //!     remotemand [--listen ADDR:PORT] [--state DIR] [--socket PATH] [--pair] [--name NAME]
-//!                [--user NAME] [--login screen|key|off]
+//!                [--user NAME] [--login screen|key|off] [--users NAME,NAME]
 //!     remotemand ctl [--socket PATH] status | switch N | prefer N
-//!     remotemand ctl [--socket PATH] devices | revoke FINGERPRINT | drop | pair on|off
+//!     remotemand ctl [--socket PATH] devices | revoke FINGERPRINT | drop
+//!     remotemand ctl [--socket PATH] pair on|ask|off|accept|decline | sharing on|off | owner
 //!     remotemand test-agent [--socket PATH] [--label NAME]      (for tests: see standin.rs)
 //!
 //! It owns the UDP port, the trust list and every client's connection. The picture comes from
@@ -12,15 +13,23 @@
 //! client reconnecting (what happens by itself when a login screen gives way to a session);
 //! `ctl prefer N` gives the next client to agent N.
 //!
-//! `--user NAME`: the paired devices are NAME's (one user for all of them, for now). A device
-//! goes to NAME's session if there is one. If there is none, `--login` says what happens:
-//! `screen` (the default when run as root) asks GDM for a headless login screen and moves the
-//! device to the session once someone has logged in on it; `key` asks GDM for NAME's session
-//! straight away, with no password, trusting the device's key alone; `off` turns it away.
+//! Each paired device belongs to a user: the one whose `ctl` opened the pairing it came
+//! through (the agent in their session asks for them), kept in the state folder (`users.rs`).
+//! `--user NAME`: the devices with no user of their own are NAME's (those paired before users
+//! were kept, and those root pairs). A device goes to its user's session if there is one, and
+//! never to anybody else's. If there is none, `--login` says what happens: `screen` (the
+//! default when run as root) asks GDM for a headless login screen and moves the device to the
+//! session once its user has logged in on it; `key` asks GDM for its user's session straight
+//! away, with no password, trusting the device's key alone; `off` turns it away. `ctl` shows
+//! and changes only the asker's own devices, unless root or the daemon's own user asks.
+//! Who may have devices of their own: the `--user` user, and anybody with an agent attached
+//! whom the user database gives a shell to log in with. `--users` (names or numbers) adds
+//! accounts it doesn't (tests; a person with an odd shell).
 
 mod broker;
 mod gdm;
 mod standin;
+mod users;
 
 use std::io::Read;
 use std::net::SocketAddr;
@@ -46,6 +55,7 @@ fn main() -> Result<()> {
     let (mut standin, mut label) = (false, "stand-in".to_owned());
     let mut advertise = None::<bool>;
     let (mut user, mut login) = (None::<String>, if root { "screen" } else { "off" }.to_owned());
+    let mut people = Vec::<u32>::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if let Some(words) = &mut ctl {
@@ -78,6 +88,11 @@ fn main() -> Result<()> {
             "--pair" => pair = true,
             "--user" => user = Some(value()?),
             "--login" => login = value()?,
+            "--users" => {
+                for who in value()?.split(',').filter(|w| !w.is_empty()) {
+                    people.push(who.parse().ok().or_else(|| uid_of(who)).with_context(|| format!("--users: there is no user {who}"))?);
+                }
+            }
             // Tell the local network this host is here (or don't), whatever it listens on.
             "--advertise" => advertise = Some(true),
             "--no-advertise" => advertise = Some(false),
@@ -126,7 +141,7 @@ fn main() -> Result<()> {
         }
         other => anyhow::bail!("--login {other}: screen, key or off"),
     };
-    let shared = broker::Shared::new(owner, login, Some(&state));
+    let shared = broker::Shared::new(owner, login, Some(&state), people);
     // What the agents can do. (Each agent says what it has when it attaches; until the daemon
     // tells clients per session, it lists what an agent allowed everything would have.)
     let features = ["video", "input", "cursor", "placement", "mirror", "displays", "way_in", "configure", "sound", "mic", "camera", "files", "clipboard"].map(String::from).to_vec();
