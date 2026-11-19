@@ -268,7 +268,7 @@ impl Host {
     }
 
     /// A clipboard blob from the client: what was copied on the device becomes what the
-    /// desktop pastes. Text only.
+    /// desktop pastes: text, or a picture as a PNG.
     fn copied(&mut self, event: &BlobEvent) {
         let Some(l) = self.live.as_mut() else { return };
         match event {
@@ -289,10 +289,14 @@ impl Host {
             }
             BlobEvent::Close { id, complete } => {
                 let (Some((mime, bytes)), Some(clipboard), true) = (l.copied.remove(id), l.clipboard.as_ref(), *complete) else { return };
-                if !mime.starts_with("text/plain") {
-                    return tracing::info!(kind = mime, "the device copied something this host doesn't take (text only)");
-                }
-                clipboard.offer(String::from_utf8_lossy(&bytes).into_owned());
+                let mime = if mime.starts_with("text/plain") {
+                    crate::clipboard::TEXT
+                } else if mime == crate::clipboard::PNG {
+                    crate::clipboard::PNG
+                } else {
+                    return tracing::info!(kind = mime, "the device copied something this host doesn't take (text and PNG only)");
+                };
+                clipboard.offer(crate::clipboard::Copied { mime, bytes });
             }
         }
     }
@@ -392,6 +396,12 @@ impl HostHandler for Host {
                 }
             }
             Message::Mic { on, .. } => self.take_microphone(*on),
+            // The device's word on a file this computer sent it.
+            Message::FileResult { ok, message, .. } => {
+                tracing::info!(ok, said = message, "the device answered for a file sent to it");
+                let mut sent = self.allowed.sent.lock().unwrap();
+                *sent = (sent.0 + 1, *ok, message.clone());
+            }
             Message::Display { index: 1, on, display, side, .. } => self.second_display(*on, *display, *side),
             Message::DisplayKeyframe { index: 1 } => {
                 if let Some((pipeline, _)) = self.live.as_ref().and_then(|l| l.second.as_ref()) {

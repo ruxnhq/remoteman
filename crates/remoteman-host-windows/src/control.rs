@@ -1,7 +1,7 @@
 //! The owner's side of the host: what it is asked and told while it runs, by `remoteman-host
 //! ctl WORDS` today and by a tray icon later. The words are the Linux host's (`status`, `pair
 //! on|off|accept|decline`, `allow clipboard|files on|off`, `drop`, `revoke FINGERPRINT`), so
-//! one interface can speak to both.
+//! one interface can speak to both. `send PATH` sends a file to the connected device.
 //!
 //! It is a named pipe, `\\.\pipe\remoteman-host-PORT`, one line in and one answer out. The
 //! pipe is made with Windows' default protection for pipes: the system, Administrators and the
@@ -53,6 +53,9 @@ pub struct Allowed {
     /// And a third, for a device's second display.
     pub second: Arc<AtomicBool>,
     pub now: Arc<Mutex<Option<Now>>>,
+    /// What the device said of files sent to it: how many it answered for, and the last
+    /// answer (whether it took it, and what it said: where it went, or why not).
+    pub sent: Arc<Mutex<(u64, bool, String)>>,
 }
 
 /// What this host does, as its hello lists it. `mirror`: a device may ask for the monitor as
@@ -165,13 +168,59 @@ pub fn ask(port: u16, words: &str) -> anyhow::Result<String> {
     anyhow::bail!("no host is answering on {name}: {} (is it running, and is this prompt elevated?)", last.map(|e| e.to_string()).unwrap_or_default())
 }
 
+/// Send a file to the connected device, on a thread of its own. The device decides where it
+/// goes and answers when it has it (`Allowed::sent`). As the Linux host does it.
+fn send_file(link: Option<remoteman_core::host::Link>, path: &Path) -> Result<(), String> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let link = link.ok_or("no device is connected")?;
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let size = file.metadata().map_err(|e| e.to_string())?.len();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+    let header = remoteman_core::media::FileHeader { id: NEXT.fetch_add(1, Ordering::Relaxed), name, size };
+    tracing::info!(bytes = size, "a file goes to the device");
+    let blob = link.open_blob(remoteman_core::media::BLOB_FILE, serde_json::to_string(&header).unwrap_or_default());
+    std::thread::Builder::new()
+        .name("file".into())
+        .spawn(move || {
+            let mut piece = vec![0u8; 256 * 1024];
+            loop {
+                match file.read(&mut piece) {
+                    Ok(0) => {
+                        let _ = blob.finish();
+                        return;
+                    }
+                    Ok(n) if blob.write(&piece[..n]) => {}
+                    // The connection went, or the file can't be read on: given up (dropping
+                    // the blob tells the device).
+                    _ => return,
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
+    // A path may have spaces in it: everything after the word.
+    if let Some(path) = line.trim().strip_prefix("send ") {
+        if !allowed.files.load(Ordering::Relaxed) {
+            return "files are switched off on this computer\n".into();
+        }
+        return match send_file(host.link(), Path::new(path.trim().trim_matches('"'))) {
+            Ok(()) => "ok\n".into(),
+            Err(why) => format!("{why}\n"),
+        };
+    }
     let mut words = line.split_whitespace();
     match (words.next(), words.next(), words.next()) {
         (Some("status") | None, _, _) => {
             let client = allowed.now.lock().unwrap().as_ref().map(|n| {
                 serde_json::json!({ "name": n.name, "since": n.since, "width": n.width, "height": n.height, "refresh": n.refresh, "placement": n.placement, "picture": n.picture, "sound": n.sound })
             });
+            let sent = {
+                let sent = allowed.sent.lock().unwrap();
+                serde_json::json!({ "answered": sent.0, "ok": sent.1, "said": sent.2 })
+            };
             let status = serde_json::json!({
                 "address": host.address.to_string(),
                 "fingerprint": host.fingerprint,
@@ -184,6 +233,7 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "files": allowed.files.load(Ordering::Relaxed),
                 "microphone": allowed.microphone.load(Ordering::Relaxed),
                 "client": client,
+                "sent": sent,
             });
             format!("{status}\n")
         }
@@ -232,6 +282,6 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
-        _ => "status | pair on|off|accept|decline | allow clipboard|files on|off | drop | revoke FINGERPRINT\n".into(),
+        _ => "status | pair on|off|accept|decline | allow clipboard|files on|off | drop | revoke FINGERPRINT | send PATH\n".into(),
     }
 }

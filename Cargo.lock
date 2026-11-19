@@ -1708,6 +1708,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "opusic-c",
+ "png",
  "remoteman-core",
  "remoteman-encode",
  "serde_json",
