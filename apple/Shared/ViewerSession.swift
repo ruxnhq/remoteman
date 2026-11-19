@@ -777,10 +777,12 @@ final class ViewerSession: ObservableObject {
     private func comeBack(after reason: String, generation gen: Int) -> Bool {
         guard ["logging in:", "logging_in:"].contains(where: { reason.lowercased().contains($0) }), loginRetries < 10, let again else { return false }
         loginRetries += 1
-        loggingIn = true
         let c = client
         client = nil
         c?.close()
+        // As after any session: what was on (sound, clipboard, microphone) is asked for afresh.
+        teardown()
+        loggingIn = true
         state = .connecting(target)
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             guard let self, self.generation == gen else { return }
@@ -795,7 +797,9 @@ final class ViewerSession: ObservableObject {
         if comeBack(after: reason, generation: gen) { return }
         closeCode = client?.closeCode ?? -1
         // On 3 the computer's key is kept: pairing again still checks it is the same computer.
+        let c = client
         client = nil
+        c?.close()
         teardown()
         lockedAsk = Self.lockedWords(reason)
         state = .failed(Self.plain(reason))

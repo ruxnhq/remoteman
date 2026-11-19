@@ -70,6 +70,10 @@ while !args.isEmpty {
     case "--keep-last": HostEncoder.keepsLast = yes()
     case "--test-bursts": TestWindow.bursts = yes()
     case "--encoder": HostEncoder.testMode = value()
+    case "--pace": options.pace = yes()
+    case "--log": _ = value()
+    case "--dump": _ = value()
+    case "--whole-every": HostEncoder.wholeEvery = Int(value()) ?? 2000
     case "--in-flight": options.inFlight = Int(value()) ?? 2
     // For tests: so many seconds after a device connects, drop it or stop trusting it.
     case "--sound": options.sound = yes()

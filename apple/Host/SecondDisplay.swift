@@ -157,11 +157,12 @@ final class HostSecondDisplay: NSObject, SCStreamOutput, SCStreamDelegate {
         encoder = nil
         last = nil
         lock.unlock()
-        try? await s?.stopCapture()
-        enc?.invalidate()
+        // Before the wait: a start() that runs during it makes a display of its own, which this must not take away.
         if display != nil { hostLog("host: second display removed") }
         display = nil
         geometry = nil
+        try? await s?.stopCapture()
+        enc?.invalidate()
     }
 
     /// The device lost a frame of this picture: the next one is whole (the last one again if the screen is still).

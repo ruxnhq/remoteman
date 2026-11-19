@@ -14,7 +14,10 @@ import ScreenCaptureKit
 let hostLogFile: FileHandle? = {
     // At the login window launchd already sends what is printed to the agent's own log.
     if CommandLine.arguments.contains("--login-window") { return nil }
-    let url = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+    // A host started for a test (`--log file`) keeps its lines out of the everyday host's log.
+    let args = CommandLine.arguments
+    let own = args.firstIndex(of: "--log").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+    let url = own.map { URL(fileURLWithPath: $0) } ?? FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Logs/remoteman-host.log")
     if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
     let h = try? FileHandle(forWritingTo: url)
@@ -49,6 +52,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var capture = "x420"
         /// How many frames may be inside the encoder at once.
         var inFlight = 2
+        /// Capture no faster than the encoder manages (off: capture at the rate asked, drop what is too much).
+        var pace = false
         var bitrate = 0
         /// Fill the virtual display with moving test content while a client is on.
         var testWindow = false
@@ -235,6 +240,15 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private var captureMs = 0.0, captured = 0, ageMs = 0.0
     private var askedFps = 60, saidSlow = false
     private var inputs = 0, inputMax = 0.0
+    private var captureConfig: SCStreamConfiguration?, pacedFps = 0
+    private var liveStream: SCStream?
+    /// For checking the stream with other decoders (`--dump file.hevc`): every frame as encoded.
+    private let dumpFile: FileHandle? = {
+        let args = CommandLine.arguments
+        guard let path = args.firstIndex(of: "--dump").flatMap({ $0 + 1 < args.count ? args[$0 + 1] : nil }) else { return nil }
+        FileManager.default.createFile(atPath: path, contents: nil)
+        return FileHandle(forWritingAtPath: path)
+    }()
     private var displayMax = (3840, 2880), shownPlacement = 0
     private var sendMs = 0.0, sendMax = 0.0, largest = 0, keysSent = 0, captureGap = 0.0, lastCaptured = 0.0, refused = 0
 
@@ -330,9 +344,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         advertiser.stop()
         soundQueue.sync { speakers.restore() }
         teardown()
+        // `host` stays set until the core has stopped: its last callbacks (the client leaving) use it.
         if let h = host {
-            host = nil
             rm_host_stop(h)
+            host = nil
         }
     }
 
@@ -699,6 +714,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var accept = rm_accept()
         fill(&accept, now)
         if rm_host_restart(host, &accept) == 0 { hostLog("host: configure: the core didn't restart the stream") }
+        // The first frame after a restart has to be a whole one, and the new encoder's first may
+        // have gone out before the restart.
+        wholeFrameNow()
         rm_host_send_message(host, "{\"t\":\"status\",\"bitrate\":\(bitrate(for: now))}")
         // What was on stays on across the new picture, and the device hears the format again.
         soundQueue.sync { if sound != nil { rm_host_send_message(host, HostSound.format) } }
@@ -708,8 +726,14 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func keyframeWanted() {
         lock.lock()
-        let enc = encoder, last = lastBuffer
         keyframes += 1
+        lock.unlock()
+        wholeFrameNow()
+    }
+
+    private func wholeFrameNow() {
+        lock.lock()
+        let enc = encoder, last = lastBuffer
         lock.unlock()
         enc?.requestKeyframe()
         // A still screen sends no frames; encode the last one so the keyframe goes out.
@@ -901,7 +925,12 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let config = captureConfiguration(width: width, height: height, cursorApart: cursorApart)
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         config.queueDepth = 3
+        captureConfig = config
+        pacedFps = fps
         let s = SCStream(filter: SCContentFilter(display: d, excludingWindows: []), configuration: config, delegate: self)
+        lock.lock()
+        liveStream = s
+        lock.unlock()
         do {
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: frames)
             if options.sound { try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: soundQueue) }
@@ -994,6 +1023,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         encoder = nil
         lastBuffer = nil
         geometry = nil
+        liveStream = nil
         lock.unlock()
         enc?.invalidate()
         if let s = stream {
@@ -1107,6 +1137,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             let pb = sb.imageBuffer
         else { return }
         lock.lock()
+        // A stream that was stopped can still deliver for a moment (its size may be the old one).
+        guard stream === liveStream else { return lock.unlock() }
         let enc = encoder
         let first = lastBuffer == nil
         lastBuffer = pb
@@ -1137,6 +1169,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let now = rm_host_now_us(host)
         guard now != 0 else { return }
         let capture = now &- UInt64(max(0, age) * 1_000_000)
+        dumpFile?.write(o.annexB)
         let before = CACurrentMediaTime()
         let taken = o.annexB.withUnsafeBytes {
             rm_host_send_frame(host, $0.bindMemory(to: UInt8.self).baseAddress, o.annexB.count, o.keyframe ? 1 : 0, capture)
@@ -1145,7 +1178,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         guard taken != 0 else {
             lock.lock()
             refused += 1
+            let enc = encoder
             lock.unlock()
+            // A whole frame the core didn't take has to be made again.
+            if o.keyframe { enc?.requestKeyframe() }
             return
         }
         lock.lock()
@@ -1162,6 +1198,14 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         hostLog("host: capture stopped: \(error.localizedDescription)")
+        // The device would keep a frozen picture: end the session, so that it sees it ended.
+        lock.lock()
+        let live = stream === liveStream
+        lock.unlock()
+        if live, let host {
+            hostLog("host: dropping the device, its picture has stopped")
+            rm_host_drop_client(host)
+        }
     }
 
     private func stats() {
@@ -1175,15 +1219,35 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let slow = !saidSlow && sent >= 20 && dropped > 0 && took > frameMs
         if slow { saidSlow = true }
         let fps = sent, bits = bytes * 8, wasDropped = dropped
+        // With `--pace yes`: capture no faster than the encoder gets through, so frames come
+        // evenly at half (or a third, a quarter) of the rate asked instead of unevenly at more.
+        var paceTo = 0
+        if slow, options.pace {
+            for k in 2...4 where paceTo == 0 { if 1000 * Double(k) / Double(askedFps) >= took * 0.9 { paceTo = askedFps / k } }
+            if paceTo == 0 { paceTo = askedFps / 4 }
+        }
         defer {
+            if paceTo > 0 { pace(to: paceTo, encodeMs: took) }
             if slow {
                 hostLog(String(format: "host: the device asked for more than this Mac encodes in a frame time: %.1f ms a frame at this size against %.1f ms at %d Hz, so frames are being dropped (%d sent, %d dropped in the last second). A smaller picture would be quicker.", took, frameMs, askedFps, fps, wasDropped))
             }
         }
-        sent = 0; bytes = 0; encodeMs = 0; dropped = 0; captureMs = 0; captured = 0; ageMs = 0; sendMs = 0; sendMax = 0; largest = 0; keysSent = 0; captureGap = 0; refused = 0; inputs = 0; inputMax = 0
+        sent = 0; bytes = 0; encodeMs = 0; dropped = 0; captureMs = 0; captured = 0; ageMs = 0; sendMs = 0; sendMax = 0; largest = 0; keysSent = 0; captureGap = 0; refused = 0; inputs = 0; inputMax = 0; keyframes = 0
         lock.unlock()
         if let line { hostLog(line) }
         onStats?(fps, bits)
+    }
+
+    /// Capture at this rate from now on, and tell the device (status "refresh").
+    private func pace(to fps: Int, encodeMs: Double) {
+        guard let stream, let config = captureConfig, let host, fps != pacedFps else { return }
+        pacedFps = fps
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        stream.updateConfiguration(config) { error in
+            if let error { hostLog("host: pacing capture failed: \(error.localizedDescription)") }
+        }
+        hostLog(String(format: "host: capturing at %d Hz from now on: the encoder takes %.1f ms a frame at this size", fps, encodeMs))
+        rm_host_send_message(host, "{\"t\":\"status\",\"refresh\":\(fps)}")
     }
 
     // MARK: Cursor (main queue)

@@ -40,6 +40,10 @@ final class HostEncoder {
     /// Counted for the log: frames encoded late from `waiting`, and times a dropped frame was
     /// followed by nothing for a quarter of a second (the device was left with an old picture).
     private var late = 0, stale = 0, droppedAt = 0.0
+    /// Frames taken in so far: the waiting frame goes in only if none newer went in meanwhile.
+    private var taken = 0
+    private var sinceKey = 0
+    static var wholeEvery = 2000
     func takeCounts() -> (late: Int, stale: Int) {
         lock.lock()
         defer { late = 0; stale = 0; lock.unlock() }
@@ -136,7 +140,14 @@ final class HostEncoder {
             droppedAt = 0
         }
         inFlight += 1
-        let force = forceKey
+        taken += 1
+        // Never as far as frame 2048 after a keyframe: there the encoder's picture count wraps,
+        // and the frame at the wrap names four earlier pictures where every other names one.
+        // Apple's decoder lets that pass; FFmpeg's (the Linux viewer's) has dropped three of them
+        // and decodes nothing more until a keyframe. A whole frame every 2000 starts the count again.
+        sinceKey += 1
+        let force = forceKey || sinceKey >= Self.wholeEvery
+        if force { sinceKey = 0 }
         forceKey = false
         lock.unlock()
         let started = CACurrentMediaTime()
@@ -151,10 +162,18 @@ final class HostEncoder {
                 self.inFlight -= 1
                 let w = self.waiting
                 self.waiting = nil
-                if w != nil { self.late += 1 }
+                let mark = self.taken
                 self.lock.unlock()
                 if let w {
-                    let again = { [weak self] in _ = self?.encode(w.0, pts: w.1) }
+                    let again = { [weak self] in
+                        guard let self else { return }
+                        // A newer frame got in first: this one would put an older picture after it.
+                        self.lock.lock()
+                        let newest = self.taken == mark && self.waiting == nil
+                        if newest { self.late += 1 }
+                        self.lock.unlock()
+                        if newest { _ = self.encode(w.0, pts: w.1) }
+                    }
                     if let q = self.queue { q.async(execute: again) } else { again() }
                 }
             }
