@@ -103,6 +103,10 @@ fn main() -> Result<()> {
             let system = remoteman_core::relay::socket_path(true);
             if system.exists() { system } else { remoteman_core::relay::socket_path(false) }
         });
+        // The owner's programs ask this agent how things stand, as they ask the standalone
+        // host; what is the daemon's to say is asked of the daemon.
+        let control_at = control_at.clone().unwrap_or_else(|| control::default_path(remoteman_core::PORT));
+        control::serve(&control_at, control::Behind::Daemon(socket.clone()), allowed.clone(), state.clone());
         // The daemon may start after us, or be restarted: keep trying.
         let mut said = false;
         loop {
@@ -131,7 +135,7 @@ fn main() -> Result<()> {
     let host = std::sync::Arc::new(Host::start(options, session::Agent::new(bitrate * 1_000_000, refs, allowed.clone(), take_output)?)?);
     tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
     let control_at = control_at.unwrap_or_else(|| control::default_path(host.address.port()));
-    control::serve(&control_at, std::sync::Arc::downgrade(&host), allowed, state_dir);
+    control::serve(&control_at, control::Behind::Own(std::sync::Arc::downgrade(&host)), allowed, state_dir);
     if pair {
         tracing::info!("pairing: the next unknown device to connect will be trusted");
     }

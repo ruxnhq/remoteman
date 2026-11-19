@@ -51,6 +51,8 @@ struct State {
     said: Vec<Message>,
     /// Counts clients, so that work started for one stops when it has gone.
     generation: u64,
+    /// The owner has switched sharing off: every client is turned away until it is on again.
+    paused: bool,
 }
 
 /// Getting a device into a session it isn't in yet, through GDM.
@@ -72,11 +74,17 @@ pub struct Shared {
     /// The listening side, once it is up: the trust list and the client's connection.
     /// Not held: the daemon's main thread is the one that stops it.
     host: std::sync::OnceLock<std::sync::Weak<remoteman_core::host::Host>>,
+    /// Where it is noted that sharing is switched off, so a restart keeps it off.
+    paused_note: Option<std::path::PathBuf>,
 }
 
 impl Shared {
-    pub fn new(owner: Option<(String, u32)>, login: Option<Login>) -> Arc<Self> {
-        Arc::new(Self { sending: Mutex::new(()), state: Mutex::default(), owner, login, host: Default::default() })
+    /// `state`: the daemon's state folder, where a pause of sharing is remembered.
+    pub fn new(owner: Option<(String, u32)>, login: Option<Login>, state: Option<&std::path::Path>) -> Arc<Self> {
+        let paused_note = state.map(|s| s.join("sharing-off"));
+        let shared = Self { sending: Mutex::new(()), state: Mutex::default(), owner, login, host: Default::default(), paused_note };
+        shared.state.lock().unwrap().paused = shared.paused_note.as_ref().is_some_and(|p| p.exists());
+        Arc::new(shared)
     }
 
     pub fn listening(&self, host: &Arc<remoteman_core::host::Host>) {
@@ -181,6 +189,9 @@ impl Broker {
 
 impl HostHandler for Broker {
     fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
+        if self.0.state.lock().unwrap().paused {
+            return Err("sharing is switched off on this computer".into());
+        }
         let (tx, rx) = mpsc::channel();
         let generation = {
             let mut st = self.0.state.lock().unwrap();
@@ -324,8 +335,9 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
         Ok(Some(ToDaemon::Hello { features })) => features,
         Ok(Some(ToDaemon::Control(words))) => {
             use std::io::Write;
+            // Root, the user the daemon runs as, and the user whose devices these are.
             // SAFETY: no arguments, no state.
-            let ours = uid == 0 || uid == unsafe { libc::geteuid() };
+            let ours = uid == 0 || uid == unsafe { libc::geteuid() } || shared.owner.as_ref().is_some_and(|(_, owner)| *owner == uid);
             // Looking at the agents is for any local user; changing anything is not, and
             // neither is the list of devices (their names are their owner's business).
             let looking = matches!(words.split_whitespace().next(), Some("status") | None);
@@ -518,6 +530,40 @@ fn control(shared: &Shared, words: &str) -> String {
                 Err(why) => format!("{why}\n"),
             }
         }
+        // For the owner's programs (the agent in their session, which Remoteman Host asks): how
+        // things stand, as one line of JSON.
+        Some("owner") => {
+            let Some(host) = shared.host.get().and_then(|h| h.upgrade()) else { return "the daemon isn't listening\n".into() };
+            let paused = shared.state.lock().unwrap().paused;
+            let status = serde_json::json!({
+                "address": host.address.to_string(),
+                "fingerprint": host.fingerprint,
+                "pairing": host.pairing(),
+                "pending": host.pending(),
+                "devices": host.devices(),
+                "paused": paused,
+            });
+            format!("{status}\n")
+        }
+        // Switched off, every client is turned away (the connected one is dropped); the
+        // daemon keeps running, and stays so across restarts until switched on again.
+        Some("sharing") => {
+            let on = match words.next() {
+                Some("on") => true,
+                Some("off") => false,
+                _ => return "sharing on|off\n".into(),
+            };
+            shared.state.lock().unwrap().paused = !on;
+            if let Some(note) = &shared.paused_note {
+                let _ = if on { std::fs::remove_file(note) } else { std::fs::write(note, "") };
+            }
+            if !on {
+                if let Some(host) = shared.host.get().and_then(|h| h.upgrade()) {
+                    host.drop_client();
+                }
+            }
+            "ok\n".into()
+        }
         Some(word @ ("devices" | "revoke" | "drop" | "pair")) => {
             let Some(host) = shared.host.get().and_then(|h| h.upgrade()) else { return "the daemon isn't listening\n".into() };
             match word {
@@ -545,17 +591,27 @@ fn control(shared: &Shared, words: &str) -> String {
                 "drop" => if host.drop_client() { "the client was dropped\n".into() } else { "no client is connected\n".into() },
                 _ => match words.next() {
                     Some("on") => {
+                        host.set_confirm(false);
                         host.set_pairing(true);
                         "pairing is on: the next unknown device is let in and remembered\n".into()
                     }
+                    // As `on`, but the device that comes is held until its owner has said
+                    // yes (`pair accept`); who it is and its code are in `owner`.
+                    Some("ask") => {
+                        host.set_confirm(true);
+                        host.set_pairing(true);
+                        "ok\n".into()
+                    }
                     Some("off") => {
                         host.set_pairing(false);
+                        host.decide(false);
                         "pairing is off\n".into()
                     }
-                    _ => "pair on|off\n".into(),
+                    Some(answer @ ("accept" | "decline")) => if host.decide(answer == "accept") { "ok\n".into() } else { "no device is waiting\n".into() },
+                    _ => "pair on|ask|off|accept|decline\n".into(),
                 },
             }
         }
-        Some(other) => format!("unknown command {other}: status, switch N, prefer N, devices, revoke FINGERPRINT, drop, pair on|off\n"),
+        Some(other) => format!("unknown command {other}: status, owner, sharing on|off, switch N, prefer N, devices, revoke FINGERPRINT, drop, pair on|ask|off|accept|decline\n"),
     }
 }

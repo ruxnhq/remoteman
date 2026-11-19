@@ -1654,6 +1654,7 @@ dependencies = [
  "anyhow",
  "libc",
  "remoteman-core",
+ "remoteman-desktop",
  "serde_json",
  "tokio",
  "tracing",

@@ -43,6 +43,7 @@ fn main() -> Result<()> {
     let (mut pair, mut drop_one_in, mut name) = (false, None::<u32>, None::<String>);
     let mut ctl = None::<Vec<String>>;
     let (mut standin, mut label) = (false, "stand-in".to_owned());
+    let mut advertise = None::<bool>;
     let (mut user, mut login) = (None::<String>, if root { "screen" } else { "off" }.to_owned());
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -66,6 +67,9 @@ fn main() -> Result<()> {
             "--pair" => pair = true,
             "--user" => user = Some(value()?),
             "--login" => login = value()?,
+            // Tell the local network this host is here (or don't), whatever it listens on.
+            "--advertise" => advertise = Some(true),
+            "--no-advertise" => advertise = Some(false),
             // For tests: lose one video packet in this many.
             "--test-drop-one-in" => drop_one_in = Some(value()?.parse().context("--test-drop-one-in N")?),
             other => anyhow::bail!("unknown option {other}"),
@@ -111,10 +115,11 @@ fn main() -> Result<()> {
         }
         other => anyhow::bail!("--login {other}: screen, key or off"),
     };
-    let shared = broker::Shared::new(owner, login);
+    let shared = broker::Shared::new(owner, login, Some(&state));
     // What the agents can do. (Each agent says what it has when it attaches; until the daemon
     // tells clients per session, it lists what an agent allowed everything would have.)
-    let features = ["video", "input", "cursor", "placement", "configure", "sound", "mic", "camera", "files", "clipboard"].map(String::from).to_vec();
+    let features = ["video", "input", "cursor", "placement", "mirror", "configure", "sound", "mic", "camera", "files", "clipboard"].map(String::from).to_vec();
+    let said_name = name.clone();
     let options = HostOptions { listen, state, name, os: "linux".into(), features, pair, test_drop_one_in: drop_one_in };
     let host = std::sync::Arc::new(Host::start(options, broker::Broker(shared.clone()))?);
     shared.listening(&host);
@@ -123,6 +128,22 @@ fn main() -> Result<()> {
         tracing::info!("pairing: the next unknown device to connect will be trusted");
     }
     std::thread::Builder::new().name("agents".into()).spawn(move || broker::accept(listener, shared))?;
+    // Viewers on this network find a host that can be reached from it; one that listens on
+    // this computer alone (a test's) keeps to itself.
+    let _advert = if advertise.unwrap_or(!listen.ip().is_loopback()) {
+        match remoteman_desktop::advertise::Advert::start(&said_name, host.address.port(), remoteman_desktop::advertise::records(&host.fingerprint, "linux")) {
+            Ok(advert) => {
+                tracing::info!(name = said_name, "viewers on this network can find this host");
+                Some(advert)
+            }
+            Err(e) => {
+                tracing::warn!("this host isn't advertised on the network (viewers need its address): {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Until Ctrl-C or a request to stop.
     let wait = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
