@@ -272,7 +272,7 @@ fn main() -> Result<()> {
         None => None,
     };
     let watcher = Watcher { decoder: None, seen: seen.clone(), file, record, warm: Instant::now() + Duration::from_secs(2) };
-    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement }, decoders, test_drop_one_in: drop_one_in, test_delay_lost_ms: delay_lost, unlock: unlock.clone(), attach_only, cursor };
+    let options = Options { host, state, name: "testclient".into(), pair, display: Display { width: size.0, height: size.1, scale, refresh, placement, hdr: false, headroom: 0.0 }, decoders, test_drop_one_in: drop_one_in, test_delay_lost_ms: delay_lost, unlock: unlock.clone(), attach_only, cursor };
     let client = Client::connect(options, watcher)?;
     println!("host: {} ({}), features {:?}, fingerprint {}", client.host_name, client.host_os, client.host_features, &client.host_fingerprint[..12]);
 
@@ -344,7 +344,7 @@ fn main() -> Result<()> {
                                 _ => Side::Right,
                             };
                             let (w, h) = size.split_once('x').with_context(|| format!("line {}: display2 WxH [left|above|below] or off", i + 1))?;
-                            Message::Display { index: 1, on: true, display: Some(Display { width: w.parse()?, height: h.parse()?, scale: 1.0, refresh: 60, placement: Placement::Extend }), side, message: String::new() }
+                            Message::Display { index: 1, on: true, display: Some(Display { width: w.parse()?, height: h.parse()?, scale: 1.0, refresh: 60, placement: Placement::Extend, hdr: false, headroom: 0.0 }), side, message: String::new() }
                         }
                     };
                     client.send_message(message);
@@ -418,7 +418,7 @@ fn main() -> Result<()> {
                 "bitrate" => client.send_message(Message::Configure { display: None, bitrate: Some(rest.trim().parse().with_context(|| format!("line {}: bitrate BITS", i + 1))?), decoders: None }),
                 "resize" => {
                     let (w, h) = rest.trim().split_once('x').with_context(|| format!("line {}: resize WxH", i + 1))?;
-                    let display = Display { width: w.parse()?, height: h.parse()?, scale, refresh, placement };
+                    let display = Display { width: w.parse()?, height: h.parse()?, scale, refresh, placement, hdr: false, headroom: 0.0 };
                     client.send_message(Message::Configure { display: Some(display), bitrate: None, decoders: None });
                 }
                 other => bail!("line {}: unknown step {other}", i + 1),

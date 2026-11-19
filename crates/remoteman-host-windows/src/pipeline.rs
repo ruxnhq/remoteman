@@ -274,7 +274,7 @@ impl Picture {
             self.converter = converter;
             self.recovery = Recovery::new(self.encoder.short_term(), self.encoder.long_term(), s.fps);
             (self.width, self.height, self.have) = (new.width, new.height, false);
-            if !link.restart(Accept { mode, width: new.width, height: new.height, refresh: s.fps, colour: "bt709".into() }) {
+            if !link.restart(Accept { mode, width: new.width, height: new.height, refresh: s.fps, colour: "bt709".into(), sdr_white: 0, peak: 0 }) {
                 bail!("the client is gone");
             }
             (s.resized)(new.width, new.height);

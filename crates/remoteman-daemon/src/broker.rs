@@ -871,7 +871,7 @@ mod tests {
     }
 
     fn accept(width: u32) -> Accept {
-        Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width, height: 720, refresh: 60, colour: "bt709".into() }
+        Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width, height: 720, refresh: 60, colour: "bt709".into(), sdr_white: 0, peak: 0 }
     }
 
     /// An agent's end of the socket, attached as `uid` (which only the kernel can say for a

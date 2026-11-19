@@ -87,6 +87,20 @@ pub struct Display {
     pub refresh: u32,
     #[serde(default, skip_serializing_if = "Placement::is_default")]
     pub placement: Placement,
+    /// The screen can show HDR, and by how many times brighter than its SDR white it can go
+    /// (what devices report; a host that needs nits takes SDR white as 203). Left out: SDR.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hdr: bool,
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub headroom: f32,
+}
+
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
+}
+
+fn is_zero32(v: &u32) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -130,6 +144,12 @@ pub enum Message {
         colour: String,
         #[serde(default, skip_serializing_if = "is_zero8")]
         index: u8,
+        /// With `bt2020-pq`: where SDR white sits in the signal and the brightest the host's
+        /// display may go, in nits (left out: 203 and 1000).
+        #[serde(default, skip_serializing_if = "is_zero32")]
+        sdr_white: u32,
+        #[serde(default, skip_serializing_if = "is_zero32")]
+        peak: u32,
     },
     /// Client to host: add a second display of this size to the session (`index` 1, `on`
     /// true), or take it away. Host to client, with `on` false: the second display is gone
@@ -340,7 +360,7 @@ mod tests {
 
     #[test]
     fn stream_is_flat_and_unknowns_are_ignored() {
-        let m = Message::Stream { epoch: 1, mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: 2752, height: 2064, refresh: 120, colour: "bt709".into(), index: 0 };
+        let m = Message::Stream { epoch: 1, mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: 2752, height: 2064, refresh: 120, colour: "bt709".into(), index: 0, sdr_white: 0, peak: 0 };
         assert_eq!(
             serde_json::to_string(&m).unwrap(),
             r#"{"t":"stream","epoch":1,"codec":"av1","chroma":"420","depth":10,"width":2752,"height":2064,"refresh":120,"colour":"bt709"}"#

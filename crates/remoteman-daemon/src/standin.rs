@@ -67,7 +67,7 @@ impl HostHandler for StandIn {
             }
         }));
         println!("{}: client {} ({}x{})", self.label, client.name, client.display.width, client.display.height);
-        Ok(Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: client.display.width, height: client.display.height, refresh: 120, colour: "bt709".into() })
+        Ok(Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: client.display.width, height: client.display.height, refresh: 120, colour: "bt709".into(), sdr_white: 0, peak: 0 })
     }
 
     fn keyframe(&mut self) {
@@ -104,7 +104,7 @@ impl HostHandler for StandIn {
                 if let Some(d) = display {
                     // The picture starts afresh at the new size; the next frame is a keyframe.
                     self.key.store(true, Ordering::Relaxed);
-                    link.restart(Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: d.width, height: d.height, refresh: d.refresh, colour: "bt709".into() });
+                    link.restart(Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: d.width, height: d.height, refresh: d.refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
                 }
                 if let Some(b) = bitrate {
                     link.send_message(Message::Status { bitrate: Some(*b) });

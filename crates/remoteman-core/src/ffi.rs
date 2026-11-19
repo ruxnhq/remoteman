@@ -70,14 +70,32 @@ fn give_blob(f: OnBlob, ctx: *mut c_void, event: &BlobEvent) {
     }
 }
 
+/// The headroom the app last connected with (`hdr=` in its options), as bits; 0: SDR. A second
+/// display asked for through `rm_client_second_display` is as the first in this.
+static HEADROOM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 fn give_message(f: extern "C" fn(ctx: *mut c_void, json: *const c_char), ctx: *mut c_void, message: &Message) {
     if let Ok(json) = CString::new(serde_json::to_string(message).unwrap_or_default()) {
         f(ctx, json.as_ptr());
     }
 }
 
+impl RmCallbacks {
+    /// Before an HDR stream starts: where SDR white sits in it and how bright it may go, in
+    /// nits, through `on_message` as `{"t":"stream_light","index":0,"sdr_white":203,"peak":1000}`
+    /// (`on_stream` keeps its arguments).
+    fn light(&mut self, index: u8, s: &StreamInfo) {
+        if let (Some(f), true) = (self.on_message, s.colour == "bt2020-pq") {
+            if let Ok(json) = CString::new(format!(r#"{{"t":"stream_light","index":{index},"sdr_white":{},"peak":{}}}"#, s.sdr_white, s.peak)) {
+                f(self.ctx, json.as_ptr());
+            }
+        }
+    }
+}
+
 impl Handler for RmCallbacks {
     fn stream(&mut self, s: &StreamInfo) {
+        self.light(0, s);
         if let Some(f) = self.on_stream {
             let chroma = if s.mode.chroma == Chroma::C444 { 444 } else { 420 };
             f(self.ctx, s.epoch, (s.mode.codec == Codec::Av1) as u8, chroma, s.mode.depth, s.width, s.height, s.refresh, (s.colour == "bt2020-pq") as u8);
@@ -91,6 +109,7 @@ impl Handler for RmCallbacks {
     }
 
     fn stream2(&mut self, s: &StreamInfo) {
+        self.light(1, s);
         if let Some(f) = self.on_stream2 {
             let chroma = if s.mode.chroma == Chroma::C444 { 444 } else { 420 };
             f(self.ctx, s.epoch, (s.mode.codec == Codec::Av1) as u8, chroma, s.mode.depth, s.width, s.height, s.refresh, (s.colour == "bt2020-pq") as u8);
@@ -225,7 +244,13 @@ pub unsafe extern "C" fn rm_client_connect(
     let mut placement = Placement::Extend;
     let mut unlock = None;
     let mut attach_only = false;
+    // `hdr=HEADROOM`: this screen can show HDR, that many times brighter than its SDR white.
+    let mut headroom = 0.0f32;
     for pair in options.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        if let Some(("hdr", times)) = pair.split_once('=') {
+            headroom = times.parse().unwrap_or(0.0);
+            continue;
+        }
         match pair.split_once('=') {
             Some(("placement", "extend")) => placement = Placement::Extend,
             Some(("placement", "main")) => placement = Placement::Main,
@@ -262,7 +287,8 @@ pub unsafe extern "C" fn rm_client_connect(
             }
         });
     }
-    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh, placement }, decoders: modes, test_drop_one_in: None, test_delay_lost_ms: None, cursor: callbacks.on_cursor_shape.is_some(), unlock, attach_only };
+    HEADROOM.store(if headroom > 1.0 { headroom.to_bits() } else { 0 }, std::sync::atomic::Ordering::Relaxed);
+    let options = Options { host, state: PathBuf::from(state), name, pair: pair != 0, display: Display { width, height, scale, refresh, placement, hdr: headroom > 1.0, headroom: if headroom > 1.0 { headroom } else { 0.0 } }, decoders: modes, test_drop_one_in: None, test_delay_lost_ms: None, cursor: callbacks.on_cursor_shape.is_some(), unlock, attach_only };
     match Client::connect(options, callbacks) {
         Ok(c) => Box::into_raw(Box::new(c)),
         Err(e) => {
@@ -440,7 +466,7 @@ pub unsafe extern "C" fn rm_client_second_display(client: *const Client, on: i32
         3 => Side::Below,
         _ => Side::Right,
     };
-    let display = (on != 0).then_some(remoteman_proto::control::Display { width, height, scale, refresh, placement: Default::default() });
+    let display = (on != 0).then_some(remoteman_proto::control::Display { width, height, scale, refresh, placement: Default::default(), hdr: HEADROOM.load(std::sync::atomic::Ordering::Relaxed) != 0, headroom: f32::from_bits(HEADROOM.load(std::sync::atomic::Ordering::Relaxed)) });
     unsafe { &*client }.send_message(Message::Display { index: 1, on: on != 0, display, side, message: String::new() });
 }
 
@@ -486,6 +512,9 @@ pub struct RmClientInfo {
     /// Where its display should sit: 0 an extra display, 1 the main display, 2 the only
     /// display (this computer's own screens off while it is connected).
     pub placement: u8,
+    /// Non-zero: its screen can show HDR, `headroom` times brighter than its SDR white.
+    pub hdr: u8,
+    pub headroom: f32,
 }
 
 /// The host's answer, filled in by `on_client`.
@@ -503,6 +532,10 @@ pub struct RmAccept {
     pub hdr: u8,
     /// When refusing: why, as a C string the client is shown.
     pub refuse: [c_char; 200],
+    /// With `hdr` 1: where SDR white sits in the signal and the brightest this display may
+    /// go, in nits (0: the usual, 203 and 1000). (Added last.)
+    pub sdr_white: u32,
+    pub peak: u32,
 }
 
 /// One input event, as docs/PROTOCOL.md numbers them. Fields that a type doesn't use are zero.
@@ -574,8 +607,10 @@ impl HostHandler for RmHostCallbacks {
             decoders: decoders.as_ptr(),
             cursor_apart: client.cursor as u8,
             placement: client.display.placement as u8,
+            hdr: client.display.hdr as u8,
+            headroom: client.display.headroom,
         };
-        let mut a = RmAccept { codec: 0, depth: 10, chroma: 420, width: 0, height: 0, refresh: 0, hdr: 0, refuse: [0; 200] };
+        let mut a = RmAccept { codec: 0, depth: 10, chroma: 420, width: 0, height: 0, refresh: 0, hdr: 0, refuse: [0; 200], sdr_white: 0, peak: 0 };
         if f(self.ctx, &info, &mut a) == 0 {
             a.refuse[199] = 0;
             // SAFETY: terminated just above.
@@ -653,6 +688,8 @@ fn accepted(a: &RmAccept) -> Accept {
         height: a.height,
         refresh: a.refresh,
         colour: if a.hdr != 0 { "bt2020-pq" } else { "bt709" }.into(),
+        sdr_white: a.sdr_white,
+        peak: a.peak,
     }
 }
 

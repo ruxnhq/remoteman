@@ -377,7 +377,7 @@ mod tests {
             }));
             // Frames are already waiting in the link by the time this returns.
             std::thread::sleep(std::time::Duration::from_millis(30));
-            Ok(Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: client.display.width, height: 2, refresh: 120, colour: "bt709".into() })
+            Ok(Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: client.display.width, height: 2, refresh: 120, colour: "bt709".into(), sdr_white: 0, peak: 0 })
         }
         fn keyframe(&mut self) {}
         fn input(&mut self, event: Event) {
@@ -398,7 +398,7 @@ mod tests {
     impl HostHandler for Sending {
         fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
             self.0.push(link.open_blob(remoteman_proto::media::BLOB_FILE, format!("for {}", client.name)));
-            Ok(Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: 2, height: 2, refresh: 60, colour: "bt709".into() })
+            Ok(Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: 2, height: 2, refresh: 60, colour: "bt709".into(), sdr_white: 0, peak: 0 })
         }
         fn keyframe(&mut self) {}
         fn input(&mut self, _event: Event) {}
@@ -425,7 +425,7 @@ mod tests {
     }
 
     fn client(name: &str, width: u32) -> ToAgent {
-        let display = Display { width, height: 2, scale: 1.0, refresh: 120, placement: Default::default() };
+        let display = Display { width, height: 2, scale: 1.0, refresh: 120, placement: Default::default(), hdr: false, headroom: 0.0 };
         ToAgent::Client { info: ClientInfo { name: name.into(), fingerprint: "f".into(), display, decoders: vec![], cursor: false, unlock: None, attach_only: false }, elapsed_us: 5 }
     }
 

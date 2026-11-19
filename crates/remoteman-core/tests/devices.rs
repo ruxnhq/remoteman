@@ -15,7 +15,7 @@ struct Desk(mpsc::Sender<&'static str>);
 impl HostHandler for Desk {
     fn connected(&mut self, _client: &ClientInfo, _link: Link) -> Result<Accept, String> {
         let _ = self.0.send("connected");
-        Ok(Accept { mode: MODE, width: 640, height: 480, refresh: 60, colour: "bt709".into() })
+        Ok(Accept { mode: MODE, width: 640, height: 480, refresh: 60, colour: "bt709".into(), sdr_white: 0, peak: 0 })
     }
     fn keyframe(&mut self) {}
     fn input(&mut self, _event: Event) {}
@@ -54,7 +54,7 @@ fn options(host: &Host, state: &PathBuf, name: &str, pair: bool) -> Options {
         state: state.clone(),
         name: name.into(),
         pair,
-        display: Display { width: 640, height: 480, scale: 1.0, refresh: 60, placement: Default::default() },
+        display: Display { width: 640, height: 480, scale: 1.0, refresh: 60, placement: Default::default(), hdr: false, headroom: 0.0 },
         decoders: vec![MODE],
         test_drop_one_in: None,
         test_delay_lost_ms: None,
