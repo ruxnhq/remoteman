@@ -274,6 +274,15 @@ struct HostSettings: View {
                         .toggleStyle(.checkbox).available(Features.placementPolicy)
                     }
                 }
+                CardGroup("Being found", footnote: "Off, a device is paired by typing this Mac's address. Only paired devices can connect either way.") {
+                    Row(
+                        "Show this Mac to devices on this network",
+                        caption: "A device looking for computers lists this Mac by name and can wake it. The first time, macOS asks whether remoteman host may be found on your local network."
+                    ) {
+                        Toggle("Show this Mac to devices on this network", isOn: Binding(get: { controller.advertise }, set: { controller.setAdvertise($0) }))
+                            .labelsHidden().toggleStyle(.switch)
+                    }
+                }
                 CardGroup(
                     "What paired devices may do",
                     footnote: "Both are off until you turn them on. A connected device is told at once."

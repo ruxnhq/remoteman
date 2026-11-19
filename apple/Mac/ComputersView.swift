@@ -30,6 +30,12 @@ struct ComputersView: View {
 private struct ComputersContent: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject var store: ComputerStore
+    @ObservedObject private var nearby = Nearby.shared
+
+    /// Seen on this network and not paired with this Mac.
+    private var strangers: [Nearby.Found] {
+        nearby.found.filter { f in !store.computers.contains { !f.fp.isEmpty && $0.fingerprint.lowercased().hasPrefix(f.fp) } }
+    }
     @Binding var renaming: SavedComputer?
     @Binding var forgetting: SavedComputer?
 
@@ -42,12 +48,37 @@ private struct ComputersContent: View {
                     }
                 }
                 Section("Nearby") {
-                    // Finding computers on the network isn't there yet: the section is, empty.
-                    if !Features.discovery {
-                        Text("Finding computers on this network isn't available yet. Add one by its address with the plus button.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .selectionDisabled()
+                    if nearby.refused {
+                        Text("macOS isn't letting remoteman look. Allow it under System Settings, Privacy & Security, Local Network.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary).selectionDisabled()
+                    } else if !nearby.looking && !Nearby.wanted {
+                        // Looking is asked for: the first time, macOS asks whether remoteman may.
+                        Button("Look on This Network") { nearby.look() }
+                            .buttonStyle(.link).font(.system(size: 12)).selectionDisabled()
+                    } else if strangers.isEmpty {
+                        Text(nearby.found.isEmpty ? "No computers found on this network yet." : "Every computer found here is already paired.")
+                            .font(.system(size: 11)).foregroundStyle(.tertiary).selectionDisabled()
+                    }
+                    ForEach(strangers) { f in
+                        HStack(spacing: 8) {
+                            Label {
+                                Text(f.name).lineLimit(1)
+                            } icon: {
+                                Image(systemName: f.os == "macos" ? "macmini" : "desktopcomputer").foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 4)
+                            Button("Add") {
+                                guard let address = f.address else { return }
+                                var c = SavedComputer(name: f.name, address: address)
+                                c.pairOnConnect = true
+                                c.os = f.os
+                                c.macs = f.macs
+                                store.add(c)
+                                model.selection = c.id
+                            }
+                            .controlSize(.small).disabled(f.address == nil)
+                        }
+                        .selectionDisabled()
                     }
                 }
             }
@@ -100,6 +131,7 @@ private struct ComputersContent: View {
 
 private struct SidebarRow: View {
     let computer: SavedComputer
+    @ObservedObject private var nearby = Nearby.shared
     var body: some View {
         HStack(spacing: 8) {
             Label {
@@ -112,6 +144,9 @@ private struct SidebarRow: View {
             // told, only "Not paired" is said, of one that has never been connected to.
             if computer.pairOnConnect {
                 Text("Not paired").font(.system(size: 11)).foregroundStyle(.secondary)
+            } else if nearby.seen(fingerprint: computer.fingerprint) != nil {
+                // Seen on this network now. Not seen says nothing: it may be reached another way.
+                Circle().fill(Color.green).frame(width: 7, height: 7).help("On this network now").accessibilityLabel("On this network now")
             }
         }
     }
@@ -136,6 +171,7 @@ private struct EmptyDetail: View {
 struct ComputerDetail: View {
     @EnvironmentObject private var model: AppModel
     let computer: SavedComputer
+    @State private var wakeNote: String?
 
     private var error: String? { model.errors[computer.id] }
 
@@ -166,9 +202,14 @@ struct ComputerDetail: View {
                     if error == nil {
                         Text("or double-click it in the sidebar").font(.system(size: 11)).foregroundStyle(Tokens.l2)
                     } else {
-                        Button("Send Wake Signal") {}
-                            .buttonStyle(LargeButtonStyle())
-                            .available(Features.wake)
+                        Button(wakeNote ?? "Send Wake Signal") {
+                            let n = Wake.send(macs: computer.macs, lastAddress: computer.address)
+                            wakeNote = n > 0 ? "Wake Signal Sent" : "Couldn't Send It"
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { wakeNote = nil }
+                        }
+                        .buttonStyle(LargeButtonStyle())
+                        .available(Features.wake && !computer.macs.isEmpty)
+                        .help(computer.macs.isEmpty ? "Its network card's address isn't known yet: it is learned when the computer is seen on this network." : "Wakes it if it is asleep on this network")
                     }
                 }
                 .padding(.top, 8)

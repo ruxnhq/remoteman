@@ -233,8 +233,14 @@ struct ComputerSettings: View {
                     Row("Require Touch ID to connect") {
                         FixedPopUp(title: "Require Touch ID to connect", value: "Use the default (off)", flag: Features.touchID)
                     }
-                    Row("Wake it over the network", caption: "Its network card address was saved at pairing.") {
-                        FixedSwitch(title: "Wake it over the network", value: false, flag: Features.wake)
+                    Row(
+                        "Wake it before connecting",
+                        caption: c.macs.isEmpty
+                            ? "Its network card's address isn't known yet. It is learned when the computer is seen on this network (Nearby, in the main window)."
+                            : "Sends the wake signal on this network first, to \(c.macs.joined(separator: ", "))."
+                    ) {
+                        Toggle("Wake it before connecting", isOn: Binding(get: { c.wake }, set: { on in store.update(c.id) { $0.wake = on } }))
+                            .labelsHidden().toggleStyle(.switch).available(Features.wake && !c.macs.isEmpty)
                     }
                     Row("Key fingerprint", value: Fingerprint.shown(c.fingerprint), dim: c.fingerprint.isEmpty, mono: true)
                     Row(

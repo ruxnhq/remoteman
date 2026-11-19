@@ -16,6 +16,10 @@ struct Computer: Codable, Identifiable, Equatable {
     /// False until the first connection has gone through (which is when the pairing happens).
     var paired = false
     var fingerprint: String?
+    /// Its network cards' addresses, as it said them on this network (for waking it).
+    var macs: [String]?
+    /// Send the wake signal before connecting.
+    var wake: Bool?
 
     var osLine: String {
         switch os {

@@ -13,6 +13,11 @@ struct ComputersScreen: View {
     @State private var newName = ""
     @State private var forgetting: Computer?
 
+    @ObservedObject private var look = Nearby.shared
+    /// Seen on this network and not paired with this device.
+    private var strangers: [Nearby.Found] {
+        look.found.filter { f in !store.computers.contains { c in !f.fp.isEmpty && (c.fingerprint ?? "").lowercased().hasPrefix(f.fp) } }
+    }
     private var pad: Bool { sizeClass == .regular }
     private var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
 
@@ -221,12 +226,40 @@ struct ComputersScreen: View {
             }
             InsetGroup(
                 header: pad ? nil : "Nearby, not paired",
-                footer: pad
-                    ? "To pair, open remoteman on the computer, choose Pair a Device, and scan the code it shows."
-                    : "To pair, open remoteman on the computer and scan the code it shows."
+                footer: "To pair, choose Pair a Device in remoteman on the computer, then add it here and connect."
             ) {
-                Row(title: "Looking for computers isn't available yet", subtitle: "Add one by its address with the + button", last: true) {
-                    EmptyView()
+                if look.refused {
+                    Row(
+                        title: "This \(device) isn't allowed to look",
+                        subtitle: "Allow remoteman under Settings, Privacy & Security, Local Network", last: true
+                    ) { EmptyView() }
+                } else if !look.looking && !Nearby.wanted {
+                    // Looking is asked for: the first time, the system asks whether remoteman may.
+                    Button { look.look() } label: {
+                        Row(title: "Look on this network", subtitle: "\(device == "iPad" ? "iPadOS" : "iOS") asks once whether remoteman may find devices on your network", last: true) {
+                            Image(systemName: "dot.radiowaves.left.and.right").foregroundStyle(Theme.tint)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                } else if strangers.isEmpty {
+                    Row(
+                        title: look.found.isEmpty ? "No computers found yet" : "Every computer found here is paired",
+                        subtitle: "Add one by its address with the + button", last: true
+                    ) { ProgressView().opacity(look.found.isEmpty ? 1 : 0) }
+                } else {
+                    ForEach(Array(strangers.enumerated()), id: \.element.id) { i, f in
+                        Row(title: f.name, subtitle: f.os == "macos" ? "macOS" : f.os == "linux" ? "Linux" : f.os, last: i == strangers.count - 1) {
+                            Button("Add") {
+                                guard let address = f.address else { return }
+                                var c = store.add(name: f.name, address: address)
+                                c.os = f.os
+                                c.macs = f.macs
+                                store.update(c)
+                                Haptics.success()
+                            }
+                            .buttonStyle(WideButtonStyle(small: true)).fixedSize().disabled(f.address == nil)
+                        }
+                    }
                 }
             }
         }
@@ -255,9 +288,13 @@ struct Thumbnail: View {
 struct StatusLine: View {
     let computer: Computer
     let short: Bool
+    @ObservedObject private var look = Nearby.shared
     var body: some View {
         HStack(spacing: 6) {
-            if Features.presence { Circle().fill(Theme.green).frame(width: 9, height: 9) }
+            // Seen on this network now. Not seen says nothing: it may be reached another way.
+            if Features.presence, look.seen(fingerprint: computer.fingerprint) != nil {
+                Circle().fill(Theme.green).frame(width: 9, height: 9).accessibilityLabel("On this network now")
+            }
             Text(computer.usedLine(short: short) ?? (computer.paired ? "Paired" : "Not connected yet"))
                 .font(Theme.subhead).foregroundStyle(Theme.secondary).lineLimit(1)
         }

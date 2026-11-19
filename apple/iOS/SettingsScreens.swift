@@ -73,8 +73,18 @@ struct ComputerSettingsScreen: View {
                             Row(title: "Way in") { RowValue(text: "Automatic", chevron: true) }.available(Features.remoteLogin)
                             Row(title: "Require Face ID to connect") { Toggle("", isOn: .constant(false)).labelsHidden() }
                                 .available(Features.faceID)
-                            Row(title: "Wake it when it's asleep", last: true) { Toggle("", isOn: .constant(false)).labelsHidden() }
-                                .available(Features.wake)
+                            Row(
+                                title: "Wake it before connecting",
+                                subtitle: (c.macs ?? []).isEmpty ? "Its network card isn't known yet: it is learned when the computer is seen on this network" : nil,
+                                last: true
+                            ) {
+                                Toggle("", isOn: Binding(get: { c.wake == true }, set: { on in
+                                    var u = c
+                                    u.wake = on
+                                    store.update(u)
+                                })).labelsHidden()
+                            }
+                            .available(Features.wake && !(c.macs ?? []).isEmpty)
                         }
                         InsetGroup(header: "During a session") {
                             Row(title: "Picture quality") { RowValue(text: "Automatic", chevron: true) }.available(Features.pictureQuality)

@@ -22,6 +22,10 @@ struct SavedComputer: Codable, Identifiable, Equatable {
     /// As the computer reported them on the last connection.
     var os = ""
     var fingerprint = ""
+    /// Its network cards' addresses, as it said them on this network (for waking it).
+    var macs: [String] = []
+    /// Send the wake signal before connecting.
+    var wake = false
 
     init(name: String, address: String) {
         self.name = name
@@ -42,6 +46,8 @@ struct SavedComputer: Codable, Identifiable, Equatable {
         lastDuration = try c.decodeIfPresent(TimeInterval.self, forKey: .lastDuration)
         os = try c.decodeIfPresent(String.self, forKey: .os) ?? ""
         fingerprint = try c.decodeIfPresent(String.self, forKey: .fingerprint) ?? ""
+        macs = try c.decodeIfPresent([String].self, forKey: .macs) ?? []
+        wake = try c.decodeIfPresent(Bool.self, forKey: .wake) ?? false
     }
 
     var place: ViewerSession.Placement {

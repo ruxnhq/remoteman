@@ -13,7 +13,7 @@ enum Launch {
     /// Started to run by itself from its arguments: the window is the stream and nothing else.
     static let automated: Bool = {
         let args = CommandLine.arguments.dropFirst()
-        return ["--host", "--play", "--bench", "--opus-test"].contains { args.contains($0) }
+        return ["--host", "--play", "--bench", "--opus-test", "--nearby", "--wake"].contains { args.contains($0) }
     }()
 }
 
@@ -86,6 +86,7 @@ final class AppModel: ObservableObject {
     private var savedFrame: NSRect?
     private var pictureTimer: Timer?
     private var stateSink: AnyCancellable?
+    private var nearbySink: AnyCancellable?
     private var monitor: Any?
     private var observers: [NSObjectProtocol] = []
 
@@ -96,9 +97,22 @@ final class AppModel: ObservableObject {
             // The value arrives before the session has it; act once it does.
             DispatchQueue.main.async { self?.stateChanged(s) }
         }
+        nearbySink = Nearby.shared.$found.sink { [weak self] found in
+            DispatchQueue.main.async { self?.noteNearby(found) }
+        }
+        // Looking by itself only once the person has asked for it (and macOS has been answered).
+        if Nearby.wanted, !Launch.automated { Nearby.shared.look() }
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .keyDown]) { [weak self] e in
             guard let self else { return e }
             return self.intercept(e)
+        }
+    }
+
+    /// What a computer seen on this network says of its network cards is kept for waking it.
+    func noteNearby(_ found: [Nearby.Found]) {
+        for c in store.computers {
+            guard let f = Nearby.shared.seen(fingerprint: c.fingerprint), !f.macs.isEmpty, f.macs != c.macs else { continue }
+            store.update(c.id) { $0.macs = f.macs }
         }
     }
 
@@ -119,6 +133,8 @@ final class AppModel: ObservableObject {
         let display = sessionDisplay()
         requested = display
         session.showStats = UserDefaults.standard.bool(forKey: Self.showFiguresKey)
+        // A computer that may be asleep is woken first; one that is awake takes no notice.
+        if c.wake, !c.macs.isEmpty, Nearby.shared.seen(fingerprint: c.fingerprint) == nil { Wake.send(macs: c.macs, lastAddress: c.address) }
         session.connect(host: c.address, pair: c.pairOnConnect, name: DeviceDisplay.name, display: display, placement: c.place)
         watchForPicture()
     }

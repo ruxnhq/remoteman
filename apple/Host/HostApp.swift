@@ -26,6 +26,15 @@ final class HostController: ObservableObject {
     @Published private(set) var allowClipboard = false
     @Published private(set) var allowFiles = false
     static let clipboardKey = "allowClipboard", filesKey = "allowFiles"
+    /// Shown to devices looking on this network. Off until the owner turns it on.
+    @Published private(set) var advertise = false
+    static let advertiseKey = "advertise"
+
+    func setAdvertise(_ on: Bool) {
+        advertise = on
+        if !unattended { UserDefaults.standard.set(on, forKey: Self.advertiseKey) }
+        host.advertise(on)
+    }
     /// Silence this Mac's speakers while a device plays its sound. On unless the owner turns it off.
     @Published private(set) var silenceSpeakers = true
     static let speakersKey = "keepSpeakersOn"
@@ -94,12 +103,14 @@ final class HostController: ObservableObject {
         if !unattended {
             options.allowClipboard = UserDefaults.standard.bool(forKey: Self.clipboardKey)
             options.allowFiles = UserDefaults.standard.bool(forKey: Self.filesKey)
+            options.advertise = UserDefaults.standard.bool(forKey: Self.advertiseKey)
         }
         if !unattended { options.silenceSpeakers = !UserDefaults.standard.bool(forKey: Self.speakersKey) }
         host = MacHost(options: options)
         silenceSpeakers = options.silenceSpeakers
         allowClipboard = options.allowClipboard
         allowFiles = options.allowFiles
+        advertise = options.advertise
         host.onClient = { [weak self] c in
             // The same device with another display (it changed its settings) keeps its time.
             let before = self?.client

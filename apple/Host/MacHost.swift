@@ -59,6 +59,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         /// What this Mac's owner allows paired devices: the clipboard both ways, files into Downloads.
         var allowClipboard = false
         var allowFiles = false
+        /// Say on the network that this Mac can be reached (DNS-SD). Off until the owner turns it on.
+        var advertise = false
         var testAllow: Double?
         var testDrop: Double?
         var testRevoke: Double?
@@ -232,9 +234,36 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         rm_host_info(h, &info, info.count)
         let parts = String(cString: info).split(separator: "\t").map(String.init)
         hostLog("host: listening on \(parts.first ?? options.listen), fingerprint \(parts.count > 1 ? parts[1] : "?"), pairing \(rm_host_pairing(h) != 0 ? "on" : "off")")
+        listening = (parts.first ?? options.listen, parts.count > 1 ? parts[1] : "")
+        advertise(options.advertise)
+    }
+
+    private var listening = ("", "")
+    private let advertiser = Advertise()
+
+    /// Show this Mac to devices on the network, or stop showing it.
+    func advertise(_ on: Bool) {
+        options.advertise = on
+        guard on, host != nil else {
+            if advertiser.on { hostLog("host: no longer shown on the network") }
+            advertiser.stop()
+            return
+        }
+        let at = listening.0
+        let port = UInt16(at.split(separator: ":").last ?? "") ?? 7791
+        if at.hasPrefix("127.") || at.hasPrefix("[::1]") {
+            hostLog("host: not shown on the network: it listens on this Mac only")
+            return
+        }
+        if let why = advertiser.start(name: options.name, port: port, fingerprint: listening.1) {
+            hostLog("host: couldn't be shown on the network: \(why)")
+        } else {
+            hostLog("host: shown on the network as \"\(options.name)\" (_remoteman._udp, port \(port), cards \(Advertise.macs.joined(separator: ",")))")
+        }
     }
 
     func stop() {
+        advertiser.stop()
         soundQueue.sync { speakers.restore() }
         teardown()
         if let h = host {

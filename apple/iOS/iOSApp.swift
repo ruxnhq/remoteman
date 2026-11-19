@@ -31,8 +31,23 @@ final class AppModel: ObservableObject {
     /// What this device asks for; set from the root view's size.
     var display = ViewerSession.Display(width: 1920, height: 1080, scale: 2, refresh: 60)
     private var watching: Any?
+    private var nearby: Any?
 
     init() {
+        // What a computer seen on this network says of its network cards is kept for waking it.
+        nearby = Nearby.shared.$found.sink { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                for c in self.store.computers {
+                    guard let f = Nearby.shared.seen(fingerprint: c.fingerprint), !f.macs.isEmpty, f.macs != c.macs else { continue }
+                    var u = c
+                    u.macs = f.macs
+                    self.store.update(u)
+                }
+            }
+        }
+        // Looking by itself only once the person has asked for it (and the system has been answered).
+        if Nearby.wanted, !CommandLine.arguments.contains(where: { $0.hasPrefix("--") }) { Nearby.shared.look() }
         session.showStats = UserDefaults.standard.bool(forKey: "figuresInNewSessions")
         watching = session.$state.sink { [weak self] state in
             // The state arrives before it is stored; act on the next turn of the main queue.
@@ -42,6 +57,10 @@ final class AppModel: ObservableObject {
 
     func connect(_ c: Computer) {
         current = c
+        // A computer that may be asleep is woken first; one that is awake takes no notice.
+        if c.wake == true, let macs = c.macs, !macs.isEmpty, Nearby.shared.seen(fingerprint: c.fingerprint) == nil {
+            Wake.send(macs: macs, lastAddress: c.address)
+        }
         session.connect(
             host: c.address, pair: !c.paired, name: DeviceDisplay.name, display: asked(for: c), placement: c.placementChoice)
     }

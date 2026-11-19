@@ -22,6 +22,10 @@
 	<string>1</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_remoteman._udp</string>
+	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>remoteman host lets your own devices connect to this Mac to show and control its desktop.</string>
 </dict>

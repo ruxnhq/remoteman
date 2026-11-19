@@ -57,6 +57,7 @@ targetTemplates:
         CFBundleDisplayName: remoteman host
         LSUIElement: true
         NSLocalNetworkUsageDescription: remoteman host lets your own devices connect to this Mac to show and control its desktop.
+        NSBonjourServices: [_remoteman._udp]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.xnixy.remoteman.host
@@ -80,6 +81,7 @@ targets:
         CFBundleDisplayName: remoteman
         LSApplicationCategoryType: public.app-category.utilities
         NSLocalNetworkUsageDescription: remoteman connects to your PC on the local network to show and control its desktop.
+        NSBonjourServices: [_remoteman._udp]
         NSHighResolutionCapable: true
         NSMicrophoneUsageDescription: remoteman can pass this Mac's microphone to the computer you are connected to, when you switch that on.
         NSCameraUsageDescription: remoteman can pass this Mac's camera to the computer you are connected to, when you switch that on.
@@ -104,6 +106,7 @@ targets:
         CFBundleDisplayName: remoteman
         UILaunchScreen: {}
         NSLocalNetworkUsageDescription: remoteman connects to your PC on the local network to show and control its desktop.
+        NSBonjourServices: [_remoteman._udp]
         # 120 Hz on iPhones with ProMotion; iPads need nothing.
         CADisableMinimumFrameDurationOnPhone: true
         # Clicks and drags from a trackpad or mouse arrive as pointer events, not fake touches.

@@ -97,6 +97,20 @@ enum Automation {
             case "--mute": SoundPlayer.silent = ["yes", "1", "true"].contains(value())
             case "--verbose": verbose = ["yes", "1", "true"].contains(value())
             case "--bench": bench = value()
+            case "--nearby":
+                // Look on this network for so many seconds, say what is there, and quit.
+                let seconds = Double(value()) ?? 5
+                Nearby.shared.look()
+                DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+                    let n = Nearby.shared
+                    print("remoteman: nearby: looking \(n.looking), refused \(n.refused), \(n.found.count) found")
+                    for f in n.found { print("remoteman: nearby: \"\(f.name)\" at \(f.address ?? "unresolved"), os \(f.os), fp \(f.fp), cards \(f.macs.joined(separator: ","))") }
+                    exit(0)
+                }
+                return
+            case "--wake":
+                // Send the wake signal to these cards (comma-separated) and say how many packets left.
+                print("remoteman: wake: \(Wake.send(macs: value().split(separator: ",").map(String.init))) packets sent")
             case "--exit": exitAfter = ["yes", "1", "true"].contains(value())
             default: break
             }

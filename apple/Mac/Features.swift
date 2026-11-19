@@ -3,13 +3,13 @@
 // this one place when the engine has it.
 enum Features {
     /// Finding computers on the network: the sidebar's "Nearby" section.
-    static let discovery = false
+    static let discovery = true
     /// Pairing by comparing a 6-digit code ("Codes Match").
     static let codePairing = false
     /// Online / asleep / not reachable, "last seen", and "What remoteman tried".
-    static let reachability = false
+    static let reachability = true
     /// "Wake", "Wake and Connect", "Send Wake Signal", "Wake it over the network".
-    static let wake = false
+    static let wake = true
     /// The last picture as a thumbnail in the detail header.
     static let thumbnails = false
     /// The computer's sound on this Mac.

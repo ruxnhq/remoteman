@@ -3,14 +3,14 @@
 // drawn as designed, dimmed, and does nothing.
 enum Features {
     /// Computers on this network that aren't paired yet ("Nearby").
-    static let discovery = false
+    static let discovery = true
     /// Pairing by scanning the computer's QR code, and by comparing six digits.
     static let qrPairing = false
     static let codePairing = false
     /// Knowing whether a computer is online, asleep or out of reach before connecting.
-    static let presence = false
+    static let presence = true
     /// Waking a sleeping computer over the network.
-    static let wake = false
+    static let wake = true
     /// Face ID before connecting, and filling the login password with it.
     static let faceID = false
     /// The computer's login screen when nobody is logged in, and the choice of way in.
