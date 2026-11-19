@@ -68,6 +68,7 @@ while !args.isEmpty {
     case "--bitrate": options.bitrate = Int(value()) ?? 0
     case "--test-window": options.testWindow = yes()
     case "--keep-last": HostEncoder.keepsLast = yes()
+    case "--test-bright": TestWindow.bright = yes()
     case "--test-bursts": TestWindow.bursts = yes()
     case "--encoder": HostEncoder.testMode = value()
     case "--pace": options.pace = yes()
@@ -86,6 +87,7 @@ while !args.isEmpty {
     case "--advertise": options.advertise = yes()
     case "--own-screen": options.ownScreen = yes()
     case "--ten-bit": options.tenBit = yes()
+    case "--hdr": options.hdr = yes()
     case "--login-window":
         // Started by launchd in the login window's session: picture and input only.
         options.loginWindow = yes()

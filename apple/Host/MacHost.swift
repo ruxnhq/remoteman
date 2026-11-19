@@ -81,6 +81,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var lockOnLeave = false
         /// 10 bits a colour (the picture as the Mac draws it); off, 8 bits, which every device decodes.
         var tenBit = true
+        /// HDR: an HDR virtual display, captured as HDR10 (BT.2020 primaries, the PQ curve) and
+        /// said to be so in the stream. For now a switch for the whole host (`--hdr yes`), until a
+        /// device can ask for it in its hello.
+        var hdr = false
         /// For tests: capture this Mac's own main screen, as the login window's host does.
         var ownScreen = false
         /// For tests: so many seconds after a device starts waiting, say yes (negative: say no).
@@ -464,8 +468,13 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         accept.pointee.width = UInt32(p.width)
         accept.pointee.height = UInt32(p.height)
         accept.pointee.refresh = UInt32(p.fps)
-        accept.pointee.hdr = 0
+        accept.pointee.hdr = hdrNow(p) ? 1 : 0
     }
+
+    /// HDR needs 10 bits and a display of this host's making (not the Mac's own screen, not a mirror).
+    private func hdrNow(_ p: Picture) -> Bool { MacHost.hdrCapture && options.hdr && options.tenBit && !p.ownScreen }
+    /// ScreenCaptureKit captures HDR from macOS 15.
+    static var hdrCapture: Bool { if #available(macOS 15.0, *) { return true } else { return false } }
 
     /// Take down whatever picture there is and start this one. Blocks the core's thread until
     /// it runs; returns why not, if it doesn't.
@@ -852,16 +861,26 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: Display and capture (main queue)
 
+    /// An HDR mode is one with a transfer function (1: the system then treats the display as an
+    /// HDR screen with headroom); an ordinary one goes the ordinary way. HDR has no 2× mode yet.
+    private func applyMode(_ d: RMVirtualDisplay, width: Int, height: Int, fps: Int, hiDPI: Bool, hdr: Bool) -> Bool {
+        if hdr, !hiDPI {
+            return d.applyModes([[NSNumber(value: width), NSNumber(value: height), NSNumber(value: fps)]], transferFunction: 1, refreshDeadline: 0)
+        }
+        return d.applyWidth(UInt32(width), height: UInt32(height), refreshRate: Double(fps), hiDPI: hiDPI)
+    }
+
     /// Returns nil when the picture is running, or why it isn't.
     @MainActor
     private func setUp(
         width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int, bitrate: Int, gen: Int, ownScreen: Bool = false,
         inPlace: Bool = false
     ) async -> String? {
+        let hdr = MacHost.hdrCapture && options.hdr && options.tenBit && !ownScreen
         holdAwake()
         let id: CGDirectDisplayID
         if inPlace, let display {
-            guard display.applyWidth(UInt32(width), height: UInt32(height), refreshRate: Double(fps), hiDPI: hiDPI) else {
+            guard applyMode(display, width: width, height: height, fps: fps, hiDPI: hiDPI, hdr: hdr) else {
                 return "the virtual display refused \(width)×\(height) at \(fps) Hz"
             }
             id = display.displayID
@@ -882,7 +901,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
                 display = nil
             }
             guard let display else { return "couldn't create a virtual display" }
-            guard display.applyWidth(UInt32(width), height: UInt32(height), refreshRate: Double(fps), hiDPI: hiDPI) else {
+            guard applyMode(display, width: width, height: height, fps: fps, hiDPI: hiDPI, hdr: hdr) else {
                 return "the virtual display refused \(width)×\(height) at \(fps) Hz"
             }
             id = display.displayID
@@ -915,14 +934,14 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         guard gen == generation else { return "replaced by a newer client" }
 
         let enc: HostEncoder
-        do { enc = try HostEncoder(width: width, height: height, fps: fps, bitrate: bitrate, tenBit: options.tenBit) } catch {
+        do { enc = try HostEncoder(width: width, height: height, fps: fps, bitrate: bitrate, tenBit: options.tenBit, hdr: hdr) } catch {
             return "no HEVC Main10 hardware encoder for \(width)×\(height) (\(error.localizedDescription))"
         }
         enc.maxInFlight = max(1, options.inFlight)
         enc.queue = frames
         enc.onFrame = { [weak self] o in self?.send(o) }
 
-        let config = captureConfiguration(width: width, height: height, cursorApart: cursorApart)
+        let config = captureConfiguration(width: width, height: height, cursorApart: cursorApart, hdr: hdr)
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         config.queueDepth = 3
         captureConfig = config
@@ -956,11 +975,28 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         if cursorApart { startCursor() }
         if options.testWindow { testWindow.show(on: id) }
         firstFrame(d, width: width, height: height, cursorApart: cursorApart, gen: gen)
-        hostLog("host: sending \(width)×\(height) at \(fps) Hz, HEVC \(options.tenBit ? "Main10" : "Main (8-bit)") 4:2:0, \(bitrate / 1000) kbit/s, capture \(options.tenBit ? options.capture : "420v"), cursor \(cursorApart ? "apart" : "in the picture"), \(width * height * fps / 1_000_000) megapixels a second")
+        hostLog("host: sending \(width)×\(height) at \(fps) Hz, HEVC \(options.tenBit ? "Main10" : "Main (8-bit)") 4:2:0\(hdr ? " HDR (BT.2020, PQ)" : ""), \(bitrate / 1000) kbit/s, capture \(options.tenBit ? options.capture : "420v"), cursor \(cursorApart ? "apart" : "in the picture"), \(width * height * fps / 1_000_000) megapixels a second")
         return nil
     }
 
-    private func captureConfiguration(width: Int, height: Int, cursorApart: Bool) -> SCStreamConfiguration {
+    private func captureConfiguration(width: Int, height: Int, cursorApart: Bool, hdr: Bool = false) -> SCStreamConfiguration {
+        if hdr, #available(macOS 15.0, *) {
+            // HDR10 as any HDR screen expects it ("canonical"), not as this Mac's own display would show it.
+            let config = SCStreamConfiguration(preset: .captureHDRStreamCanonicalDisplay)
+            config.width = width
+            config.height = height
+            config.pixelFormat = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            // What the stream says it is: BT.2020 primaries and matrix, the PQ curve (the preset
+            // by itself gives P3 primaries and the BT.709 matrix).
+            config.colorSpaceName = CGColorSpace.itur_2100_PQ
+            config.colorMatrix = kCVImageBufferYCbCrMatrix_ITU_R_2020
+            config.showsCursor = !cursorApart
+            config.capturesAudio = options.sound
+            config.sampleRate = 48000
+            config.channelCount = 2
+            config.excludesCurrentProcessAudio = true
+            return config
+        }
         let config = SCStreamConfiguration()
         config.width = width
         config.height = height
@@ -1146,7 +1182,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         if first {
             let f = CVPixelBufferGetPixelFormatType(pb)
             let cc = String(bytes: [24, 16, 8, 0].map { UInt8((f >> $0) & 0xff) }, encoding: .ascii) ?? "?"
-            hostLog("host: capture delivers \(CVPixelBufferGetWidth(pb))×\(CVPixelBufferGetHeight(pb)) '\(cc)'")
+            let colour = [kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey, kCVImageBufferYCbCrMatrixKey]
+                .map { (CVBufferCopyAttachment(pb, $0, nil) as? String) ?? "-" }.joined(separator: " / ")
+            hostLog("host: capture delivers \(CVPixelBufferGetWidth(pb))×\(CVPixelBufferGetHeight(pb)) '\(cc)', \(colour)")
         }
         // The timestamp is the time the frame was shown, on the host clock; how long capture took
         // to hand it over is counted for the log. A busy encoder drops the frame.

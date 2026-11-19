@@ -52,7 +52,7 @@ final class HostEncoder {
     /// Called on VideoToolbox's thread; the encoder takes no new frame until it returns.
     var onFrame: ((Output) -> Void)?
 
-    init(width: Int, height: Int, fps: Int, bitrate: Int, tenBit: Bool = true) throws {
+    init(width: Int, height: Int, fps: Int, bitrate: Int, tenBit: Bool = true, hdr: Bool = false) throws {
         self.width = width
         self.height = height
         var s: VTCompressionSession?
@@ -81,10 +81,10 @@ final class HostEncoder {
             (kVTCompressionPropertyKey_ProfileLevel, tenBit ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel),
             (kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, true),
             // What the stream says it is: BT.709, limited range.
-            (kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2),
-            (kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2),
-            (kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2),
-        ]
+            (kVTCompressionPropertyKey_ColorPrimaries, hdr ? kCVImageBufferColorPrimaries_ITU_R_2020 : kCVImageBufferColorPrimaries_ITU_R_709_2),
+            (kVTCompressionPropertyKey_TransferFunction, hdr ? kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ : kCVImageBufferTransferFunction_ITU_R_709_2),
+            (kVTCompressionPropertyKey_YCbCrMatrix, hdr ? kCVImageBufferYCbCrMatrix_ITU_R_2020 : kCVImageBufferYCbCrMatrix_ITU_R_709_2),
+        ] + (hdr ? [(kVTCompressionPropertyKey_HDRMetadataInsertionMode, kVTHDRMetadataInsertionMode_Auto as Any)] : [])
         for (k, v) in props {
             let st = VTSessionSetProperty(s, key: k, value: v as CFTypeRef)
             if st != noErr { hostLog("encoder: property \(k) refused (\(st))") }

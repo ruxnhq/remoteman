@@ -32,6 +32,9 @@ final class TestWindow {
     private var link: CADisplayLink?
     private let text = CATextLayer()
     private let bar = CALayer()
+    private let bright = CALayer()
+    /// `--test-bright yes`: a patch above SDR white in the middle.
+    static var bright = false
     private var n = 0
     private var size = CGSize.zero
 
@@ -57,6 +60,17 @@ final class TestWindow {
         text.contentsScale = screen.backingScaleFactor
         bar.frame = CGRect(x: 0, y: 80, width: 120, height: 120)
         bar.backgroundColor = CGColor(red: 0.2, green: 0.8, blue: 0.7, alpha: 1)
+        if Self.bright {
+            // A patch four times as bright as SDR white, for checking HDR: it needs a layer that
+            // may go over 1.0 and a colour in an extended space.
+            view.layer?.wantsExtendedDynamicRangeContent = true
+            bright.wantsExtendedDynamicRangeContent = true
+            bright.frame = CGRect(x: f.width / 2 - 200, y: f.height / 2 - 100, width: 400, height: 200)
+            if let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) {
+                bright.backgroundColor = CGColor(colorSpace: space, components: [4, 4, 4, 1])
+            }
+            view.layer?.addSublayer(bright)
+        }
         view.layer?.addSublayer(text)
         view.layer?.addSublayer(bar)
         w.contentView = view
