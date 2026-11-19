@@ -374,7 +374,7 @@ final class RefreshMeter {
         func updateUIView(_ v: RefreshProbeView, context: Context) {}
     }
 
-    final class ViewerView: UIView, UIKeyInput, UIPointerInteractionDelegate {
+    final class ViewerView: UIView, UIKeyInput, UIPointerInteractionDelegate, UIGestureRecognizerDelegate {
         let session: ViewerSession
         private var link: CADisplayLink?
         private var slots: [UITouch: UInt8] = [:]
@@ -411,6 +411,12 @@ final class RefreshMeter {
             three.numberOfTouchesRequired = 3
             three.cancelsTouchesInView = true
             addGestureRecognizer(three)
+            // A pinch magnifies this device's view of the picture (for those who leave that on);
+            // the fingers that made it are taken back from the computer.
+            let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched))
+            pinch.cancelsTouchesInView = true
+            pinch.delegate = self
+            addGestureRecognizer(pinch)
             cursorView.isHidden = true
             cursorView.isUserInteractionEnabled = false
             addSubview(cursorView)
@@ -478,6 +484,39 @@ final class RefreshMeter {
         override var canBecomeFirstResponder: Bool { true }
 
         @objc private func threeFingers() { session.toggleControls?() }
+
+        // MARK: Magnifying the view
+
+        private var pinchStart: CGFloat = 1
+        private var pinchAnchor = CGPoint.zero  // the spot of the picture under the fingers, as fractions
+
+        override func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+            g is UIPinchGestureRecognizer ? InputSettings.viewZoom && session.renderer?.videoSize != nil : super.gestureRecognizerShouldBegin(g)
+        }
+
+        @objc private func pinched(_ g: UIPinchGestureRecognizer) {
+            guard let r = session.renderer, bounds.width > 0, bounds.height > 0 else { return }
+            let at = g.location(in: self)
+            switch g.state {
+            case .began:
+                // Any touches of this pinch that reached the computer are over.
+                for (_, slot) in slots { session.input?.touch(phase: 2, slot: slot, x: 0, y: 0) }
+                slots = [:]
+                pad = [:]
+                pinchStart = max(1, r.zoom)
+                let rect = r.videoRect(in: bounds.size)
+                pinchAnchor = CGPoint(x: (at.x - rect.minX) / rect.width, y: (at.y - rect.minY) / rect.height)
+            case .changed, .ended:
+                let z = min(8, max(1, pinchStart * g.scale))
+                let base = r.videoRect(in: bounds.size, zoomed: false)
+                // The spot under the fingers stays under them.
+                r.zoomOrigin = CGPoint(
+                    x: (at.x - pinchAnchor.x * base.width * z) / bounds.width, y: (at.y - pinchAnchor.y * base.height * z) / bounds.height)
+                r.zoom = g.state == .ended && z < 1.08 ? 1 : z
+                updateCursorShape()
+            default: break
+            }
+        }
 
         /// The system's own three-finger gestures for text (undo, copy, paste) stay out of it.
         override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }

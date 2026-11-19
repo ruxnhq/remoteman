@@ -11,13 +11,13 @@ using namespace metal;
 
 struct VOut { float4 pos [[position]]; float2 uv; };
 
-struct Uniforms { float2 scale; };
+struct Uniforms { float2 scale; float2 offset; };
 
 vertex VOut rm_vertex(uint vid [[vertex_id]], constant Uniforms &u [[buffer(0)]]) {
     float2 p[4] = { float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1) };
     float2 t[4] = { float2(0, 1), float2(1, 1), float2(0, 0), float2(1, 0) };
     VOut o;
-    o.pos = float4(p[vid] * u.scale, 0, 1);
+    o.pos = float4(p[vid] * u.scale + u.offset, 0, 1);
     o.uv = t[vid];
     return o;
 }
@@ -116,6 +116,9 @@ final class VideoRenderer {
         current = nil
         needsRedraw = true
         lock.unlock()
+        // The next session starts with the whole picture in view.
+        zoom = 1
+        zoomOrigin = .zero
     }
 
     func setNeedsRedraw() {
@@ -138,14 +141,28 @@ final class VideoRenderer {
         return CGSize(width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb))
     }
 
-    /// Where the picture sits inside a view of `bounds` (aspect fit, centred), in the view's units.
-    func videoRect(in bounds: CGSize) -> CGRect {
+    /// The view's own magnification of the picture (1: the whole picture fits), and where the
+    /// magnified picture's top left sits, as fractions of the view from its top left. Set on
+    /// the main thread (a pinch on iPhone and iPad); input is mapped through the same rectangle.
+    var zoom: CGFloat = 1 { didSet { setNeedsRedraw() } }
+    var zoomOrigin = CGPoint.zero { didSet { setNeedsRedraw() } }
+
+    /// Where the picture sits inside a view of `bounds` (aspect fit, centred; magnified if the
+    /// view is zoomed), in the view's units.
+    func videoRect(in bounds: CGSize, zoomed: Bool = true) -> CGRect {
         guard let v = videoSize, v.width > 0, v.height > 0, bounds.width > 0, bounds.height > 0 else {
             return CGRect(origin: .zero, size: bounds)
         }
         let s = min(bounds.width / v.width, bounds.height / v.height)
-        let w = v.width * s, h = v.height * s
-        return CGRect(x: (bounds.width - w) / 2, y: (bounds.height - h) / 2, width: w, height: h)
+        let z = zoomed ? max(1, zoom) : 1
+        let w = v.width * s * z, h = v.height * s * z
+        // A picture larger than the view covers it edge to edge; a smaller one is centred.
+        func place(_ origin: CGFloat, _ size: CGFloat, _ room: CGFloat) -> CGFloat {
+            size <= room ? (room - size) / 2 : min(0, max(room - size, origin))
+        }
+        return CGRect(
+            x: place(z > 1 ? zoomOrigin.x * bounds.width : 0, w, bounds.width), y: place(z > 1 ? zoomOrigin.y * bounds.height : 0, h, bounds.height),
+            width: w, height: h)
     }
 
     private func textures(_ pb: CVPixelBuffer) -> (MTLTexture, MTLTexture, CVMetalTexture, CVMetalTexture)? {
@@ -161,7 +178,7 @@ final class VideoRenderer {
     }
 
     private func encode(
-        _ pb: CVPixelBuffer?, into target: MTLTexture, format: MTLPixelFormat, commandBuffer: MTLCommandBuffer
+        _ pb: CVPixelBuffer?, into target: MTLTexture, format: MTLPixelFormat, commandBuffer: MTLCommandBuffer, zoomed: Bool = true
     ) -> [Any] {
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
@@ -173,10 +190,13 @@ final class VideoRenderer {
         if let pb, let (ty, tc, ky, kc) = textures(pb), let p = pipeline(format) {
             let tw = Double(target.width), th = Double(target.height)
             let vw = Double(CVPixelBufferGetWidth(pb)), vh = Double(CVPixelBufferGetHeight(pb))
-            let s = min(tw / vw, th / vh)
-            var scale = SIMD2<Float>(Float(vw * s / tw), Float(vh * s / th))
+            // The same rectangle input is mapped through, here in the target's pixels.
+            _ = (vw, vh)
+            let r = videoRect(in: CGSize(width: tw, height: th), zoomed: zoomed)
+            var uniforms = SIMD4<Float>(
+                Float(r.width / tw), Float(r.height / th), Float((r.midX / tw) * 2 - 1), Float(1 - (r.midY / th) * 2))
             enc.setRenderPipelineState(p)
-            enc.setVertexBytes(&scale, length: MemoryLayout<SIMD2<Float>>.size, index: 0)
+            enc.setVertexBytes(&uniforms, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
             enc.setFragmentTexture(ty, index: 0)
             enc.setFragmentTexture(tc, index: 1)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -233,7 +253,7 @@ final class VideoRenderer {
         d.usage = [.renderTarget, .shaderRead]
         d.storageMode = .shared
         guard let target = device.makeTexture(descriptor: d), let cb = queue.makeCommandBuffer() else { return nil }
-        let keep = encode(pb, into: target, format: .bgra8Unorm, commandBuffer: cb)
+        let keep = encode(pb, into: target, format: .bgra8Unorm, commandBuffer: cb, zoomed: false)
         cb.commit()
         cb.waitUntilCompleted()
         _ = keep

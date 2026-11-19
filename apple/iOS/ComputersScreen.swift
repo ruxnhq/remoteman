@@ -12,6 +12,9 @@ struct ComputersScreen: View {
     @State private var renaming: Computer?
     @State private var newName = ""
     @State private var forgetting: Computer?
+    @State private var selecting = false
+    @State private var selected: Set<UUID> = []
+    @State private var forgettingSelected = false
 
     @ObservedObject private var look = Nearby.shared
     /// Seen on this network and not paired with this device.
@@ -33,6 +36,17 @@ struct ComputersScreen: View {
             .padding(.bottom, 34)
         }
         .background(Theme.bg.ignoresSafeArea())
+        .alert("Forget \(selected.count) computer\(selected.count == 1 ? "" : "s")?", isPresented: $forgettingSelected) {
+            Button("Forget", role: .destructive) {
+                for c in store.computers where selected.contains(c.id) { store.forget(c) }
+                selected = []
+                selecting = false
+                Haptics.warning()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Their keys are removed from this \(device). Revoke this \(device) on each computer too.")
+        }
         .onAppear(perform: showFromArguments)
         .sheet(isPresented: $pairing) { PairSheet() }
         .sheet(isPresented: $settings) { SettingsScreen() }
@@ -89,9 +103,17 @@ struct ComputersScreen: View {
             if pad { Text("Computers").font(Theme.largeTitle) }
             Spacer()
             if pad {
-                Button("Select") {}
-                    .font(Theme.body).foregroundStyle(Theme.label).padding(.horizontal, 16).frame(height: 48)
-                    .glass().available(Features.multiSelect)
+                if selecting, !selected.isEmpty {
+                    Button("Forget \(selected.count)…") { forgettingSelected = true }
+                        .font(Theme.body).foregroundStyle(Theme.red).padding(.horizontal, 16).frame(height: 48).glass()
+                }
+                Button(selecting ? "Done" : "Select") {
+                    selecting.toggle()
+                    selected = []
+                    Haptics.choice()
+                }
+                .font(Theme.body).foregroundStyle(Theme.label).padding(.horizontal, 16).frame(height: 48)
+                .glass().available(Features.multiSelect && !store.computers.isEmpty)
             }
             HStack(spacing: 0) {
                 barButton("plus", "Pair a computer") { pairing = true }
@@ -137,9 +159,20 @@ struct ComputersScreen: View {
 
     private func card(_ c: Computer) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Button { model.connect(c) } label: {
+            Button {
+                guard selecting else { return model.connect(c) }
+                if selected.contains(c.id) { selected.remove(c.id) } else { selected.insert(c.id) }
+                Haptics.choice()
+            } label: {
                 Thumbnail(computer: c).aspectRatio(4 / 3, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+                    .overlay(alignment: .topLeading) {
+                        if selecting {
+                            Image(systemName: selected.contains(c.id) ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 26, weight: .medium)).foregroundStyle(selected.contains(c.id) ? Theme.tint : .white)
+                                .shadow(radius: 2).padding(10)
+                        }
+                    }
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Connect to \(c.name)")

@@ -181,6 +181,9 @@ struct SettingsScreen: View {
     @AppStorage(ViewerPrefs.soundDefaultKey) private var soundDefault = false
     @AppStorage(ViewerPrefs.rememberMediaKey) private var rememberMedia = false
     @AppStorage(ViewerPrefs.requireAuthKey) private var requireAuth = false
+    @AppStorage(ViewerPrefs.askCameraKey) private var askCamera = false
+    @State private var editingStrip = false
+    @AppStorage(InputSettings.viewZoomKey) private var viewZoom = true
     private var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
 
     var body: some View {
@@ -202,8 +205,10 @@ struct SettingsScreen: View {
                         ChoiceRow(title: "Control sends", value: $control, choices: [("ctrl", "Ctrl"), ("super", "Super")])
                             .available(Features.keyRemapping)
                         Row(title: "Option sends") { RowValue(text: "Alt") }
-                        Row(title: "Key strip", last: true) { RowValue(text: "Esc, Tab and 19 more", chevron: true) }
-                            .available(Features.keyStripEditing)
+                        Button { editingStrip = true } label: {
+                            Row(title: "Key strip", last: true) { RowValue(text: "\(KeyStrip.groups.flatMap { $0 }.count) keys", chevron: true) }
+                        }
+                        .buttonStyle(.plain).available(Features.keyStripEditing)
                     }
                     InsetGroup(
                         header: "Pointer and touch",
@@ -216,7 +221,7 @@ struct SettingsScreen: View {
                         Row(title: "Two-finger tap for right click") { Toggle("", isOn: $twoFinger).labelsHidden() }
                             .available(Features.pointerOptions && touch == "trackpad")
                         Row(title: "Natural scrolling") { Toggle("", isOn: $natural).labelsHidden() }.available(Features.pointerOptions)
-                        Row(title: "Pinch to zoom the view") { Toggle("", isOn: .constant(true)).labelsHidden() }
+                        Row(title: "Pinch to zoom the view") { Toggle("", isOn: $viewZoom).labelsHidden() }
                             .available(Features.viewZoom)
                         ChoiceRow(
                             title: "Pointer speed", last: true, value: $pointerSpeed,
@@ -258,7 +263,7 @@ struct SettingsScreen: View {
                         Row(title: "Require \(Gate.name) to connect") { Toggle("", isOn: $requireAuth).labelsHidden() }.available(Features.faceID)
                         Row(title: "Fill login passwords with Face ID") { Toggle("", isOn: .constant(false)).labelsHidden() }
                             .available(Features.remoteLogin)
-                        Row(title: "Ask before sharing the camera", last: true) { Toggle("", isOn: .constant(true)).labelsHidden() }
+                        Row(title: "Ask before sharing the camera", last: true) { Toggle("", isOn: $askCamera).labelsHidden() }
                             .available(Features.cameraAsk)
                     }
                     if !store.computers.isEmpty {
@@ -283,6 +288,7 @@ struct SettingsScreen: View {
         .background(Theme.bg.ignoresSafeArea())
         .presentationCornerRadius(40)
         .sheet(item: $editing) { ComputerSettingsScreen(computerID: $0.id) }
+        .sheet(isPresented: $editingStrip) { KeyStripEditor() }
     }
 
     private func added(_ c: Computer) -> String {
@@ -308,5 +314,53 @@ struct ChoiceRow: View {
                 RowValue(text: choices.first { $0.0 == value }?.1 ?? "", chevron: true)
             }
         }
+    }
+}
+
+/// Choosing the keys of the strip above the keyboard.
+struct KeyStripEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var chosen = KeyStrip.chosen
+    private let sections: [(String, [KeyStrip.Key])] = [
+        ("Keys", KeyStrip.all[0]), ("Modifiers", KeyStrip.all[1]), ("Arrows", KeyStrip.all[2]), ("Function keys", KeyStrip.all[3]),
+        ("More keys", KeyStrip.extras),
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Key Strip").font(Theme.largeTitle)
+                Spacer()
+                CircleButton(icon: "checkmark", label: "Done", tinted: true) { dismiss() }
+            }
+            .padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 8)
+            ScrollView {
+                VStack(spacing: 22) {
+                    ForEach(sections, id: \.0) { title, keys in
+                        InsetGroup(header: title) {
+                            ForEach(Array(keys.enumerated()), id: \.element.id) { i, k in
+                                Row(title: k.label, last: i == keys.count - 1) {
+                                    Toggle("", isOn: Binding(
+                                        get: { chosen.contains(k.usage) },
+                                        set: { on in
+                                            if on { chosen.insert(k.usage) } else { chosen.remove(k.usage) }
+                                            KeyStrip.chosen = chosen
+                                        })
+                                    ).labelsHidden()
+                                }
+                            }
+                        }
+                    }
+                    Button("Back to the Usual Keys") {
+                        UserDefaults.standard.removeObject(forKey: KeyStrip.shownKey)
+                        chosen = KeyStrip.chosen
+                    }
+                    .font(Theme.body).foregroundStyle(Theme.tint)
+                }
+                .padding(.horizontal, 20).padding(.vertical, 12)
+            }
+        }
+        .background(Theme.bg.ignoresSafeArea())
+        .presentationCornerRadius(40)
     }
 }

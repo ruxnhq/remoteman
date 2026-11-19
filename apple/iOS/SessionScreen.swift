@@ -15,6 +15,17 @@ struct SessionScreen: View {
     @State private var pickingFiles = false
     @State private var leaving = false
     @AppStorage(InputSettings.touchModeKey) private var touchMode = "direct"
+    @State private var confirmingCamera = false
+
+    /// The camera goes on at once, or after a question for those who asked for one.
+    private func askCamera() {
+        if !session.cameraOn, UserDefaults.standard.bool(forKey: ViewerPrefs.askCameraKey) {
+            confirmingCamera = true
+        } else {
+            Haptics.toggle(!session.cameraOn)
+            session.setCamera(!session.cameraOn)
+        }
+    }
     @State private var hint = false
     @StateObject private var keys = KeyStrip()
     @AppStorage(SessionHandle.shownKey) private var showHandle = true
@@ -55,6 +66,15 @@ struct SessionScreen: View {
             Color.clear.fileImporter(isPresented: $pickingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
                 if case .success(let urls) = result { urls.forEach { session.send(file: $0) } }
             })
+        .alert("Share this camera with \(session.client?.host.name ?? "the computer")?", isPresented: $confirmingCamera) {
+            Button("Share") {
+                Haptics.toggle(true)
+                session.setCamera(true)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Programs on the computer can then see through this camera until you turn it off.")
+        }
         .alert("A file is still on its way", isPresented: $leaving) {
             Button("Disconnect", role: .destructive) { model.disconnect() }
             Button("Stay", role: .cancel) {}
@@ -140,7 +160,7 @@ struct SessionScreen: View {
             }
             .available(Features.microphone && session.has("mic"))
             icon(session.cameraOn ? "camera.fill" : "camera", session.cameraOn ? "Camera, on" : "Camera, off", active: session.cameraOn) {
-                session.setCamera(!session.cameraOn)
+                askCamera()
             }
             .available(Features.camera && session.has("camera"))
             separator
@@ -243,7 +263,7 @@ struct SessionScreen: View {
                     .available(Features.sound && session.has("sound"))
                 tile("mic", "Microphone", on: session.micOn) { Haptics.toggle(!session.micOn); session.setMic(!session.micOn) }
                     .available(Features.microphone && session.has("mic"))
-                tile("camera", "Camera", on: session.cameraOn) { Haptics.toggle(!session.cameraOn); session.setCamera(!session.cameraOn) }
+                tile("camera", "Camera", on: session.cameraOn) { askCamera() }
                     .available(Features.camera && session.has("camera"))
                 tile("doc.on.clipboard", "Clipboard", on: session.clipboardOn) { Haptics.toggle(!session.clipboardOn); session.setClipboard(!session.clipboardOn) }
                     .available(Features.clipboard && session.has("clipboard"))
@@ -650,7 +670,28 @@ final class KeyStrip: ObservableObject {
         var id: UInt16 { usage }
     }
 
-    static let groups: [[Key]] = [
+    /// Which keys the strip shows, kept as their codes; nothing kept means the usual ones.
+    static let shownKey = "keyStrip.shown"
+    /// Keys that can be added to the strip besides the usual ones.
+    static let extras: [Key] = [
+        Key(label: "Home", usage: 0x4A), Key(label: "End", usage: 0x4D), Key(label: "PgUp", usage: 0x4B), Key(label: "PgDn", usage: 0x4E),
+        Key(label: "Ins", usage: 0x49), Key(label: "PrtSc", usage: 0x46), Key(label: "Menu", usage: 0x65), Key(label: "⌫", usage: 0x2A),
+        Key(label: "↵", usage: 0x28), Key(label: "Space", usage: 0x2C),
+    ]
+    static var chosen: Set<UInt16> {
+        get {
+            if let list = UserDefaults.standard.array(forKey: shownKey) as? [Int] { return Set(list.map { UInt16($0) }) }
+            return Set(all.flatMap { $0 }.map(\.usage))
+        }
+        set { UserDefaults.standard.set(newValue.map { Int($0) }.sorted(), forKey: shownKey) }
+    }
+    /// The strip as chosen: the usual groups, then whatever was added, without what was taken out.
+    static var groups: [[Key]] {
+        let on = chosen
+        return (all + [extras]).map { $0.filter { on.contains($0.usage) } }.filter { !$0.isEmpty }
+    }
+
+    static let all: [[Key]] = [
         [Key(label: "Esc", usage: 0x29), Key(label: "Tab", usage: 0x2B)],
         [
             Key(label: "Super", usage: 0xE3, modifier: true), Key(label: "Ctrl", usage: 0xE0, modifier: true),

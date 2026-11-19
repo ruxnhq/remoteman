@@ -30,7 +30,7 @@ enum Features {
     static let soundChoice = true
     static let mobileData = true
     /// A question each time before the camera is shared.
-    static let cameraAsk = false
+    static let cameraAsk = true
     /// A display on an external monitor, and mirroring one of the computer's monitors.
     static let moreDisplays = false
     /// The computer's main monitor as it is ("mirror"), on a computer that lists it.
@@ -39,16 +39,16 @@ enum Features {
     static let trackpadMode = true
     static let pointerOptions = true
     /// Pinching to zoom this device's view of the picture.
-    static let viewZoom = false
+    static let viewZoom = true
     /// Remapping Command, Control and Option, stand-ins for shortcuts iPadOS keeps, editing the key strip.
     static let keyRemapping = true
-    static let keyStripEditing = false
+    static let keyStripEditing = true
     static let shortcutsMenu = false
     /// A second session in a window of its own, and choosing where a window's controls sit.
     static let multiWindow = false
     static let windowControlsChoice = false
     /// Choosing several computers at once.
-    static let multiSelect = false
+    static let multiSelect = true
 
     // sound, microphone, clipboard, files, bitrateLimit and displaySize are built here; each is
     // offered only when the connected computer lists it (ViewerSession.has).

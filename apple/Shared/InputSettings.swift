@@ -10,6 +10,7 @@ enum InputSettings {
     static let pinchZoomsKey = "input.pinchZooms"
     static let localPointerKey = "input.localPointer"  // the Mac draws the pointer itself
     static let capturedKey = "input.pointerCaptured"
+    static let viewZoomKey = "input.viewZoom"  // a pinch magnifies this device's view
     static let touchModeKey = "input.touchMode"  // "direct" or "trackpad"
     static let tapToClickKey = "input.tapToClick"
     static let twoFingerRightKey = "input.twoFingerRight"
@@ -25,6 +26,7 @@ enum InputSettings {
     static var localPointer: Bool { flag(localPointerKey, default: true) }
     static var captured: Bool { flag(capturedKey, default: false) }
     static var trackpadTouch: Bool { d.string(forKey: touchModeKey) == "trackpad" }
+    static var viewZoom: Bool { flag(viewZoomKey, default: true) }
     static var tapToClick: Bool { flag(tapToClickKey, default: true) }
     static var twoFingerRight: Bool { flag(twoFingerRightKey, default: true) }
     /// 0.25× at the slow end, 4× at the fast end.
@@ -63,6 +65,7 @@ enum ViewerPrefs {
     static let rememberMediaKey = "media.remember"  // microphone and camera come back on as they were left
     static let saveDataKey = "mobile.saveData"
     static let requireAuthKey = "security.requireAuth"
+    static let askCameraKey = "camera.ask"
     /// What the picture may use on mobile data when data is being saved.
     static let mobileLimit = 5_000_000
 
