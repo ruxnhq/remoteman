@@ -197,8 +197,10 @@ pub struct Session {
     /// The computer's sound is played here; the clipboard is shared.
     pub sound_on: bool,
     pub clipboard_on: bool,
-    /// The text that last came from the computer's clipboard: not to be sent back.
+    /// The text that last came from the computer's clipboard: not to be sent back. And the
+    /// text last sent: Windows says "the clipboard changed" several times for one copy.
     from_computer: Option<String>,
+    sent_copy: Option<String>,
     /// The display size last asked for, and the size the window's picture had a second ago.
     asked: Option<(u32, u32)>,
     wanted: (u32, u32),
@@ -207,7 +209,7 @@ pub struct Session {
 impl Session {
     #[allow(clippy::too_many_arguments)]
     pub fn new(client: Option<Arc<Client>>, shared: Arc<Shared>, target: Target, features: Vec<String>, display: Display, quality: Quality, bitrate: u32, os: String) -> Self {
-        Self { client, shared, target, features, display, quality, bitrate, began: Instant::now(), os, sound_on: false, clipboard_on: false, from_computer: None, asked: None, wanted: (0, 0) }
+        Self { client, shared, target, features, display, quality, bitrate, began: Instant::now(), os, sound_on: false, clipboard_on: false, from_computer: None, sent_copy: None, asked: None, wanted: (0, 0) }
     }
 
     pub fn offers(&self, feature: &str) -> bool {
@@ -741,6 +743,7 @@ impl App {
         if let (Some(text), true) = (copy, s.clipboard_on) {
             say!("clipboard: {} characters of text from the computer", text.chars().count());
             s.from_computer = Some(text.clone());
+            s.sent_copy = None;
             self.effects.push(Effect::SetClipboard(text));
         }
         for line in news {
@@ -801,7 +804,7 @@ impl App {
         s.clipboard_on = on;
         if on {
             // What is on this clipboard now goes over, as the computer's comes here.
-            s.from_computer = None;
+            (s.from_computer, s.sent_copy) = (None, None);
             self.effects.push(Effect::ReadClipboard);
         }
         self.dirty = true;
@@ -811,10 +814,11 @@ impl App {
     /// came from the computer is not sent back.
     pub fn copied_here(&mut self, text: String) {
         use remoteman_core::media::{BLOB_CLIPBOARD, CLIPBOARD_LIMIT, ClipboardHeader};
-        let Some(s) = &self.session else { return };
-        if !s.clipboard_on || !s.offers("clipboard") || text.is_empty() || text.len() as u64 > CLIPBOARD_LIMIT || s.from_computer.as_deref() == Some(text.as_str()) {
+        let Some(s) = self.session.as_mut() else { return };
+        if !s.clipboard_on || !s.offers("clipboard") || text.is_empty() || text.len() as u64 > CLIPBOARD_LIMIT || s.from_computer.as_deref() == Some(text.as_str()) || s.sent_copy.as_deref() == Some(text.as_str()) {
             return;
         }
+        s.sent_copy = Some(text.clone());
         let Some(client) = &s.client else { return };
         let header = ClipboardHeader { seq: s.shared.copy_seq.fetch_add(1, Ordering::Relaxed) + 1, mime: "text/plain;charset=utf-8".into(), size: text.len() as u64 };
         let blob = client.open_blob(BLOB_CLIPBOARD, serde_json::to_string(&header).unwrap_or_default());

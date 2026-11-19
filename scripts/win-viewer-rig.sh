@@ -9,6 +9,10 @@
 # path has to be short). In clipboard mode the app reads commands from $RM_LOGS/NAME/app.in
 # (crates/remoteman-desktop/examples/clipboard_helper.py) and answers in app.log.
 # Talk to the host with:  scripts/win-viewer-rig.sh tell NAME "pair on"
+# It pretends to be locked: "allow unlock key" lets paired devices in, "allow unlock password"
+# asks them for the password "open sesame". Files from a device go to $RM_LOGS/NAME/downloads.
+# Sound: never play a test tone unless exactly one node called remoteman-speaker exists at
+# that moment (pw-cli ls Node); with none, pw-play falls back to the real default output.
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
 if [ "$1" = tell ]; then
   exec python3 -I -c 'import socket, sys
@@ -24,7 +28,10 @@ dbus-run-session -- sh -c '
   mutter --headless --wayland --no-x11 --wayland-display "rmv-$RM_NAME" --virtual-monitor 1600x900@60 >"$RM_LOGS/mutter.log" 2>&1 &
   mpid=$!
   sleep 2
-  REMOTEMAN_TEST_LOCKED_PASSWORD="open sesame" "$bin/remoteman-agent" --listen 127.0.0.1:$RM_PORT $RM_PAIR --state "$RM_LOGS/state" --allow clipboard,files --keep-output --control "$RM_SOCK" >"$RM_LOGS/agent.log" 2>&1 &
+  # Files a device sends go into the logs, never into the real Downloads folder.
+  mkdir -p "$RM_LOGS/config" "$RM_LOGS/downloads"
+  echo "XDG_DOWNLOAD_DIR=\"$RM_LOGS/downloads\"" >"$RM_LOGS/config/user-dirs.dirs"
+  XDG_CONFIG_HOME="$RM_LOGS/config" REMOTEMAN_TEST_LOCKED_PASSWORD="open sesame" "$bin/remoteman-agent" --listen 127.0.0.1:$RM_PORT $RM_PAIR --state "$RM_LOGS/state" --allow clipboard,files --keep-output --control "$RM_SOCK" >"$RM_LOGS/agent.log" 2>&1 &
   apid=$!
   if [ "$RM_MODE" = clipboard ]; then
     : >"$RM_LOGS/app.in"
