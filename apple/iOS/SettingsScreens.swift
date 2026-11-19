@@ -258,11 +258,9 @@ struct SettingsScreen: View {
                     }
                     InsetGroup(
                         header: "Security",
-                        footer: "Passwords stay in this \(device)'s keychain and travel only over the encrypted link to a paired computer."
+                        footer: "A locked computer's password, if you choose to keep it when it is asked for, stays in this \(device)'s keychain behind \(Gate.name) and travels only over the encrypted link to that computer."
                     ) {
                         Row(title: "Require \(Gate.name) to connect") { Toggle("", isOn: $requireAuth).labelsHidden() }.available(Features.faceID)
-                        Row(title: "Fill login passwords with Face ID") { Toggle("", isOn: .constant(false)).labelsHidden() }
-                            .available(Features.remoteLogin)
                         Row(title: "Ask before sharing the camera", last: true) { Toggle("", isOn: $askCamera).labelsHidden() }
                             .available(Features.cameraAsk)
                     }

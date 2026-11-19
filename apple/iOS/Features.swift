@@ -13,8 +13,6 @@ enum Features {
     static let wake = true
     /// Face ID before connecting, and filling the login password with it.
     static let faceID = true
-    /// The computer's login screen when nobody is logged in, and the choice of way in.
-    static let remoteLogin = false
     /// The computer's sound on this device, and this device's microphone and camera on it.
     static let sound = true
     static let microphone = true
@@ -43,10 +41,8 @@ enum Features {
     /// Remapping Command, Control and Option, stand-ins for shortcuts iPadOS keeps, editing the key strip.
     static let keyRemapping = true
     static let keyStripEditing = true
-    static let shortcutsMenu = false
     /// A second session in a window of its own, and choosing where a window's controls sit.
     static let multiWindow = true
-    static let windowControlsChoice = false
     /// Choosing several computers at once.
     static let multiSelect = true
 

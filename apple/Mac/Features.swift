@@ -33,8 +33,6 @@ enum Features {
     static let bitrateFigure = true
     /// "Require Touch ID to connect" and the Touch ID prompt while connecting.
     static let touchID = true
-    /// The computer's own login screen when nobody is logged in, and "Fill Password with Touch ID".
-    static let remoteLogin = false
     /// Mirroring one of the computer's monitors.
     static let mirrorMonitor = true
     /// "Add a Second Display…".
