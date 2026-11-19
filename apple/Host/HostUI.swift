@@ -282,21 +282,7 @@ struct HostSettings: View {
                         .toggleStyle(.checkbox).available(Features.placementPolicy)
                     }
                 }
-                CardGroup(
-                    "When nobody is logged in",
-                    footnote: "Picture and input only. After a restart with FileVault on, the disk has to be unlocked at this Mac first; nothing can show the Mac before that."
-                ) {
-                    Row(
-                        "Show the login window to paired devices",
-                        caption: controller.loginNote.isEmpty
-                            ? (controller.loginInstalled
-                                ? "Installed. After you log out, a paired device connecting to this Mac sees its login window and can log in. It connects again once logged in."
-                                : "Installs a small agent that macOS starts at the login window. macOS asks for your password. remoteman host has to be in the Applications folder.")
-                            : controller.loginNote
-                    ) {
-                        Button(controller.loginInstalled ? "Remove…" : "Install…") { controller.installLoginWindow() }
-                    }
-                }
+                UnattendedGroup(controller: controller)
                 CardGroup("Being found", footnote: "Off, a device is paired by typing this Mac's address. Only paired devices can connect either way.") {
                     Row(
                         "Show this Mac to devices on this network",
@@ -575,5 +561,39 @@ struct FirstRun: View {
         .frame(width: 700, height: 640)
         .background(Tokens.win)
         .ignoresSafeArea()
+    }
+}
+
+/// Letting a paired device into a locked or logged-out Mac without anyone typing.
+private struct UnattendedGroup: View {
+    @ObservedObject var controller: HostController
+    @State private var password = ""
+
+    var body: some View {
+        CardGroup(
+            "When this Mac is locked or nobody is logged in",
+            footnote: "The password stays on this Mac: in your keychain for the lock screen, and in a file only the system can read for the login window. It is typed for you only when a device you have paired connects. Anyone holding a paired device can then get into this Mac, so revoke a device you lose. After a restart with FileVault on, the disk has to be unlocked at this Mac first."
+        ) {
+            Row(
+                "Log in and unlock for paired devices",
+                caption: controller.unattendedNote.isEmpty
+                    ? (controller.unattendedOn
+                        ? "On\(Unattended.coversLoginWindow ? "" : " for the lock screen only"). A paired device that connects is let straight in to your desktop."
+                        : "Enter this Mac's login password once. macOS then asks for an administrator's password to set it up.")
+                    : controller.unattendedNote
+            ) {
+                if controller.unattendedOn {
+                    Button("Turn Off…") { controller.setUnattended(password: nil) }
+                } else {
+                    SecureField("Mac password", text: $password).textFieldStyle(.roundedBorder).frame(width: 170)
+                    Button("Turn On…") {
+                        let p = password
+                        password = ""
+                        controller.setUnattended(password: p)
+                    }
+                    .disabled(password.isEmpty)
+                }
+            }
+        }
     }
 }

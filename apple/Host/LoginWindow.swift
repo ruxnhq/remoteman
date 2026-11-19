@@ -1,7 +1,9 @@
 // Reaching this Mac while nobody is logged in. The host is an app in its owner's session, and
 // goes when they log out; a launch agent that macOS starts in the login window's own session
-// runs the same host there (as root), so that a paired device is shown the login window and
-// can type into it. It listens only while the login window is what the Mac shows, and the
+// runs the same host there (as root). It shows nothing of the login window (macOS would ask at
+// the Mac itself before letting it be captured): when a paired device connects, it logs the
+// owner in with the password they gave for this (Unattended.swift), and the device connects
+// again to the owner's own host. It listens only while the login window is what the Mac shows, and the
 // owner's own host lets go of the port whenever its session isn't the one on screen, so the
 // two never want the port at once. A device is not carried across: it connects again after
 // logging in.
@@ -36,6 +38,23 @@ enum LoginWindow {
         return (d[kCGSessionOnConsoleKey as String] as? Bool) ?? true
     }
 
+    /// The launch agent's description, written to a temporary file ready to be copied into place.
+    static func agentDescription(binary: String, stateDir: String, listen: String, name: String) -> URL? {
+        let dict: [String: Any] = [
+            "Label": label,
+            "ProgramArguments": [binary, "--login-window", "yes", "--state", stateDir, "--listen", listen, "--name", name],
+            "LimitLoadToSessionType": ["LoginWindow"],
+            "RunAtLoad": true,
+            "KeepAlive": true,
+            "StandardOutPath": log,
+            "StandardErrorPath": log,
+        ]
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("\(label).plist")
+        guard let data = try? PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0), (try? data.write(to: temp)) != nil
+        else { return nil }
+        return temp
+    }
+
     /// Install or remove the launch agent. macOS asks for an administrator's password.
     /// Returns what came of it ("" when the owner cancelled).
     static func setInstalled(_ install: Bool, stateDir: String, listen: String, name: String) -> String {
@@ -44,19 +63,9 @@ enum LoginWindow {
             guard let binary = Bundle.main.executablePath, binary.hasPrefix("/Applications/") else {
                 return "Move remoteman host into the Applications folder first: the login window starts it from there."
             }
-            let dict: [String: Any] = [
-                "Label": label,
-                "ProgramArguments": [binary, "--login-window", "yes", "--state", stateDir, "--listen", listen, "--name", name],
-                "LimitLoadToSessionType": ["LoginWindow"],
-                "RunAtLoad": true,
-                "KeepAlive": true,
-                "StandardOutPath": log,
-                "StandardErrorPath": log,
-            ]
-            let temp = FileManager.default.temporaryDirectory.appendingPathComponent("\(label).plist")
-            guard let data = try? PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0),
-                (try? data.write(to: temp)) != nil
-            else { return "It didn't work: the agent's description couldn't be written." }
+            guard let temp = agentDescription(binary: binary, stateDir: stateDir, listen: listen, name: name) else {
+                return "It didn't work: the agent's description couldn't be written."
+            }
             commands = ["cp '\(temp.path)' '\(plist)'", "chown root:wheel '\(plist)'", "chmod 644 '\(plist)'"]
         } else {
             commands = ["rm -f '\(plist)'"]

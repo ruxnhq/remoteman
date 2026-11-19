@@ -52,6 +52,11 @@ final class ViewerSession: ObservableObject {
     @Published private(set) var stage = 0
     /// While the computer waits for its owner to confirm this device: the six digits to compare.
     @Published private(set) var pairingCode: String?
+    /// The computer is logging its owner in for this device; connecting is tried again meanwhile.
+    @Published private(set) var loggingIn = false
+    private var again: (() -> Void)?
+    private var loginRetries = 0
+    private var retrying = false
     /// The computer is locked and wants its user's password: its words for people. Set as the
     /// session fails; cleared by the next connect.
     @Published private(set) var lockedAsk: String?
@@ -440,7 +445,12 @@ final class ViewerSession: ObservableObject {
         host: String, pair: Bool, name: String, display: Display, decoders: String = ViewerSession.decoders,
         placement: Placement = .extend, unlock: String? = nil
     ) {
-        guard !isActive else { return }
+        guard !isActive || retrying else { return }
+        if !retrying { loginRetries = 0 }
+        retrying = false
+        again = { [weak self] in
+            self?.connect(host: host, pair: pair, name: name, display: display, decoders: decoders, placement: placement, unlock: unlock)
+        }
         lockedAsk = nil
         let target = host.contains(":") ? host : host + ":7791"
         state = .connecting(target)
@@ -523,6 +533,7 @@ final class ViewerSession: ObservableObject {
                         self.transferChanged(t)
                     }
                     self.pairingCode = nil
+                    self.loggingIn = false
                     self.state = .streaming(hostName.isEmpty ? target : hostName)
                     self.startStats()
                     // What was on for this computer last time comes back on. The microphone and
@@ -544,6 +555,19 @@ final class ViewerSession: ObservableObject {
             } catch {
                 DispatchQueue.main.async {
                     guard let self, self.generation == gen else { return }
+                    // A computer that is logging its owner in for this device (it was locked,
+                    // or nobody was logged in) is tried again until it is ready.
+                    if "\(error)".lowercased().contains("logging in:"), self.loginRetries < 10, let again = self.again {
+                        self.loginRetries += 1
+                        self.loggingIn = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                            guard self.generation == gen else { return }
+                            self.retrying = true
+                            again()
+                        }
+                        return
+                    }
+                    self.loggingIn = false
                     self.lockedAsk = Self.lockedWords("\(error)")
                     self.state = .failed(Self.plain("\(error)"))
                 }
@@ -615,6 +639,7 @@ final class ViewerSession: ObservableObject {
 
     private func teardown() {
         pairingCode = nil
+        loggingIn = false
         timer?.invalidate()
         timer = nil
         pipeLock.lock()

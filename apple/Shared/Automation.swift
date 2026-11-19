@@ -196,8 +196,8 @@ enum Automation {
     /// leave (end the session, stay open)  join (connect again as at launch)  mem (this app's memory)
     static func runScript(_ script: String, session: ViewerSession, join: (() -> Void)? = nil) {
         DispatchQueue.global().async {
-            // Wait for the stream and its first picture.
-            for _ in 0..<150 {
+            // Wait for the stream and its first picture (longer when the computer first logs in).
+            for _ in 0..<450 {
                 if session.renderer?.videoSize != nil { break }
                 usleep(100_000)
             }

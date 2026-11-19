@@ -331,6 +331,28 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             return 0
         }
+        if options.loginWindow {
+            // Nothing is shown from here: the owner is logged in for the device, which then
+            // connects again to the owner's own host. (A viewer tries again by itself on "logging in:".)
+            if let why = Unattended.submit() {
+                return refuse("this Mac is at its login window and couldn't log in for the device: \(why)")
+            }
+            hostLog("host: the login window took the password for \(name)")
+            return refuse("logging in: this Mac is logging in for you")
+        }
+        if Unattended.screenLocked, Unattended.enabled {
+            // Locked: unlocked for the paired device, which never sees the lock screen.
+            if let why = Unattended.submit() {
+                hostLog("host: locked, and couldn't unlock for the device: \(why)")
+            } else {
+                var waited = 0.0
+                while Unattended.screenLocked, waited < 6 {
+                    usleep(200_000)
+                    waited += 0.2
+                }
+                hostLog("host: locked: \(Unattended.screenLocked ? "the lock screen took the password but is still up" : "unlocked for \(name) after \(String(format: "%.1f", waited)) s")")
+            }
+        }
         guard decoders.contains("hevc") else { return refuse("this host sends HEVC 4:2:0 and the client doesn't decode it") }
         guard RMVirtualDisplay.isSupported() else { return refuse("this macOS has no virtual displays") }
         if !CGPreflightScreenCaptureAccess() {

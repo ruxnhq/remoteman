@@ -719,6 +719,10 @@ struct ConnectingView: View {
                 step("Attach", answered ? "Waiting for the picture" : "To its session", stage >= 2 ? .busy : .waiting)
             }
             .frame(maxWidth: 720)
+            if session.loggingIn {
+                Label("\(computer.name) was locked or logged out. It is logging in for you; this takes a few seconds.", systemImage: "lock.open")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
+            }
             if let code = session.pairingCode {
                 VStack(spacing: 6) {
                     Text(code).font(.system(size: 40, weight: .semibold, design: .monospaced)).tracking(2)

@@ -83,6 +83,22 @@ final class HostController: ObservableObject {
     /// Sharing stopped because this session isn't the one on screen; it comes back with it.
     private var yielded = false
 
+    /// Logging in and unlocking for paired devices (Unattended.swift).
+    @Published private(set) var unattendedOn = Unattended.enabled
+    @Published private(set) var unattendedNote = ""
+
+    /// `password` nil turns it off and removes the password from this Mac.
+    func setUnattended(password: String?) {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("remoteman-host", isDirectory: true).path
+        unattendedNote = Unattended.set(
+            password, stateDir: unattended ? options.stateDir : support, listen: "0.0.0.0:\(port.isEmpty ? "7791" : port)", name: options.name)
+        unattendedOn = Unattended.enabled
+        loginInstalled = LoginWindow.installed
+        // After a log in someone has to be listening: the host opens with the session.
+        if unattendedOn, !openAtLogin { setOpenAtLogin(true) }
+    }
+
     func installLoginWindow(_ install: Bool? = nil) {
         let want = install ?? !loginInstalled
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

@@ -121,6 +121,10 @@ struct GettingInScreen: View {
             step(session.stage >= 2 ? .current : .pending, placementTitle, nil)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        if session.loggingIn {
+            Label("\(name) was locked or logged out. It is logging in for you; this takes a few seconds.", systemImage: "lock.open")
+                .font(Theme.subhead).foregroundStyle(.white.opacity(0.7)).frame(maxWidth: .infinity, alignment: .leading)
+        }
         if let code = session.pairingCode {
             VStack(spacing: 6) {
                 Text(code).font(.system(size: 40, weight: .semibold, design: .monospaced)).tracking(2).foregroundStyle(.white)
