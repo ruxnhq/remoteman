@@ -234,6 +234,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private var sent = 0, bytes = 0, encodeMs = 0.0, dropped = 0, keyframes = 0
     private var captureMs = 0.0, captured = 0, ageMs = 0.0
     private var askedFps = 60, saidSlow = false
+    private var inputs = 0, inputMax = 0.0
+    private var displayMax = (3840, 2880), shownPlacement = 0
     private var sendMs = 0.0, sendMax = 0.0, largest = 0, keysSent = 0, captureGap = 0.0, lastCaptured = 0.0, refused = 0
 
     init(options: Options) {
@@ -494,18 +496,23 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         hostLog("host: this Mac's own ceiling \(options.bitrate), encoding at \(rate / 1000) kbit/s")
     }
 
-    private func begin(_ p: Picture) -> String? {
+    /// `keep`: change the display there is in place if that is all the change needs.
+    private func begin(_ p: Picture, keep: Bool = false) -> String? {
         let done = DispatchSemaphore(value: 0)
         var failure: String? = "starting the display timed out"
         let rate = bitrate(for: p)
         DispatchQueue.main.async { [self] in
-            teardown()
+            // Only the size, the refresh rate or 1×/2× differ: the same display takes the new mode,
+            // so it stays where it is (and stays main) and the windows on it stay on it.
+            let inPlace = keep && display != nil && !p.ownScreen && p.placement == shownPlacement && p.placement < 2
+                && p.width <= displayMax.0 && p.height <= displayMax.1
+            teardown(keepDisplay: inPlace)
             generation += 1
             let gen = generation
             Task { @MainActor in
                 failure = await self.setUp(
                     width: p.width, height: p.height, fps: p.fps, hiDPI: p.hiDPI, cursorApart: p.cursorApart, placement: p.placement,
-                    bitrate: rate, gen: gen, ownScreen: p.ownScreen)
+                    bitrate: rate, gen: gen, ownScreen: p.ownScreen, inPlace: inPlace)
                 done.signal()
             }
         }
@@ -678,7 +685,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         guard new != old else { return }
         hostLog("host: configure: display \(new.width)×\(new.height) at \(new.fps) Hz, 2× \(new.hiDPI), placement \(new.placement)")
         var now = new
-        if let failure = begin(new) {
+        if let failure = begin(new, keep: !old.ownScreen) {
             // Back to what worked; if that fails too, the client is dropped.
             hostLog("host: configure failed (\(failure)); going back to \(old.width)×\(old.height)")
             now = old
@@ -759,6 +766,14 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func inputArrived(_ i: rm_input) {
+        let began = CACurrentMediaTime()
+        defer {
+            let took = (CACurrentMediaTime() - began) * 1000
+            lock.lock()
+            inputs += 1
+            inputMax = max(inputMax, took)
+            lock.unlock()
+        }
         if i.kind == 8 {
             lock.lock()
             aimedAtSecond = i.slot == 1
@@ -816,18 +831,29 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Returns nil when the picture is running, or why it isn't.
     @MainActor
     private func setUp(
-        width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int, bitrate: Int, gen: Int, ownScreen: Bool = false
+        width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int, bitrate: Int, gen: Int, ownScreen: Bool = false,
+        inPlace: Bool = false
     ) async -> String? {
         holdAwake()
         let id: CGDirectDisplayID
-        if ownScreen {
+        if inPlace, let display {
+            guard display.applyWidth(UInt32(width), height: UInt32(height), refreshRate: Double(fps), hiDPI: hiDPI) else {
+                return "the virtual display refused \(width)×\(height) at \(fps) Hz"
+            }
+            id = display.displayID
+            await settle(id, width: width, height: height, hiDPI: hiDPI)
+            if let m = CGDisplayCopyDisplayMode(id) {
+                hostLog("host: display \(id) changed in place: \(m.pixelWidth)×\(m.pixelHeight) px, \(m.width)×\(m.height) pt, \(m.refreshRate) Hz")
+            }
+        } else if ownScreen {
             id = CGMainDisplayID()
             hostLog("host: this Mac's own screen \(id), \(width)×\(height) px at \(fps) Hz, as it is")
         } else {
             // A fixed serial first; one left behind by a crashed run can't be shared, so then a new one.
             for serial in [UInt32(7791), UInt32.random(in: 10_000...60_000)] {
+                displayMax = (max(width, 3840), max(height, 2880))
                 display = RMVirtualDisplay(
-                    name: "remoteman", maxWidth: UInt32(max(width, 3840)), maxHeight: UInt32(max(height, 2880)), serial: serial)
+                    name: "remoteman", maxWidth: UInt32(displayMax.0), maxHeight: UInt32(displayMax.1), serial: serial)
                 if let d = display, d.displayID != 0 { break }
                 display = nil
             }
@@ -837,6 +863,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             id = display.displayID
             await settle(id, width: width, height: height, hiDPI: hiDPI)
+            shownPlacement = placement
             if let m = CGDisplayCopyDisplayMode(id) {
                 hostLog("host: display \(id): \(m.pixelWidth)×\(m.pixelHeight) px, \(m.width)×\(m.height) pt, \(m.refreshRate) Hz")
             }
@@ -953,7 +980,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private let testWindow = TestWindow()
 
-    private func teardown() {
+    private func teardown(keepDisplay: Bool = false) {
         generation += 1
         testWindow.close()
         statsTimer?.invalidate()
@@ -972,6 +999,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             stream = nil
             Task { try? await s.stopCapture() }
         }
+        if keepDisplay { return }
         if !mirrored.isEmpty {
             MacHost.unmirror(mirrored)
             mirrored = []
@@ -1137,8 +1165,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func stats() {
         lock.lock()
-        let line = sent > 0 || dropped > 0
-            ? String(format: "host: %d fps, %d kbit/s, capture %.2f ms, encode %.2f ms, %.2f ms old when sent, send %.2f ms (longest %.2f), largest frame %d bytes, %d keyframes sent, longest wait for the screen %.0f ms, %d dropped (busy), %d not taken by the core, %d keyframe requests", sent, bytes * 8 / 1000, captureMs / Double(max(captured, 1)), encodeMs / Double(max(sent, 1)), ageMs / Double(max(sent, 1)), sendMs / Double(max(sent, 1)), sendMax, largest, keysSent, captureGap, dropped, refused, keyframes)
+        let line = sent > 0 || dropped > 0 || inputs > 0
+            ? String(format: "host: %d fps, %d kbit/s, capture %.2f ms, encode %.2f ms, %.2f ms old when sent, send %.2f ms (longest %.2f), largest frame %d bytes, %d keyframes sent, longest wait for the screen %.0f ms, %d dropped (busy), %d not taken by the core, %d keyframe requests, %d input events (longest %.2f ms)", sent, bytes * 8 / 1000, captureMs / Double(max(captured, 1)), encodeMs / Double(max(sent, 1)), ageMs / Double(max(sent, 1)), sendMs / Double(max(sent, 1)), sendMax, largest, keysSent, captureGap, dropped, refused, keyframes, inputs, inputMax)
             : nil
         // Asked for more than the encoder does in a frame time: said once a session.
         let frameMs = 1000 / Double(max(askedFps, 1)), took = encodeMs / Double(max(sent, 1))
@@ -1150,7 +1178,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
                 hostLog(String(format: "host: the device asked for more than this Mac encodes in a frame time: %.1f ms a frame at this size against %.1f ms at %d Hz, so frames are being dropped (%d sent, %d dropped in the last second). A smaller picture would be quicker.", took, frameMs, askedFps, fps, wasDropped))
             }
         }
-        sent = 0; bytes = 0; encodeMs = 0; dropped = 0; captureMs = 0; captured = 0; ageMs = 0; sendMs = 0; sendMax = 0; largest = 0; keysSent = 0; captureGap = 0; refused = 0
+        sent = 0; bytes = 0; encodeMs = 0; dropped = 0; captureMs = 0; captured = 0; ageMs = 0; sendMs = 0; sendMax = 0; largest = 0; keysSent = 0; captureGap = 0; refused = 0; inputs = 0; inputMax = 0
         lock.unlock()
         if let line { hostLog(line) }
         onStats?(fps, bits)
