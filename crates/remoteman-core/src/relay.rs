@@ -237,6 +237,10 @@ pub fn run_agent(socket: UnixStream, features: Vec<String>, mut handler: impl Ho
     // While a client is being served: the threads carrying its frames and cursor to the daemon.
     let mut carrying: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut serving = false;
+    // Blobs are numbered through all of this agent's clients, never from 1 again for the next
+    // one: what is still being read for a client that has gone (a long file) keeps arriving
+    // at the daemon under its number, and must not land in a blob of the next client's.
+    let blobs = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let stop = |handler: &mut dyn HostHandler, serving: &mut bool, carrying: &mut Vec<std::thread::JoinHandle<()>>| {
         if std::mem::take(serving) {
             // Ends the picture, which drops every copy of the link, which ends the threads: so
@@ -282,9 +286,8 @@ pub fn run_agent(socket: UnixStream, features: Vec<String>, mut handler: impl Ho
                                 }
                             }
                         })?);
-                        let w = writer.clone();
+                        let (w, blobs) = (writer.clone(), blobs.clone());
                         carrying.push(std::thread::Builder::new().name("to daemon: the rest".into()).spawn(move || {
-                            let mut blobs = 0u32;
                             while let Some(c) = end.cursor.blocking_recv() {
                                 let m = match c {
                                     CursorMsg::Shape(s) => ToDaemon::CursorShape(s),
@@ -294,8 +297,8 @@ pub fn run_agent(socket: UnixStream, features: Vec<String>, mut handler: impl Ho
                                     CursorMsg::Blob { kind, header, mut content } => {
                                         // Carried by a thread of its own, so a long file
                                         // doesn't hold up the cursor or the sound.
-                                        blobs = blobs.wrapping_add(1);
-                                        let (id, w) = (blobs, w.clone());
+                                        let id = blobs.fetch_add(1, std::sync::atomic::Ordering::Relaxed).wrapping_add(1);
+                                        let w = w.clone();
                                         let _ = std::thread::Builder::new().name("to daemon: blob".into()).spawn(move || {
                                             let say = |event: BlobEvent| ToDaemon::Blob(event).write(&mut *w.lock().unwrap()).is_ok();
                                             if !say(BlobEvent::Open { id, kind, header }) {
@@ -386,6 +389,39 @@ mod tests {
                 let _ = t.join();
             }
         }
+    }
+
+    /// Opens a blob for each client and never finishes it, as a file still being read when
+    /// the client goes.
+    struct Sending(Vec<crate::BlobSender>);
+
+    impl HostHandler for Sending {
+        fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
+            self.0.push(link.open_blob(remoteman_proto::media::BLOB_FILE, format!("for {}", client.name)));
+            Ok(Accept { mode: Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, width: 2, height: 2, refresh: 60, colour: "bt709".into() })
+        }
+        fn keyframe(&mut self) {}
+        fn input(&mut self, _event: Event) {}
+        fn left(&mut self) {}
+    }
+
+    #[test]
+    fn a_blob_of_the_next_client_never_shares_a_number_with_one_still_in_flight() {
+        let (agent, mut daemon) = UnixStream::pair().unwrap();
+        let running = std::thread::spawn(move || run_agent(agent, vec![], Sending(Vec::new())));
+        let mut opened = Vec::new();
+        for name in ["one", "two"] {
+            client(name, 2).write(&mut daemon).unwrap();
+            while opened.iter().filter(|(_, h)| *h == format!("for {name}")).count() == 0 {
+                if let Some(ToDaemon::Blob(BlobEvent::Open { id, header, .. })) = ToDaemon::read(&mut daemon).unwrap() {
+                    opened.push((id, header));
+                }
+            }
+        }
+        assert_ne!(opened[0].0, opened[1].0, "the first client's unfinished blob and the second client's have one number: {opened:?}");
+        daemon.shutdown(std::net::Shutdown::Write).unwrap();
+        while let Ok(Some(_)) = ToDaemon::read(&mut daemon) {}
+        running.join().unwrap().unwrap();
     }
 
     fn client(name: &str, width: u32) -> ToAgent {
