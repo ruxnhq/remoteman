@@ -125,6 +125,32 @@ mod windows_main {
             print!("{}", crate::control::ask(port, &words.join(" "))?);
             return Ok(());
         }
+        // For looking into the display driver by hand: send it one of its text commands.
+        if args.peek().map(String::as_str) == Some("--driver") {
+            args.next();
+            let text: Vec<String> = args.collect();
+            crate::vdd::Driver::open()?.command(&text.join(" "))?;
+            println!("sent");
+            return Ok(());
+        }
+        // For tests and repairs: put the driver's first monitor into a mode for good, as the
+        // main display (`--first-mode 1920x1080x60`).
+        if args.peek().map(String::as_str) == Some("--first-mode") {
+            args.next();
+            let said = args.next().context("--first-mode WxHxR")?;
+            let n: Vec<u32> = said.split('x').filter_map(|v| v.parse().ok()).collect();
+            anyhow::ensure!(n.len() == 3, "--first-mode WxHxR");
+            crate::display::set_first(crate::display::Mode { width: n[0], height: n[1], refresh: n[2] })?;
+            println!("set");
+            return Ok(());
+        }
+        // For tests and repairs: take an output (\\.\DISPLAY1) out of the desktop.
+        if args.peek().map(String::as_str) == Some("--detach") {
+            args.next();
+            crate::display::detach(&args.next().context("--detach OUTPUT")?)?;
+            println!("detached");
+            return Ok(());
+        }
         while let Some(a) = args.next() {
             let mut value = || args.next().with_context(|| format!("{a} needs a value"));
             match a.as_str() {
@@ -207,6 +233,12 @@ mod windows_main {
         match &sink {
             Some(name) => tracing::info!(into = name, "a device's microphone can be taken"),
             None => tracing::info!(?outputs, "no virtual microphone here (Steam's \"Steam Streaming Microphone\" or VB-CABLE): a device's microphone can't be taken"),
+        }
+        let mut screen = screen;
+        let own = fit != Fit::Keep && screen.has_own();
+        allowed.own_monitor.store(own, Ordering::Relaxed);
+        if !own {
+            tracing::info!("the display driver has no second monitor to give (its settings say one monitor, or `--mode keep`): a device gets the one monitor at its own size");
         }
         let features = crate::control::features(&allowed);
         tracing::info!(?features, "what this host does");

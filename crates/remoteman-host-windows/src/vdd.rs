@@ -56,6 +56,9 @@ const MAX_SLOTS: usize = 8;
 /// description, hardware id or name), most telling first.
 pub const ADAPTER_HINTS: [&str; 4] = ["guesthousedisplay", "guesthouse", "rdpudd chained", "zakovdd"];
 
+/// What marks one of this driver's monitors in its device path, lower case.
+pub const MONITOR_HINTS: [&str; 2] = ["ghs0001", "zako"];
+
 /// `VDD_FRAME_CHANNEL_CAPS`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -193,7 +196,7 @@ impl Driver {
     ///
     /// Only `SETMODES` and `REFRESHMODES` are sent by this host. Most of the others rewrite the
     /// driver's settings file and reload it, which is not this program's to do.
-    fn command(&self, text: &str) -> Result<()> {
+    pub fn command(&self, text: &str) -> Result<()> {
         let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
         ensure!(wide.len() <= 2048, "a driver command of {} characters; 2047 is the most", wide.len() - 1);
         // SAFETY: reading the u16s as bytes.

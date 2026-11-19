@@ -30,6 +30,8 @@ use crate::vdd::{Driver, Metadata};
 
 pub struct Settings {
     pub driver: Arc<Driver>,
+    /// The driver's number for the monitor to stream.
+    pub monitor: u32,
     /// The modes the client decodes and this host encodes, the client's favourite first. The
     /// first one this GPU's encoder opens for is used.
     pub modes: Vec<Mode>,
@@ -184,7 +186,7 @@ fn wait_for_channel(s: &Settings, patience: Duration) -> Result<crate::vdd::Chan
     let began = Instant::now();
     let mut tries = 0u32;
     loop {
-        if let Some(channel) = display::channel(&s.driver)? {
+        if let Some(channel) = display::channel(&s.driver, s.monitor)? {
             let size = channel.snapshot().map(|m| (m.width, m.height));
             // Not the size the monitor is in now: the channel of the swap chain Windows is
             // about to take away. Give the new one three seconds, then take what there is.
@@ -257,13 +259,13 @@ impl Picture {
     /// is another size or format now, the stream starts afresh as that. False: the driver has
     /// no channel at the moment (between two modes); try again later.
     fn reopen(&mut self, s: &Settings, link: &Link, bitrate: u32) -> Result<bool> {
-        let Some(channel) = display::channel(&s.driver)? else { return Ok(false) };
+        let Some(channel) = display::channel(&s.driver, s.monitor)? else { return Ok(false) };
         let source = Source::open(&self.gpu, channel)?;
         let (old, new) = (self.source.meta, source.meta);
         if (old.width, old.height, old.format, old.is_hdr) != (new.width, new.height, new.format, new.is_hdr) {
             tracing::info!(from = format!("{}x{}", old.width, old.height), to = format!("{}x{}", new.width, new.height), format = new.format, hdr = new.is_hdr, "the monitor changed; the picture starts afresh");
             // Only this mode: the client has its decoder set up for it.
-            let only = Settings { driver: s.driver.clone(), modes: vec![self.mode], fps: s.fps, bitrate, nudge_at: s.nudge_at, expect: None, held: false, resized: Box::new(|_, _| {}) };
+            let only = Settings { driver: s.driver.clone(), monitor: s.monitor, modes: vec![self.mode], fps: s.fps, bitrate, nudge_at: s.nudge_at, expect: None, held: false, resized: Box::new(|_, _| {}) };
             let (converter, encoder, mode) = build(&self.gpu, &new, &only, bitrate)?;
             // The old encoder goes before the texture it reads from.
             self.encoder = encoder;
@@ -389,7 +391,7 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         // So when frames stop, ask now and then whether the channel is still the driver's.
         if stamp.is_none() && quiet_since.elapsed() > Duration::from_secs(1) && checked.elapsed() > Duration::from_secs(1) {
             checked = Instant::now();
-            match display::channel(&s.driver) {
+            match display::channel(&s.driver, s.monitor) {
                 Ok(Some(current)) if !current.same_as(p.source.channel()) => {
                     drop(current);
                     afresh |= p.reopen(s, link, rate)?;

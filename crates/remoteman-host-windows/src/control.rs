@@ -48,13 +48,19 @@ pub struct Allowed {
     pub clipboard: Arc<AtomicBool>,
     /// A device this host can play a client's microphone into was found.
     pub microphone: Arc<AtomicBool>,
+    /// The driver has a second monitor to give a device as its own.
+    pub own_monitor: Arc<AtomicBool>,
     pub now: Arc<Mutex<Option<Now>>>,
 }
 
 /// What this host does, as its hello lists it. `mirror`: a device may ask for the monitor as
-/// it is. Not `placement` or `displays`: a device gets no monitor of its own yet.
+/// it is. `placement`: a device gets a monitor of its own, placed as it asks. Not `displays`:
+/// no second display for one device.
 pub fn features(allowed: &Allowed) -> Vec<String> {
     let mut features: Vec<String> = ["video", "input", "cursor", "configure", "mirror", "sound"].map(String::from).to_vec();
+    if allowed.own_monitor.load(Ordering::Relaxed) {
+        features.push("placement".into());
+    }
     if allowed.microphone.load(Ordering::Relaxed) {
         features.push("mic".into());
     }

@@ -17,7 +17,7 @@ use crate::files::Files;
 use crate::sound::{self, Microphone, Speaker};
 
 use crate::cursor::Cursor;
-use crate::display::{self, Area, Fit, Screen};
+use crate::display::{self, Area, Fit, Place, Screen};
 use crate::encode;
 use crate::input::Injector;
 use crate::pipeline::{self, Pipeline};
@@ -99,13 +99,25 @@ impl Host {
         let want = display::Mode { width: screen.width, height: screen.height, refresh: screen.refresh.clamp(1, 240) };
         // A device that asks to mirror is shown the monitor as it is, no faster than it asked.
         let mirror = screen.placement == Placement::Mirror;
-        let got = self.screen.fit(want, if mirror { Fit::Keep } else { self.fit }).map_err(|e| format!("{e:#}"))?;
+        // Otherwise a monitor of its own where the driver has one to give, else the driver's
+        // one monitor at the device's size.
+        let place = match screen.placement {
+            Placement::Main => Place::Main,
+            Placement::Only => Place::Only,
+            _ => Place::Beside,
+        };
+        let own = if mirror || self.fit == Fit::Keep { None } else { self.screen.give(want, place).inspect_err(|e| tracing::warn!("couldn't give the device a monitor of its own: {e:#}")).ok().flatten() };
+        let got = match own {
+            Some(mode) => mode,
+            None => self.screen.fit(want, if mirror { Fit::Keep } else { self.fit }).map_err(|e| format!("{e:#}"))?,
+        };
         let (_, at) = self.screen.now().map_err(|e| format!("{e:#}"))?;
         let area = Arc::new(Mutex::new(at));
         let refresh = if mirror { got.refresh.min(want.refresh) } else { got.refresh }.clamp(1, 240);
         let (device, shared) = (self.screen.device().to_owned(), area.clone());
         let settings = pipeline::Settings {
             driver: self.screen.driver(),
+            monitor: self.screen.monitor(),
             modes: modes.clone(),
             fps: refresh,
             bitrate: self.rate(ceiling),
@@ -145,7 +157,13 @@ impl Host {
             let mode = started.mode;
             let picture = format!("{} {}-bit{}", if mode.codec == Codec::Av1 { "AV1" } else { "HEVC" }, mode.depth, if mode.chroma == Chroma::C444 { " 4:4:4" } else { "" });
             // (Every placement but `mirror` is, for now, the one monitor at the device's size.)
-            *now = Some(Now { name, since, width: started.width, height: started.height, refresh, placement: if mirror { "mirror" } else { "only" }, picture, sound: self.sound.is_some() });
+            *now = Some(Now { name, since, width: started.width, height: started.height, refresh, placement: match (mirror, own.is_some(), place) {
+                (true, ..) => "mirror",
+                (_, true, Place::Beside) => "extend",
+                (_, true, Place::Main) => "main",
+                // (Without a monitor of its own the device has the one monitor, resized.)
+                _ => "only",
+            }, picture, sound: self.sound.is_some() });
         }
         Ok(Accept { mode: started.mode, width: started.width, height: started.height, refresh, colour: "bt709".into() })
     }
