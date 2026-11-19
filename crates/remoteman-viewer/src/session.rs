@@ -131,6 +131,9 @@ pub struct View {
     /// The other computer's pointer drawn over the picture, while this one's is captured: a
     /// layer over the picture and the image on it.
     pointer_layer: gtk::Fixed,
+    /// Shown over the black of a picture that hasn't come yet: a spinner and what is awaited.
+    waiting: gtk::Box,
+    waiting_for: gtk::Label,
     pointer_image: gtk::Picture,
     /// The session's bar: a pill floating at the top of the picture, as wide as its controls.
     /// The revealer brings it out and takes it away; the box is the pill itself.
@@ -292,12 +295,20 @@ pub fn build(video: &Video) -> View {
     let pointer_image = gtk::Picture::builder().can_shrink(true).content_fit(gtk::ContentFit::Fill).visible(false).build();
     pointer_layer.put(&pointer_image, 0.0, 0.0);
     overlay.add_overlay(&pointer_layer);
+    let waiting = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(18).halign(gtk::Align::Center).valign(gtk::Align::Center).can_target(false).visible(false).css_classes(["rm-waiting"]).build();
+    waiting.append(&adw::Spinner::builder().width_request(48).height_request(48).halign(gtk::Align::Center).build());
+    let waiting_for = gtk::Label::builder().css_classes(["title-3"]).build();
+    waiting.append(&waiting_for);
+    waiting.append(&gtk::Label::builder().label("Its display is being made ready").css_classes(["dim-label"]).build());
+    overlay.add_overlay(&waiting);
     // Last, so that it is over the other computer's pointer and takes the clicks on it.
     overlay.add_overlay(&pill);
 
     View {
         page: overlay,
         pointer_layer,
+        waiting,
+        waiting_for,
         pointer_image,
         pill,
         pill_box,
@@ -378,6 +389,14 @@ impl View {
     /// The other computer's pointer, drawn here: its image (`None`: nothing to draw), the
     /// image's size and the spot in it that points, in this widget's units, and where that
     /// spot is over the picture.
+    /// Say that the picture is on its way (`Some`: from which computer), or that it has come.
+    pub fn await_picture(&self, from: Option<&str>) {
+        if let Some(name) = from {
+            self.waiting_for.set_label(&format!("Connected to {name}"));
+        }
+        self.waiting.set_visible(from.is_some());
+    }
+
     pub fn draw_pointer(&self, image: Option<&gdk::Texture>, size: (f64, f64), hot: (f64, f64), at: (f64, f64)) {
         let Some(image) = image else { return self.pointer_image.set_visible(false) };
         if self.pointer_image.paintable().as_ref() != Some(image.upcast_ref()) {
