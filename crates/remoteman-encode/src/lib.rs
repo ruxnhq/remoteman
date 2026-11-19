@@ -5,6 +5,9 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 
 use anyhow::{Result, bail};
 
+#[cfg(target_os = "linux")]
+pub mod vaapi;
+
 #[repr(C)]
 struct Cfg {
     codec: u32,
