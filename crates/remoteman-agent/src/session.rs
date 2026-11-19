@@ -28,6 +28,8 @@ struct Live {
     desktop: VirtualDisplay,
     pipeline: Pipeline,
     size: (u32, u32),
+    /// When this display's pointer was first put somewhere.
+    pointed: Option<std::time::Instant>,
     /// Putting the display where the client asked for it, which waits for the monitor to exist.
     placing: tokio::task::JoinHandle<()>,
     /// The client's name, for what is shown on the desktop (its speaker, its microphone).
@@ -132,7 +134,12 @@ pub struct Agent {
     unlocked_for_client: bool,
     /// Wrong passwords for unlocking in a row, and until when no more are taken.
     wrong: (u32, Option<std::time::Instant>),
+    /// A login screen whose client has gone, on its way to being ended.
+    ending: Option<tokio::task::JoinHandle<()>>,
 }
+
+/// How long a login screen's session is kept after its client has gone.
+const LOGIN_SCREEN_LINGERS: std::time::Duration = std::time::Duration::from_secs(45);
 
 pub const UNLOCK_OFF: u8 = 0;
 pub const UNLOCK_WITH_PASSWORD: u8 = 1;
@@ -203,7 +210,7 @@ impl Agent {
         if login_screen.is_some() {
             tracing::info!("this is a login screen's session: no files, no clipboard, and it ends when its client goes");
         }
-        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None, unlocked_for_client: false, wrong: (0, None) })
+        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None, unlocked_for_client: false, wrong: (0, None), ending: None })
     }
 
     /// What the picture is encoded at when the client's ceiling is `ceiling`.
@@ -285,7 +292,7 @@ impl Agent {
                 tracing::warn!("couldn't make the display {:?}: {e:#}", screen.placement);
             }
         });
-        self.live = Some(Live { desktop, pipeline, size: (screen.width, screen.height), placing, name, link, screen, decoders, cursor, mode, ceiling, files: BTreeMap::new(), clipboard: None, copied: BTreeMap::new() });
+        self.live = Some(Live { desktop, pipeline, size: (screen.width, screen.height), pointed: None, placing, name, link, screen, decoders, cursor, mode, ceiling, files: BTreeMap::new(), clipboard: None, copied: BTreeMap::new() });
         // The clipboard belongs to the display's session, so a new display shares it anew.
         self.share_clipboard(self.clipboard_wanted);
         if let Some(l) = &self.live {
@@ -767,6 +774,10 @@ fn downloads() -> PathBuf {
 impl HostHandler for Agent {
     fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
         self.left();
+        // A login screen that was about to be ended has a client again.
+        if let Some(ending) = self.ending.take() {
+            ending.abort();
+        }
         self.unlock_for(client)?;
         let screen = client.display;
         tracing::info!(name = %client.name, ?screen, decoders = ?client.decoders, cursor_apart = client.cursor, "client");
@@ -858,7 +869,22 @@ impl HostHandler for Agent {
     }
 
     fn input(&mut self, event: Event) {
-        let Some(l) = &self.live else { return };
+        let Some(l) = &mut self.live else { return };
+        // The desktop takes a moment to notice where a new display's pointer has first been
+        // put: a button pressed sooner lands on nothing (seen on GNOME Shell 51: a click
+        // 80 ms after the first position is lost, one 190 ms after lands). A tap on a touch
+        // device is exactly that, a position and a press at once, so the first press of a
+        // session waits out that moment.
+        const SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+        match &event {
+            Event::PointerTo { .. } | Event::PointerBy { .. } if l.pointed.is_none() => l.pointed = Some(std::time::Instant::now()),
+            Event::Button { down: true, .. } => {
+                if let Some(wait) = l.pointed.and_then(|at| SETTLE.checked_sub(at.elapsed())) {
+                    std::thread::sleep(wait);
+                }
+            }
+            _ => {}
+        }
         let scale = f32::from_bits(l.pipeline.scale.load(std::sync::atomic::Ordering::Relaxed));
         if let Err(e) = self.runtime.block_on(l.desktop.inject(&event, l.size, scale)) {
             tracing::warn!("input: {e:#}");
@@ -877,11 +903,19 @@ impl HostHandler for Agent {
             // A headless login screen exists for one client; when that client has logged in
             // (and been moved to its session) or gone, nobody else will ever see it, and GDM
             // leaves ending it to us.
+            // Not at once: a password typed a moment before the client went is still being
+            // checked, and GDM drops the session it was about to start if the login screen
+            // goes first (seen: a session opened 11 s after the password and lost when the
+            // device left 7 s later). A client that comes back meanwhile keeps the screen.
             if self.login_screen == Some(true) {
-                tracing::info!("the client has left this login screen: ending its session");
-                if let Err(e) = self.runtime.block_on(remoteman_desktop::logind::log_out()) {
-                    tracing::warn!("couldn't end the login screen's session: {e:#}");
-                }
+                tracing::info!("the client has left this login screen: its session ends in {} s unless a client comes back", LOGIN_SCREEN_LINGERS.as_secs());
+                self.ending = Some(self.runtime.spawn(async {
+                    tokio::time::sleep(LOGIN_SCREEN_LINGERS).await;
+                    tracing::info!("ending the login screen's session");
+                    if let Err(e) = remoteman_desktop::logind::log_out().await {
+                        tracing::warn!("couldn't end the login screen's session: {e:#}");
+                    }
+                }));
             }
         }
         self.relock();

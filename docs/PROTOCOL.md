@@ -25,7 +25,7 @@ The code is made from both keys: the first four bytes of SHA-256 over the text `
 
 A host whose desktop is locked may let a paired device in all the same, if its owner has said so: by the device's key alone, or with the password of the host's user as well.
 
-- A host that wants the password answers the hello with `{"t":"error","code":"locked","message":"..."}` and closes the connection, with the same words as its closing reason, begun with `locked: ` (a client sees one or the other, depending on which arrives first). `message` is for people: whose password is wanted, or that the last one was wrong.
+- A host that wants the password answers the hello with `{"t":"error","code":"locked","message":"..."}` and closes the connection, with the same words as its closing reason, begun with `locked: ` (a client sees one or the other, depending on which arrives first). `message` is for people: whose password is wanted, or that the last one was wrong. After a wrong password it contains the words `not right` (a client that kept the password may take that as its cue to throw the kept one away); those words are part of the protocol and will not change.
 - The client asks its user and connects again with the password in the hello: `"unlock":"..."` in `client_hello`. It travels inside the connection's encryption, to a host whose key the device already holds, and is never stored by the host. A wrong one gets the same answer again; after several the host takes no more for a while.
 - A host that is locked and set to let nobody in answers with an ordinary error.
 

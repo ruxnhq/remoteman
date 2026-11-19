@@ -391,7 +391,17 @@ impl Client {
             let (mut started, mut need_key, mut missed) = (false, true, None::<u32>);
             let mut asked = None::<Instant>;
             let mut dropped = 0u32;
+            // Datagrams that came ahead of the `stream` message they belong to (the two travel
+            // apart and may arrive in either order): kept until it has come. Without this the
+            // first frames of a picture, its keyframe among them, are thrown away, and on a
+            // desktop where nothing moves no other frame follows.
+            let mut early = std::collections::VecDeque::new();
+            let mut replay = std::collections::VecDeque::new();
             let reason = loop {
+                // Kept datagrams go first, in the order they came.
+                let d = if let Some(d) = replay.pop_front() {
+                    d
+                } else {
                 tokio::select! {
                     biased;
                     Some(reason) = closed_rx.recv() => break reason,
@@ -400,16 +410,41 @@ impl Client {
                             r.reset(info.epoch);
                             (started, need_key, missed) = (true, true, None);
                             handler.stream(&info);
+                            replay.extend(early.drain(..));
+                            continue;
                         }
-                        FromHost::Cursor(shape) => handler.cursor_shape(&shape),
-                        FromHost::Message(m) => handler.message(&m),
+                        FromHost::Cursor(shape) => {
+                            handler.cursor_shape(&shape);
+                            continue;
+                        }
+                        FromHost::Message(m) => {
+                            handler.message(&m);
+                            continue;
+                        }
                     },
-                    Some(event) = blob_rx.recv() => handler.blob(&event),
-                    d = video.read_datagram() => {
-                        let d = match d {
-                            Ok(d) => d,
-                            Err(e) => break e.to_string(),
-                        };
+                    Some(event) = blob_rx.recv() => {
+                        handler.blob(&event);
+                        continue;
+                    }
+                    d = video.read_datagram() => match d {
+                        Ok(d) => d,
+                        Err(e) => break e.to_string(),
+                    },
+                }
+                };
+                {
+                    {
+                        // A picture's datagram for a stream this side hasn't heard of yet (none
+                        // at all, or a newer one than the one it knows): kept for when it has.
+                        let ahead = d.first() == Some(&KIND_VIDEO) && (!started || d.get(2..4).is_some_and(|e| { let e = u16::from_le_bytes([e[0], e[1]]); e != r.epoch() && e.wrapping_sub(r.epoch()) < 0x8000 }));
+                        if ahead {
+                            // (A few megabytes at most: older ones give way.)
+                            if early.len() >= 4096 {
+                                early.pop_front();
+                            }
+                            early.push_back(d);
+                            continue;
+                        }
                         if !started {
                             continue;
                         }

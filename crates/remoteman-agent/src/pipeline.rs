@@ -118,6 +118,8 @@ impl Pipeline {
             let mut answer = None::<u64>;
             let mut tally = Tally::default();
             let mut rate = bitrate;
+            // Where the last picture encoded is (it stays there until newer ones have come).
+            let mut last = None::<usize>;
             loop {
                 // A still desktop sends no frames, and a new bitrate is answered all the same.
                 let c = match rx.recv_timeout(std::time::Duration::from_millis(100)) {
@@ -140,7 +142,20 @@ impl Pipeline {
                         }
                     }
                 }
-                let Some(c) = c else { continue };
+                // Nothing new to encode. If the client is asking for something (a keyframe, or
+                // frames it lost), the last picture is encoded again to answer it: on a still
+                // desktop no other frame would ever come, and the client would be left with
+                // nothing, or with a picture it can't use.
+                let c = match c {
+                    Some(c) => {
+                        last = Some(c.slot);
+                        c
+                    }
+                    None => match last {
+                        Some(slot) if key.load(Ordering::Relaxed) || lost_r.lock().unwrap().is_some() => Converted { slot, capture_us: out.now_us() },
+                        _ => continue,
+                    },
+                };
                 let mut how = How { idr: key.swap(false, Ordering::Relaxed), ..How::default() };
                 let mut recovery = false;
                 let reported = lost_r.lock().unwrap().take();
@@ -228,6 +243,7 @@ impl Pipeline {
                     }
                 }
             }
+            tracing::info!(frames = n, "the picture ended");
             if tally.reports > 0 {
                 let Tally { reports, recovered, long_term, early, too_old, refused, unasked, unsure, behind } = tally;
                 tracing::info!(
