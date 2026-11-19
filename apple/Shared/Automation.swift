@@ -303,6 +303,18 @@ enum Automation {
                     // side:right|left|above|below, for the second display asked for after this.
                     let which = ["right": 0, "left": 1, "above": 2, "below": 3][arg.trimmingCharacters(in: .whitespaces)] ?? 0
                     DispatchQueue.main.sync { UserDefaults.standard.set(which, forKey: "secondSide." + session.hostKey) }
+                #if os(macOS)
+                case "window" where n.count >= 2:
+                    // window:w,h resizes the app's window (points), as a hand would.
+                    DispatchQueue.main.sync {
+                        if let w = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) {
+                            var f = w.frame
+                            f.size = NSSize(width: CGFloat(n[0]), height: CGFloat(n[1]))
+                            w.setFrame(f, display: true)
+                            print("remoteman: window now \(Int(w.frame.width))x\(Int(w.frame.height))")
+                        } else { print("remoteman: no window to resize") }
+                    }
+                #endif
                 case "picture":
                     // picture:own|1440|1080, for the next connect or change of size.
                     let lines = Int(arg.trimmingCharacters(in: .whitespaces)) ?? 0

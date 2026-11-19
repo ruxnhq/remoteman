@@ -87,7 +87,7 @@ struct ComputerSettingsScreen: View {
                                         (ViewerSession.PictureSize(rawValue: Int(v) ?? 0) ?? .own).save(for: target(c))
                                         sideChanged += 1
                                     }),
-                                choices: ViewerSession.PictureSize.allCases.map { (String($0.rawValue), $0.label) }
+                                choices: ViewerSession.PictureSize.choices.map { (String($0.rawValue), $0.label) }
                             )
                             .id(sideChanged)
                             ChoiceRow(

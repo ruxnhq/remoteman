@@ -40,9 +40,24 @@ final class ViewerSession: ObservableObject {
     /// to encode: a Mac's encoder takes about 16 ms over 3840×2160, twice a 120 Hz frame.
     enum PictureSize: Int, CaseIterable, Identifiable {
         case own = 0, lines1440 = 1440, lines1080 = 1080
+        /// The Mac app only: the window's own pixels, asked for again when the window has been
+        /// resized and still for a second. (On iPhone and iPad the app's area is always followed.)
+        case window = -1
         var id: Int { rawValue }
+        /// What this device offers.
+        static var choices: [PictureSize] {
+            #if os(macOS)
+            [.own, .window, .lines1440, .lines1080]
+            #else
+            [.own, .lines1440, .lines1080]
+            #endif
+        }
         var label: String {
+            #if os(macOS)
+            if self == .own { return "The window's size when connecting" }
+            #endif
             switch self {
+            case .window: return "The window's size, as it changes"
             case .own: return "This screen's own"
             case .lines1440: return "Up to 1440 lines"
             case .lines1080: return "Up to 1080 lines"
@@ -54,7 +69,7 @@ final class ViewerSession: ObservableObject {
         func save(for host: String) { UserDefaults.standard.set(rawValue, forKey: "pictureSize." + host) }
         func fit(_ d: Display) -> Display {
             let short = min(d.width, d.height)
-            guard self != .own, short > rawValue else { return d }
+            guard rawValue > 0, short > rawValue else { return d }
             let f = Double(rawValue) / Double(short)
             func even(_ v: Int) -> Int { max(2, Int((Double(v) * f / 2).rounded()) * 2) }
             return Display(width: even(d.width), height: even(d.height), scale: d.scale * Float(f), refresh: d.refresh)

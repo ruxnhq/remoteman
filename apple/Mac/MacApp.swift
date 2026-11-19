@@ -77,7 +77,31 @@ final class AppModel: ObservableObject {
     @Published private(set) var requested: ViewerSession.Display?
 
     /// The picture area's size in points, kept up to date by the session screen.
-    var pictureSize: CGSize = .zero
+    var pictureSize: CGSize = .zero { didSet { if pictureSize != oldValue { windowResized() } } }
+    private var resizeCount = 0
+
+    /// For a computer whose picture follows the window: once the window has been still for a
+    /// second, ask for its new size. Only where the computer changes size without a reconnect;
+    /// full screen asks by itself.
+    private func windowResized() {
+        resizeCount += 1
+        let count = resizeCount
+        guard let id = active, hasPicture, !automatedResizeOff, let c = store[id],
+            ViewerSession.PictureSize.saved(for: ViewerSession.key(for: c.address)) == .window
+        else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self, count == self.resizeCount, self.active == id, self.hasPicture, !self.reconnecting,
+                self.session.has("configure"), self.pictureSize.width > 0
+            else { return }
+            let d = self.capped(DeviceDisplay.current(
+                for: self.pictureSize, displayScale: self.window?.backingScaleFactor ?? 2, measured: self.session.refreshMeter.rate))
+            // Not for a pixel or two (the window's chrome coming and going).
+            if let r = self.requested, abs(r.width - d.width) < 8, abs(r.height - d.height) < 8 { return }
+            self.reconnect()
+        }
+    }
+    /// Mirroring a monitor has the monitor's size, not the window's.
+    private var automatedResizeOff: Bool { active.flatMap { store[$0]?.place } == .mirror }
     weak var window: NSWindow? { didSet { if window !== oldValue { watchWindow() } } }
 
     private var started: Date?

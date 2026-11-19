@@ -282,12 +282,12 @@ struct ComputerSettings: View {
                         }
                         .labelsHidden().fixedSize()
                     }
-                    Row("Picture size", caption: "Fewer pixels reach you sooner: a Mac takes about twice as long over a 4K picture as over 1440 lines. Applies the next time you connect.") {
+                    Row("Picture size", caption: "Fewer pixels reach you sooner: a Mac takes about twice as long over a 4K picture as over 1440 lines. Following the window asks the computer for a new size a second after you stop resizing. Applies the next time you connect.") {
                         Picker("Picture size", selection: Binding(
                             get: { ViewerSession.PictureSize.saved(for: ViewerSession.key(for: c.address)) },
                             set: { $0.save(for: ViewerSession.key(for: c.address)); sideChanged += 1 })
                         ) {
-                            ForEach(ViewerSession.PictureSize.allCases) { Text($0.label).tag($0) }
+                            ForEach(ViewerSession.PictureSize.choices) { Text($0.label).tag($0) }
                         }
                         .labelsHidden().fixedSize().id(sideChanged)
                     }
