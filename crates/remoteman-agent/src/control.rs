@@ -83,7 +83,52 @@ pub fn features(allowed: &Allowed) -> Vec<String> {
 /// Start answering at `path`. If something already answers there (another host of this user's
 /// on the same port can't exist, but a stale name might be someone's), it is left alone and
 /// this host runs without a control socket.
-pub fn serve(path: &Path, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
+/// What listens for devices behind this control socket.
+pub enum Behind {
+    /// This program itself (the standalone host).
+    Own(Weak<Host>),
+    /// The system's daemon, at this socket: this program is the agent of one desktop
+    /// session, and what belongs to the daemon (who is paired, pairing, the address) is
+    /// asked of it.
+    Daemon(PathBuf),
+}
+
+/// The same, for the length of one request.
+enum Back<'a> {
+    Own(std::sync::Arc<Host>),
+    Daemon(&'a Path),
+}
+
+/// One request to the daemon (as `remotemand ctl` makes them), and its answer.
+fn ask_daemon(socket: &Path, line: &str) -> Option<String> {
+    use std::io::Read;
+    let mut stream = UnixStream::connect(socket).ok()?;
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+    remoteman_core::relay::ToDaemon::Control(line.to_owned()).write(&mut stream).ok()?;
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).ok()?;
+    Some(answer)
+}
+
+impl Back<'_> {
+    /// Ask the daemon and say `ok` if its answer begins with one of these.
+    fn daemon(socket: &Path, line: &str, good: &[&str]) -> String {
+        match ask_daemon(socket, line) {
+            Some(said) if good.iter().any(|g| said.starts_with(g)) => "ok\n".into(),
+            Some(said) => said,
+            None => "the daemon isn't answering\n".into(),
+        }
+    }
+
+    fn link(&self, allowed: &Allowed) -> Option<remoteman_core::host::Link> {
+        match self {
+            Back::Own(host) => host.link(),
+            Back::Daemon(_) => allowed.link.lock().unwrap().clone(),
+        }
+    }
+}
+
+pub fn serve(path: &Path, behind: Behind, allowed: Allowed, state: PathBuf) {
     if UnixStream::connect(path).is_ok() {
         return tracing::warn!("{} is in use: this host can't be asked how it stands", path.display());
     }
@@ -112,9 +157,12 @@ pub fn serve(path: &Path, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
             if BufReader::new(&stream).read_line(&mut line).is_err() {
                 continue;
             }
-            let answer = match host.upgrade() {
-                Some(host) => answer(&host, &allowed, &state, line.trim()),
-                None => "the host is stopping\n".into(),
+            let answer = match &behind {
+                Behind::Own(host) => match host.upgrade() {
+                    Some(host) => answer(&Back::Own(host), &allowed, &state, line.trim()),
+                    None => "the host is stopping\n".into(),
+                },
+                Behind::Daemon(socket) => answer(&Back::Daemon(socket), &allowed, &state, line.trim()),
             };
             let _ = (&stream).write_all(answer.as_bytes());
         }
@@ -123,10 +171,10 @@ pub fn serve(path: &Path, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
 
 /// Send a file to the connected device, on a thread of its own. The device decides where it
 /// goes and answers when it has it (`Allowed::sent`).
-fn send_file(host: &Host, path: &Path) -> Result<(), String> {
+fn send_file(link: Option<remoteman_core::host::Link>, path: &Path) -> Result<(), String> {
     use std::io::Read;
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-    let link = host.link().ok_or("no device is connected")?;
+    let link = link.ok_or("no device is connected")?;
     let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let size = file.metadata().map_err(|e| e.to_string())?.len();
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
@@ -153,13 +201,13 @@ fn send_file(host: &Host, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
+fn answer(back: &Back, allowed: &Allowed, state: &Path, line: &str) -> String {
     // A path may have spaces in it: everything after the word.
     if let Some(path) = line.trim().strip_prefix("send ") {
         if !allowed.files.load(Ordering::Relaxed) {
             return "files are switched off on this computer\n".into();
         }
-        return match send_file(host, Path::new(path.trim())) {
+        return match send_file(back.link(allowed), Path::new(path.trim())) {
             Ok(()) => "ok\n".into(),
             Err(why) => format!("{why}\n"),
         };
@@ -171,36 +219,70 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 let sent = allowed.sent.lock().unwrap();
                 serde_json::json!({ "answered": sent.0, "ok": sent.1, "said": sent.2 })
             };
-            let status = serde_json::json!({
-                "address": host.address.to_string(),
-                "fingerprint": host.fingerprint,
-                "pairing": host.pairing(),
-                "clipboard": allowed.clipboard.load(Ordering::Relaxed),
-                "files": allowed.files.load(Ordering::Relaxed),
-                "unlock": unlock_word(allowed.unlock.load(Ordering::Relaxed)),
-                "client": *allowed.now.lock().unwrap(),
-                "pending": host.pending(),
-                "sent": sent,
-                "devices": host.devices(),
-            });
+            // What is the listening side's: this program's own, or asked of the daemon.
+            let mut status = match back {
+                Back::Own(host) => serde_json::json!({
+                    "address": host.address.to_string(),
+                    "fingerprint": host.fingerprint,
+                    "pairing": host.pairing(),
+                    "pending": host.pending(),
+                    "devices": host.devices(),
+                    "daemon": false,
+                    "paused": false,
+                }),
+                Back::Daemon(socket) => match ask_daemon(socket, "owner").and_then(|said| serde_json::from_str::<serde_json::Value>(said.trim()).ok()).filter(|v| v.is_object()) {
+                    Some(mut of_daemon) => {
+                        of_daemon["daemon"] = true.into();
+                        of_daemon
+                    }
+                    None => return "the daemon isn't answering\n".into(),
+                },
+            };
+            status["clipboard"] = allowed.clipboard.load(Ordering::Relaxed).into();
+            status["files"] = allowed.files.load(Ordering::Relaxed).into();
+            status["unlock"] = unlock_word(allowed.unlock.load(Ordering::Relaxed)).into();
+            status["client"] = serde_json::to_value(&*allowed.now.lock().unwrap()).unwrap_or_default();
+            status["sent"] = sent;
             format!("{status}\n")
         }
         // Pairing opened here waits for its owner's word on the device that comes (the
         // code is in `status`); `--pair` on the command line trusts the first to come.
-        (Some("pair"), Some(word @ ("on" | "off")), _) => {
-            host.set_confirm(true);
-            host.set_pairing(word == "on");
-            if word == "off" {
-                host.decide(false);
+        (Some("pair"), Some(word @ ("on" | "off")), _) => match back {
+            Back::Own(host) => {
+                host.set_confirm(true);
+                host.set_pairing(word == "on");
+                if word == "off" {
+                    host.decide(false);
+                }
+                "ok\n".into()
             }
-            "ok\n".into()
-        }
-        (Some("pair"), Some(word @ ("accept" | "decline")), _) => if host.decide(word == "accept") { "ok\n".into() } else { "no device is waiting\n".into() },
-        (Some("drop"), _, _) => if host.drop_client() { "ok\n".into() } else { "no device is connected\n".into() },
-        (Some("revoke"), Some(fingerprint), _) => match host.revoke(fingerprint) {
-            Ok(true) => "ok\n".into(),
-            Ok(false) => "no such device\n".into(),
-            Err(e) => format!("the list couldn't be saved: {e:#}\n"),
+            Back::Daemon(socket) => Back::daemon(socket, if word == "on" { "pair ask" } else { "pair off" }, &["ok", "pairing is"]),
+        },
+        (Some("pair"), Some(word @ ("accept" | "decline")), _) => match back {
+            Back::Own(host) => if host.decide(word == "accept") { "ok\n".into() } else { "no device is waiting\n".into() },
+            Back::Daemon(socket) => Back::daemon(socket, &format!("pair {word}"), &["ok"]),
+        },
+        (Some("drop"), _, _) => match back {
+            Back::Own(host) => if host.drop_client() { "ok\n".into() } else { "no device is connected\n".into() },
+            Back::Daemon(socket) => Back::daemon(socket, "drop", &["the client was dropped"]),
+        },
+        (Some("revoke"), Some(fingerprint), _) => match back {
+            Back::Own(host) => match host.revoke(fingerprint) {
+                Ok(true) => "ok\n".into(),
+                Ok(false) => "no such device\n".into(),
+                Err(e) => format!("the list couldn't be saved: {e:#}\n"),
+            },
+            Back::Daemon(socket) => match ask_daemon(socket, &format!("revoke {fingerprint}")) {
+                Some(said) if said.contains("is no longer trusted") => "ok\n".into(),
+                Some(said) => said,
+                None => "the daemon isn't answering\n".into(),
+            },
+        },
+        // With the daemon, sharing is switched off and on there (it turns every device away
+        // meanwhile and keeps running); the standalone host is its own service to stop.
+        (Some("sharing"), Some(word @ ("on" | "off")), _) => match back {
+            Back::Own(_) => "this host is switched off by stopping it\n".into(),
+            Back::Daemon(socket) => Back::daemon(socket, &format!("sharing {word}"), &["ok"]),
         },
         // What gets a paired device in while this computer is locked.
         (Some("allow"), Some("unlock"), Some(word @ ("off" | "password" | "key"))) => {
@@ -224,15 +306,27 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
             // The next client hears it in the hello; the connected one is told now. A
             // clipboard being shared stops as if the client had switched it off; a file
             // opened after this is refused where files are taken.
-            host.set_features(features(allowed));
-            if what == "clipboard" && !on {
-                host.tell_handler(Message::Clipboard { on: false });
+            match back {
+                Back::Own(host) => {
+                    host.set_features(features(allowed));
+                    if what == "clipboard" && !on {
+                        host.tell_handler(Message::Clipboard { on: false });
+                    }
+                }
+                // (The daemon's hello lists everything an agent might allow; the connected
+                // device is told what this session allows now. A clipboard being shared
+                // stops with the device's next session.)
+                Back::Daemon(_) => {
+                    if let Some(link) = back.link(allowed) {
+                        link.send_message(Message::Features { features: features(allowed) });
+                    }
+                }
             }
             match kept {
                 Ok(()) => "ok\n".into(),
                 Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
-        _ => "status | pair on|off|accept|decline | drop | revoke FINGERPRINT | allow clipboard|files on|off | allow unlock off|password|key | send PATH\n".into(),
+        _ => "status | sharing on|off | pair on|off|accept|decline | drop | revoke FINGERPRINT | allow clipboard|files on|off | allow unlock off|password|key | send PATH\n".into(),
     }
 }

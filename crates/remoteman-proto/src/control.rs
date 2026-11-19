@@ -86,6 +86,11 @@ pub enum Message {
         /// earlier hello with the error `locked` (docs/PROTOCOL.md, "A locked host").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unlock: Option<String>,
+        /// How this device may be let in where there is a choice: left out, any way the host
+        /// has; `"attach"`, only into a session that is already running (never a login
+        /// screen). A host with one way in takes no notice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        way_in: Option<String>,
     },
     HostHello {
         proto: u32,

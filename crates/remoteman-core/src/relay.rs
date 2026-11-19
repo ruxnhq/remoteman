@@ -378,7 +378,7 @@ mod tests {
 
     fn client(name: &str, width: u32) -> ToAgent {
         let display = Display { width, height: 2, scale: 1.0, refresh: 120, placement: Default::default() };
-        ToAgent::Client { info: ClientInfo { name: name.into(), fingerprint: "f".into(), display, decoders: vec![], cursor: false, unlock: None }, elapsed_us: 5 }
+        ToAgent::Client { info: ClientInfo { name: name.into(), fingerprint: "f".into(), display, decoders: vec![], cursor: false, unlock: None, attach_only: false }, elapsed_us: 5 }
     }
 
     /// The next `count` frames' numbers, having skipped nothing else.

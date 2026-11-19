@@ -344,7 +344,15 @@ pub fn computer(app: &Rc<App>, address: &str, addresses: bool) {
     page.add(&media);
 
     let connection = adw::PreferencesGroup::builder().title("Connection").build();
-    connection.add(&gate(combo("Way in", "Automatic attaches when you are logged in at the computer, and uses remote login when nobody is", &["Automatic"], 0), FEATURES.way_in));
+    let way_in = combo("Way in", "Automatic comes into your session when you are logged in at the computer, and shows its login screen when nobody is. Computers with one way in take no notice", &["Automatic", "Only a session that is already running"], c.attach_only as u32);
+    way_in.connect_selected_notify({
+        let (app, address) = (app.clone(), address.clone());
+        move |row| {
+            let attach_only = row.selected() == 1;
+            app.store.borrow_mut().update(&address.borrow(), |c| c.attach_only = attach_only);
+        }
+    });
+    connection.add(&gate(way_in, FEATURES.way_in));
     let quality = quality_row("Picture quality", "", c.quality);
     quality.connect_selected_notify({
         let (app, address) = (app.clone(), address.clone());

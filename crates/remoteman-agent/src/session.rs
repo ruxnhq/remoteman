@@ -76,6 +76,9 @@ pub struct Allowed {
     pub unlock: Arc<std::sync::atomic::AtomicU8>,
     /// The client being served, for whoever asks how things stand (the control socket).
     pub now: Arc<std::sync::Mutex<Option<Now>>>,
+    /// The way to the device being served, for sending it something from outside the
+    /// session's own thread (a file, from the control socket).
+    pub link: Arc<std::sync::Mutex<Option<Link>>>,
     /// What the device said became of the last file sent to it: how many have been answered,
     /// whether that one arrived, and where it put it or why not.
     pub sent: Arc<std::sync::Mutex<(u32, bool, String)>>,
@@ -297,6 +300,7 @@ impl Agent {
         self.live = Some(Live { desktop, pipeline, size: (screen.width, screen.height), pointed: None, placing, name, link, screen, decoders, cursor, mode, ceiling, files: BTreeMap::new(), clipboard: None, copied: BTreeMap::new() });
         // The clipboard belongs to the display's session, so a new display shares it anew.
         self.share_clipboard(self.clipboard_wanted);
+        *self.allowed.link.lock().unwrap() = self.live.as_ref().map(|l| l.link.clone());
         if let Some(l) = &self.live {
             let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
             let mut now = self.allowed.now.lock().unwrap();
@@ -390,6 +394,7 @@ impl Agent {
     /// Stop the picture and take the display away. Files half received are thrown away.
     fn stop(&mut self) -> Option<Live> {
         let mut l = self.live.take()?;
+        *self.allowed.link.lock().unwrap() = None;
         tracing::info!(skipped = l.pipeline.skipped.load(std::sync::atomic::Ordering::Relaxed), "session over");
         l.placing.abort();
         for (_, f) in std::mem::take(&mut l.files) {

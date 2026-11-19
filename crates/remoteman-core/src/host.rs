@@ -53,6 +53,9 @@ pub struct ClientInfo {
     /// The password it sent to unlock a locked host with, if it sent one. Never logged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unlock: Option<String>,
+    /// It asked to be let in only into a session that is already running.
+    #[serde(default)]
+    pub attach_only: bool,
 }
 
 /// What the host will send, in answer to a client's hello.
@@ -515,7 +518,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     let no = |e: anyhow::Error| (false, e);
     let clock = Instant::now();
     let (mut send, mut recv) = conn.accept_bi().await.context("control stream").map_err(no)?;
-    let Some(Message::ClientHello { proto, name, display, decoders, cursor, unlock }) = read_message(&mut recv).await.map_err(no)? else {
+    let Some(Message::ClientHello { proto, name, display, decoders, cursor, unlock, way_in }) = read_message(&mut recv).await.map_err(no)? else {
         return Err(no(anyhow::anyhow!("the first message wasn't client_hello")));
     };
     // A new device, held for the owner's word: it is told to wait (and can show the code),
@@ -564,7 +567,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     let (cursor_tx, mut cursor_rx) = tokio::sync::mpsc::unbounded_channel::<CursorMsg>();
     let link = Link { frames: frame_tx, cursor: cursor_tx, clock };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let info = ClientInfo { name, fingerprint, display, decoders, cursor, unlock };
+    let info = ClientInfo { name, fingerprint, display, decoders, cursor, unlock, attach_only: way_in.as_deref() == Some("attach") };
     // Reachable through `Host::link` before the handler hears of the client, so nothing it
     // sends from the start is lost.
     *current_link.lock().unwrap() = Some(link.clone());

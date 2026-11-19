@@ -8,6 +8,9 @@ After=graphical-session.target
 
 [Service]
 ExecStart=/usr/lib/remoteman/remoteman-agent --daemon
+# If the agent goes (killed, crashed) while this computer is unlocked for a device, it is
+# locked here, whatever the reason the agent stopped.
+ExecStopPost=/usr/lib/remoteman/remoteman-agent --lock-if-left-unlocked
 Restart=on-failure
 RestartSec=2
 

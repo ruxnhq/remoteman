@@ -241,7 +241,9 @@ impl Ui {
         let pending = |s: &State| if let State::Sharing { pending, .. } = s { pending.clone() } else { None };
         let (was, now) = (self.shown.borrow().as_ref().and_then(pending), pending(&state));
         if was != now {
-            if let Some(old) = self.asking.borrow_mut().take() {
+            // (Taken out first: closing it calls the answer's handler, which looks here too.)
+            let old = self.asking.borrow_mut().take();
+            if let Some(old) = old {
                 old.force_close();
             }
             if let Some(device) = now {

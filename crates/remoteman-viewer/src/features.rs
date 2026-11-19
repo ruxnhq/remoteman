@@ -83,7 +83,7 @@ pub const FEATURES: Features = Features {
     release_shortcut: true,
     second_display: false,
     mirror: true,
-    way_in: false,
+    way_in: true,
 };
 
 pub const NOT_YET: &str = "Not available yet";
