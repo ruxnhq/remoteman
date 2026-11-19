@@ -32,6 +32,8 @@ dbus-run-session -- sh -c '
   kill $apid 2>/dev/null; sleep 0.5; kill $mpid 2>/dev/null
   wait 2>/dev/null
 ' 2>&1 | grep -vE "dbus-daemon|fusermount|Gdk-Message|A connection to the bus|portal|keyring|^$"
+# (Seen as "the question never came up", with a Python error before it: another program on the port.)
+grep -q "os error 98" "$RM_LOGS/agent.log" && { echo "the host never started: port $RM_PORT is taken by another program (set RM_PORT)"; echo "FAIL (logs in $RM_LOGS)"; exit 1; }
 grep -E "notified|saved|icon" "$RM_LOGS/tray.log"
 grep -q "^asking: pair with" "$RM_LOGS/tray.log" || { echo "the question about a new device never came up"; echo "FAIL (logs in $RM_LOGS)"; exit 1; }
 grep -q "^saved " "$RM_LOGS/tray.log" || { echo "Remoteman Host did not live to the end (it crashed when the question was answered elsewhere?)"; echo "FAIL (logs in $RM_LOGS)"; tail -5 "$RM_LOGS/tray.log"; exit 1; }
