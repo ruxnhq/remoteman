@@ -282,3 +282,6 @@ void rm_glview_free(rm_glview *v) {
     glDeleteVertexArrays(1, &v->vao);
     free(v);
 }
+
+// Wait until the GPU has done everything asked of it so far (for timing a draw).
+void rm_glview_finish(void) { glFinish(); }
