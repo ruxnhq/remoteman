@@ -340,6 +340,12 @@ impl Screen {
             self.device = first.device;
         }
         if !modes(&own.device).contains(&want) {
+            // The first monitor is off for this device (it has the only display and now wants
+            // another size): the list of modes is read from the first monitor and re-creates
+            // it, so it comes back on for the moment that takes.
+            if !attached(&self.device) {
+                self.take_back();
+            }
             // One list for all the driver's monitors: the first one's, with this mode added.
             let offered = modes(&self.device);
             let added = self.add_mode(want, &offered);
