@@ -253,7 +253,7 @@ fn keysym(c: char) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::keysym;
+    use super::{allowed_scale, keysym};
 
     #[test]
     fn a_scale_the_desktop_refuses_becomes_the_nearest_it_takes() {
