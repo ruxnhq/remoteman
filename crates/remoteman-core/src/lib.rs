@@ -100,6 +100,10 @@ pub trait Handler: Send + 'static {
     /// How far connecting has got. Called on the connecting thread, before
     /// [`Client::connect`] returns; after [`Stage::Display`] come `stream` and the first `frame`.
     fn stage(&mut self, _stage: Stage) {}
+    /// This device is new to the host, whose owner now has `seconds` to confirm it there.
+    /// `code` is what both sides show for comparing. Called on the connecting thread, in the
+    /// middle of [`Client::connect`], which goes on waiting.
+    fn pairing(&mut self, _code: &str, _seconds: u32) {}
     /// The connection is over.
     fn closed(&mut self, reason: &str);
 }
@@ -244,10 +248,18 @@ impl Client {
         let o_delay = o.test_delay_lost_ms.filter(|ms| *ms > 0);
         handler.stage(Stage::Handshake);
         let (endpoint, conn, fingerprint) = connect(addr, &identity, expect).await?;
-        if !known.exists() {
+        let new_here = !known.exists();
+        if new_here {
             std::fs::create_dir_all(known.parent().unwrap())?;
             std::fs::write(&known, &fingerprint)?;
         }
+        // A host that turns a new device down is not kept: the next try starts from nothing.
+        let forget = |e: anyhow::Error| {
+            if new_here {
+                let _ = std::fs::remove_file(&known);
+            }
+            e
+        };
 
         let clock = Instant::now();
         let now_us = move || clock.elapsed().as_micros() as u64;
@@ -257,7 +269,9 @@ impl Client {
         let (host_name, host_os, host_features) = loop {
             match read_message(&mut recv).await?.context("the host closed the connection")? {
                 Message::HostHello { name, os, features, .. } => break (name, os, features),
-                Message::Error { code, message } => bail!("the host refused: {code}: {message}"),
+                Message::Error { code, message } => return Err(forget(anyhow::anyhow!("the host refused: {code}: {message}"))),
+                // New here, and the host's owner is being asked: show the code and wait.
+                Message::Pairing { seconds } => handler.pairing(&remoteman_transport::pair_code(&fingerprint, &identity.fingerprint), seconds),
                 _ => {}
             }
         };

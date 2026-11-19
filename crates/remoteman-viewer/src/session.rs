@@ -16,6 +16,7 @@ use crate::window::App;
 struct Item {
     button: gtk::Button,
     mark: Option<gtk::CheckButton>,
+    #[allow(dead_code)]
     label: gtk::Label,
     hint: gtk::Label,
 }
@@ -134,9 +135,8 @@ pub struct View {
     menus: [gtk::MenuButton; 5],
     share_clipboard: Item,
     send_file: Item,
-    placements: [(Placement, Item); 3],
+    placements: [(Placement, Item); 4],
     qualities: [(Quality, Item); 2],
-    mirror: Item,
     show_figures: Item,
     /// Plays the computer's sound here while it is pressed in.
     pub sound: gtk::ToggleButton,
@@ -177,10 +177,7 @@ pub fn build(video: &Video) -> View {
     let only = item("Only Display", "Computer's screens off", Mark::Radio(extra.mark.as_ref()));
     let second = item("Add a Second Display…", "", Mark::None);
     gate(second.button.clone(), FEATURES.second_display);
-    let mirror = item("Mirror a Monitor", "", Mark::None);
-    if let Some(row) = mirror.button.child().and_downcast::<gtk::Box>() {
-        row.append(&gtk::Image::builder().icon_name("go-next-symbolic").css_classes(["dim-label"]).build());
-    }
+    let mirror = item("Mirror the Main Monitor", "The computer's own picture", Mark::Radio(extra.mark.as_ref()));
     gate(mirror.button.clone(), FEATURES.mirror);
     let display_popover = popover(
         &[section("Use This Display As").upcast_ref(), extra.button.upcast_ref(), main.button.upcast_ref(), only.button.upcast_ref(), gtk::Separator::new(gtk::Orientation::Horizontal).upcast_ref(), second.button.upcast_ref(), mirror.button.upcast_ref()],
@@ -250,9 +247,8 @@ pub fn build(video: &Video) -> View {
         menus: [send_keys, display, picture, menu, sharing],
         share_clipboard,
         send_file,
-        placements: [(Placement::Extend, extra), (Placement::Main, main), (Placement::Only, only)],
+        placements: [(Placement::Extend, extra), (Placement::Main, main), (Placement::Only, only), (Placement::Mirror, mirror)],
         qualities: [(Quality::Automatic, automatic), (Quality::Sharp, sharp)],
-        mirror,
         show_figures,
         sound,
         pointer,
@@ -266,17 +262,17 @@ impl View {
     /// A session has started: the bar says who with, and the menus what was asked for.
     /// `streams`: what Automatic and Sharp Text ask for first, in words; the second is empty
     /// if there is nothing sharper to ask for.
-    pub fn begin(&self, name: &str, can_place: bool, placement: Placement, quality: Quality, streams: (String, String)) {
+    pub fn begin(&self, name: &str, can_place: bool, can_mirror: bool, placement: Placement, quality: Quality, streams: (String, String)) {
         self.title.set_title(name);
         self.title.set_subtitle("Connected");
-        self.mirror.label.set_text(&format!("Mirror a Monitor of {name}"));
         for (p, item) in &self.placements {
             if let Some(mark) = &item.mark {
                 mark.set_active(*p == placement);
             }
             // Only for computers that offer the choice.
-            item.button.set_sensitive(can_place);
-            item.button.set_tooltip_text((!can_place).then_some("This computer decides where the display goes"));
+            let (can, why) = if *p == Placement::Mirror { (can_place && can_mirror && FEATURES.mirror, "This computer can't show its own monitor") } else { (can_place, "This computer decides where the display goes") };
+            item.button.set_sensitive(can);
+            item.button.set_tooltip_text((!can).then_some(why));
         }
         for (q, item) in &self.qualities {
             if let Some(mark) = &item.mark {

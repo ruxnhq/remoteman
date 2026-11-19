@@ -54,7 +54,7 @@ impl Saved {
 
 /// What the host offers, given what is allowed now.
 pub fn features(allowed: &Allowed) -> Vec<String> {
-    let mut features: Vec<String> = ["video", "input", "cursor", "placement", "configure", "sound", "mic", "camera"].map(String::from).to_vec();
+    let mut features: Vec<String> = ["video", "input", "cursor", "placement", "mirror", "configure", "sound", "mic", "camera"].map(String::from).to_vec();
     if allowed.files.load(Ordering::Relaxed) {
         features.push("files".into());
     }
@@ -162,15 +162,23 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "clipboard": allowed.clipboard.load(Ordering::Relaxed),
                 "files": allowed.files.load(Ordering::Relaxed),
                 "client": *allowed.now.lock().unwrap(),
+                "pending": host.pending(),
                 "sent": sent,
                 "devices": host.devices(),
             });
             format!("{status}\n")
         }
+        // Pairing opened here waits for its owner's word on the device that comes (the
+        // code is in `status`); `--pair` on the command line trusts the first to come.
         (Some("pair"), Some(word @ ("on" | "off")), _) => {
+            host.set_confirm(true);
             host.set_pairing(word == "on");
+            if word == "off" {
+                host.decide(false);
+            }
             "ok\n".into()
         }
+        (Some("pair"), Some(word @ ("accept" | "decline")), _) => if host.decide(word == "accept") { "ok\n".into() } else { "no device is waiting\n".into() },
         (Some("drop"), _, _) => if host.drop_client() { "ok\n".into() } else { "no device is connected\n".into() },
         (Some("revoke"), Some(fingerprint), _) => match host.revoke(fingerprint) {
             Ok(true) => "ok\n".into(),
@@ -194,6 +202,6 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
-        _ => "status | pair on|off | drop | revoke FINGERPRINT | allow clipboard|files on|off | send PATH\n".into(),
+        _ => "status | pair on|off|accept|decline | drop | revoke FINGERPRINT | allow clipboard|files on|off | send PATH\n".into(),
     }
 }

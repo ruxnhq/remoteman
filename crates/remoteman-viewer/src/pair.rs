@@ -81,6 +81,25 @@ pub fn open(app: &Rc<App>, address: Option<&str>, start: bool) {
             entry.set_sensitive(false);
             pair.set_sensitive(false);
             let (dialog, entry, pair, wait, problem, slot, to) = (dialog.clone(), entry.clone(), pair.clone(), wait.clone(), problem.clone(), attempt.clone(), target.clone());
+            // If the computer asks its owner about this device, the code to compare is shown
+            // while this waits.
+            gtk::glib::timeout_add_local(std::time::Duration::from_millis(250), {
+                let (app, waiting, slot, host) = (app.clone(), waiting.clone(), attempt.clone(), host_part(&address).to_owned());
+                let mut said = false;
+                move || {
+                    if slot.get().is_none() {
+                        return gtk::glib::ControlFlow::Break;
+                    }
+                    if let (false, Some((code, seconds))) = (said, app.pairing.lock().unwrap().clone()) {
+                        said = true;
+                        waiting.set_text(&format!("{host} is asking its owner about this device.\nCheck that it shows this code, and confirm there within {seconds} seconds:\n\n{code}"));
+                        if app.args.ui.is_some() {
+                            println!("~ pairing code {code}");
+                        }
+                    }
+                    gtk::glib::ControlFlow::Continue
+                }
+            });
             let id = app.attempt(&target, true, move |app, result| {
                 slot.set(None);
                 match result {

@@ -68,6 +68,9 @@ pub struct App {
     /// The pointer held in the window, its raw movement sent, while that is wanted.
     /// Every advertisement of a remoteman host seen on this network now.
     pub nearby: RefCell<Vec<crate::nearby::Found>>,
+    /// The code to compare while a computer's owner is asked about this device, and the
+    /// seconds they have (set by the attempt that is running).
+    pub pairing: std::sync::Arc<std::sync::Mutex<Option<(String, u32)>>>,
     pub capture: RefCell<Option<crate::capture::Capture>>,
     /// How far a captured pointer has been sent in this run, for tests.
     pub moved: Cell<(f64, f64)>,
@@ -220,7 +223,7 @@ impl App {
         let id = self.attempt.get().wrapping_add(1);
         self.attempt.set(id);
         let (placement, quality) = self.choices(&target.address);
-        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, folder: self.store.borrow().receive_folder() };
+        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
         let app = self.clone();
         glib::spawn_future_local(async move {
             let result = match gio::spawn_blocking(move || Session::start(request)).await {
@@ -295,7 +298,7 @@ impl App {
         // What each choice of quality asks the computer for first.
         let first = |q: Quality| self.decoders(q).first().map(mode_name).unwrap_or_default();
         let sharp = if self.decoders(Quality::Sharp).first().is_some_and(|m| m.chroma == Chroma::C444) { first(Quality::Sharp) } else { String::new() };
-        self.view.begin(&name, can_place, placement, quality, (first(Quality::Automatic), sharp));
+        self.view.begin(&name, can_place, session.offers("mirror"), placement, quality, (first(Quality::Automatic), sharp));
         self.view.show_figures(self.store.borrow().settings.figures);
         self.video.attach(session.shared.clone());
         self.shown_before.set(self.video.shown_total.get());
@@ -839,6 +842,7 @@ pub fn build(application: &adw::Application, args: Args) {
         released: Cell::new(false),
         chord: Cell::new((false, false, false)),
         nearby: RefCell::new(Vec::new()),
+        pairing: Default::default(),
         capture: RefCell::new(None),
         moved: Cell::new((0.0, 0.0)),
         fingers: RefCell::new(Vec::new()),

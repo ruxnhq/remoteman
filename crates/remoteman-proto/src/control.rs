@@ -39,6 +39,10 @@ pub enum Placement {
     Main = 1,
     /// The only display: the host's own screens are off while the client is connected.
     Only = 2,
+    /// No display of the client's own: it is shown the host's main monitor as it is, at that
+    /// monitor's size, and its input lands there. A host that doesn't list `mirror` among
+    /// its features reads this as an extra display.
+    Mirror = 3,
     /// An extra display beside the host's own. Also what a placement this version doesn't know
     /// is read as.
     #[default]
@@ -137,6 +141,12 @@ pub enum Message {
     /// Client to host: send the desktop's sound (sound datagrams), or stop.
     Sound {
         on: bool,
+    },
+    /// Host to client, in place of the hello for a moment: this device is new here, and the
+    /// host's owner has this many seconds to confirm it. Both sides can show the same code
+    /// meanwhile (docs/PROTOCOL.md, "Pairing"); the hello, or an error, follows.
+    Pairing {
+        seconds: u32,
     },
     /// Host to client: what the sound datagrams carry, before the first one and on any change.
     SoundFormat {
@@ -268,7 +278,10 @@ mod tests {
         assert_eq!((display.width, display.refresh, display.placement), (2752, 120, Placement::Extend));
         let only = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"only"},"decoders":[]}"#).unwrap();
         assert!(matches!(only, Message::ClientHello { display: Display { placement: Placement::Only, .. }, .. }));
-        let newer = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"mirror"},"decoders":[]}"#).unwrap();
+        let mirror = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"mirror"},"decoders":[]}"#).unwrap();
+        assert!(matches!(mirror, Message::ClientHello { display: Display { placement: Placement::Mirror, .. }, .. }));
+        // A placement this version doesn't know is an extra display.
+        let newer = Message::parse(br#"{"t":"client_hello","proto":0,"name":"x","display":{"width":2,"height":2,"scale":1.0,"refresh":60,"placement":"sideways"},"decoders":[]}"#).unwrap();
         assert!(matches!(newer, Message::ClientHello { display: Display { placement: Placement::Extend, .. }, .. }));
         assert_eq!(decoders[1], Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 });
         assert_eq!(serde_json::to_string(&m).unwrap(), json);

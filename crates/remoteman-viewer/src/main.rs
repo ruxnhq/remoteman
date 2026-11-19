@@ -73,7 +73,7 @@ pub struct Args {
 }
 
 /// The placements, as they are written on the command line and in the state folder.
-pub const PLACEMENTS: [(Placement, &str); 3] = [(Placement::Extend, "extend"), (Placement::Main, "main"), (Placement::Only, "only")];
+pub const PLACEMENTS: [(Placement, &str); 4] = [(Placement::Extend, "extend"), (Placement::Main, "main"), (Placement::Only, "only"), (Placement::Mirror, "mirror")];
 
 fn parse_args() -> anyhow::Result<Args> {
     use anyhow::Context;
@@ -99,7 +99,7 @@ fn parse_args() -> anyhow::Result<Args> {
             "--dump" => a.dump = Some(value()?.into()),
             "--placement" => {
                 let v = value()?;
-                a.placement = Some(PLACEMENTS.iter().find(|p| p.1 == v).context("--placement extend, main or only")?.0);
+                a.placement = Some(PLACEMENTS.iter().find(|p| p.1 == v).context("--placement extend, main, only or mirror")?.0);
             }
             "--hover-bar" => a.hover_bar = Some(value()? == "yes"),
             // For pictures of the window: see shot.rs.

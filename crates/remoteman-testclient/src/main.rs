@@ -219,6 +219,7 @@ fn main() -> Result<()> {
                     "extend" => Placement::Extend,
                     "main" => Placement::Main,
                     "only" => Placement::Only,
+                    "mirror" => Placement::Mirror,
                     other => bail!("unknown placement {other}"),
                 }
             }
