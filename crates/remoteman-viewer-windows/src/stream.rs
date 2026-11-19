@@ -27,6 +27,8 @@ pub struct Scene {
     poked: Condvar,
     /// The window's client area in pixels: width in the high half.
     pub client_size: AtomicU64,
+    /// A panel's scale, x in the high half, each an f32's bits (0: none, a window's own).
+    pub panel_scale: AtomicU64,
     /// The window, for waking it from other threads (0 until there is one).
     pub hwnd: AtomicIsize,
     /// Set when it is time to leave.
@@ -174,6 +176,15 @@ impl Shared {
 
 pub fn pack(width: u32, height: u32) -> u64 {
     (width as u64) << 32 | height as u64
+}
+
+#[allow(dead_code)]
+pub fn pack_scale(x: f32, y: f32) -> u64 {
+    ((x.to_bits() as u64) << 32) | y.to_bits() as u64
+}
+
+pub fn unpack_scale(v: u64) -> (f32, f32) {
+    if v == 0 { (1.0, 1.0) } else { (f32::from_bits((v >> 32) as u32), f32::from_bits(v as u32)) }
 }
 
 pub fn unpack(size: u64) -> (u32, u32) {

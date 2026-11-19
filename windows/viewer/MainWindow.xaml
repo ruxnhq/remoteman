@@ -8,25 +8,30 @@
   </Window.SystemBackdrop>
   <Grid x:Name="Root">
     <Grid.RowDefinitions>
-      <RowDefinition Height="40" />
+      <RowDefinition x:Name="TitleRow" Height="40" />
       <RowDefinition Height="*" />
     </Grid.RowDefinitions>
-    <Grid x:Name="TitleBar" Height="40" Padding="14,0,0,0" ColumnSpacing="10">
+    <Grid x:Name="TitleBar" Height="40" Padding="8,0,0,0" ColumnSpacing="10">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="Auto" />
         <ColumnDefinition Width="Auto" />
         <ColumnDefinition Width="Auto" />
         <ColumnDefinition Width="*" />
+        <ColumnDefinition x:Name="CaptionRoom" Width="138" />
       </Grid.ColumnDefinitions>
       <Button x:Name="BackButton" Grid.Column="0" Visibility="Collapsed" Style="{StaticResource NavigationBackButtonSmallStyle}" Click="Back_Click" />
-      <Canvas Grid.Column="1" Width="16" Height="16" VerticalAlignment="Center">
+      <Canvas x:Name="Logo" Grid.Column="1" Width="16" Height="16" Margin="6,0,0,0" VerticalAlignment="Center">
         <Rectangle Width="16" Height="16" RadiusX="3.5" RadiusY="3.5" Fill="#2458F5" />
         <Rectangle Canvas.Left="6" Canvas.Top="5" Width="7" Height="5" RadiusX="1.2" RadiusY="1.2" Stroke="White" StrokeThickness="1.2" />
         <Path Data="M2.5,6 L4.5,6 M2,7.8 L4.5,7.8 M3,9.5 L4.5,9.5" Stroke="White" StrokeThickness="1.1" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
       </Canvas>
       <TextBlock x:Name="TitleText" Grid.Column="2" Text="remoteman" Style="{StaticResource CaptionTextBlockStyle}" VerticalAlignment="Center" />
-      <Grid x:Name="BarHost" Grid.Column="3" />
+      <ContentPresenter x:Name="BarHost" Grid.Column="3" VerticalAlignment="Stretch" HorizontalAlignment="Stretch" />
     </Grid>
-    <Frame x:Name="Pages" Grid.Row="1" />
+    <Grid x:Name="Body" Grid.Row="1">
+      <local:PictureView x:Name="Picture" Visibility="Collapsed" />
+      <ContentPresenter x:Name="PageHost" />
+    </Grid>
+    <InfoBar x:Name="Toast" Grid.Row="1" IsClosable="False" Severity="Informational" VerticalAlignment="Bottom" HorizontalAlignment="Center" Margin="16" MaxWidth="560" />
   </Grid>
 </Window>

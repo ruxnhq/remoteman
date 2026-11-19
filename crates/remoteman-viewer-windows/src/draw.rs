@@ -100,6 +100,28 @@ struct Planes {
     chroma: ID3D11ShaderResourceView,
 }
 
+/// Where the picture goes: a window of our own, with the interface drawn in a layer over it,
+/// or the WinUI 3 app's `SwapChainPanel`, which has been given the swap chain already and
+/// draws everything else itself.
+pub enum Surface {
+    Window(HWND),
+    #[allow(dead_code)]
+    Panel(IDXGISwapChain1),
+}
+
+/// The window's layers above the picture, and the compositor's side (none for a panel).
+struct Layers {
+    painter: Painter,
+    /// The interface's layer, and what Direct2D draws into it through (made anew when the
+    /// window changes size).
+    ui_swap: IDXGISwapChain1,
+    ui_target: Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
+    /// The device, the window's target (kept alive), and the picture's layer.
+    dcomp: IDCompositionDevice,
+    _target: IDCompositionTarget,
+    video_visual: IDCompositionVisual,
+}
+
 struct Drawer {
     gpu: Gpu,
     swap: IDXGISwapChain1,
@@ -120,17 +142,47 @@ struct Drawer {
     own: Option<(ID3D11Texture2D, Planes, (u32, u32, DXGI_FORMAT))>,
     /// The picture on screen, kept for drawing again when the window or the interface changes.
     shown: Option<Picture>,
-    painter: Painter,
-    /// The interface's layer, and what Direct2D draws into it through (made anew when the
-    /// window changes size).
-    ui_swap: IDXGISwapChain1,
-    ui_target: Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
-    /// The compositor's side: the device, the window's target (kept alive), and the picture's
-    /// layer with the part of the window it is cut to (`None`: not shown at all).
-    dcomp: IDCompositionDevice,
-    _target: IDCompositionTarget,
-    video_visual: IDCompositionVisual,
+    layers: Option<Layers>,
+    /// The part of the window the picture's layer is cut to (`None`: not shown at all).
     clip: Option<Option<(i32, i32, i32, i32)>>,
+    /// A panel's scale (pixels to one of the app's units) the swap chain is set to undo.
+    scale: (f32, f32),
+}
+
+/// The picture's swap chain as it is made for a window's layer or for a panel.
+fn picture_chain(gpu: &Gpu, width: u32, height: u32) -> Result<IDXGISwapChain1> {
+    // SAFETY: DXGI calls on interfaces held here, with a description that lives through each.
+    unsafe {
+        let factory: IDXGIFactory2 = gpu.device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
+        let mut desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: width.max(8),
+            Height: height.max(8),
+            Format: DXGI_FORMAT_R10G10B10A2_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: 2,
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+            Flags: WAITABLE.0 as u32,
+            ..Default::default()
+        };
+        // The stream is 10-bit, so the picture's buffers are too where that is allowed.
+        Ok(match factory.CreateSwapChainForComposition(&gpu.device, &desc, None) {
+            Ok(swap) => swap,
+            Err(e) => {
+                say!("no 10-bit swap chain ({e}): 8-bit");
+                desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                factory.CreateSwapChainForComposition(&gpu.device, &desc, None).context("create the picture's swap chain")?
+            }
+        })
+    }
+}
+
+/// A swap chain for a panel of the WinUI 3 app; the app's thread hands it to the panel.
+#[allow(dead_code)]
+pub fn panel_chain(gpu: &Gpu, width: u32, height: u32) -> Result<IDXGISwapChain1> {
+    picture_chain(gpu, width, height)
 }
 
 fn plane_formats(format: DXGI_FORMAT) -> Result<(DXGI_FORMAT, DXGI_FORMAT)> {
@@ -142,48 +194,47 @@ fn plane_formats(format: DXGI_FORMAT) -> Result<(DXGI_FORMAT, DXGI_FORMAT)> {
 }
 
 impl Drawer {
-    fn new(gpu: Gpu, hwnd: HWND) -> Result<Self> {
+    fn new(gpu: Gpu, surface: Surface) -> Result<Self> {
         // SAFETY: Direct3D and DXGI calls on interfaces held here, with structures that live
         // through each call.
         unsafe {
-            let factory: IDXGIFactory2 = gpu.device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
-            let mut client = windows::Win32::Foundation::RECT::default();
-            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
-            let (width, height) = (client.right.max(8) as u32, client.bottom.max(8) as u32);
-            let mut desc = DXGI_SWAP_CHAIN_DESC1 {
-                Width: width,
-                Height: height,
-                Format: DXGI_FORMAT_R10G10B10A2_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                BufferCount: 2,
-                Scaling: DXGI_SCALING_STRETCH,
-                SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-                Flags: WAITABLE.0 as u32,
-                ..Default::default()
-            };
-            // The stream is 10-bit, so the picture's buffers are too where that is allowed.
-            let swap = match factory.CreateSwapChainForComposition(&gpu.device, &desc, None) {
-                Ok(swap) => swap,
-                Err(e) => {
-                    say!("no 10-bit swap chain ({e}): 8-bit");
-                    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-                    factory.CreateSwapChainForComposition(&gpu.device, &desc, None).context("create the picture's swap chain")?
+            let (swap, layers) = match surface {
+                Surface::Panel(swap) => (swap, None),
+                Surface::Window(hwnd) => {
+                    let factory: IDXGIFactory2 = gpu.device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
+                    let mut client = windows::Win32::Foundation::RECT::default();
+                    let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+                    let (width, height) = (client.right.max(8) as u32, client.bottom.max(8) as u32);
+                    let swap = picture_chain(&gpu, width, height)?;
+                    // The interface's: Direct2D's own format, transparent where nothing is drawn.
+                    let ui_desc = DXGI_SWAP_CHAIN_DESC1 {
+                        Width: width,
+                        Height: height,
+                        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                        BufferCount: 2,
+                        Scaling: DXGI_SCALING_STRETCH,
+                        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+                        Flags: 0,
+                        ..Default::default()
+                    };
+                    let ui_swap = factory.CreateSwapChainForComposition(&gpu.device, &ui_desc, None).context("create the interface's swap chain")?;
+                    let dcomp: IDCompositionDevice = DCompositionCreateDevice(&gpu.device.cast::<IDXGIDevice>()?).context("no DirectComposition")?;
+                    let target = dcomp.CreateTargetForHwnd(hwnd, true).context("a composition target for the window")?;
+                    let (root, video_visual, ui_visual) = (dcomp.CreateVisual()?, dcomp.CreateVisual()?, dcomp.CreateVisual()?);
+                    video_visual.SetContent(&swap)?;
+                    ui_visual.SetContent(&ui_swap)?;
+                    root.AddVisual(&video_visual, false, None)?;
+                    root.AddVisual(&ui_visual, true, &video_visual)?;
+                    target.SetRoot(&root)?;
+                    dcomp.Commit()?;
+                    let painter = Painter::new(&gpu.device)?;
+                    say!("interface: Direct2D on the same device, in a layer of its own over the picture's; text in {}", painter.family());
+                    (swap, Some(Layers { painter, ui_swap, ui_target: None, dcomp, _target: target, video_visual }))
                 }
             };
-            // The interface's: Direct2D's own format, transparent where nothing is drawn.
-            let ui_desc = DXGI_SWAP_CHAIN_DESC1 { Format: DXGI_FORMAT_B8G8R8A8_UNORM, SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED, Flags: 0, ..desc };
-            let ui_swap = factory.CreateSwapChainForComposition(&gpu.device, &ui_desc, None).context("create the interface's swap chain")?;
-            let dcomp: IDCompositionDevice = DCompositionCreateDevice(&gpu.device.cast::<IDXGIDevice>()?).context("no DirectComposition")?;
-            let target = dcomp.CreateTargetForHwnd(hwnd, true).context("a composition target for the window")?;
-            let (root, video_visual, ui_visual) = (dcomp.CreateVisual()?, dcomp.CreateVisual()?, dcomp.CreateVisual()?);
-            video_visual.SetContent(&swap)?;
-            ui_visual.SetContent(&ui_swap)?;
-            root.AddVisual(&video_visual, false, None)?;
-            root.AddVisual(&ui_visual, true, &video_visual)?;
-            target.SetRoot(&root)?;
-            dcomp.Commit()?;
             let now = swap.GetDesc1()?;
             let latency: IDXGISwapChain2 = swap.cast()?;
             latency.SetMaximumFrameLatency(1)?;
@@ -205,10 +256,7 @@ impl Drawer {
             gpu.device.CreateSamplerState(&s, Some(&mut sampler))?;
             let c = D3D11_BUFFER_DESC { ByteWidth: 48, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
             gpu.device.CreateBuffer(&c, None, Some(&mut constants))?;
-            say!("swap chain: {}x{}, {}, flip model", now.Width, now.Height, if now.Format == DXGI_FORMAT_R10G10B10A2_UNORM { "10 bits a channel" } else { "8 bits a channel" });
-
-            let painter = Painter::new(&gpu.device)?;
-            say!("interface: Direct2D on the same device, in a layer of its own over the picture's; text in {}", painter.family());
+            say!("swap chain: {}x{}, {}, flip model{}", now.Width, now.Height, if now.Format == DXGI_FORMAT_R10G10B10A2_UNORM { "10 bits a channel" } else { "8 bits a channel" }, if layers.is_none() { ", in the app's panel" } else { "" });
             Ok(Self {
                 gpu,
                 swap,
@@ -223,13 +271,9 @@ impl Drawer {
                 copying: false,
                 own: None,
                 shown: None,
-                painter,
-                ui_swap,
-                ui_target: None,
-                dcomp,
-                _target: target,
-                video_visual,
+                layers,
                 clip: None,
+                scale: (1.0, 1.0),
             })
         }
     }
@@ -329,39 +373,58 @@ impl Drawer {
         }
         // Nothing may hold the old buffers while they are replaced.
         self.target = None;
-        self.ui_target = None;
+        if let Some(layers) = &mut self.layers {
+            layers.ui_target = None;
+        }
         // SAFETY: calls on interfaces we hold.
         unsafe {
             self.gpu.context.OMSetRenderTargets(None, None);
             self.swap.ResizeBuffers(0, to.0, to.1, DXGI_FORMAT_UNKNOWN, WAITABLE).context("resize the swap chain")?;
-            self.ui_swap.ResizeBuffers(0, to.0, to.1, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)).context("resize the interface's swap chain")?;
+            if let Some(layers) = &self.layers {
+                layers.ui_swap.ResizeBuffers(0, to.0, to.1, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)).context("resize the interface's swap chain")?;
+            }
         }
         self.size = to;
         Ok(true)
     }
 
+    /// A panel's swap chain is in the app's units: undo its scale, so a pixel is a pixel.
+    fn set_scale(&mut self, scale: (f32, f32)) -> Result<()> {
+        if self.layers.is_some() || scale == self.scale || scale.0 <= 0.0 || scale.1 <= 0.0 {
+            return Ok(());
+        }
+        self.scale = scale;
+        let m = DXGI_MATRIX_3X2_F { _11: 1.0 / scale.0, _22: 1.0 / scale.1, ..Default::default() };
+        // SAFETY: a call on the swap chain with a matrix that lives through it.
+        unsafe { self.swap.cast::<IDXGISwapChain2>()?.SetMatrixTransform(&m).context("set the panel's scale")? };
+        Ok(())
+    }
+
     /// Draw the interface into its layer's back buffer.
     fn paint(&mut self, frame: &crate::ui::Frame) -> Result<()> {
-        if self.ui_target.is_none() {
+        let Some(layers) = &mut self.layers else { return Ok(()) };
+        if layers.ui_target.is_none() {
             // SAFETY: a call on the swap chain; with the flip model, buffer 0 is always the
             // one being drawn, so what is made on it lasts until the size changes.
-            let back: IDXGISurface = unsafe { self.ui_swap.GetBuffer(0)? };
-            self.ui_target = Some(self.painter.target(&back)?);
+            let back: IDXGISurface = unsafe { layers.ui_swap.GetBuffer(0)? };
+            layers.ui_target = Some(layers.painter.target(&back)?);
         }
-        let bitmap = self.ui_target.clone().unwrap();
-        self.painter.paint(&bitmap, frame)
+        let bitmap = layers.ui_target.clone().unwrap();
+        layers.painter.paint(&bitmap, frame)
     }
 
     /// Show the picture's layer in this part of the window only (in pixels), or not at all.
     fn place_video(&mut self, area: Option<(i32, i32, i32, i32)>) -> Result<()> {
         if self.clip != Some(area) {
             self.clip = Some(area);
+            // A panel is the picture's place, all of it.
+            let Some(layers) = &self.layers else { return Ok(()) };
             let (x, y, w, h) = area.unwrap_or((0, 0, 0, 0));
             let r = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F { left: x as f32, top: y as f32, right: (x + w) as f32, bottom: (y + h) as f32 };
             // SAFETY: calls on interfaces held here; the rectangle lives through the call.
             unsafe {
-                self.video_visual.SetClip2(&r)?;
-                self.dcomp.Commit()?;
+                layers.video_visual.SetClip2(&r)?;
+                layers.dcomp.Commit()?;
             }
         }
         Ok(())
@@ -454,8 +517,15 @@ impl Drawer {
     /// picture where its layer shows (if `picture`), `backdrop` elsewhere, the interface over
     /// both. The only place pixels come to CPU memory.
     fn shot(&self, path: &std::path::Path, backdrop: crate::ui::Color, picture: bool) -> Result<()> {
-        let (w, h, _, ui) = self.read(&self.ui_swap)?;
-        let under = if picture { Some(self.read(&self.swap)?) } else { None };
+        let under = if picture || self.layers.is_none() { Some(self.read(&self.swap)?) } else { None };
+        let (w, h, _, ui) = match &self.layers {
+            Some(layers) => self.read(&layers.ui_swap)?,
+            // A panel has no interface of ours over it: nothing on top.
+            None => {
+                let (w, h) = under.as_ref().map_or((1, 1), |u| (u.0, u.1));
+                (w, h, DXGI_FORMAT_B8G8R8A8_UNORM, vec![0; w * h * 4])
+            }
+        };
         let clip = self.clip.flatten().unwrap_or((0, 0, 0, 0));
         let back = [(backdrop.0 * 255.0) as u8, (backdrop.1 * 255.0) as u8, (backdrop.2 * 255.0) as u8];
         let mut rgb = Vec::with_capacity(w * h * 3);
@@ -503,8 +573,13 @@ const SHOT_AFTER: Duration = Duration::from_secs(4);
 
 pub fn start(gpu: Gpu, scene: Arc<Scene>, hwnd: HWND, shot: Option<PathBuf>) -> Result<JoinHandle<()>> {
     let hwnd = hwnd.0 as isize;
+    start_on(gpu, scene, move || Surface::Window(HWND(hwnd as *mut _)), shot)
+}
+
+/// The same for whatever surface `surface` makes on the draw thread.
+pub fn start_on(gpu: Gpu, scene: Arc<Scene>, surface: impl FnOnce() -> Surface + Send + 'static, shot: Option<PathBuf>) -> Result<JoinHandle<()>> {
     Ok(std::thread::Builder::new().name("draw".into()).spawn(move || {
-        if let Err(e) = run(gpu, &scene, HWND(hwnd as *mut _), shot) {
+        if let Err(e) = run(gpu, &scene, surface(), shot) {
             // (The window going is how it ends; what fails after that is nothing.)
             if scene.quit.load(Ordering::Relaxed) {
                 return;
@@ -516,8 +591,8 @@ pub fn start(gpu: Gpu, scene: Arc<Scene>, hwnd: HWND, shot: Option<PathBuf>) -> 
     })?)
 }
 
-fn run(gpu: Gpu, scene: &Scene, hwnd: HWND, mut shot: Option<PathBuf>) -> Result<()> {
-    let mut drawer = Drawer::new(gpu, hwnd)?;
+fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> Result<()> {
+    let mut drawer = Drawer::new(gpu, surface)?;
     let mut first = None::<Instant>;
     let mut occluded = false;
     // Whether the swap chain has said it has room and nothing has been presented since.
@@ -548,10 +623,12 @@ fn run(gpu: Gpu, scene: &Scene, hwnd: HWND, mut shot: Option<PathBuf>) -> Result
         }
         let fresh = session.as_ref().and_then(|s| s.picture.lock().unwrap().take());
         changed |= drawer.resize(unpack(scene.client_size.load(Ordering::Relaxed)))?;
+        drawer.set_scale(crate::stream::unpack_scale(scene.panel_scale.load(Ordering::Relaxed)))?;
         let frame = scene.frame.lock().unwrap().clone();
         let mut painted = false;
         if let Some(frame) = &frame {
-            if drawer.ui_target.is_none() || drawn.as_ref().is_none_or(|d| d.serial != frame.serial) {
+            let unpainted = drawer.layers.as_ref().is_some_and(|l| l.ui_target.is_none());
+            if drawer.layers.is_some() && (unpainted || drawn.as_ref().is_none_or(|d| d.serial != frame.serial)) {
                 let _alone = DRAWING.lock().unwrap();
                 drawer.paint(frame)?;
                 drawn = Some(frame.clone());
@@ -599,7 +676,9 @@ fn run(gpu: Gpu, scene: &Scene, hwnd: HWND, mut shot: Option<PathBuf>) -> Result
         }
         if painted {
             // SAFETY: a call on the swap chain. The interface is shown as soon as may be.
-            unsafe { drawer.ui_swap.Present(0, DXGI_PRESENT(0)) }.ok().context("present the interface")?;
+            if let Some(layers) = &drawer.layers {
+                unsafe { layers.ui_swap.Present(0, DXGI_PRESENT(0)) }.ok().context("present the interface")?;
+            }
         }
         if draws {
             // For the next refresh of the display. There is room, so this doesn't wait.

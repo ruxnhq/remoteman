@@ -56,7 +56,12 @@ fn default_state() -> PathBuf {
 }
 
 pub fn parse() -> Result<Args> {
-    let mut words = std::env::args().skip(1).peekable();
+    parse_from(std::env::args().skip(1).collect())
+}
+
+/// The same from words given, for the engine (the WinUI 3 app passes on what is its own).
+pub fn parse_from(words: Vec<String>) -> Result<Args> {
+    let mut words = words.into_iter().peekable();
     let host = words.next_if(|h| !h.starts_with("--"));
     let mut args = Args {
         host,

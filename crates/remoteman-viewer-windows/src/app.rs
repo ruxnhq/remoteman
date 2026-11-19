@@ -365,6 +365,9 @@ pub struct App {
     pub remote_cursor: Option<Arc<remoteman_core::CursorShape>>,
     /// A line of news over the window, until it has been read.
     pub toast: Option<(String, Instant)>,
+    /// The picture has a place of its own (the WinUI 3 app's panel, `engine.rs`) and the
+    /// size the window is said to have is that place's: the bar is not in it.
+    pub panel: bool,
 }
 
 fn mode_word(mode: &Mode) -> &'static str {
@@ -427,6 +430,7 @@ impl App {
             captured: false,
             remote_cursor: None,
             toast: None,
+            panel: false,
             shown_format: None,
             args,
             gpu,
@@ -502,7 +506,7 @@ impl App {
                 if !self.maximised && (w < 1224.0 || h < 744.0) {
                     (w, h) = (1224.0, 744.0);
                 }
-                if !self.store.settings.hover_bar {
+                if !self.store.settings.hover_bar && !self.panel {
                     h -= crate::session::BAR;
                 }
                 (w * self.scale, h * self.scale)
@@ -2045,7 +2049,7 @@ impl App {
         if self.screen != Screen::Session || self.session.is_none() {
             return None;
         }
-        let top = if self.bar_hidden() { 0.0 } else { crate::session::BAR };
+        let top = if self.bar_hidden() || self.panel { 0.0 } else { crate::session::BAR };
         Some(ui::rect(0.0, top, self.size.0, (self.size.1 - top).max(1.0)))
     }
 
