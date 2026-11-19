@@ -87,7 +87,8 @@ impl State {
 struct Pairing {
     /// Who opened it: the pending device is theirs to see, accept and decline.
     opener: u32,
-    /// Whose the device that comes will be: the opener, or for root the `--user` user (none).
+    /// Whose the device that comes will be: the opener, or for root and the daemon's own user
+    /// the `--user` user (none).
     by: Option<u32>,
     /// The devices trusted when it was opened: one that isn't among them came through it.
     known: Vec<String>,
@@ -799,12 +800,13 @@ fn control(shared: &Shared, words: &str, uid: u32) -> String {
                     if may && host.drop_client() { "the client was dropped\n".into() } else { "no client is connected\n".into() }
                 }
                 _ => match words.next() {
-                    // The device that comes is its opener's (for root: the `--user` user's).
+                    // The device that comes is its opener's; root's and the daemon's own
+                    // user's get no user of their own, which makes them the `--user` user's.
                     Some(how @ ("on" | "ask")) => {
                         if !theirs && (host.pairing() || host.pending().is_some()) {
                             return "another user is pairing a device with this computer right now\n".into();
                         }
-                        *pairing = Some(Pairing { opener: uid, by: (uid != 0).then_some(uid), known: host.devices().into_iter().map(|d| d.fingerprint).collect() });
+                        *pairing = Some(Pairing { opener: uid, by: (!admin).then_some(uid), known: host.devices().into_iter().map(|d| d.fingerprint).collect() });
                         // `ask`: the device that comes is held until its owner has said yes
                         // (`pair accept`); who it is and its code are in `owner`.
                         host.set_confirm(how == "ask");

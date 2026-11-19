@@ -3,7 +3,8 @@
 //!     remotemand [--listen ADDR:PORT] [--state DIR] [--socket PATH] [--pair] [--name NAME]
 //!                [--user NAME] [--login screen|key|off]
 //!     remotemand ctl [--socket PATH] status | switch N | prefer N
-//!     remotemand ctl [--socket PATH] devices | revoke FINGERPRINT | drop | pair on|off
+//!     remotemand ctl [--socket PATH] devices | revoke FINGERPRINT | drop
+//!     remotemand ctl [--socket PATH] pair on|ask|off|accept|decline | sharing on|off | owner
 //!     remotemand test-agent [--socket PATH] [--label NAME]      (for tests: see standin.rs)
 //!
 //! It owns the UDP port, the trust list and every client's connection. The picture comes from
@@ -12,11 +13,15 @@
 //! client reconnecting (what happens by itself when a login screen gives way to a session);
 //! `ctl prefer N` gives the next client to agent N.
 //!
-//! `--user NAME`: the paired devices are NAME's (one user for all of them, for now). A device
-//! goes to NAME's session if there is one. If there is none, `--login` says what happens:
-//! `screen` (the default when run as root) asks GDM for a headless login screen and moves the
-//! device to the session once someone has logged in on it; `key` asks GDM for NAME's session
-//! straight away, with no password, trusting the device's key alone; `off` turns it away.
+//! Each paired device belongs to a user: the one whose `ctl` opened the pairing it came
+//! through (the agent in their session asks for them), kept in the state folder (`users.rs`).
+//! `--user NAME`: the devices with no user of their own are NAME's (those paired before users
+//! were kept, and those root pairs). A device goes to its user's session if there is one, and
+//! never to anybody else's. If there is none, `--login` says what happens: `screen` (the
+//! default when run as root) asks GDM for a headless login screen and moves the device to the
+//! session once its user has logged in on it; `key` asks GDM for its user's session straight
+//! away, with no password, trusting the device's key alone; `off` turns it away. `ctl` shows
+//! and changes only the asker's own devices, unless root or the daemon's own user asks.
 
 mod broker;
 mod gdm;
