@@ -162,6 +162,8 @@ pub struct Decoder {
     decoder: ff::decoder::Video,
     _hw: Option<HwDevice>,
     frame: Video,
+    /// Where the decoder is asked for its next picture, before it becomes `frame`.
+    next: Video,
     download: Video,
     /// Hand surfaces out as DMA-BUFs (until that fails once).
     export: bool,
@@ -195,7 +197,7 @@ impl Decoder {
             None => format!("{} (cpu)", found.name()),
         };
         let decoder = ctx.decoder().video().context("open decoder")?;
-        Ok(Self { decoder, _hw: hw.map(|(d, _)| d), frame: Video::empty(), download: Video::empty(), export: std::env::var("REMOTEMAN_DMABUF").as_deref() != Ok("0"), gpu: std::env::var("REMOTEMAN_GL").as_deref() != Ok("0"), name })
+        Ok(Self { decoder, _hw: hw.map(|(d, _)| d), frame: Video::empty(), next: Video::empty(), download: Video::empty(), export: std::env::var("REMOTEMAN_DMABUF").as_deref() != Ok("0"), gpu: std::env::var("REMOTEMAN_GL").as_deref() != Ok("0"), name })
     }
 
     /// Stop handing out GPU pictures (the window couldn't take one) and copy them down from now on.
@@ -293,15 +295,39 @@ impl Decoder {
     /// Feed one frame as the core delivers it; returns its picture.
     pub fn decode(&mut self, data: &[u8]) -> Result<Option<Picture>> {
         let packet = ff::Packet::copy(data);
-        match self.decoder.send_packet(&packet) {
-            Ok(()) => {}
-            Err(ff::Error::Other { errno }) if errno == ff::util::error::EAGAIN => {}
-            Err(e) => return Err(e).context("decode"),
+        // A decoder that is full takes nothing more until pictures have been taken from it:
+        // take one and offer the packet again. (It used to be dropped at that point, which
+        // left every later frame leaning on one the decoder never saw.)
+        let mut got = false;
+        let again = |e: &ff::Error| matches!(e, ff::Error::Other { errno } if *errno == ff::util::error::EAGAIN);
+        for _ in 0..8 {
+            match self.decoder.send_packet(&packet) {
+                Ok(()) => break,
+                Err(e) if again(&e) => match self.decoder.receive_frame(&mut self.next) {
+                    Ok(()) => {
+                        std::mem::swap(&mut self.frame, &mut self.next);
+                        got = true;
+                    }
+                    Err(e) if again(&e) => break,
+                    Err(e) => return Err(e).context("decode"),
+                },
+                Err(e) => return Err(e).context("decode"),
+            }
         }
-        match self.decoder.receive_frame(&mut self.frame) {
-            Ok(()) => {}
-            Err(ff::Error::Other { errno }) if errno == ff::util::error::EAGAIN => return Ok(None),
-            Err(e) => return Err(e).context("decode"),
+        // Every picture that is ready, the newest kept: one behind is one frame late for good.
+        // (Into a frame of its own: asking when there is none empties the frame asked into.)
+        loop {
+            match self.decoder.receive_frame(&mut self.next) {
+                Ok(()) => {
+                    std::mem::swap(&mut self.frame, &mut self.next);
+                    got = true;
+                }
+                Err(e) if again(&e) => break,
+                Err(e) => return Err(e).context("decode"),
+            }
+        }
+        if !got {
+            return Ok(None);
         }
         let mut frame = &self.frame;
         if self.export && matches!(frame.format(), Pixel::VAAPI | Pixel::VULKAN) {

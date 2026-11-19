@@ -371,11 +371,11 @@ pub fn computer(app: &Rc<App>, address: &str, addresses: bool) {
         }
     });
     connection.add(&quality);
-    let size = combo("Picture size", "Fewer pixels reach this screen sooner, and are scaled up to fit it. Worth it with a computer that can't encode this screen's own size fast enough (a Mac at 4K). From the next time you connect", &crate::store::SIZES.map(|(_, name)| name), crate::store::SIZES.iter().position(|(lines, _)| *lines == c.max_height).unwrap_or(0) as u32);
+    let size = combo("Picture size", "Fewer pixels reach this screen sooner. The window's size gives the computer a display of exactly the window's pixels, made afresh when the window changes size; the others are scaled up to fit. Worth it with a computer that can't encode this screen's own size fast enough (a Mac at 4K). From the next time you connect", &crate::store::SIZES.map(|(_, name)| name), crate::store::SIZES.iter().position(|(lines, _)| *lines == c.max_height).unwrap_or(0) as u32);
     size.connect_selected_notify({
         let (app, address) = (app.clone(), address.clone());
         move |row| {
-            let lines = crate::store::SIZES[(row.selected() as usize).min(2)].0;
+            let lines = crate::store::SIZES[(row.selected() as usize).min(3)].0;
             app.store.borrow_mut().update(&address.borrow(), |c| c.max_height = lines);
         }
     });

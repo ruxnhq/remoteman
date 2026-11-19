@@ -315,6 +315,14 @@ impl View {
 
     /// Whether this computer gives a device a second display: the line is there for those
     /// that do.
+    /// How tall the window's bar is, whether it has been shown yet or not.
+    pub fn bar_height(&self) -> i32 {
+        match self.header.height() {
+            0 => self.header.measure(gtk::Orientation::Vertical, -1).1,
+            h => h,
+        }
+    }
+
     pub fn offer_second(&self, offered: bool) {
         if FEATURES.second_display {
             self.second.button.set_sensitive(offered);

@@ -31,6 +31,8 @@ pub struct Video {
     pub stack: gtk::Stack,
     /// The C helper's state for `gl` (null until the first picture).
     gl_view: Cell<*mut std::ffi::c_void>,
+    /// The decoder's GPU context `gl_view` was made for.
+    gl_context: Cell<*mut std::ffi::c_void>,
     /// An NVDEC picture waiting for `gl` to draw it.
     gl_pending: RefCell<Option<Picture>>,
     /// The surface last drawn; holding it keeps the decoder's GPU context alive under `gl_view`.
@@ -78,6 +80,7 @@ impl Video {
             gl: gl.clone(),
             stack,
             gl_view: Cell::new(std::ptr::null_mut()),
+            gl_context: Cell::new(std::ptr::null_mut()),
             gl_pending: RefCell::new(None),
             gl_last: RefCell::new(None),
             gl_dump: Cell::new(false),
@@ -203,7 +206,16 @@ impl Video {
                 // SAFETY: GTK has made the widget's GL context current for this call; the
                 // pointers are a live CUDA surface, kept by `hold`.
                 unsafe {
+                    // Another decoder (the picture started afresh at another size, or in
+                    // another codec) has a GPU context of its own: the helper made for the
+                    // old one goes while that context is still held (`gl_last`), and a new
+                    // one is made. Drawing the new decoder's pictures through the old
+                    // context crashed.
+                    if !self.gl_view.get().is_null() && self.gl_context.get() != context as *mut std::ffi::c_void {
+                        rm_glview_free(self.gl_view.replace(std::ptr::null_mut()));
+                    }
                     if self.gl_view.get().is_null() {
+                        self.gl_context.set(context as *mut std::ffi::c_void);
                         let mut err = [0 as std::ffi::c_char; 256];
                         let v = rm_glview_new(context as *mut _, err.as_mut_ptr(), 256);
                         if v.is_null() {

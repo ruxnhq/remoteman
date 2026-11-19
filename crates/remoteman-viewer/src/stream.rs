@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::Result;
@@ -25,6 +25,14 @@ pub struct Shared {
     /// What is decoding, e.g. "av1 (cuda) 2752×2064".
     pub decoder: Mutex<String>,
     pub decoded: AtomicU32,
+    /// Frames the core handed over, frames the decoder was given and pictures it gave, since
+    /// they were last read for the log.
+    pub handed: AtomicU32,
+    pub fed: AtomicU32,
+    pub pictures: AtomicU32,
+    /// The decoder has been given frames for a while and has given no picture: ask the host
+    /// for a keyframe (set by the decode thread, taken by the window).
+    pub stuck: AtomicBool,
     /// Pictures the window never showed because a newer one arrived first.
     pub replaced: AtomicU32,
     /// The newest frame's age when it was decoded, in microseconds (0: not known yet).
@@ -100,6 +108,7 @@ impl Handler for Feed {
         // Every frame leans on the one before, so none may be skipped here: if the decoder
         // falls behind, this waits, and the loss shows up upstream as a keyframe request.
         self.shared.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
+        self.shared.handed.fetch_add(1, Ordering::Relaxed);
         let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us));
     }
 
@@ -188,6 +197,8 @@ fn decoding(shared: Arc<Shared>) -> Result<mpsc::SyncSender<Msg>> {
     let s = shared;
     std::thread::Builder::new().name("decode".into()).spawn(move || {
         let mut decoder: Option<Decoder> = None;
+        // Frames given to the decoder since its last picture, and when the first of them was.
+        let mut barren: (u32, Option<std::time::Instant>) = (0, None);
         while let Ok(msg) = rx.recv() {
             match msg {
                 Msg::Stream(info) => match Decoder::new(info.mode.codec) {
@@ -206,8 +217,11 @@ fn decoding(shared: Arc<Shared>) -> Result<mpsc::SyncSender<Msg>> {
                         d.stop_exporting();
                     }
                     let t = std::time::Instant::now();
+                    s.fed.fetch_add(1, Ordering::Relaxed);
                     match d.decode(&data) {
                         Ok(Some(picture)) => {
+                            barren = (0, None);
+                            s.pictures.fetch_add(1, Ordering::Relaxed);
                             let took = t.elapsed().as_micros() as u32;
                             s.decode_us_max.fetch_max(took, Ordering::Relaxed);
                             s.decoded.fetch_add(1, Ordering::Relaxed);
@@ -218,7 +232,17 @@ fn decoding(shared: Arc<Shared>) -> Result<mpsc::SyncSender<Msg>> {
                                 s.replaced.fetch_add(1, Ordering::Relaxed);
                             }
                         }
-                        Ok(None) => {}
+                        // No picture for this frame. One or two at a start is the decoder
+                        // warming up; frame after frame for half a second is a decoder that
+                        // has lost its footing, and only a keyframe gets it back. Nothing
+                        // was lost on the way, so nothing else will ask for one.
+                        Ok(None) => {
+                            barren = (barren.0 + 1, barren.1.or(Some(t)));
+                            if barren.0 >= 3 && barren.1.is_some_and(|since| since.elapsed() > std::time::Duration::from_millis(500)) {
+                                s.stuck.store(true, Ordering::Relaxed);
+                                barren = (0, None);
+                            }
+                        }
                         Err(e) => {
                             *s.closed.lock().unwrap() = Some(format!("{e:#}"));
                             return;

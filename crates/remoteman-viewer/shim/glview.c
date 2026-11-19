@@ -192,17 +192,50 @@ int rm_glview_upload(rm_glview *v, int layout, int width, int height, const uint
     return 0;
 }
 
-// Draw the current picture into the bound framebuffer, keeping its shape. The framebuffer's size
-// is the viewport GTK set before calling; it is returned in `out_w` and `out_h`.
+// The size of the framebuffer being drawn into: of what is attached to it, asked for directly.
+// (The viewport is not it: this file narrows the viewport to the picture on every draw, and
+// reading it back gave the last picture's place, so a widget that had grown since, when the
+// window's bar slid away, say, went on being drawn at its old size, anchored at the bottom,
+// while pointer positions were worked out for the new one.) 0 by 0 if it can't be told.
+static void framebuffer_size(int *w, int *h) {
+    GLint type = 0, name = 0, was = 0;
+    *w = *h = 0;
+    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
+    glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+    if (type == GL_TEXTURE) {
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &was);
+        glBindTexture(GL_TEXTURE_2D, name);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, w);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, h);
+        glBindTexture(GL_TEXTURE_2D, was);
+    } else if (type == GL_RENDERBUFFER) {
+        glGetIntegerv(GL_RENDERBUFFER_BINDING, &was);
+        glBindRenderbuffer(GL_RENDERBUFFER, name);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, w);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, h);
+        glBindRenderbuffer(GL_RENDERBUFFER, was);
+    }
+    while (glGetError() != GL_NO_ERROR) {}
+}
+
+// Draw the current picture into the bound framebuffer, in its middle and keeping its shape. The
+// framebuffer's size is returned in `out_w` and `out_h`.
 void rm_glview_draw(rm_glview *v, int *out_w, int *out_h) {
     static const char *names[] = { "t0", "t1", "t2" };
     float scale, black, yrange, mid, crange;
     double s;
     int i, dw, dh, fb_w, fb_h;
     GLint vp[4];
-    glGetIntegerv(GL_VIEWPORT, vp);
-    fb_w = *out_w = vp[2];
-    fb_h = *out_h = vp[3];
+    framebuffer_size(&fb_w, &fb_h);
+    if (fb_w <= 0 || fb_h <= 0) {
+        // Not to be had from the attachment: what GTK set, right the first time at least.
+        glGetIntegerv(GL_VIEWPORT, vp);
+        fb_w = vp[2];
+        fb_h = vp[3];
+    }
+    *out_w = fb_w;
+    *out_h = fb_h;
+    glViewport(0, 0, fb_w, fb_h);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     if (!v->have_picture || fb_w <= 0 || fb_h <= 0) return;

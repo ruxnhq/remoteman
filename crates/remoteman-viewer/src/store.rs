@@ -279,7 +279,7 @@ impl Store {
                         "quality" => c.quality = Quality::from_key(value),
                         "cards" => c.cards = value.to_owned(),
                         "way-in" => c.attach_only = value == "attach",
-                        "picture-lines" => c.max_height = value.parse().unwrap_or(0),
+                        "picture-lines" => c.max_height = if value == "window" { WINDOW } else { value.parse().unwrap_or(0) },
                         "second-side" => c.second_side = SIDES.iter().find(|(_, key)| *key == value).map_or(Side::Right, |(side, _)| *side),
                         other => {
                             if let Some(field) = c.media.field(other) {
@@ -413,7 +413,7 @@ impl Store {
                 clean(&c.cards),
                 if c.attach_only { "attach" } else { "any" },
                 SIDES.iter().find(|(side, _)| *side == c.second_side).map_or("right", |(_, key)| key),
-                c.max_height,
+                if c.max_height == WINDOW { "window".to_owned() } else { c.max_height.to_string() },
                 c.media.lines()
             );
         }
@@ -488,13 +488,17 @@ pub fn when(unix: i64) -> String {
 
 /// The picture sizes a computer can be asked for, in the order they are offered: the most
 /// lines (0: this screen's own) and what the choice is called.
-pub const SIZES: [(u32, &str); 3] = [(0, "This screen's own"), (1440, "Up to 1440 lines"), (1080, "Up to 1080 lines")];
+pub const SIZES: [(u32, &str); 4] = [(0, "This screen's own"), (WINDOW, "The window's size"), (1440, "Up to 1440 lines"), (1080, "Up to 1080 lines")];
+
+/// In place of a number of lines: a display of exactly the pixels the picture has in the
+/// viewer's window, asked for again when the window has changed size ("window" in the file).
+pub const WINDOW: u32 = 1;
 
 /// A screen of `width` by `height` pixels drawn at `scale`, as it is asked for when the
 /// picture may have `most` lines at most (0: no limit): the same shape and the same desktop
 /// (what was one point is still one point), with fewer pixels.
 pub fn fit_lines(width: u32, height: u32, scale: f32, most: u32) -> (u32, u32, f32) {
-    if most == 0 || height <= most {
+    if most == 0 || most == WINDOW || height <= most {
         return (width, height, scale);
     }
     let by = most as f64 / height as f64;

@@ -62,6 +62,13 @@ pub struct App {
     pub hover_bar: Cell<bool>,
     /// Seconds of streaming counted, for the line in the log every ten.
     pub log_tick: Cell<u32>,
+    /// For the same line: pictures shown and input events sent since the last one.
+    pub shown_window: Cell<u32>,
+    pub inputs: Cell<u32>,
+    /// With "The window's size": the display last asked of the computer, and the size the
+    /// picture's place had at the last look.
+    pub asked: Cell<Option<(u32, u32)>>,
+    pub wanted: Cell<(u32, u32)>,
     /// The pointer is at the top edge (or on the bar), so a hidden bar is out.
     pub bar_out: Cell<bool>,
     /// The placement from the command line, until another is chosen in the window.
@@ -146,6 +153,7 @@ impl App {
     }
 
     pub fn send(&self, event: Event) {
+        self.inputs.set(self.inputs.get() + 1);
         if let Some(s) = self.session.borrow().as_ref() {
             s.client.send(event);
         }
@@ -182,6 +190,54 @@ impl App {
         self.display_for(address.as_deref(), placement)
     }
 
+    /// How many pixels the picture has to itself in the window, at this scale: the window
+    /// without its bar, or all of it where the bar lies over the picture.
+    fn picture_pixels(&self, scale: f32) -> (u32, u32) {
+        let (mut w, mut h) = (self.window.width(), self.window.height());
+        if self.streaming() && self.video.stack.width() > 0 {
+            // Connected: the picture's place as it is laid out.
+            (w, h) = (self.video.stack.width(), self.video.stack.height());
+        } else {
+            // Not connected yet: the size the window is about to have (a small one is made
+            // room in when the picture comes, see `started`), less its bar if that stays.
+            if !self.window.is_maximized() && !self.window.is_fullscreen() && (w < 1280 || h < 800) && w > 0 {
+                (w, h) = (1280, 800);
+            }
+            if !(self.window.is_fullscreen() || self.hover_bar.get()) {
+                h -= self.view.bar_height();
+            }
+        }
+        let pixels = |points: i32| (((points.max(1) as f32 * scale).round() as u32) & !1).clamp(320, 8192);
+        (pixels(w), pixels(h))
+    }
+
+    /// While connected with "The window's size": when the window has changed size and has
+    /// been still for a second, the computer is asked for a display of the new size. Asked
+    /// once a second. Compared with what was last asked for, never with what came: a host
+    /// may answer with another size (rounded, or the nearest it can do), and that must not
+    /// be asked for again and again.
+    fn follow_window(&self) {
+        let session = self.session.borrow();
+        let (Some(s), Some(target)) = (session.as_ref(), self.target.borrow().clone()) else { return };
+        let most = self.store.borrow().find(&target.address).map_or(0, |c| c.max_height);
+        let placement = self.choices(&target.address).0;
+        // Not with a second display on: a display made afresh takes the second away.
+        if most != crate::store::WINDOW || self.args.size.is_some() || placement == Placement::Mirror || !s.offers("configure") || self.second.borrow().is_some() {
+            return;
+        }
+        let display = self.display_for(Some(&target.address), placement);
+        let now = (display.width, display.height);
+        let Some(asked) = self.asked.get() else { return self.asked.set(Some(now)) };
+        // Still for a second: the same on two looks running.
+        if now != asked && self.wanted.replace(now) == now {
+            self.asked.set(Some(now));
+            if self.args.ui.is_some() {
+                println!("~ asked for a display of {} x {}", now.0, now.1);
+            }
+            s.client.send_message(remoteman_core::Message::Configure { display: Some(display), bitrate: None, decoders: None });
+        }
+    }
+
     /// The same, as it is asked of the computer at this address (its picture size may have
     /// been chosen smaller).
     pub fn display_for(&self, address: Option<&str>, placement: Placement) -> Display {
@@ -205,7 +261,11 @@ impl App {
         }
         // Fewer pixels, if that was chosen for this computer.
         let most = address.and_then(|a| self.store.borrow().find(a).map(|c| c.max_height)).unwrap_or(0);
-        let (w, h, scale) = crate::store::fit_lines(w, h, self.args.scale.unwrap_or(scale), most);
+        let (mut w, mut h, scale) = crate::store::fit_lines(w, h, self.args.scale.unwrap_or(scale), most);
+        // The window's own pixels, if that was chosen (a mirrored display is the computer's).
+        if most == crate::store::WINDOW && self.args.size.is_none() && placement != Placement::Mirror {
+            (w, h) = self.picture_pixels(scale);
+        }
         Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement }
     }
 
@@ -259,7 +319,9 @@ impl App {
         let id = self.attempt.get().wrapping_add(1);
         self.attempt.set(id);
         let (placement, quality) = self.choices(&target.address);
-        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display_for(Some(&target.address), placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, unlock: self.unlock.borrow_mut().take(), attach_only: self.store.borrow().find(&target.address).is_some_and(|c| c.attach_only), folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
+        let display = self.display_for(Some(&target.address), placement);
+        self.asked.set(Some((display.width, display.height)));
+        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display, decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, unlock: self.unlock.borrow_mut().take(), attach_only: self.store.borrow().find(&target.address).is_some_and(|c| c.attach_only), folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
         let app = self.clone();
         glib::spawn_future_local(async move {
             let result = match gio::spawn_blocking(move || Session::start(request)).await {
@@ -821,15 +883,27 @@ impl App {
             println!("{} | drawn {}", line.replace('\n', " | "), self.video.drawn.replace(0));
         }
         let megabits = s.shared.bytes.swap(0, Ordering::Relaxed) as f64 * 8.0 / 1e6;
+        self.follow_window();
         // Every ten seconds, to the log (the journal, when started from the desktop): what a
         // report of "it got stuck" or "it is slow" can be checked against afterwards. Numbers
         // only, nothing of what is on the screen.
         let tick = self.log_tick.get() + 1;
         self.log_tick.set(tick);
+        // A decoder that takes frames and gives no pictures gets a keyframe.
+        if s.shared.stuck.swap(false, Ordering::Relaxed) {
+            eprintln!("remoteman: the decoder was given frames and gave no picture for half a second: asking the computer for a keyframe");
+            s.client.send_message(remoteman_core::Message::Keyframe);
+        }
+        self.shown_window.set(self.shown_window.get() + shown);
         if tick % 10 == 0 {
             eprintln!(
-                "remoteman: {decoder} via {}: this second {shown} shown, {decoded} decoded, {megabits:.1} Mbit/s, {age:.1} ms old, decode up to {decode:.1} ms; in all {} lost, {replaced} replaced unseen, {} keyframes asked; round trip {round_trip:.1} ms",
+                "remoteman: {decoder} via {}: in ten seconds {} frames came, {} went to the decoder, {} pictures came out, {} were shown, {} input events were sent; the last second {megabits:.1} Mbit/s, {age:.1} ms old, decode up to {decode:.1} ms; in all {} lost, {replaced} replaced unseen, {} keyframes asked; round trip {round_trip:.1} ms",
                 self.video.path.get(),
+                s.shared.handed.swap(0, Ordering::Relaxed),
+                s.shared.fed.swap(0, Ordering::Relaxed),
+                s.shared.pictures.swap(0, Ordering::Relaxed),
+                self.shown_window.replace(0),
+                self.inputs.replace(0),
                 stats.lost,
                 stats.keyframe_requests
             );
@@ -906,6 +980,10 @@ pub fn build(application: &adw::Application, args: Args) {
         attempt: Cell::new(0),
         hover_bar: Cell::new(hover_bar),
         log_tick: Cell::new(0),
+        shown_window: Cell::new(0),
+        inputs: Cell::new(0),
+        asked: Cell::new(None),
+        wanted: Cell::new((0, 0)),
         bar_out: Cell::new(false),
         released: Cell::new(false),
         chord: Cell::new((false, false, false)),
