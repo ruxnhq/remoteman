@@ -63,6 +63,7 @@ final class HostSecondDisplay: NSObject, SCStreamOutput, SCStreamDelegate {
             try? await Task.sleep(nanoseconds: 150_000_000)
         }
         guard let d = found else { return "the second display didn't appear for capture" }
+        Self.placeRight(id)
         let enc: HostEncoder
         let bitrate = width * height >= 3840 * 2160 ? 40_000_000 : 25_000_000
         do { enc = try HostEncoder(width: width, height: height, fps: fps, bitrate: bitrate, tenBit: tenBit) } catch {
@@ -111,6 +112,23 @@ final class HostSecondDisplay: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         }
         return nil
+    }
+
+    /// To the right of every other display, top edges level with the main one's: the same
+    /// place the Linux host gives a second display, wherever macOS first put it.
+    private static func placeRight(_ id: CGDirectDisplayID) {
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetActiveDisplayList(count, &ids, &count)
+        let others = ids.prefix(Int(count)).filter { $0 != id && CGDisplayMirrorsDisplay($0) != id }
+        guard let right = others.map({ CGDisplayBounds($0).maxX }).max() else { return }
+        let now = CGDisplayBounds(id)
+        guard Int(now.minX) != Int(right) || Int(now.minY) != 0 else { return }
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success, let config else { return }
+        CGConfigureDisplayOrigin(config, id, Int32(right), 0)
+        if CGCompleteDisplayConfiguration(config, .forSession) != .success { CGCancelDisplayConfiguration(config) }
     }
 
     @MainActor
