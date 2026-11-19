@@ -25,6 +25,8 @@ pub struct Gpu {
     /// The adapter's name, for the log.
     pub adapter: String,
     pub luid: (u32, i32),
+    /// The adapter maker's PCI id (0x10de NVIDIA, 0x1002 AMD, 0x8086 Intel).
+    pub vendor: u32,
 }
 
 impl Gpu {
@@ -57,7 +59,7 @@ impl Gpu {
             let _ = context.cast::<ID3D11Multithread>().context("ID3D11Multithread")?.SetMultithreadProtected(true);
             let device1 = device.cast::<ID3D11Device1>().context("ID3D11Device1 (Direct3D 11.1), which opening the driver's textures needs")?;
             tracing::info!(adapter = %name, vendor = format!("{:04x}", desc.VendorId), feature_level = format!("{:x}", level.0), "Direct3D device");
-            Ok(Self { device, device1, context, adapter: name, luid })
+            Ok(Self { device, device1, context, adapter: name, luid, vendor: desc.VendorId })
         }
     }
 }

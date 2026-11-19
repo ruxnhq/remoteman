@@ -317,6 +317,7 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
     let interval = Duration::from_secs_f64(1.0 / s.fps.max(1) as f64);
     let mut last_sent = Instant::now() - interval;
     let mut held_back = None::<u64>;
+    let mut told_rate = false;
     loop {
         let held = control.held.load(Ordering::Relaxed);
         if !p.again || held {
@@ -454,6 +455,11 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         last_sent = turn;
         if !delivered {
             break;
+        }
+        // What the picture is encoded at, said once it has begun (viewers show it) and again
+        // whenever it changes.
+        if !std::mem::replace(&mut told_rate, true) {
+            link.send_message(Message::Status { bitrate: Some(rate) });
         }
     }
     let driver = p.source.counts();

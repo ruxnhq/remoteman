@@ -3,7 +3,7 @@
 //!
 //!     remoteman-host [--listen ADDR:PORT] [--state DIR] [--pair] [--name NAME] [--log FILE]
 //!                    [--bitrate MBIT] [--mode keep|listed|any] [--allow files,clipboard]
-//!                    [--seconds N]
+//!                    [--encoder auto|nvenc|mf] [--seconds N]
 //!     remoteman-host --probe | --probe-picture [--log FILE]
 //!     remoteman-host ctl [--port PORT] WORDS
 //!
@@ -58,6 +58,8 @@ mod display;
 mod encode;
 #[cfg(windows)]
 mod input;
+#[cfg(windows)]
+mod mf;
 #[cfg(windows)]
 mod pipeline;
 #[cfg(windows)]
@@ -158,6 +160,17 @@ mod windows_main {
                 "--state" => state = value()?.into(),
                 "--bitrate" => bitrate = value()?.parse().context("--bitrate in Mbit/s")?,
                 "--pair" => pair = true,
+                // Which encoder: the card's own (NVENC on NVIDIA, Media Foundation's on any
+                // other), or one of the two whatever the card.
+                "--encoder" => crate::encode::WHICH.store(
+                    match value()?.as_str() {
+                        "auto" => crate::encode::AUTO,
+                        "nvenc" => crate::encode::NVENC,
+                        "mf" => crate::encode::ANY_MAKERS,
+                        other => anyhow::bail!("--encoder {other}: auto, nvenc, mf"),
+                    },
+                    Ordering::Relaxed,
+                ),
                 "--allow" => {
                     for what in value()?.split(',') {
                         match what.trim() {

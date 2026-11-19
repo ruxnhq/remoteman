@@ -2,10 +2,16 @@
 //! [`open`] and the `FrameEncoder` it returns; which vendor's encoder is behind it is decided
 //! here.
 //!
-//! SEAM (other encoders, not built): AMD's AMF, Intel's QSV and Direct3D 12 Video Encode each
-//! become one more `FrameEncoder` tried in [`open`]. The long-term-reference and invalidation
-//! calls are the contract with loss recovery; an encoder without them answers `invalidate`
-//! with an error and reports no long-term frames, and losses then cost keyframes.
+//! On an NVIDIA card that is NVENC (`remoteman-encode`), which keeps long-term frames and can
+//! be told to stop referring to a lost one, so a loss is answered without a keyframe. On any
+//! other maker's card it is the hardware encoder that maker's driver registers with Media
+//! Foundation (`mf.rs`), which can do neither: it answers `invalidate` with an error and
+//! reports no long-term frames, and a loss then costs a keyframe. `--encoder nvenc|mf` asks
+//! for one of them whatever the card.
+//!
+//! SEAM (not built): AMD's AMF and Intel's own interface, or Direct3D 12 Video Encode for
+//! both, where the application keeps the reference frames itself and loss recovery without a
+//! keyframe comes back. Each becomes one more `FrameEncoder` tried in [`open`].
 
 use std::path::PathBuf;
 
@@ -35,10 +41,24 @@ pub struct Settings {
 /// index for `encode_how` is 0.
 pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<Box<dyn FrameEncoder>> {
     anyhow::ensure!(MODES.contains(&settings.mode), "this host doesn't encode {:?}", settings.mode);
-    // NVIDIA's is the only one so far, so it is tried whatever the adapter calls itself, and
-    // its own error is the answer on other vendors' GPUs.
-    nvidia::open(gpu, input, settings).with_context(|| format!("NVENC on {}", gpu.adapter))
+    let any = || crate::mf::Encoder::open(gpu, input, settings).map(|e| Box::new(e) as Box<dyn FrameEncoder>).with_context(|| format!("Media Foundation's encoder on {}", gpu.adapter));
+    let nvenc = || nvidia::open(gpu, input, settings).with_context(|| format!("NVENC on {}", gpu.adapter));
+    match WHICH.load(std::sync::atomic::Ordering::Relaxed) {
+        NVENC => nvenc(),
+        ANY_MAKERS => any(),
+        // The card's own best first; on an NVIDIA card whose NVENC won't open, the other.
+        _ if gpu.vendor == NVIDIA => nvenc().or_else(|first| any().map_err(|second| anyhow::anyhow!("{first:#}; and {second:#}"))),
+        _ => any(),
+    }
 }
+
+/// NVIDIA's PCI id.
+const NVIDIA: u32 = 0x10de;
+pub const AUTO: u8 = 0;
+pub const NVENC: u8 = 1;
+pub const ANY_MAKERS: u8 = 2;
+/// Which encoder `--encoder` asked for; the card's own by default.
+pub static WHICH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(AUTO);
 
 /// Where NVIDIA's encoder library was found, for `--probe`.
 pub fn library() -> Result<String> {

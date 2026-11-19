@@ -166,6 +166,9 @@ pub fn run(picture: bool) -> Result<()> {
     }
 
     // 6. Encode it, in each mode this host offers.
+    for name in crate::mf::names() {
+        say!("Media Foundation hardware encoder: {name}");
+    }
     match encode::library() {
         Ok(from) => say!("encoder library: {from}"),
         Err(e) => say!("FAILED: {e:#}"),
