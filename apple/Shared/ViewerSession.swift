@@ -23,6 +23,20 @@ final class ViewerSession: ObservableObject {
         var refresh: Int
     }
 
+    /// Which side of the computer's other displays a second display sits on, chosen per computer.
+    enum SecondSide: UInt8, CaseIterable, Identifiable {
+        case right = 0, left, above, below
+        var id: UInt8 { rawValue }
+        var label: String { ["To the right", "To the left", "Above", "Below"][Int(rawValue)] }
+        static func saved(for host: String) -> SecondSide {
+            SecondSide(rawValue: UInt8(UserDefaults.standard.integer(forKey: "secondSide." + host))) ?? .right
+        }
+        func save(for host: String) { UserDefaults.standard.set(Int(rawValue), forKey: "secondSide." + host) }
+    }
+
+    /// A computer's address as sessions know it (with the port).
+    static func key(for address: String) -> String { address.contains(":") ? address : address + ":7791" }
+
     /// Where this device's display sits among the host's own.
     enum Placement: String, CaseIterable, Identifiable {
         case extend, main, only
@@ -89,7 +103,7 @@ final class ViewerSession: ObservableObject {
         guard let client, has("displays") else { return }
         secondDisplay = d
         if let d {
-            client.secondDisplay(on: true, width: d.width, height: d.height, scale: d.scale, refresh: d.refresh)
+            client.secondDisplay(on: true, width: d.width, height: d.height, scale: d.scale, refresh: d.refresh, side: SecondSide.saved(for: target).rawValue)
             secondOn = true
         } else {
             client.secondDisplay(on: false)
@@ -238,6 +252,8 @@ final class ViewerSession: ObservableObject {
     private(set) var display: Display?
     private(set) var placement = Placement.extend
     private var target = ""
+    /// The connected computer's address as settings are kept under it.
+    var hostKey: String { target }
     private let sound = SoundPlayer()
     private let soundSetup = DispatchQueue(label: "remoteman.sound.setup")
     private var mic: MicSender?

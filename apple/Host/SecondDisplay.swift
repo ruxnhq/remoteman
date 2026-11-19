@@ -98,7 +98,7 @@ final class HostSecondDisplay: NSObject, SCStreamOutput, SCStreamDelegate {
         geometry = (b, b.width > 0 ? CGFloat(width) / b.width : 1)
         size = (width, height, fps)
         stream = s
-        hostLog("host: second display \(id): \(width)×\(height) at \(fps) Hz, \(bitrate / 1000) kbit/s, at \(Int(b.minX)),\(Int(b.minY)) (\(side.isEmpty ? "right" : side) of the others)")
+        hostLog("host: second display \(id): \(width)×\(height) at \(fps) Hz, \(bitrate / 1000) kbit/s, at \(Int(b.minX)),\(Int(b.minY)) (\(["left": "left of", "above": "above", "below": "below"][side] ?? "right of") the others)")
         // A still screen sends nothing: the first picture is made from a screenshot if none came.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self, gen == self.generation else { return }

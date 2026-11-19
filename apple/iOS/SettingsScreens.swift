@@ -8,6 +8,7 @@ struct ComputerSettingsScreen: View {
     @Environment(\.dismiss) private var dismiss
     let computerID: UUID
     @State private var forgetting = false
+    @State private var sideChanged = 0
 
     private var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone" }
     private static let notes: [ViewerSession.Placement: String] = [
@@ -78,6 +79,17 @@ struct ComputerSettingsScreen: View {
                                     store.update(u)
                                 }),
                                 choices: [("any", "Automatic"), ("attach", "Only a running session")])
+                            ChoiceRow(
+                                title: "A second display goes",
+                                value: Binding(
+                                    get: { String(ViewerSession.SecondSide.saved(for: target(c)).rawValue) },
+                                    set: { v in
+                                        (ViewerSession.SecondSide(rawValue: UInt8(v) ?? 0) ?? .right).save(for: target(c))
+                                        sideChanged += 1
+                                    }),
+                                choices: ViewerSession.SecondSide.allCases.map { (String($0.rawValue), $0.label) }
+                            )
+                            .id(sideChanged)
                             Row(title: "Require \(Gate.name) to connect", subtitle: ViewerPrefs.requireAuth ? "On for every computer, in Settings" : nil) {
                                 Toggle("", isOn: Binding(get: { c.auth == "always" || (c.auth == nil && ViewerPrefs.requireAuth) }, set: { on in
                                     var u = c

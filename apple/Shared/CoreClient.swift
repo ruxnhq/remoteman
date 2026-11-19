@@ -241,8 +241,9 @@ final class CoreClient: SharingLink {
     }
 
     /// Ask for a second display of this size (again while on: another size), or give it back.
-    func secondDisplay(on: Bool, width: Int = 0, height: Int = 0, scale: Float = 1, refresh: Int = 60) {
-        with { rm_client_second_display($0, on ? 1 : 0, UInt32(width), UInt32(height), scale, UInt32(refresh)) }
+    /// `side`: which side of the computer's other displays it sits on (0 right, 1 left, 2 above, 3 below).
+    func secondDisplay(on: Bool, width: Int = 0, height: Int = 0, scale: Float = 1, refresh: Int = 60, side: UInt8 = 0) {
+        with { rm_client_second_display($0, on ? 1 : 0, UInt32(width), UInt32(height), scale, UInt32(refresh), side) }
     }
     /// Which display the pointer and touch events after this are on: 0 the first, 1 the second.
     func pointerOn(_ index: UInt8) { with { rm_client_pointer_on($0, index) } }

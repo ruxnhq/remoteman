@@ -299,6 +299,10 @@ enum Automation {
                 case "mem":
                     let (on, size) = DispatchQueue.main.sync { (session.client != nil, session.renderer?.layer.drawableSize ?? .zero) }
                     print("remoteman: memory \(memory()), \(on ? "connected" : "not connected"), drawing at \(Int(size.width))x\(Int(size.height))")
+                case "side":
+                    // side:right|left|above|below, for the second display asked for after this.
+                    let which = ["right": 0, "left": 1, "above": 2, "below": 3][arg.trimmingCharacters(in: .whitespaces)] ?? 0
+                    DispatchQueue.main.sync { UserDefaults.standard.set(which, forKey: "secondSide." + session.hostKey) }
                 case "second":
                     // second:w,h[,scale[,refresh]] asks for a second display; second:off gives it back.
                     DispatchQueue.main.sync {

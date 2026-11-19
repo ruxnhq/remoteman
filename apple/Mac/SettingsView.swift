@@ -234,6 +234,7 @@ struct ComputerSettings: View {
     @State private var adding = false
     @State private var renaming: SavedComputer?
     @State private var forgetting: SavedComputer?
+    @State private var sideChanged = 0
 
     private var selected: SavedComputer? { store[selection] ?? store.computers.first }
 
@@ -280,6 +281,15 @@ struct ComputerSettings: View {
                             Text("Only a session that is already running").tag("attach")
                         }
                         .labelsHidden().fixedSize()
+                    }
+                    Row("A second display goes", caption: "Which side of the computer's other displays it sits on. Applies the next time one is added.") {
+                        Picker("A second display goes", selection: Binding(
+                            get: { ViewerSession.SecondSide.saved(for: ViewerSession.key(for: c.address)) },
+                            set: { $0.save(for: ViewerSession.key(for: c.address)); sideChanged += 1 })
+                        ) {
+                            ForEach(ViewerSession.SecondSide.allCases) { Text($0.label).tag($0) }
+                        }
+                        .labelsHidden().fixedSize().id(sideChanged)
                     }
                     Row("Require Touch ID to connect") {
                         Picker("Require Touch ID to connect", selection: Binding(get: { c.auth }, set: { v in store.update(c.id) { $0.auth = v } })) {
