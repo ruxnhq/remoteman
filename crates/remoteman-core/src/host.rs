@@ -862,22 +862,67 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     if conn.close_reason().is_some() { Ok(true) } else { result.map(|()| true).map_err(yes) }
 }
 
+/// Hand on every whole event at the front of `buf` and take them out of it. An event that is
+/// whole but can't be read (a button this version doesn't know, text that isn't UTF-8) is
+/// stepped over: ending here would leave the client with a picture and no input for the rest
+/// of its session, and nothing to tell it so. Only a type this version doesn't know at all
+/// ends the input, since there is no telling where its event stops (docs/PROTOCOL.md, "Input").
+fn take_events(buf: &mut Vec<u8>, mut sink: impl FnMut(Event)) -> Result<()> {
+    let mut at = 0;
+    let result = loop {
+        match Event::parse(&buf[at..]) {
+            Ok(Some((event, used))) => {
+                at += used;
+                sink(event);
+            }
+            Ok(None) => break Ok(()),
+            Err(e) => match Event::length(&buf[at..]) {
+                Some(n) if buf.len() - at >= n => at += n,
+                _ => break Err(e.into()),
+            },
+        }
+    };
+    buf.drain(..at);
+    result
+}
+
 async fn read_input(mut stream: RecvStream, first: u8, calls: &mpsc::Sender<Call>) -> Result<()> {
     // `first` was read off the stream to see what it was.
     let mut buf = vec![first];
     let mut chunk = [0u8; 4096];
     while let Some(n) = stream.read(&mut chunk).await? {
         buf.extend_from_slice(&chunk[..n]);
-        let mut at = 0;
-        while let Some((event, used)) = Event::parse(&buf[at..])? {
-            at += used;
-            if calls.send(Call::Input(event)).is_err() {
-                bail!("the host is shutting down");
-            }
+        let mut gone = false;
+        take_events(&mut buf, |event| gone |= calls.send(Call::Input(event)).is_err())?;
+        if gone {
+            bail!("the host is shutting down");
         }
-        buf.drain(..at);
     }
     // The input stream closing isn't the session ending: wait for the connection to say so.
     std::future::pending::<()>().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use remoteman_proto::input::Button;
+
+    #[test]
+    fn input_goes_on_after_an_event_that_cannot_be_read() {
+        let mut buf = Vec::new();
+        Event::Key { usage: 4, down: true }.write(&mut buf);
+        buf.extend_from_slice(&[3, 9, 1]); // a button this version doesn't know
+        buf.extend_from_slice(&[7, 2, 0, 0xff, 0xfe]); // text that isn't UTF-8
+        buf.extend_from_slice(&[6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // a touch phase it doesn't know
+        Event::Button { button: Button::Left, down: true }.write(&mut buf);
+        buf.extend_from_slice(&[5, 4]); // half a key
+        let mut got = Vec::new();
+        take_events(&mut buf, |e| got.push(e)).expect("input ended at an event that could have been stepped over");
+        assert_eq!(got, [Event::Key { usage: 4, down: true }, Event::Button { button: Button::Left, down: true }]);
+        assert_eq!(buf, [5, 4]);
+        // A type nobody knows still ends it: its length can't be known.
+        let mut buf = vec![99, 1, 2];
+        assert!(take_events(&mut buf, |_| ()).is_err());
+    }
 }

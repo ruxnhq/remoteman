@@ -66,12 +66,33 @@ impl Event {
                 f(out, *y);
             }
             Event::Text(s) => {
-                let s = &s.as_bytes()[..s.len().min(u16::MAX as usize)];
+                // Cut where a character ends: half a character is text no host can read,
+                // and a host that can't read an event stops taking input.
+                let mut end = s.len().min(u16::MAX as usize);
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let s = &s.as_bytes()[..end];
                 out.push(7);
                 out.extend_from_slice(&(s.len() as u16).to_le_bytes());
                 out.extend_from_slice(s);
             }
             Event::Display(index) => out.extend_from_slice(&[8, *index]),
+        }
+    }
+
+    /// How long the event at the front of `buf` is, if its type is known and enough of it is
+    /// there to say: what a reader steps over when the event is whole but can't be read (a
+    /// button or touch phase it doesn't know, text that isn't UTF-8).
+    pub fn length(buf: &[u8]) -> Option<usize> {
+        match *buf.first()? {
+            1 | 2 | 4 => Some(9),
+            3 => Some(3),
+            5 => Some(4),
+            6 => Some(11),
+            8 => Some(2),
+            7 if buf.len() >= 3 => Some(3 + u16::from_le_bytes([buf[1], buf[2]]) as usize),
+            _ => None,
         }
     }
 
@@ -155,6 +176,25 @@ mod tests {
             at += used;
         }
         assert_eq!(at, buf.len());
+    }
+
+    #[test]
+    fn long_text_is_cut_where_a_character_ends() {
+        // 65535 bytes would end in the middle of the last "é" (two bytes each).
+        let mut b = Vec::new();
+        Event::Text("é".repeat(40000)).write(&mut b);
+        let (got, used) = Event::parse(&b).expect("the text written can't be read back").unwrap();
+        assert_eq!(used, b.len());
+        assert_eq!(got, Event::Text("é".repeat(32767)));
+    }
+
+    #[test]
+    fn a_whole_event_that_cannot_be_read_has_a_length() {
+        assert!(Event::parse(&[3, 9, 1]).is_err());
+        assert_eq!(Event::length(&[3, 9, 1]), Some(3));
+        assert_eq!(Event::length(&[7, 2, 0, 0xff, 0xfe]), Some(5));
+        assert_eq!(Event::length(&[7, 2]), None);
+        assert_eq!(Event::length(&[99, 0, 0]), None);
     }
 
     #[test]
