@@ -20,15 +20,45 @@
 #   sudo scripts/install-daemon.sh remove           back to the user service; /var/lib/remoteman is kept
 #
 # Build first, as yourself: cargo build --release -p remoteman-daemon -p remoteman-agent
+#
+# The host's AppImage runs this too (packaging/appimage/AppRun-host), with RM_PAYLOAD naming
+# the folder that holds the two programs and the libraries that travel with them (in lib/),
+# and RM_UNITS the folder of the unit files. RM_DESTDIR, for checking the layout: put the
+# files under that folder and touch nothing else (no root, no services).
 set -eu
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
+PAYLOAD=${RM_PAYLOAD:-$root/target/release}
+UNITS=${RM_UNITS:-$root/packaging/systemd}
+DEST=${RM_DESTDIR:-}
 LIB=/usr/local/lib/remoteman
 STATE=/var/lib/remoteman
-UNIT=/etc/systemd/system/remotemand.service
+UNIT=$DEST/etc/systemd/system/remotemand.service
 AGENT=/etc/systemd/user/remoteman-agent.service
 WANTS=/etc/systemd/user/gnome-session.target.wants
+# The programs, the libraries that travel with them if there are any, and the two unit files.
+place() {
+    how=$1
+    install -d -m 755 "$DEST$LIB" "$DEST$WANTS" "$(dirname "$UNIT")"
+    install -m 755 "$PAYLOAD/remotemand" "$PAYLOAD/remoteman-agent" "$DEST$LIB/"
+    if [ -d "$PAYLOAD/lib" ]; then
+        rm -rf "$DEST$LIB/lib"
+        cp -r "$PAYLOAD/lib" "$DEST$LIB/lib"
+    fi
+    sed -e "s|^ExecStart=/usr/lib/remoteman/remotemand.*|ExecStart=$LIB/remotemand --user $U --login $how|" "$UNITS/system/remotemand.service" > "$UNIT"
+    sed -e "s|=/usr/lib/remoteman/remoteman-agent|=$LIB/remoteman-agent|" "$UNITS/user/remoteman-agent.service" > "$DEST$AGENT"
+    ln -sf "$AGENT" "$DEST$WANTS/remoteman-agent.service"
+}
+if [ -n "$DEST" ]; then
+    [ "${1:-}" = install ] || { echo "RM_DESTDIR is for install only"; exit 1; }
+    U=${SUDO_USER:-$(id -un)}
+    place "${2:-screen}"
+    echo "laid out under $DEST; nothing else was touched"
+    exit 0
+fi
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
+# Whose desktop: who called sudo, or who was asked for the password by pkexec.
 U=${SUDO_USER:-}
+[ -n "$U" ] || [ -z "${PKEXEC_UID:-}" ] || U=$(id -un "$PKEXEC_UID")
 [ -n "$U" ] && [ "$U" != root ] || { echo "run with sudo from the account whose desktop is to be shared"; exit 1; }
 UID_=$(id -u "$U")
 HOME_=$(getent passwd "$U" | cut -d: -f6)
@@ -46,10 +76,9 @@ case "${1:-}" in
 install)
     how=${2:-screen}
     case "$how" in screen|key) ;; *) echo "install [screen|key]"; exit 1 ;; esac
-    for b in remotemand remoteman-agent; do [ -x "$root/target/release/$b" ] || { echo "build first, as yourself: cargo build --release -p remoteman-daemon -p remoteman-agent"; exit 1; }; done
+    for b in remotemand remoteman-agent; do [ -x "$PAYLOAD/$b" ] || { echo "build first, as yourself: cargo build --release -p remoteman-daemon -p remoteman-agent"; exit 1; }; done
     [ -e /run/remoteman/password ] && { echo "the remote-login test is still installed: sudo scripts/remote-login-test.sh stop first"; exit 1; }
-    install -d -m 755 "$LIB" "$WANTS"
-    install -m 755 "$root/target/release/remotemand" "$root/target/release/remoteman-agent" "$LIB/"
+    place "$how"
     # The key and the paired devices of the host that ran as the user, the first time only.
     install -d -m 700 "$STATE"
     if [ ! -e "$STATE/host" ] && [ -d "$HOME_/.local/state/remoteman/host" ]; then
@@ -57,9 +86,6 @@ install)
         chown -R root:root "$STATE/host"
         echo "copied $U's host key and paired devices to $STATE (the originals stay where they are)"
     fi
-    sed -e "s|^ExecStart=/usr/lib/remoteman/remotemand.*|ExecStart=$LIB/remotemand --user $U --login $how|" "$root/packaging/systemd/system/remotemand.service" > "$UNIT"
-    sed -e "s|=/usr/lib/remoteman/remoteman-agent|=$LIB/remoteman-agent|" "$root/packaging/systemd/user/remoteman-agent.service" > "$AGENT"
-    ln -sf "$AGENT" "$WANTS/remoteman-agent.service"
     # The two can't both hold the port: the user service goes first.
     as_user systemctl --user disable --now remoteman-host.service 2>/dev/null || true
     systemctl daemon-reload

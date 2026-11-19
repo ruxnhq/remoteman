@@ -10,7 +10,7 @@ root=$(dirname "$(dirname "$(readlink -f "$0")")")
 export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT="${RM_PORT:-7794}"
 # A socket's path must be short, which a logs folder may not be.
 export RM_SOCK="${XDG_RUNTIME_DIR:-/tmp}/remoteman-e2e-$$.sock" RM_SWITCH_AFTER="${RM_SWITCH_AFTER:-6}"
-bin="$root/target/release"
+bin="${RM_BIN:-$root/target/release}"
 "$bin/remotemand" --listen 127.0.0.1:$RM_PORT --pair --state "$RM_LOGS/state" --socket "$RM_SOCK" >"$RM_LOGS/daemon.log" 2>&1 &
 dpid=$!
 # One desktop session with an agent: $1 its name, $2 seconds until its moving content starts.
@@ -19,7 +19,7 @@ session() {
     mutter --headless --wayland --no-x11 --wayland-display rm-$RM_NAME >"$RM_LOGS/mutter-$RM_NAME.log" 2>&1 &
     mpid=$!
     sleep 2
-    "$RM_ROOT/target/release/remoteman-agent" --daemon --socket "$RM_SOCK" >"$RM_LOGS/agent-$RM_NAME.log" 2>&1 &
+    "${RM_BIN:-$RM_ROOT/target/release}/remoteman-agent" --daemon --socket "$RM_SOCK" >"$RM_LOGS/agent-$RM_NAME.log" 2>&1 &
     apid=$!
     ( sleep "$RM_CONTENT_AFTER"; exec env -u DISPLAY WAYLAND_DISPLAY=rm-$RM_NAME GDK_BACKEND=wayland python3 "$RM_ROOT/scripts/animate.py" >"$RM_LOGS/content-$RM_NAME.log" 2>&1 ) &
     cpid=$!

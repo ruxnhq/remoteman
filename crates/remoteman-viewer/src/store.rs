@@ -70,6 +70,10 @@ pub struct Computer {
     pub attach_only: bool,
     /// Which side of the computer's other displays a second display here is put on.
     pub second_side: Side,
+    /// The most lines of picture to ask this computer for (0: this screen's own). Fewer
+    /// pixels are encoded sooner: a computer whose encoder can't keep up with this screen at
+    /// its full size is quicker with a smaller picture, which is scaled up here.
+    pub max_height: u32,
     /// The hardware addresses of its network cards, as it last advertised them on this
     /// network (comma-separated; empty: never seen): what waking it needs.
     pub cards: String,
@@ -261,7 +265,7 @@ impl Store {
             Ok(text) => {
                 for line in text.lines() {
                     if line == "[computer]" {
-                        store.computers.push(Computer { name: String::new(), address: String::new(), os: String::new(), paired: 0, used: 0, placement: Placement::Extend, quality: Quality::Automatic, media: Media::default(), cards: String::new(), attach_only: false, second_side: Side::Right });
+                        store.computers.push(Computer { name: String::new(), address: String::new(), os: String::new(), paired: 0, used: 0, placement: Placement::Extend, quality: Quality::Automatic, media: Media::default(), cards: String::new(), attach_only: false, second_side: Side::Right, max_height: 0 });
                         continue;
                     }
                     let (Some(c), Some((key, value))) = (store.computers.last_mut(), line.split_once('=')) else { continue };
@@ -275,6 +279,7 @@ impl Store {
                         "quality" => c.quality = Quality::from_key(value),
                         "cards" => c.cards = value.to_owned(),
                         "way-in" => c.attach_only = value == "attach",
+                        "picture-lines" => c.max_height = if value == "window" { WINDOW } else { value.parse().unwrap_or(0) },
                         "second-side" => c.second_side = SIDES.iter().find(|(_, key)| *key == value).map_or(Side::Right, |(side, _)| *side),
                         other => {
                             if let Some(field) = c.media.field(other) {
@@ -292,7 +297,7 @@ impl Store {
                 let last = last.trim();
                 if !last.is_empty() && store.known(last).exists() {
                     let paired = std::fs::metadata(store.known(last)).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64);
-                    store.computers.push(Computer { name: host_part(last).to_owned(), address: last.to_owned(), os: String::new(), paired, used: paired, placement: store.settings.placement, quality: store.settings.quality, media: store.settings.media, cards: String::new(), attach_only: false, second_side: Side::Right });
+                    store.computers.push(Computer { name: host_part(last).to_owned(), address: last.to_owned(), os: String::new(), paired, used: paired, placement: store.settings.placement, quality: store.settings.quality, media: store.settings.media, cards: String::new(), attach_only: false, second_side: Side::Right, max_height: 0 });
                 }
             }
         }
@@ -343,7 +348,7 @@ impl Store {
             }
             None => {
                 let name = if host_name.is_empty() { host_part(address) } else { host_name };
-                self.computers.push(Computer { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: self.settings.quality, media: self.settings.media, cards: String::new(), attach_only: false, second_side: Side::Right });
+                self.computers.push(Computer { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: self.settings.quality, media: self.settings.media, cards: String::new(), attach_only: false, second_side: Side::Right, max_height: 0 });
             }
         }
         self.sort();
@@ -397,7 +402,7 @@ impl Store {
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         for c in &self.computers {
             out += &format!(
-                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\ncards={}\nway-in={}\nsecond-side={}\n{}",
+                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\ncards={}\nway-in={}\nsecond-side={}\npicture-lines={}\n{}",
                 clean(&c.name),
                 clean(&c.address),
                 clean(&c.os),
@@ -408,6 +413,7 @@ impl Store {
                 clean(&c.cards),
                 if c.attach_only { "attach" } else { "any" },
                 SIDES.iter().find(|(side, _)| *side == c.second_side).map_or("right", |(_, key)| key),
+                if c.max_height == WINDOW { "window".to_owned() } else { c.max_height.to_string() },
                 c.media.lines()
             );
         }
@@ -480,6 +486,25 @@ pub fn when(unix: i64) -> String {
     }
 }
 
+/// The picture sizes a computer can be asked for, in the order they are offered: the most
+/// lines (0: this screen's own) and what the choice is called.
+pub const SIZES: [(u32, &str); 4] = [(0, "This screen's own"), (WINDOW, "The window's size"), (1440, "Up to 1440 lines"), (1080, "Up to 1080 lines")];
+
+/// In place of a number of lines: a display of exactly the pixels the picture has in the
+/// viewer's window, asked for again when the window has changed size ("window" in the file).
+pub const WINDOW: u32 = 1;
+
+/// A screen of `width` by `height` pixels drawn at `scale`, as it is asked for when the
+/// picture may have `most` lines at most (0: no limit): the same shape and the same desktop
+/// (what was one point is still one point), with fewer pixels.
+pub fn fit_lines(width: u32, height: u32, scale: f32, most: u32) -> (u32, u32, f32) {
+    if most == 0 || most == WINDOW || height <= most {
+        return (width, height, scale);
+    }
+    let by = most as f64 / height as f64;
+    (((width as f64 * by).round() as u32) & !1, most & !1, (scale as f64 * by) as f32)
+}
+
 /// The sides a second display can sit on, in the order they are offered, with their names in
 /// the file.
 pub const SIDES: [(Side, &str); 4] = [(Side::Right, "right"), (Side::Left, "left"), (Side::Above, "above"), (Side::Below, "below")];
@@ -518,12 +543,16 @@ mod tests {
         store.save_settings();
         // A computer paired from here on starts with the defaults of that moment.
         store.used("desk:7791", "desk", "linux");
-        store.update("desk:7791", |c| (c.media.camera, c.second_side) = (true, Side::Above));
+        store.update("desk:7791", |c| (c.media.camera, c.second_side, c.max_height) = (true, Side::Above, 1440));
         let again = Store::load(&dir);
         assert_eq!(again.settings.media, store.settings.media);
         assert_eq!(again.settings.input, store.settings.input);
         assert_eq!(again.find("desk:7791").unwrap().media, Media { sound: true, microphone: false, camera: true, clipboard: true });
         assert_eq!(again.find("desk:7791").unwrap().second_side, Side::Above);
+        assert_eq!(again.find("desk:7791").unwrap().max_height, 1440);
+        assert_eq!(fit_lines(3840, 2160, 1.25, 1440), (2560, 1440, 1.25 * 1440.0 / 2160.0));
+        assert_eq!(fit_lines(1920, 1080, 1.0, 1440), (1920, 1080, 1.0));
+        assert_eq!(fit_lines(3840, 2160, 2.0, 0), (3840, 2160, 2.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

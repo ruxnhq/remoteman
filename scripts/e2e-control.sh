@@ -23,7 +23,7 @@ sys.stdout.write(out.decode())
 PY
 printf 'wait 2\nclip remoteman-test-control\nwait 6\nfile %s\nwait 8\n' "$RM_LOGS/remoteman-test-refused.bin" > "$RM_LOGS/steps.txt"
 dbus-run-session -- sh -c '
-  bin="$RM_ROOT/target/release"; ask() { python3 "$RM_LOGS/ask.py" "$@"; }
+  bin="${RM_BIN:-$RM_ROOT/target/release}"; ask() { python3 "$RM_LOGS/ask.py" "$@"; }
   mutter --headless --wayland --no-x11 --wayland-display rm-control-e2e >"$RM_LOGS/mutter.log" 2>&1 &
   mpid=$!
   sleep 2

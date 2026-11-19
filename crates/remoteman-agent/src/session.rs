@@ -640,10 +640,17 @@ impl Agent {
         let (desktop, link, copies) = (clipboard.clone(), l.link.clone(), self.copies.clone());
         *self.last_copy.lock().unwrap() = None;
         let last_copy = self.last_copy.clone();
+        let still_allowed = self.allowed.clipboard.clone();
         // Whatever is copied on the desktop goes to the client: text if there is any, else a
         // picture.
         let watching = self.runtime.spawn(async move {
             while let Some(types) = changes.next().await {
+                // Switched off by the computer's owner since: nothing more leaves, from this
+                // very copy on (the sharing itself is taken down at the device's next sign
+                // of life, see `clipboard_switched_off`).
+                if !still_allowed.load(Ordering::Relaxed) {
+                    continue;
+                }
                 let (read_as, send_as) = match clipboard::text_type(&types) {
                     Some(text) => (text.to_owned(), "text/plain;charset=utf-8"),
                     None if types.iter().any(|t| t == "image/png") => ("image/png".to_owned(), "image/png"),
@@ -680,9 +687,21 @@ impl Agent {
         tracing::info!("the clipboard is shared with the device");
     }
 
+    /// The computer's owner switched the clipboard off while it was being shared: stop, as if
+    /// the device had. The standalone host is told so the moment it happens; the agent of a
+    /// daemon has nobody to tell it, so it looks whenever the device does something (and
+    /// until then the watcher above lets nothing out).
+    fn clipboard_switched_off(&mut self) {
+        if self.live.as_ref().is_some_and(|l| l.clipboard.is_some()) && !self.allowed.clipboard.load(Ordering::Relaxed) {
+            self.clipboard_wanted = false;
+            self.share_clipboard(false);
+        }
+    }
+
     /// A clipboard blob from the client: what was copied on the device becomes what the
     /// desktop pastes.
     fn copied(&mut self, event: &BlobEvent) {
+        self.clipboard_switched_off();
         let Some(l) = self.live.as_mut() else { return };
         match event {
             BlobEvent::Open { id, header, .. } => {
@@ -965,6 +984,7 @@ impl HostHandler for Agent {
     }
 
     fn input(&mut self, event: Event) {
+        self.clipboard_switched_off();
         let Some(l) = &mut self.live else { return };
         // The desktop takes a moment to notice where a new display's pointer has first been
         // put: a button pressed sooner lands on nothing (seen on GNOME Shell 51: a click

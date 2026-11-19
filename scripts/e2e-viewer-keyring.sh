@@ -14,7 +14,7 @@ print(s.recv(65536).decode().strip())
 PY
 mkdir -p "$RM_LOGS/home"
 dbus-run-session -- sh -c '
-  bin="$RM_ROOT/target/release"
+  bin="${RM_BIN:-$RM_ROOT/target/release}"
   mutter --headless --wayland --no-x11 --wayland-display rm-e2e >"$RM_LOGS/mutter.log" 2>&1 &
   mpid=$!
   sleep 2
@@ -27,7 +27,7 @@ tell() { python3 -I "$RM_LOGS/tell.py" "$RM_LOGS/host.sock" "$1" >/dev/null; }
 # The viewer pairs while the computer lets paired devices in by their key; then it asks.
 tell "allow unlock key"
 HOME="$RM_LOGS/home" XDG_DATA_HOME="$RM_LOGS/home/data" XDG_CONFIG_HOME="$RM_LOGS/home/config" XDG_CACHE_HOME="$RM_LOGS/home/cache" dbus-run-session -- sh -c '
-  bin="$RM_ROOT/target/release"
+  bin="${RM_BIN:-$RM_ROOT/target/release}"
   # A keyring of the test own, unlocked with a password of the test own.
   printf "test" | gnome-keyring-daemon --unlock --components=secrets >/dev/null 2>&1
   # (It stays running; the newest process of that name is it. It is stopped by that number.)

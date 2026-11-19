@@ -8,7 +8,7 @@
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
 export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT="${RM_PORT:-7794}"
 export RM_SOCK="${XDG_RUNTIME_DIR:-/tmp}/remoteman-e2e-$$.sock" RM_CTL="${XDG_RUNTIME_DIR:-/tmp}/remoteman-e2e-$$-owner.sock"
-bin="$root/target/release"
+bin="${RM_BIN:-$root/target/release}"
 cat > "$RM_LOGS/tell.py" <<'PY'
 import socket, sys
 s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall((sys.argv[2] + "\n").encode()); s.shutdown(socket.SHUT_WR)
@@ -23,7 +23,7 @@ dbus-run-session -- sh -c '
   mutter --headless --wayland --no-x11 --wayland-display rm-owner >"$RM_LOGS/mutter.log" 2>&1 &
   mpid=$!
   sleep 2
-  "$RM_ROOT/target/release/remoteman-agent" --daemon --socket "$RM_SOCK" --control "$RM_CTL" --state "$RM_LOGS/agent-state" --keep-output >"$RM_LOGS/agent.log" 2>&1 &
+  "${RM_BIN:-$RM_ROOT/target/release}/remoteman-agent" --daemon --socket "$RM_SOCK" --control "$RM_CTL" --state "$RM_LOGS/agent-state" --keep-output >"$RM_LOGS/agent.log" 2>&1 &
   apid=$!
   echo "$apid $mpid" > "$RM_LOGS/session.pids"
   wait $apid

@@ -17,7 +17,7 @@ PY
 dbus-run-session -- mutter --headless --wayland --no-x11 --wayland-display rm-view --virtual-monitor 1920x1080@60 >"$RM_LOGS/mutter-view.log" 2>&1 &
 vpid=$!
 dbus-run-session -- sh -c '
-  bin="$RM_ROOT/target/release"
+  bin="${RM_BIN:-$RM_ROOT/target/release}"
   tell() { python3 -I "$RM_LOGS/tell.py" "$RM_LOGS/host.sock" "$1" >/dev/null; }
   # A device: its first word names its log; the rest are options of the test client.
   client() { log="$RM_LOGS/device-$1.log"; shift; "$bin/remoteman-testclient" 127.0.0.1:$RM_PORT --state "$RM_LOGS/client" --seconds 4 "$@" >"$log" 2>&1; grep -E "^stream|refused|ended the session" "$log" | head -1 | cut -c1-150; }

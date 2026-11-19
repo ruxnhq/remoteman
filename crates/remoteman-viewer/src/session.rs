@@ -126,6 +126,10 @@ impl Figures {
 /// The session's part of the window.
 pub struct View {
     pub toolbar: adw::ToolbarView,
+    /// The other computer's pointer drawn over the picture, while this one's is captured: a
+    /// layer over the picture and the image on it.
+    pointer_layer: gtk::Fixed,
+    pointer_image: gtk::Picture,
     header: adw::HeaderBar,
     title: adw::WindowTitle,
     disconnect: gtk::Button,
@@ -233,14 +237,21 @@ pub fn build(video: &Video) -> View {
     let overlay = gtk::Overlay::builder().child(&video.stack).build();
     overlay.add_overlay(&figures.root);
     overlay.add_css_class("rm-video");
+    let pointer_layer = gtk::Fixed::builder().can_target(false).overflow(gtk::Overflow::Hidden).build();
+    let pointer_image = gtk::Picture::builder().can_shrink(true).content_fit(gtk::ContentFit::Fill).visible(false).build();
+    pointer_layer.put(&pointer_image, 0.0, 0.0);
+    overlay.add_overlay(&pointer_layer);
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_top_bar_style(adw::ToolbarStyle::Raised);
+    toolbar.add_css_class("rm-session");
     toolbar.set_content(Some(&overlay));
 
     View {
         toolbar,
+        pointer_layer,
+        pointer_image,
         header,
         title,
         disconnect,
@@ -314,6 +325,27 @@ impl View {
 
     /// Whether this computer gives a device a second display: the line is there for those
     /// that do.
+    /// The other computer's pointer, drawn here: its image (`None`: nothing to draw), the
+    /// image's size and the spot in it that points, in this widget's units, and where that
+    /// spot is over the picture.
+    pub fn draw_pointer(&self, image: Option<&gdk::Texture>, size: (f64, f64), hot: (f64, f64), at: (f64, f64)) {
+        let Some(image) = image else { return self.pointer_image.set_visible(false) };
+        if self.pointer_image.paintable().as_ref() != Some(image.upcast_ref()) {
+            self.pointer_image.set_paintable(Some(image));
+        }
+        self.pointer_image.set_size_request(size.0.round() as i32, size.1.round() as i32);
+        self.pointer_layer.move_(&self.pointer_image, at.0 - hot.0, at.1 - hot.1);
+        self.pointer_image.set_visible(true);
+    }
+
+    /// How tall the window's bar is, whether it has been shown yet or not.
+    pub fn bar_height(&self) -> i32 {
+        match self.header.height() {
+            0 => self.header.measure(gtk::Orientation::Vertical, -1).1,
+            h => h,
+        }
+    }
+
     pub fn offer_second(&self, offered: bool) {
         if FEATURES.second_display {
             self.second.button.set_sensitive(offered);
@@ -573,9 +605,11 @@ pub fn wire(app: &Rc<App>) {
     // the bar.
     let edge = gtk::EventControllerMotion::new();
     edge.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let at = Rc::new(std::cell::Cell::new(f64::MAX));
     edge.connect_motion({
-        let app = app.clone();
+        let (app, at) = (app.clone(), at.clone());
         move |_, _, y| {
+            at.set(y);
             let out = if app.bar_out.get() { y < 64.0 } else { y < 2.0 };
             if out != app.bar_out.get() {
                 app.bar_out.set(out);
@@ -583,10 +617,14 @@ pub fn wire(app: &Rc<App>) {
             }
         }
     });
+    // The pointer leaving the window from below the bar takes the bar away. Leaving while it
+    // is on the bar does not: that is what dragging the window by its bar looks like from
+    // here (the desktop takes the pointer for the move), and the bar going at that moment
+    // took the grip away with it. It goes when the pointer is next seen below it.
     edge.connect_leave({
-        let app = app.clone();
+        let (app, at) = (app.clone(), at.clone());
         move |_| {
-            if app.bar_out.replace(false) {
+            if at.get() >= 64.0 && app.bar_out.replace(false) {
                 app.place_bar();
             }
         }

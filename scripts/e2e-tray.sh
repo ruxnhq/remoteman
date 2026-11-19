@@ -8,7 +8,7 @@ export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT="${RM_PORT:-77
 mkdir -p "$RM_LOGS/tstate/remoteman"
 echo on > "$RM_LOGS/tstate/remoteman/tray-notify"
 dbus-run-session -- sh -c '
-  bin="$RM_ROOT/target/release"
+  bin="${RM_BIN:-$RM_ROOT/target/release}"
   mutter --headless --wayland --no-x11 --wayland-display rm-e2e --virtual-monitor 1280x800@60 >"$RM_LOGS/mutter.log" 2>&1 &
   mpid=$!
   sleep 2

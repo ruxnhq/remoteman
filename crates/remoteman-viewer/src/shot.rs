@@ -207,6 +207,13 @@ pub fn run(app: &Rc<App>, script: String) {
                         app.window.set_default_size(w.parse().unwrap_or(900), h.parse().unwrap_or(680));
                     }
                 }
+                // Where the picture's place is in the window, for checking that what is drawn
+                // and where the pointer is taken to be agree.
+                "place?" => {
+                    let stack = &app.video.stack;
+                    let at = stack.compute_point(&app.window, &graphene::Point::new(0.0, 0.0)).map(|p| (p.x(), p.y()));
+                    println!("~ window {} x {}, picture's place {} x {} at {:?}, bar {} tall, the middle of the window is {:?} of the picture", app.window.width(), app.window.height(), stack.width(), stack.height(), at, app.view.bar_height(), app.video.fraction(stack.width() as f64 / 2.0, stack.height() as f64 / 2.0));
+                }
                 "size?" => println!("~ window {} x {}, default {:?}", app.window.width(), app.window.height(), app.window.default_size()),
                 "keys?" => println!("~ keys go to the other computer: {}", app.forwarding()),
                 // Sharing: the clipboard on, a copy made here, what this clipboard holds, a file.
