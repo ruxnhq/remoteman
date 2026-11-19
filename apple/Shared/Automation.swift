@@ -108,6 +108,15 @@ enum Automation {
                     exit(0)
                 }
                 return
+            case "--keychain-test":
+                // Keep, find and forget a made-up password (nothing is read back, so nothing is asked).
+                let key = "remoteman-test-keychain"
+                let saved = UnlockStore.save("remoteman-test-password", for: key)
+                let found = UnlockStore.has(key)
+                UnlockStore.forget(key)
+                print("remoteman: keychain: saved \(saved), found \(found), found after forgetting \(UnlockStore.has(key))")
+                print("remoteman: locked words: \(ViewerSession.lockedWords("the host refused: locked: enter the password of nick") ?? "nil") | \(ViewerSession.lockedWords("locked: That password is not right.") ?? "nil") | \(ViewerSession.lockedWords("the host refused: not_paired: pairing was declined") ?? "nil") | \(ViewerSession.lockedWords("connection closed: locked: again") ?? "nil")")
+                _ = value()
             case "--wake":
                 // Send the wake signal to these cards (comma-separated) and say how many packets left.
                 print("remoteman: wake: \(Wake.send(macs: value().split(separator: ",").map(String.init))) packets sent")

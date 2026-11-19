@@ -13,7 +13,7 @@ enum Launch {
     /// Started to run by itself from its arguments: the window is the stream and nothing else.
     static let automated: Bool = {
         let args = CommandLine.arguments.dropFirst()
-        return ["--host", "--play", "--bench", "--opus-test", "--nearby", "--wake"].contains { args.contains($0) }
+        return ["--host", "--play", "--bench", "--opus-test", "--nearby", "--wake", "--keychain-test"].contains { args.contains($0) }
     }()
 }
 
@@ -125,13 +125,17 @@ final class AppModel: ObservableObject {
     func connect(_ c: SavedComputer) {
         guard !session.isActive, active == nil else { return }
         let ask = c.auth == "always" || (c.auth.isEmpty && ViewerPrefs.requireAuth)
+        unlocker.cancel()
         guard ask, !automated else { return connectNow(c) }
         Gate.pass(for: c.name) { [weak self] ok in
             if ok { self?.connectNow(c) }
         }
     }
 
-    private func connectNow(_ c: SavedComputer) {
+    /// For a locked computer that asks for its user's password.
+    let unlocker = Unlocker()
+
+    private func connectNow(_ c: SavedComputer, unlock: String? = nil) {
         guard !session.isActive, active == nil else { return }
         errors[c.id] = nil
         selection = c.id
@@ -145,7 +149,7 @@ final class AppModel: ObservableObject {
         session.showStats = UserDefaults.standard.bool(forKey: Self.showFiguresKey)
         // A computer that may be asleep is woken first; one that is awake takes no notice.
         if c.wake, !c.macs.isEmpty, Nearby.shared.seen(fingerprint: c.fingerprint) == nil { Wake.send(macs: c.macs, lastAddress: c.address) }
-        session.connect(host: c.address, pair: c.pairOnConnect, name: DeviceDisplay.name, display: display, placement: c.place)
+        session.connect(host: c.address, pair: c.pairOnConnect, name: DeviceDisplay.name, display: display, placement: c.place, unlock: unlock)
         watchForPicture()
     }
 
@@ -211,6 +215,7 @@ final class AppModel: ObservableObject {
         case .streaming:
             reconnecting = false
             guard started == nil else { return }
+            unlocker.connected()
             started = Date()
             let host = session.client?.host
             store.update(id) { c in
@@ -235,7 +240,15 @@ final class AppModel: ObservableObject {
                 finish(id, reason: "This Mac was taken off its list of trusted devices. Turn pairing on there, then pair again.")
                 return
             }
+            let locked = started == nil ? session.lockedAsk : nil
+            let computer = store[id]
             finish(id, reason: started == nil ? reason : "The connection ended: \(reason)")
+            // Locked, and it wants its user's password: ask (or use the kept one) and connect again.
+            if let locked, let c = computer {
+                unlocker.locked(words: locked, key: c.fingerprint.isEmpty ? c.address : c.fingerprint, name: c.name) { [weak self] password in
+                    self?.connectNow(c, unlock: password)
+                }
+            }
         }
     }
 
@@ -369,6 +382,14 @@ final class AppModel: ObservableObject {
 
 /// The window's content: the stream alone on an unattended run; otherwise the computers, or
 /// the session with one of them.
+/// The sheet asking for a locked computer's password, over whatever the window shows.
+private struct UnlockPrompt: ViewModifier {
+    @ObservedObject var unlocker: Unlocker
+    func body(content: Content) -> some View {
+        content.sheet(item: $unlocker.asking) { UnlockSheet(ask: $0, unlocker: unlocker) }
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject var session: ViewerSession
@@ -388,6 +409,7 @@ struct RootView: View {
                     ComputersView()
                 }
             }
+            .modifier(UnlockPrompt(unlocker: model.unlocker))
             .onAppear {
                 guard !started else { return }
                 started = true

@@ -52,6 +52,9 @@ final class ViewerSession: ObservableObject {
     @Published private(set) var stage = 0
     /// While the computer waits for its owner to confirm this device: the six digits to compare.
     @Published private(set) var pairingCode: String?
+    /// The computer is locked and wants its user's password: its words for people. Set as the
+    /// session fails; cleared by the next connect.
+    @Published private(set) var lockedAsk: String?
     /// Why the host ended the last session (CoreClient.closeCode); -1 when it wasn't the host.
     @Published private(set) var closeCode = -1
     /// The computer took this device off its trust list: it has to be paired again.
@@ -82,6 +85,17 @@ final class ViewerSession: ObservableObject {
 
     /// A refusal as the computer worded it ("the host refused: not_paired: pairing was declined
     /// on the computer" is shown as "Pairing was declined on the computer").
+    /// The words of a "locked" refusal, if this is one.
+    static func lockedWords(_ reason: String) -> String? {
+        for lead in ["the host refused: locked: ", "locked: "] {
+            if let r = reason.range(of: lead), lead != "locked: " || r.lowerBound == reason.startIndex || reason[..<r.lowerBound].hasSuffix(": ") {
+                let text = String(reason[r.upperBound...])
+                return text.prefix(1).uppercased() + text.dropFirst()
+            }
+        }
+        return nil
+    }
+
     static func plain(_ reason: String) -> String {
         guard let r = reason.range(of: "the host refused: ") else { return reason }
         var text = String(reason[r.upperBound...])
@@ -424,9 +438,10 @@ final class ViewerSession: ObservableObject {
 
     func connect(
         host: String, pair: Bool, name: String, display: Display, decoders: String = ViewerSession.decoders,
-        placement: Placement = .extend
+        placement: Placement = .extend, unlock: String? = nil
     ) {
         guard !isActive else { return }
+        lockedAsk = nil
         let target = host.contains(":") ? host : host + ":7791"
         state = .connecting(target)
         generation += 1
@@ -439,7 +454,11 @@ final class ViewerSession: ObservableObject {
         let config = CoreClient.Config(
             host: target, stateDir: Self.stateDir, name: name, pair: pair, width: display.width,
             height: display.height, scale: display.scale, refresh: display.refresh, decoders: decoders,
-            options: placement == .extend ? "" : "placement=\(placement.rawValue)")
+            options: [
+                placement == .extend ? nil : "placement=\(placement.rawValue)",
+                // The locked computer's password, as hex (the options are split on ";" and "=").
+                unlock.map { "unlock-hex=" + $0.utf8.map { String(format: "%02x", $0) }.joined() },
+            ].compactMap { $0 }.joined(separator: ";"))
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 var shared: Sharing?
@@ -525,6 +544,7 @@ final class ViewerSession: ObservableObject {
             } catch {
                 DispatchQueue.main.async {
                     guard let self, self.generation == gen else { return }
+                    self.lockedAsk = Self.lockedWords("\(error)")
                     self.state = .failed(Self.plain("\(error)"))
                 }
             }
@@ -544,6 +564,7 @@ final class ViewerSession: ObservableObject {
         guard !isActive else { return }
         let rec: Recording
         do { rec = try Recording(url: url) } catch {
+            lockedAsk = Self.lockedWords("\(error)")
             state = .failed(Self.plain("\(error)"))
             return
         }
@@ -588,6 +609,7 @@ final class ViewerSession: ObservableObject {
         // On 3 the computer's key is kept: pairing again still checks it is the same computer.
         client = nil
         teardown()
+        lockedAsk = Self.lockedWords(reason)
         state = .failed(Self.plain(reason))
     }
 

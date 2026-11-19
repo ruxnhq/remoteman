@@ -73,6 +73,9 @@ struct ComputersScreen: View {
         guard let i = args.firstIndex(of: "--show"), i + 1 < args.count else { return }
         switch args[i + 1] {
         case "pair": pairing = true
+        case "unlock":
+            // The sheet as a locked computer would raise it, with made-up words.
+            model.unlocker.locked(words: "Enter the password of the user logged in at this computer.", key: "remoteman-test-show", name: "Studio PC") { _ in }
         case "settings": settings = true
         case "computer": editing = store.computers.first
         default: break

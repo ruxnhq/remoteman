@@ -59,20 +59,24 @@ final class AppModel: ObservableObject {
     /// Face ID (or the passcode) first, for a computer that asks for it.
     func connect(_ c: Computer) {
         let ask = c.auth == "always" || (c.auth == nil && ViewerPrefs.requireAuth)
+        unlocker.cancel()
         guard ask else { return connectNow(c) }
         Gate.pass(for: c.name) { [weak self] ok in
             if ok { self?.connectNow(c) } else { Haptics.failure() }
         }
     }
 
-    private func connectNow(_ c: Computer) {
+    /// For a locked computer that asks for its user's password.
+    let unlocker = Unlocker()
+
+    private func connectNow(_ c: Computer, unlock: String? = nil) {
         current = c
         // A computer that may be asleep is woken first; one that is awake takes no notice.
         if c.wake == true, let macs = c.macs, !macs.isEmpty, Nearby.shared.seen(fingerprint: c.fingerprint) == nil {
             Wake.send(macs: macs, lastAddress: c.address)
         }
         session.connect(
-            host: c.address, pair: !c.paired, name: DeviceDisplay.name, display: asked(for: c), placement: c.placementChoice)
+            host: c.address, pair: !c.paired, name: DeviceDisplay.name, display: asked(for: c), placement: c.placementChoice, unlock: unlock)
     }
 
     /// "More space" for the computer in view: the same pixels drawn smaller.
@@ -135,6 +139,13 @@ final class AppModel: ObservableObject {
             if case .streaming = state { Haptics.success() }
             if case .failed = state { Haptics.failure() }
         }
+        if case .streaming = state { unlocker.connected() }
+        // Locked, and it wants its user's password: ask (or use the kept one) and connect again.
+        if case .failed = state, let words = session.lockedAsk, let c = current {
+            unlocker.locked(words: words, key: c.fingerprint ?? c.address, name: c.name) { [weak self] password in
+                self?.connectNow(c, unlock: password)
+            }
+        }
         if case .failed = state, session.mustPairAgain, var c = current {
             c.paired = false
             store.update(c)
@@ -148,6 +159,16 @@ final class AppModel: ObservableObject {
         if c.name == c.address, !host.name.isEmpty { c.name = host.name }
         store.update(c)
         current = c
+    }
+}
+
+/// The sheet asking for a locked computer's password, over whatever the screen shows.
+private struct UnlockPrompt: ViewModifier {
+    @ObservedObject var unlocker: Unlocker
+    func body(content: Content) -> some View {
+        content.sheet(item: $unlocker.asking) { ask in
+            ScrollView { UnlockSheet(ask: ask, unlocker: unlocker) }.presentationDetents([.large]).interactiveDismissDisabled()
+        }
     }
 }
 
@@ -183,6 +204,7 @@ struct RootView: View {
             .onChange(of: geo.size) { _, _ in sized(geo) }
         }
         .ignoresSafeArea(edges: session.isActive ? .all : [])
+        .modifier(UnlockPrompt(unlocker: model.unlocker))
         .statusBarHidden(session.isActive)
         .persistentSystemOverlays(session.isActive ? .hidden : .automatic)
     }
