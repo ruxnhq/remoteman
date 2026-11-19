@@ -150,6 +150,10 @@ impl Handler for Watcher {
         println!("host says: {}", serde_json::to_string(message).unwrap_or_default());
     }
 
+    fn pairing(&mut self, code: &str, seconds: u32) {
+        println!("pairing: this device is new to the host; its owner has {seconds} s to confirm the code {code}");
+    }
+
     fn sound(&mut self, packet: &Packet) {
         let mut s = self.seen.lock().unwrap();
         // A packet marked as a start begins a new count (after a pause, or from another agent).

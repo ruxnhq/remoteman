@@ -1,11 +1,20 @@
 //! What the host does for a client: the monitor brought to its size, the picture out, its input
 //! in, the cursor apart if it asks. The connection itself is the shared core's. Built like the
-//! Linux agent's session, with less: no sound, microphone, camera, clipboard or files yet.
+//! Linux agent's session, with less: no camera, no second display, no unlocking, and the
+//! display is the driver's one monitor brought to the device's size, not a monitor of its own.
 
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use remoteman_core::host::{Accept, ClientInfo, HostHandler, Link};
-use remoteman_core::{Display, Event, Message, Mode};
+use remoteman_core::media::{BLOB_CLIPBOARD, BLOB_FILE, CLIPBOARD_LIMIT, ClipboardHeader};
+use remoteman_core::{BlobEvent, Chroma, Codec, Display, Event, Message, Mode, Packet, Placement};
+
+use crate::clipboard::Clipboard;
+use crate::control::{Allowed, Now};
+use crate::files::Files;
+use crate::sound::{self, Microphone, Speaker};
 
 use crate::cursor::Cursor;
 use crate::display::{self, Area, Fit, Screen};
@@ -32,18 +41,37 @@ struct Live {
     common: Vec<Mode>,
     /// The most the picture may use, as the client last said (0: this host's own figure).
     ceiling: u32,
+    /// The client's name, for what the owner is shown.
+    name: String,
+    /// Files being received.
+    files: Files,
+    /// The clipboard shared with the client, while it is.
+    clipboard: Option<Clipboard>,
+    /// What the client copied, on its way in: its type and the content so far.
+    copied: BTreeMap<u32, (String, Vec<u8>)>,
 }
 
 pub struct Host {
     screen: Screen,
     bitrate: u32,
     fit: Fit,
+    allowed: Allowed,
+    /// The client wants the clipboard shared (kept across a restart of the picture).
+    clipboard_wanted: bool,
+    /// Counts what was copied here and sent, for the client to tell new from stale.
+    copies: Arc<AtomicU32>,
+    /// The desktop's sound going to the client.
+    sound: Option<Speaker>,
+    /// The client's microphone, played into a virtual device, and its packets so far: how
+    /// many came, how many were missing in between, and the last one's number.
+    microphone: Option<Microphone>,
+    mic_count: (u32, u32, Option<u32>),
     live: Option<Live>,
 }
 
 impl Host {
-    pub fn new(screen: Screen, bitrate: u32, fit: Fit) -> Self {
-        Self { screen, bitrate, fit, live: None }
+    pub fn new(screen: Screen, bitrate: u32, fit: Fit, allowed: Allowed) -> Self {
+        Self { screen, bitrate, fit, allowed, clipboard_wanted: false, copies: Arc::default(), sound: None, microphone: None, mic_count: (0, 0, None), live: None }
     }
 
     /// What the picture is encoded at when the client's ceiling is `ceiling`.
@@ -58,7 +86,7 @@ impl Host {
 
     /// Bring the monitor to the client's display and start its picture. `held`: nothing is
     /// sent until the pipeline is released (see [`Self::restart`]).
-    fn start(&mut self, screen: Display, decoders: Vec<Mode>, cursor_apart: bool, ceiling: u32, link: Link, held: bool) -> Result<Accept, String> {
+    fn start(&mut self, name: String, screen: Display, decoders: Vec<Mode>, cursor_apart: bool, ceiling: u32, link: Link, held: bool) -> Result<Accept, String> {
         let modes = Self::common(&decoders);
         if modes.is_empty() {
             return Err("no video mode in common".into());
@@ -69,10 +97,12 @@ impl Host {
         // The client's scale (how large the desktop is drawn) isn't acted on: Windows has no
         // documented way to set a monitor's scale for the user.
         let want = display::Mode { width: screen.width, height: screen.height, refresh: screen.refresh.clamp(1, 240) };
-        let got = self.screen.fit(want, self.fit).map_err(|e| format!("{e:#}"))?;
+        // A device that asks to mirror is shown the monitor as it is, no faster than it asked.
+        let mirror = screen.placement == Placement::Mirror;
+        let got = self.screen.fit(want, if mirror { Fit::Keep } else { self.fit }).map_err(|e| format!("{e:#}"))?;
         let (_, at) = self.screen.now().map_err(|e| format!("{e:#}"))?;
         let area = Arc::new(Mutex::new(at));
-        let refresh = got.refresh.clamp(1, 240);
+        let refresh = if mirror { got.refresh.min(want.refresh) } else { got.refresh }.clamp(1, 240);
         let (device, shared) = (self.screen.device().to_owned(), area.clone());
         let settings = pipeline::Settings {
             driver: self.screen.driver(),
@@ -104,7 +134,19 @@ impl Host {
         if !cursor_apart {
             tracing::warn!("this client doesn't draw the cursor itself, and the driver keeps it out of the frames: it will see no cursor");
         }
-        self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, common: modes, ceiling });
+        self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, common: modes, ceiling, name: name.clone(), files: Files::default(), clipboard: None, copied: BTreeMap::new() });
+        // A new picture shares the clipboard anew.
+        self.share_clipboard(self.clipboard_wanted);
+        {
+            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let mut now = self.allowed.now.lock().unwrap();
+            // A new picture for the same client keeps the time it came.
+            let since = now.as_ref().filter(|n| n.name == name).map_or(since, |n| n.since);
+            let mode = started.mode;
+            let picture = format!("{} {}-bit{}", if mode.codec == Codec::Av1 { "AV1" } else { "HEVC" }, mode.depth, if mode.chroma == Chroma::C444 { " 4:4:4" } else { "" });
+            // (Every placement but `mirror` is, for now, the one monitor at the device's size.)
+            *now = Some(Now { name, since, width: started.width, height: started.height, refresh, placement: if mirror { "mirror" } else { "only" }, picture, sound: self.sound.is_some() });
+        }
         Ok(Accept { mode: started.mode, width: started.width, height: started.height, refresh, colour: "bt709".into() })
     }
 
@@ -113,7 +155,89 @@ impl Host {
         let mut l = self.live.take()?;
         l.injector.release_all();
         l.cursor = None;
+        if l.clipboard.take().is_some() {
+            tracing::info!("the clipboard is no longer shared with the device");
+        }
         Some(l)
+    }
+
+    /// Share the clipboard with the client, both ways, or stop. Only where the computer's
+    /// owner allowed it.
+    fn share_clipboard(&mut self, on: bool) {
+        let allowed = self.allowed.clipboard.load(Ordering::Relaxed);
+        let Some(l) = self.live.as_mut() else { return };
+        if l.clipboard.take().is_some() {
+            tracing::info!("the clipboard is no longer shared with the device");
+        }
+        if on && !allowed {
+            tracing::info!("the device asked to share the clipboard, which isn't allowed here");
+        }
+        if !on || !allowed {
+            return;
+        }
+        match Clipboard::start(l.link.clone(), self.allowed.clipboard.clone(), self.copies.clone()) {
+            Ok(clipboard) => {
+                l.clipboard = Some(clipboard);
+                tracing::info!("the clipboard is shared with the device");
+            }
+            Err(e) => tracing::warn!("couldn't share the clipboard: {e:#}"),
+        }
+    }
+
+    /// A clipboard blob from the client: what was copied on the device becomes what the
+    /// desktop pastes. Text only.
+    fn copied(&mut self, event: &BlobEvent) {
+        let Some(l) = self.live.as_mut() else { return };
+        match event {
+            BlobEvent::Open { id, header, .. } => {
+                let Ok(h) = serde_json::from_str::<ClipboardHeader>(header) else { return };
+                if l.clipboard.is_some() && h.size <= CLIPBOARD_LIMIT {
+                    l.copied.insert(*id, (h.mime, Vec::with_capacity(h.size as usize)));
+                }
+            }
+            BlobEvent::Data { id, bytes } => {
+                let over = l.copied.get_mut(id).is_some_and(|c| {
+                    c.1.extend_from_slice(bytes);
+                    c.1.len() as u64 > CLIPBOARD_LIMIT
+                });
+                if over {
+                    l.copied.remove(id);
+                }
+            }
+            BlobEvent::Close { id, complete } => {
+                let (Some((mime, bytes)), Some(clipboard), true) = (l.copied.remove(id), l.clipboard.as_ref(), *complete) else { return };
+                if !mime.starts_with("text/plain") {
+                    return tracing::info!(kind = mime, "the device copied something this host doesn't take (text only)");
+                }
+                clipboard.offer(String::from_utf8_lossy(&bytes).into_owned());
+            }
+        }
+    }
+
+    /// Send the desktop's sound to the client, or stop.
+    fn send_sound(&mut self, on: bool) {
+        self.sound = None;
+        let (Some(l), true) = (self.live.as_ref(), on) else { return };
+        l.link.send_message(Message::SoundFormat { codec: "opus".into(), rate: sound::SAMPLE_RATE, channels: 2, frame_us: sound::FRAME_US as u32 });
+        match Speaker::start(l.link.clone()) {
+            Ok(speaker) => self.sound = Some(speaker),
+            Err(e) => tracing::warn!("couldn't send the desktop's sound: {e:#}"),
+        }
+    }
+
+    /// Play the client's microphone into the virtual device, or stop.
+    fn take_microphone(&mut self, on: bool) {
+        if self.microphone.take().is_some() {
+            let (packets, missing, _) = std::mem::replace(&mut self.mic_count, (0, 0, None));
+            tracing::info!(packets, missing, "the device's microphone: packets that came and that were lost on the way");
+        }
+        if self.live.is_none() || !on {
+            return;
+        }
+        match Microphone::start() {
+            Ok(microphone) => self.microphone = Some(microphone),
+            Err(e) => tracing::warn!("couldn't take the device's microphone: {e:#}"),
+        }
     }
 
     /// The client changed what it wants: a new ceiling for the bitrate takes effect in the
@@ -136,14 +260,14 @@ impl Host {
         // The old picture goes first; then the monitor changes, the client is told, and the
         // new picture starts.
         let Some(old) = self.stop() else { return };
-        let (link, cursor_apart, ceiling) = (old.link.clone(), old.cursor_apart, old.ceiling);
+        let (link, cursor_apart, ceiling, name) = (old.link.clone(), old.cursor_apart, old.ceiling, old.name.clone());
         let (was_screen, was_decoders) = (old.screen, old.decoders.clone());
         drop(old);
-        if let Err(e) = self.restart(screen, decoders, cursor_apart, ceiling, link.clone()) {
+        if let Err(e) = self.restart(name.clone(), screen, decoders, cursor_apart, ceiling, link.clone()) {
             // Back to what worked, rather than leave the client with nothing.
             tracing::warn!("couldn't start that picture ({e}); going back to the one before");
             self.screen.release();
-            if let Err(e) = self.restart(was_screen, was_decoders, cursor_apart, ceiling, link) {
+            if let Err(e) = self.restart(name, was_screen, was_decoders, cursor_apart, ceiling, link) {
                 tracing::error!("couldn't restore the picture: {e}");
             }
         }
@@ -153,8 +277,8 @@ impl Host {
     /// when the client is told of the new picture, and what the picture is (its real size) is
     /// only known once it has started; so it starts held back, the client is told, and then
     /// it is let go.
-    fn restart(&mut self, screen: Display, decoders: Vec<Mode>, cursor_apart: bool, ceiling: u32, link: Link) -> Result<(), String> {
-        let accept = self.start(screen, decoders, cursor_apart, ceiling, link.clone(), true)?;
+    fn restart(&mut self, name: String, screen: Display, decoders: Vec<Mode>, cursor_apart: bool, ceiling: u32, link: Link) -> Result<(), String> {
+        let accept = self.start(name, screen, decoders, cursor_apart, ceiling, link.clone(), true)?;
         link.restart(accept);
         if let Some(l) = &self.live {
             l.pipeline.release();
@@ -168,12 +292,57 @@ impl HostHandler for Host {
         self.left();
         let screen = client.display;
         tracing::info!(name = %client.name, ?screen, decoders = ?client.decoders, cursor_apart = client.cursor, "client");
-        self.start(screen, client.decoders.clone(), client.cursor, 0, link, false).inspect_err(|e| tracing::error!("couldn't start the picture: {e}"))
+        self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link, false).inspect_err(|e| tracing::error!("couldn't start the picture: {e}"))
     }
 
     fn message(&mut self, message: &Message) {
-        if let Message::Configure { display, bitrate, decoders } = message {
-            self.configure(*display, *bitrate, decoders.clone());
+        match message {
+            Message::Configure { display, bitrate, decoders } => self.configure(*display, *bitrate, decoders.clone()),
+            Message::Clipboard { on } => {
+                self.clipboard_wanted = *on;
+                self.share_clipboard(*on);
+            }
+            Message::Sound { on } => {
+                self.send_sound(*on);
+                if let Some(now) = self.allowed.now.lock().unwrap().as_mut() {
+                    now.sound = self.sound.is_some();
+                }
+            }
+            Message::Mic { on, .. } => self.take_microphone(*on),
+            _ => {}
+        }
+    }
+
+    fn mic(&mut self, packet: &Packet) {
+        if let Some(microphone) = &self.microphone {
+            // A hole in the numbers is packets lost on the way (a pause leaves none).
+            let (packets, missing, last) = &mut self.mic_count;
+            *packets += 1;
+            if let (Some(last), false) = (*last, packet.start) {
+                let gap = packet.seq.wrapping_sub(last).wrapping_sub(1);
+                if gap < 1000 {
+                    *missing += gap;
+                }
+            }
+            *last = Some(packet.seq);
+            microphone.push(&packet.data);
+        }
+    }
+
+    fn blob(&mut self, event: &BlobEvent) {
+        // A blob of a kind that isn't taken never gets an entry, so its content and its end
+        // fall through.
+        let (is_file, is_copy) = match event {
+            BlobEvent::Open { kind, .. } => (*kind == BLOB_FILE, *kind == BLOB_CLIPBOARD),
+            other => self.live.as_ref().map_or((false, false), |l| (l.files.has(other.id()), l.copied.contains_key(&other.id()))),
+        };
+        if is_file {
+            let allowed = self.allowed.files.load(Ordering::Relaxed);
+            if let Some(l) = self.live.as_mut() {
+                l.files.event(event, allowed, &l.link);
+            }
+        } else if is_copy {
+            self.copied(event);
         }
     }
 
@@ -196,6 +365,10 @@ impl HostHandler for Host {
     }
 
     fn left(&mut self) {
+        *self.allowed.now.lock().unwrap() = None;
+        self.clipboard_wanted = false;
+        self.take_microphone(false);
+        self.sound = None;
         if let Some(l) = self.stop() {
             drop(l);
             self.screen.release();

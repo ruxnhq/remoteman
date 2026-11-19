@@ -2,8 +2,20 @@
 //! at a time (a new one takes over) and puts the client's input into the desktop.
 //!
 //!     remoteman-host [--listen ADDR:PORT] [--state DIR] [--pair] [--name NAME] [--log FILE]
-//!                    [--bitrate MBIT] [--mode keep|listed|any] [--seconds N]
+//!                    [--bitrate MBIT] [--mode keep|listed|any] [--allow files,clipboard]
+//!                    [--seconds N]
 //!     remoteman-host --probe | --probe-picture [--log FILE]
+//!     remoteman-host ctl [--port PORT] WORDS
+//!
+//! `--pair` trusts the first unknown device to connect. The owner's way is `ctl pair on`: the
+//! device that comes then waits, `ctl status` shows it with a six-digit code that the device
+//! shows too, and `ctl pair accept` or `ctl pair decline` answers it. `ctl` speaks to the
+//! running host (from an elevated prompt): `status`, `pair on|off|accept|decline`, `allow
+//! clipboard|files on|off`, `drop`, `revoke FINGERPRINT`.
+//!
+//! `--allow files,clipboard`: paired devices may put files into this user's Downloads folder,
+//! and share the clipboard (text) both ways. Both are off unless said, here or with `ctl
+//! allow`, which is remembered.
 //!
 //! `--probe` only looks: it opens the display driver, says what it finds (the driver, its frame
 //! channel, the monitor's modes, the adapter, the shared textures) and exits. Run it first on
@@ -28,6 +40,14 @@
 
 #[cfg(windows)]
 mod capture;
+#[cfg(windows)]
+mod clipboard;
+#[cfg(windows)]
+mod control;
+#[cfg(windows)]
+mod files;
+#[cfg(windows)]
+mod sound;
 #[cfg(windows)]
 mod convert;
 #[cfg(windows)]
@@ -91,7 +111,20 @@ mod windows_main {
         let mut listen: SocketAddr = format!("0.0.0.0:{}", remoteman_core::PORT).parse()?;
         let (mut pair, mut state, mut bitrate, mut drop_one_in) = (false, state_dir(), 40u32, None::<u32>);
         let (mut name, mut log, mut seconds, mut probing, mut fit) = (None::<String>, None::<PathBuf>, None::<u64>, None::<bool>, Fit::Any);
-        let mut args = std::env::args().skip(1);
+        let (mut allow_files, mut allow_clipboard) = (false, false);
+        let mut args = std::env::args().skip(1).peekable();
+        // Not a host at all: a word with the one that is running.
+        if args.peek().map(String::as_str) == Some("ctl") {
+            args.next();
+            let mut port = remoteman_core::PORT;
+            if args.peek().map(String::as_str) == Some("--port") {
+                args.next();
+                port = args.next().context("--port needs a value")?.parse().context("--port PORT")?;
+            }
+            let words: Vec<String> = args.collect();
+            print!("{}", crate::control::ask(port, &words.join(" "))?);
+            return Ok(());
+        }
         while let Some(a) = args.next() {
             let mut value = || args.next().with_context(|| format!("{a} needs a value"));
             match a.as_str() {
@@ -99,6 +132,15 @@ mod windows_main {
                 "--state" => state = value()?.into(),
                 "--bitrate" => bitrate = value()?.parse().context("--bitrate in Mbit/s")?,
                 "--pair" => pair = true,
+                "--allow" => {
+                    for what in value()?.split(',') {
+                        match what.trim() {
+                            "files" => allow_files = true,
+                            "clipboard" => allow_clipboard = true,
+                            other => anyhow::bail!("--allow {other}: files, clipboard"),
+                        }
+                    }
+                }
                 "--name" => name = Some(value()?),
                 "--log" => log = Some(value()?.into()),
                 // For tests: stop by itself after this long.
@@ -129,7 +171,7 @@ mod windows_main {
             None => tracing_subscriber::fmt().with_max_level(level).with_ansi(false).init(),
         }
         // Anything that goes wrong is in the log before the process ends.
-        let result = run(listen, state, pair, name, bitrate, drop_one_in, seconds, probing, fit);
+        let result = run(listen, state, pair, name, bitrate, drop_one_in, seconds, probing, fit, (allow_files, allow_clipboard));
         if let Err(e) = &result {
             tracing::error!("{e:#}");
         }
@@ -137,7 +179,7 @@ mod windows_main {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run(listen: SocketAddr, state: PathBuf, pair: bool, name: Option<String>, bitrate: u32, drop_one_in: Option<u32>, seconds: Option<u64>, probing: Option<bool>, fit: Fit) -> Result<()> {
+    fn run(listen: SocketAddr, state: PathBuf, pair: bool, name: Option<String>, bitrate: u32, drop_one_in: Option<u32>, seconds: Option<u64>, probing: Option<bool>, fit: Fit, allow: (bool, bool)) -> Result<()> {
         // Sizes and places in real pixels, whatever scale the desktop is drawn at: the cursor's
         // place, the monitor's corner and the pointer's target must all be in the picture's own.
         // SAFETY: plain call, before any window exists.
@@ -153,11 +195,24 @@ mod windows_main {
 
         let screen = Screen::open()?;
         let name = name.or_else(|| std::env::var("COMPUTERNAME").ok()).unwrap_or_else(|| "windows".into());
-        // What this host does today. `configure`: a new bitrate in the running picture, another
-        // size or codec by starting the picture afresh. No sound, clipboard or files yet.
-        let features = ["video", "input", "cursor", "configure"].map(String::from).to_vec();
-        let options = HostOptions { listen, state, name, os: "windows".into(), features, pair, test_drop_one_in: drop_one_in };
-        let host = Host::start(options, session::Host::new(screen, bitrate * 1_000_000, fit))?;
+        // What the owner switched on earlier holds until switched off; `--allow` adds to it
+        // for this run.
+        let allowed = crate::control::Allowed::default();
+        let saved = crate::control::load(&state);
+        allowed.files.store(allow.0 || saved.0, Ordering::Relaxed);
+        allowed.clipboard.store(allow.1 || saved.1, Ordering::Relaxed);
+        // A device's microphone needs a virtual sound device to be played into.
+        let (sink, outputs) = crate::sound::find_microphone_sink();
+        allowed.microphone.store(sink.is_some(), Ordering::Relaxed);
+        match &sink {
+            Some(name) => tracing::info!(into = name, "a device's microphone can be taken"),
+            None => tracing::info!(?outputs, "no virtual microphone here (Steam's \"Steam Streaming Microphone\" or VB-CABLE): a device's microphone can't be taken"),
+        }
+        let features = crate::control::features(&allowed);
+        tracing::info!(?features, "what this host does");
+        let options = HostOptions { listen, state: state.clone(), name, os: "windows".into(), features, pair, test_drop_one_in: drop_one_in };
+        let host = std::sync::Arc::new(Host::start(options, session::Host::new(screen, bitrate * 1_000_000, fit, allowed.clone()))?);
+        crate::control::serve(host.address.port(), std::sync::Arc::downgrade(&host), allowed, state);
         tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
         if pair {
             tracing::info!("pairing: the next unknown device to connect will be trusted");
@@ -174,7 +229,19 @@ mod windows_main {
         tracing::info!("stopping");
         // Stopping the host drops the client; its handler, on a thread of the core's, then lets
         // go of the client's keys and puts the monitor back. Give it the moment that takes.
-        host.stop();
+        // (The control thread holds the host only while it answers.)
+        let mut host = Some(host);
+        for _ in 0..20 {
+            match std::sync::Arc::try_unwrap(host.take().unwrap()) {
+                Ok(h) => {
+                    h.stop();
+                    break;
+                }
+                Err(still) => host = Some(still),
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(host);
         std::thread::sleep(Duration::from_millis(700));
         Ok(())
     }

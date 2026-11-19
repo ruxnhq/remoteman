@@ -115,9 +115,27 @@ fn pixels(bitmap: HBITMAP) -> Option<(Vec<u8>, u32, u32)> {
     }
 }
 
+/// Pixels of a cursor that invert what is under them (the text cursor is made of nothing
+/// else) can't be said in RGBA, and nobody else draws them: the driver keeps the cursor out of
+/// the frames. They become black with a white edge one pixel wide, which shows on anything.
+fn stand_in(rgba: &mut [u8], width: u32, height: u32, inverting: &[bool]) {
+    let (w, h) = (width as usize, height as usize);
+    for i in (0..w * h).filter(|i| inverting[*i]) {
+        rgba[i * 4..i * 4 + 4].copy_from_slice(&[0, 0, 0, 255]);
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let beside = (x > 0 && inverting[i - 1]) || (x + 1 < w && inverting[i + 1]) || (y > 0 && inverting[i - w]) || (y + 1 < h && inverting[i + w]);
+            if beside && !inverting[i] && rgba[i * 4 + 3] == 0 {
+                rgba[i * 4..i * 4 + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+    }
+}
+
 /// A cursor's image as the client wants it: RGBA with the colours already multiplied by the
-/// alpha. `None`: there is no image to send, because the cursor inverts what is under it (and
-/// Windows draws it into the picture itself) or couldn't be read.
+/// alpha. `None`: it couldn't be read.
 fn shape(cursor: HICON) -> Option<CursorShape> {
     let mut info = ICONINFO::default();
     // SAFETY: `info` is live; the two bitmaps it returns are ours to delete.
@@ -140,12 +158,13 @@ fn shape(cursor: HICON) -> Option<CursorShape> {
                 // An old-style colour cursor: the mask says where it is see-through. A pixel
                 // that is both masked out and coloured inverts what is under it.
                 let (m, ..) = mask.filter(|(_, w, h)| (*w, *h) == (width, height))?;
-                if (0..n).any(|i| set(&m, i) && bgra[i * 4..i * 4 + 3] != [0, 0, 0]) {
-                    tracing::debug!(width, height, "cursor: colour with inverting pixels; left to Windows to draw");
-                    return None;
-                }
+                let inverting: Vec<bool> = (0..n).map(|i| set(&m, i) && bgra[i * 4..i * 4 + 3] != [0, 0, 0]).collect();
                 for i in 0..n {
                     bgra[i * 4 + 3] = if set(&m, i) { 0 } else { 255 };
+                }
+                if inverting.contains(&true) {
+                    tracing::debug!(width, height, "cursor: colour with inverting pixels, sent as black edged with white");
+                    stand_in(&mut bgra, width, height, &inverting);
                 }
             }
             // To RGBA, colours multiplied by alpha (Windows keeps them unmultiplied).
@@ -164,16 +183,17 @@ fn shape(cursor: HICON) -> Option<CursorShape> {
             if m.len() < n * 8 || height == 0 {
                 return None;
             }
-            if (0..n).any(|i| set(&m, i) && set(&m, n + i)) {
-                tracing::debug!(width, height, "cursor: black and white with inverting pixels; left to Windows to draw");
-                return None;
-            }
+            let inverting: Vec<bool> = (0..n).map(|i| set(&m, i) && set(&m, n + i)).collect();
             let mut rgba = vec![0u8; n * 4];
             for i in 0..n {
                 if !set(&m, i) {
                     let v = if set(&m, n + i) { 255 } else { 0 };
                     rgba[i * 4..i * 4 + 4].copy_from_slice(&[v, v, v, 255]);
                 }
+            }
+            if inverting.contains(&true) {
+                tracing::debug!(width, height, "cursor: black and white with inverting pixels, sent as black edged with white");
+                stand_in(&mut rgba, width, height, &inverting);
             }
             ("black and white", CursorShape { width, height, hot_x, hot_y, rgba })
         }

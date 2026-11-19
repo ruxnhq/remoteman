@@ -308,13 +308,24 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
     // The stream must begin with a keyframe after it starts afresh.
     let mut afresh = false;
     let mut wait_failed = false;
+    // No more frames a second than the client was told (a monitor that is mirrored, or that
+    // doesn't offer the client's rate, shows more): a frame that comes too soon is held back
+    // until its turn, and replaced by a newer one if that comes first. The encoder's rate
+    // control counts on the rate it was told.
+    let interval = Duration::from_secs_f64(1.0 / s.fps.max(1) as f64);
+    let mut last_sent = Instant::now() - interval;
+    let mut held_back = None::<u64>;
     loop {
         let held = control.held.load(Ordering::Relaxed);
         if !p.again || held {
             // Held back: wait for the word only, and leave the driver's frames where they are.
             let handles = [control.wake.0, p.source.channel().ready];
             // SAFETY: live events. The timeout is for the housekeeping below.
-            let waited = unsafe { WaitForMultipleObjects(&handles[..if held { 1 } else { 2 }], false, 100) };
+            let patience = match held_back {
+                Some(_) => interval.saturating_sub(last_sent.elapsed()).as_millis().clamp(1, 100) as u32,
+                None => 100,
+            };
+            let waited = unsafe { WaitForMultipleObjects(&handles[..if held { 1 } else { 2 }], false, patience) };
             if waited == WAIT_FAILED {
                 // Not to become a loop that eats a core in silence.
                 if !std::mem::replace(&mut wait_failed, true) {
@@ -399,6 +410,16 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         // Encode when there is a new picture, or when the client needs an answer (a keyframe,
         // a loss) and the desktop is still: then the last picture is encoded again.
         let asked = control.keyframe.load(Ordering::Relaxed) || control.lost.lock().unwrap().is_some();
+        // (Counted from when a frame was taken up, not from when it had been sent: encoding
+        // and sending take a few milliseconds that the next frame doesn't wait for.)
+        let turn = Instant::now();
+        let stamp = match stamp.or(held_back.take()) {
+            Some(us) if !asked && turn.duration_since(last_sent) < interval.mul_f32(0.6) => {
+                held_back = Some(us);
+                None
+            }
+            other => other,
+        };
         let capture_us = match stamp {
             Some(us) => us,
             None if asked => {
@@ -428,6 +449,7 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
             Sent::Recovery => link.send_recovery_frame(made.data, capture_us),
             Sent::Delta => link.send_frame(made.data, false, capture_us),
         };
+        last_sent = turn;
         if !delivered {
             break;
         }
