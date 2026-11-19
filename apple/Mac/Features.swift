@@ -36,7 +36,7 @@ enum Features {
     /// The computer's own login screen when nobody is logged in, and "Fill Password with Touch ID".
     static let remoteLogin = false
     /// Mirroring one of the computer's monitors.
-    static let mirrorMonitor = false
+    static let mirrorMonitor = true
     /// "Add a Second Display…".
     static let secondDisplay = false
     /// Which of this Mac's displays to use ("Display: This Mac's display").

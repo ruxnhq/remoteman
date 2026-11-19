@@ -131,6 +131,7 @@ struct GettingInScreen: View {
         case .extend: return "This \(device) joins as an extra display"
         case .main: return "This \(device) becomes the main display"
         case .only: return "This \(device) becomes the only display"
+        case .mirror: return "This \(device) shows the computer's main monitor"
         }
     }
 

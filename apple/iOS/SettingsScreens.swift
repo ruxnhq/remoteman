@@ -52,7 +52,7 @@ struct ComputerSettingsScreen: View {
                             header: "This \(device)'s display on the computer",
                             footer: "You can switch during a session from \(device == "iPad" ? "Display" : "the controls")."
                         ) {
-                            ForEach(Array(ViewerSession.Placement.allCases.enumerated()), id: \.element) { i, p in
+                            ForEach(Array(ViewerSession.Placement.own.enumerated()), id: \.element) { i, p in
                                 Button {
                                     var u = c
                                     u.placementChoice = p

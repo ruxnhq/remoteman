@@ -33,6 +33,8 @@ enum Features {
     static let cameraAsk = false
     /// A display on an external monitor, and mirroring one of the computer's monitors.
     static let moreDisplays = false
+    /// The computer's main monitor as it is ("mirror"), on a computer that lists it.
+    static let mirror = true
     /// The finger as a trackpad, and the pointer options that go with it.
     static let trackpadMode = true
     static let pointerOptions = true

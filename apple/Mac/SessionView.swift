@@ -556,7 +556,7 @@ enum SessionMenus {
             menu.header("This display is \(name)'s")
         }
         let current = model.store[computer.id]?.place ?? computer.place
-        for p in ViewerSession.Placement.allCases {
+        for p in ViewerSession.Placement.own {
             menu.addItem(
                 ActionItem(p.title, hint: PlacementCopy.hint(p), checked: p == current, width: width) {
                     if p != current { model.reconnect(placement: p) }
@@ -566,10 +566,14 @@ enum SessionMenus {
         menu.addItem(
             ActionItem("Add a Second Display…", hint: "External monitor", enabled: Features.secondDisplay, width: width) {})
         menu.addItem(.separator())
-        menu.header("Or mirror one of \(name)'s monitors")
-        if !Features.mirrorMonitor {
-            menu.addItem(ActionItem("Its monitors can't be listed yet", enabled: false, width: width))
-        }
+        menu.header("Or mirror \(name)'s monitor")
+        menu.addItem(
+            ActionItem(
+                "Its Main Monitor", hint: session.has("mirror") ? "at its own size" : "\(name) can't do this yet", checked: current == .mirror,
+                enabled: Features.mirrorMonitor && session.has("mirror"), width: width
+            ) {
+                if current != .mirror { model.reconnect(placement: .mirror) }
+            })
         menu.caption("A mirrored monitor stays on at the computer and shows your desktop there.", width: width)
         menu.addItem(.separator())
         let full = ActionItem(model.fullScreen ? "Exit Full Screen" : "Enter Full Screen", width: width) { model.toggleFullScreen() }
@@ -734,6 +738,7 @@ struct ConnectingView: View {
         case .extend: return "This Mac joins as an extra display, beside \(name)'s own screens."
         case .main: return "This Mac joins as the main display, and \(name)'s own screens stay on."
         case .only: return "This Mac joins as the only display, so \(name)'s own screens stay off while you're connected."
+        case .mirror: return "This Mac shows \(name)'s main monitor as it is."
         }
     }
 

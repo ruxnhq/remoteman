@@ -79,6 +79,7 @@ extension ViewerSession.Placement {
         case .extend: return "Extra Display"
         case .main: return "Main Display"
         case .only: return "Only Display"
+        case .mirror: return "Mirror Its Main Monitor"
         }
     }
 }

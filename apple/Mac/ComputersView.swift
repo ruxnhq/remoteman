@@ -295,6 +295,7 @@ enum PlacementCopy {
         case .extend: return "Beside \(name)'s own screens, which stay on. You can change this during a session."
         case .main: return "As \(name)'s main screen; its own screens stay on. You can change this during a session."
         case .only: return "\(name)'s own screens are switched off while you're connected. You can change this during a session."
+        case .mirror: return "\(name)'s main monitor is shown as it is, and stays on there. You can change this during a session."
         }
     }
     static func hint(_ p: ViewerSession.Placement) -> String {
@@ -302,6 +303,7 @@ enum PlacementCopy {
         case .extend: return "Beside its own screens"
         case .main: return "Its own screens stay on"
         case .only: return "Its own screens are off"
+        case .mirror: return "Its main monitor, as it is"
         }
     }
 }
@@ -315,7 +317,7 @@ struct PlacementPicker: View {
             "This display joins as",
             selection: Binding(get: { computer.place }, set: { p in model.store.update(computer.id) { $0.place = p } })
         ) {
-            ForEach(ViewerSession.Placement.allCases) { Text($0.title).tag($0) }
+            ForEach(ViewerSession.Placement.own) { Text($0.title).tag($0) }
         }
         .labelsHidden().fixedSize()
     }

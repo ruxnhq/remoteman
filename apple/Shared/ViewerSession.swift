@@ -26,12 +26,18 @@ final class ViewerSession: ObservableObject {
     /// Where this device's display sits among the host's own.
     enum Placement: String, CaseIterable, Identifiable {
         case extend, main, only
+        /// Not a display of this device's at all: the computer's main monitor as it is, at its
+        /// own size (a computer that lists "mirror").
+        case mirror
+        /// The three ways this device's display joins the computer's own.
+        static let own: [Placement] = [.extend, .main, .only]
         var id: String { rawValue }
         var label: String {
             switch self {
             case .extend: return "Extra display"
             case .main: return "Main display"
             case .only: return "Only display"
+            case .mirror: return "Mirror its main monitor"
             }
         }
         /// The choice remembered for a computer (extend when none was made).

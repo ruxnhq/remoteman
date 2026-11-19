@@ -255,7 +255,8 @@ struct SessionScreen: View {
             VStack(spacing: 0) {
                 Menu {
                     Picker("This iPhone on \(name)", selection: placement) {
-                        ForEach(ViewerSession.Placement.allCases) { Text($0.label).tag($0) }
+                        ForEach(ViewerSession.Placement.own) { Text($0.label).tag($0) }
+                        if session.has("mirror") { Text(ViewerSession.Placement.mirror.label).tag(ViewerSession.Placement.mirror) }
                     }
                 } label: {
                     Row(title: "Display") { RowValue(text: placement.wrappedValue.label, chevron: true) }
@@ -536,7 +537,7 @@ struct DisplayMenu: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             header("This iPad on \(model.current?.name ?? "the computer")")
-            ForEach(ViewerSession.Placement.allCases) { p in
+            ForEach(ViewerSession.Placement.own) { p in
                 item(p.label, Self.notes[p] ?? "", checked: model.current?.placementChoice == p) { choose(p) }
             }
             Divider().padding(.vertical, 6)
@@ -549,8 +550,11 @@ struct DisplayMenu: View {
             header("More displays")
             item("Add a display on the external monitor", "A monitor connected to this iPad", checked: false) {}
                 .available(Features.moreDisplays)
-            item("Mirror one of the computer's monitors", "Show a monitor the computer already has", checked: false) {}
-                .available(Features.moreDisplays)
+            item(
+                "Mirror the computer's main monitor", session.has("mirror") ? "As it is, at its own size; it stays on there" : "This computer can't do this yet",
+                checked: model.current?.placementChoice == .mirror
+            ) { choose(.mirror) }
+            .available(Features.mirror && session.has("mirror"))
         }
         .padding(8).frame(width: 440)
         .environment(\.colorScheme, .dark)
