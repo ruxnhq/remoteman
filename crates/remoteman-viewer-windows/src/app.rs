@@ -686,6 +686,15 @@ impl App {
             self.dirty = true;
         }
         self.arrivals();
+        // A decoder that takes frames and gives no pictures gets a keyframe.
+        if let Some(s) = &self.session {
+            if s.shared.stuck.swap(false, Ordering::Relaxed) {
+                say!("the decoder was given frames and gave no picture: asking the computer for a keyframe");
+                if let Some(client) = &s.client {
+                    client.send_message(Message::Keyframe);
+                }
+            }
+        }
         // The bar says what the stream is, which may have changed.
         let format = self.format();
         if format != self.shown_format {

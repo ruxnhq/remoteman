@@ -97,6 +97,9 @@ pub struct Shared {
     pub folder: Mutex<PathBuf>,
     /// Plays the computer's sound, while that is on.
     pub sound: Mutex<Option<crate::sound::Player>>,
+    /// The decoder was given frames and gave no picture: the window asks the computer for a
+    /// keyframe (nothing was lost on the way, so nothing else will).
+    pub stuck: AtomicBool,
     /// Number the clipboard blobs and the files sent.
     pub copy_seq: AtomicU32,
     pub file_seq: AtomicU32,
@@ -141,6 +144,7 @@ impl Shared {
             received: Mutex::default(),
             folder: Mutex::default(),
             sound: Mutex::default(),
+            stuck: AtomicBool::default(),
             copy_seq: AtomicU32::default(),
             file_seq: AtomicU32::default(),
             decoded: AtomicU32::default(),
@@ -309,6 +313,12 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
     // that doesn't need it.
     let mut sampled = std::env::var("REMOTEMAN_SAMPLE").as_deref() != Ok("0");
     let mut first = true;
+    // Frames given to the decoder since its last picture, and when the first of them was; how
+    // many pictures in a row it gave before that; and when a keyframe was last asked for on
+    // its account. As the Linux viewer's.
+    let mut barren: (u32, Option<std::time::Instant>) = (0, None);
+    let mut in_step = 0u32;
+    let mut asked: Option<std::time::Instant> = None;
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Stream(i) => {
@@ -328,7 +338,35 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
                     *d = Decoder::new(gpu, i.mode.codec, false)?;
                     decoded = d.decode(&data, age);
                 }
-                let Some(mut picture) = decoded? else { continue };
+                // Once pictures have come, a frame the decoder refuses is not the end: it is
+                // counted with the frames that gave nothing, and a keyframe is asked for.
+                let decoded = match decoded {
+                    Err(e) if !first => {
+                        if barren.0 == 0 {
+                            say!("decoding: a frame was refused ({e:#})");
+                        }
+                        None
+                    }
+                    other => other?,
+                };
+                let Some(mut picture) = decoded else {
+                    barren = (barren.0 + 1, barren.1.or(Some(t)));
+                    // A decoder that has been giving a picture for every frame and now gives
+                    // none for two has refused a frame (seen with a Mac's stream every 2048
+                    // frames). Ask at once; one that never was in step gets half a second.
+                    let refused = in_step >= 10 && barren.0 >= 2;
+                    let silent = barren.0 >= 3 && barren.1.is_some_and(|since| since.elapsed() > Duration::from_millis(500));
+                    if (refused || silent) && asked.is_none_or(|a| a.elapsed() > Duration::from_millis(250)) {
+                        s.stuck.store(true, Ordering::Relaxed);
+                        s.scene.wake_window();
+                        asked = Some(std::time::Instant::now());
+                        barren = (0, None);
+                        in_step = 0;
+                    }
+                    continue;
+                };
+                barren = (0, None);
+                in_step = in_step.saturating_add(1);
                 if first {
                     first = false;
                     *s.decoder.lock().unwrap() = format!("{} {}x{}", d.name, picture.width, picture.height);
