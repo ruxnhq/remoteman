@@ -5,7 +5,7 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
 
-use crate::{BlobEvent, BlobSender, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, StreamInfo, TouchPhase};
+use crate::{BlobEvent, BlobSender, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, Side, StreamInfo, TouchPhase};
 
 /// The app's callbacks. They are called from the core's threads, one at a time, with `ctx`.
 #[repr(C)]
@@ -427,14 +427,21 @@ input!(/// Which display the pointer events after this are on: 0 the first, 1 th
 /// or give it back (`on` 0; the size is ignored). Only for hosts with the feature `displays`.
 /// Its picture comes to `on_stream2` and `on_frame2`; if the host can't make it, or takes it
 /// away, `on_message` gets `{"t":"display","index":1,"on":false,"message":"..."}`. Asking
-/// again while it is on changes its size.
+/// again while it is on changes its size or its side. `side`: which side of the host's other
+/// displays it sits on, 0 right, 1 left, 2 above, 3 below.
 ///
 /// # Safety
 /// `client` must come from `rm_client_connect`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rm_client_second_display(client: *const Client, on: i32, width: u32, height: u32, scale: f32, refresh: u32) {
+pub unsafe extern "C" fn rm_client_second_display(client: *const Client, on: i32, width: u32, height: u32, scale: f32, refresh: u32, side: u8) {
+    let side = match side {
+        1 => Side::Left,
+        2 => Side::Above,
+        3 => Side::Below,
+        _ => Side::Right,
+    };
     let display = (on != 0).then_some(remoteman_proto::control::Display { width, height, scale, refresh, placement: Default::default() });
-    unsafe { &*client }.send_message(Message::Display { index: 1, on: on != 0, display, message: String::new() });
+    unsafe { &*client }.send_message(Message::Display { index: 1, on: on != 0, display, side, message: String::new() });
 }
 
 /// Text typed through an on-screen keyboard or input method (UTF-8).
@@ -743,7 +750,7 @@ pub unsafe extern "C" fn rm_host_second_stop(host: *const Host, message: *const 
     match unsafe { &*host }.link() {
         Some(l) => {
             let message = if message.is_null() { String::new() } else { unsafe { text(message) } };
-            l.send_message(Message::Display { index: 1, on: false, display: None, message });
+            l.send_message(Message::Display { index: 1, on: false, display: None, side: Side::Right, message });
             1
         }
         None => 0,

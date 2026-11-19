@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
-use remoteman_proto::control::Placement;
+use remoteman_proto::control::{Placement, Side};
 use remoteman_proto::input::{Button, Event, TouchPhase};
 use remoteman_proto::keys::hid_to_linux;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
@@ -172,6 +172,16 @@ impl VirtualDisplay {
     /// display goes, the set changes back and Mutter returns to the layout it has stored for
     /// the computer's own screens, without being asked, even if this program has died.
     pub fn place(&self, placement: Placement) -> impl Future<Output = Result<()>> + Send + 'static {
+        self.place_at(placement, Side::Right)
+    }
+
+    /// The same for a display that sits beside the others ([`Placement::Extend`]), on the
+    /// side of them the client names. The others keep their places among themselves.
+    pub fn place_on(&self, side: Side) -> impl Future<Output = Result<()>> + Send + 'static {
+        self.place_at(Placement::Extend, side)
+    }
+
+    fn place_at(&self, placement: Placement, side: Side) -> impl Future<Output = Result<()>> + Send + 'static {
         let (conn, before, mirrored) = (self.conn.clone(), self.before.clone(), self.mirrored.is_some());
         async move {
             // Nothing of the computer's own to put back or to place this one among, or no
@@ -181,11 +191,11 @@ impl VirtualDisplay {
             }
             // The layout may change under us between reading it and applying ours (the serial
             // goes stale), so a failure gets one more go.
-            match place_once(&conn, &before, placement).await {
+            match place_once(&conn, &before, placement, side).await {
                 Ok(()) => Ok(()),
                 Err(_) => {
                     tokio::time::sleep(Duration::from_millis(300)).await;
-                    place_once(&conn, &before, placement).await
+                    place_once(&conn, &before, placement, side).await
                 }
             }
         }
@@ -342,19 +352,19 @@ fn allowed_scale(scale: f64, allowed: &[f64]) -> f64 {
 }
 
 /// One go at [`VirtualDisplay::place`].
-async fn place_once(conn: &Connection, before: &Before, placement: Placement) -> Result<()> {
+async fn place_once(conn: &Connection, before: &Before, placement: Placement, side: Side) -> Result<()> {
     // The monitor appears a moment after the stream's format is agreed, and joins the layout
     // a moment after that.
     let mut tries = 0;
-    let (state, ours, ours_scale, ours_mode) = loop {
+    let (state, ours, ours_scale, ours_mode, ours_size) = loop {
         let state = display_state(conn).await?;
         let found = state.1.iter().find(|m| m.0.0.starts_with("Meta-") && !before.connectors.contains(&m.0.0)).and_then(|m| {
             let mode = m.1.iter().find(|mode| mode.6.get("is-current").and_then(|v| bool::try_from(v).ok()).unwrap_or(false))?;
             let scale = state.2.iter().find(|l| l.5.iter().any(|id| id.0 == m.0.0))?.2;
-            Some((m.0.0.clone(), allowed_scale(scale, &mode.5), mode.0.clone()))
+            Some((m.0.0.clone(), allowed_scale(scale, &mode.5), mode.0.clone(), (mode.1, mode.2)))
         });
         match found {
-            Some((c, scale, mode)) => break (state, c, scale, mode),
+            Some((c, scale, mode, size)) => break (state, c, scale, mode, size),
             None if tries < 50 => {
                 tries += 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -367,7 +377,9 @@ async fn place_once(conn: &Connection, before: &Before, placement: Placement) ->
     // out in physical pixels (layout mode 2).
     let physical = globals.get("layout-mode").and_then(|v| u32::try_from(v).ok()) == Some(2);
     let mut layout = Vec::new();
-    let mut right = None::<(i32, i32)>;
+    // The rest's edges, each with where its outermost display starts along it:
+    // (left edge, that display's y), (right edge, y), (top edge, x), (bottom edge, x).
+    let mut edges = None::<[(i32, i32); 4]>;
     if placement != Placement::Only {
         for was in &before.layout {
             // Unplugged since? Then it isn't ours to place.
@@ -391,16 +403,42 @@ async fn place_once(conn: &Connection, before: &Before, placement: Placement) ->
                 })
                 .collect();
             let turned = matches!(was.transform, 1 | 3 | 5 | 7);
-            let width = if turned { was.size.1 } else { was.size.0 };
-            let width = if physical { width } else { (width as f64 / was.scale).round() as i32 };
-            if right.is_none_or(|r| was.x + width > r.0) {
-                right = Some((was.x + width, was.y));
+            let (width, height) = if turned { (was.size.1, was.size.0) } else { was.size };
+            let units = |pixels: i32| if physical { pixels } else { (pixels as f64 / was.scale).round() as i32 };
+            let (width, height) = (units(width), units(height));
+            let e = edges.get_or_insert([(was.x, was.y), (was.x + width, was.y), (was.y, was.x), (was.y + height, was.x)]);
+            if was.x < e[0].0 {
+                e[0] = (was.x, was.y);
+            }
+            if was.x + width > e[1].0 {
+                e[1] = (was.x + width, was.y);
+            }
+            if was.y < e[2].0 {
+                e[2] = (was.y, was.x);
+            }
+            if was.y + height > e[3].0 {
+                e[3] = (was.y + height, was.x);
             }
             layout.push((was.x, was.y, was.scale, was.transform, was.primary && placement == Placement::Extend, outputs));
         }
     }
-    // Ours goes to the right of the rest, level with its neighbour.
-    let (x, y) = right.unwrap_or((0, 0));
+    // Ours goes beside the rest on the side asked for (the right, unless the client said),
+    // level with its neighbour.
+    let units = |pixels: i32| if physical { pixels } else { (pixels as f64 / ours_scale).round() as i32 };
+    let (x, y) = match (edges, side) {
+        (None, _) => (0, 0),
+        (Some(e), Side::Right) => e[1],
+        (Some(e), Side::Left) => (e[0].0 - units(ours_size.0), e[0].1),
+        (Some(e), Side::Above) => (e[2].1, e[2].0 - units(ours_size.1)),
+        (Some(e), Side::Below) => (e[3].1, e[3].0),
+    };
+    // Mutter wants the whole layout to start at 0,0: with ours to the left or above, the
+    // rest moves over by its size.
+    let (shift_x, shift_y) = (layout.iter().map(|l| l.0).chain([x]).min().unwrap_or(0), layout.iter().map(|l| l.1).chain([y]).min().unwrap_or(0));
+    for l in &mut layout {
+        (l.0, l.1) = (l.0 - shift_x, l.1 - shift_y);
+    }
+    let (x, y) = (x - shift_x, y - shift_y);
     let main = placement != Placement::Extend || !layout.iter().any(|l| l.4);
     layout.push((x, y, ours_scale, 0u32, main, vec![(ours, ours_mode, HashMap::<String, Value>::new())]));
     let config = Proxy::new(conn, DISPLAYS, "/org/gnome/Mutter/DisplayConfig", DISPLAYS).await?;

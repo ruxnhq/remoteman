@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-pub use remoteman_proto::control::{Chroma, Codec, Display, Mode, Placement};
+pub use remoteman_proto::control::{Chroma, Codec, Display, Mode, Placement, Side};
 pub use remoteman_proto::input::{Button, Event, TouchPhase};
 pub use remoteman_proto::keys;
 pub use remoteman_proto::{PORT, PROTO};

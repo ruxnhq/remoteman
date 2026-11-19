@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use gtk::glib;
-use remoteman_core::{Chroma, Mode, Placement};
+use remoteman_core::{Chroma, Mode, Placement, Side};
 
 use crate::PLACEMENTS;
 
@@ -68,6 +68,8 @@ pub struct Computer {
     pub media: Media,
     /// Only into a session that is already running there: never its login screen.
     pub attach_only: bool,
+    /// Which side of the computer's other displays a second display here is put on.
+    pub second_side: Side,
     /// The hardware addresses of its network cards, as it last advertised them on this
     /// network (comma-separated; empty: never seen): what waking it needs.
     pub cards: String,
@@ -259,7 +261,7 @@ impl Store {
             Ok(text) => {
                 for line in text.lines() {
                     if line == "[computer]" {
-                        store.computers.push(Computer { name: String::new(), address: String::new(), os: String::new(), paired: 0, used: 0, placement: Placement::Extend, quality: Quality::Automatic, media: Media::default(), cards: String::new(), attach_only: false });
+                        store.computers.push(Computer { name: String::new(), address: String::new(), os: String::new(), paired: 0, used: 0, placement: Placement::Extend, quality: Quality::Automatic, media: Media::default(), cards: String::new(), attach_only: false, second_side: Side::Right });
                         continue;
                     }
                     let (Some(c), Some((key, value))) = (store.computers.last_mut(), line.split_once('=')) else { continue };
@@ -273,6 +275,7 @@ impl Store {
                         "quality" => c.quality = Quality::from_key(value),
                         "cards" => c.cards = value.to_owned(),
                         "way-in" => c.attach_only = value == "attach",
+                        "second-side" => c.second_side = SIDES.iter().find(|(_, key)| *key == value).map_or(Side::Right, |(side, _)| *side),
                         other => {
                             if let Some(field) = c.media.field(other) {
                                 *field = value == "yes";
@@ -289,7 +292,7 @@ impl Store {
                 let last = last.trim();
                 if !last.is_empty() && store.known(last).exists() {
                     let paired = std::fs::metadata(store.known(last)).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64);
-                    store.computers.push(Computer { name: host_part(last).to_owned(), address: last.to_owned(), os: String::new(), paired, used: paired, placement: store.settings.placement, quality: store.settings.quality, media: store.settings.media, cards: String::new(), attach_only: false });
+                    store.computers.push(Computer { name: host_part(last).to_owned(), address: last.to_owned(), os: String::new(), paired, used: paired, placement: store.settings.placement, quality: store.settings.quality, media: store.settings.media, cards: String::new(), attach_only: false, second_side: Side::Right });
                 }
             }
         }
@@ -340,7 +343,7 @@ impl Store {
             }
             None => {
                 let name = if host_name.is_empty() { host_part(address) } else { host_name };
-                self.computers.push(Computer { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: self.settings.quality, media: self.settings.media, cards: String::new(), attach_only: false });
+                self.computers.push(Computer { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: self.settings.quality, media: self.settings.media, cards: String::new(), attach_only: false, second_side: Side::Right });
             }
         }
         self.sort();
@@ -394,7 +397,7 @@ impl Store {
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         for c in &self.computers {
             out += &format!(
-                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\ncards={}\nway-in={}\n{}",
+                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\ncards={}\nway-in={}\nsecond-side={}\n{}",
                 clean(&c.name),
                 clean(&c.address),
                 clean(&c.os),
@@ -404,6 +407,7 @@ impl Store {
                 c.quality.key(),
                 clean(&c.cards),
                 if c.attach_only { "attach" } else { "any" },
+                SIDES.iter().find(|(side, _)| *side == c.second_side).map_or("right", |(_, key)| key),
                 c.media.lines()
             );
         }
@@ -476,6 +480,10 @@ pub fn when(unix: i64) -> String {
     }
 }
 
+/// The sides a second display can sit on, in the order they are offered, with their names in
+/// the file.
+pub const SIDES: [(Side, &str); 4] = [(Side::Right, "right"), (Side::Left, "left"), (Side::Above, "above"), (Side::Below, "below")];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,11 +518,12 @@ mod tests {
         store.save_settings();
         // A computer paired from here on starts with the defaults of that moment.
         store.used("desk:7791", "desk", "linux");
-        store.update("desk:7791", |c| c.media.camera = true);
+        store.update("desk:7791", |c| (c.media.camera, c.second_side) = (true, Side::Above));
         let again = Store::load(&dir);
         assert_eq!(again.settings.media, store.settings.media);
         assert_eq!(again.settings.input, store.settings.input);
         assert_eq!(again.find("desk:7791").unwrap().media, Media { sound: true, microphone: false, camera: true, clipboard: true });
+        assert_eq!(again.find("desk:7791").unwrap().second_side, Side::Above);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

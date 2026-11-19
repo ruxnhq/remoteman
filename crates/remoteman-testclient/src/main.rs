@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use remoteman_core::media::{BLOB_CLIPBOARD, BLOB_FILE, ClipboardHeader, FileHeader};
-use remoteman_core::{BlobEvent, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, StreamInfo, TouchPhase};
+use remoteman_core::{BlobEvent, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, Side, StreamInfo, TouchPhase};
 
 fn pct(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() { 0.0 } else { sorted[((sorted.len() - 1) as f64 * p) as usize] }
@@ -320,10 +320,18 @@ fn main() -> Result<()> {
                 // and which display the pointer steps that follow are on.
                 "display2" => {
                     let message = match rest.trim() {
-                        "off" => Message::Display { index: 1, on: false, display: None, message: String::new() },
-                        size => {
-                            let (w, h) = size.split_once('x').with_context(|| format!("line {}: display2 WxH or off", i + 1))?;
-                            Message::Display { index: 1, on: true, display: Some(Display { width: w.parse()?, height: h.parse()?, scale: 1.0, refresh: 60, placement: Placement::Extend }), message: String::new() }
+                        "off" => Message::Display { index: 1, on: false, display: None, side: Side::Right, message: String::new() },
+                        asked => {
+                            // `display2 WxH left`: on that side of everything else.
+                            let (size, side) = asked.split_once(' ').unwrap_or((asked, "right"));
+                            let side = match side.trim() {
+                                "left" => Side::Left,
+                                "above" => Side::Above,
+                                "below" => Side::Below,
+                                _ => Side::Right,
+                            };
+                            let (w, h) = size.split_once('x').with_context(|| format!("line {}: display2 WxH [left|above|below] or off", i + 1))?;
+                            Message::Display { index: 1, on: true, display: Some(Display { width: w.parse()?, height: h.parse()?, scale: 1.0, refresh: 60, placement: Placement::Extend }), side, message: String::new() }
                         }
                     };
                     client.send_message(message);
