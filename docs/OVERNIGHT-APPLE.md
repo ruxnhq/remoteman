@@ -61,9 +61,12 @@ own so that it can't collide with the main session's edits to `docs/PLAN.md`.
   ordinary one `EnableLTR` and `ReferenceBufferCount` are refused (-12900). Low-latency costs
   5.7 → 9.4 ms at 1600×1000 and 8.8 → 15.0 ms at 2560×1440, on every frame, to save a 48 KB
   keyframe on the rare loss. Not built. It would be worth it only on a link that loses often.
-- **A new virtual display sometimes plays the animated wallpaper**: the whole 3840×2160 picture
-  changes 30 times a second, 180 KB a frame, 38 Mbit/s of the 40 allowed. Seen in two of my runs.
-  Not handled: the host could set a still wallpaper on its display.
+- **A locked Mac shows a device the lock screen's moving wallpaper**: the whole picture changes
+  30 times a second, 180 KB a frame at 3840×2160, 38 Mbit/s of the 40 allowed, and windows and
+  input are under it. First taken for an animated wallpaper on new displays; it was the Mac's idle
+  lock (locked at 23:49, and during two of my earlier runs). The everyday host unlocks for the
+  owner's paired devices; a test host started with `--no-unlock` does not, so the Windows viewer's
+  first sessions (00:00) saw only that wallpaper and its clicks went to the lock screen.
 
 ## New
 
