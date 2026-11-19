@@ -89,7 +89,7 @@ pub struct Pending {
 #[derive(Clone, Debug, PartialEq)]
 pub enum State {
     /// The host runs.
-    Sharing { fingerprint: String, port: u16, pairing: bool, clipboard: bool, files: bool, client: Option<Client>, devices: Vec<Device>, sent: Sent, pending: Option<Pending> },
+    Sharing { fingerprint: String, port: u16, pairing: bool, clipboard: bool, files: bool, unlock: bool, client: Option<Client>, devices: Vec<Device>, sent: Sent, pending: Option<Pending> },
     /// The host doesn't run because it was stopped (or never started).
     Paused,
     /// The host doesn't run because it failed; why, as far as systemd says.
@@ -124,6 +124,7 @@ pub fn state() -> State {
             pairing: status["pairing"].as_bool().unwrap_or(false),
             clipboard: status["clipboard"].as_bool().unwrap_or(false),
             files: status["files"].as_bool().unwrap_or(false),
+            unlock: status["unlock"].as_bool().unwrap_or(false),
             client,
             devices,
             pending: status["pending"].as_object().map(|_| Pending { name: text(&status["pending"], "name"), code: text(&status["pending"], "code") }),

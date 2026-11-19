@@ -31,7 +31,7 @@ else
     install -Dm644 "$root/packaging/linux/$id.desktop" "$apps/$id.desktop"
     sed -i "s|^Exec=remoteman-tray|Exec=$prefix/bin/remoteman-tray|" "$apps/$id.desktop"
     install -Dm644 "$root/packaging/systemd/user/remoteman-host.service" "$units/remoteman-host.service"
-    sed -i "s|^ExecStart=/usr/lib/remoteman/remoteman-agent|ExecStart=$prefix/lib/remoteman/remoteman-agent|" "$units/remoteman-host.service"
+    sed -i "s|=/usr/lib/remoteman/remoteman-agent|=$prefix/lib/remoteman/remoteman-agent|" "$units/remoteman-host.service"
 fi
 systemctl --user daemon-reload
 gtk4-update-icon-cache -q -t -f "$icons" 2>/dev/null; update-desktop-database -q "$apps" 2>/dev/null

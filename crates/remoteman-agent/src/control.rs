@@ -36,19 +36,21 @@ pub fn default_path(port: u16) -> PathBuf {
 pub struct Saved {
     pub files: bool,
     pub clipboard: bool,
+    /// Paired devices may unlock this computer.
+    pub unlock: bool,
 }
 
 impl Saved {
     pub fn load(state: &Path) -> Self {
         let text = std::fs::read_to_string(state.join("host-settings")).unwrap_or_default();
         let on = |key: &str| text.lines().any(|l| l.trim() == format!("{key}=on"));
-        Self { files: on("files"), clipboard: on("clipboard") }
+        Self { files: on("files"), clipboard: on("clipboard"), unlock: on("unlock") }
     }
 
     fn save(&self, state: &Path) -> std::io::Result<()> {
         let word = |on: bool| if on { "on" } else { "off" };
         std::fs::create_dir_all(state)?;
-        std::fs::write(state.join("host-settings"), format!("files={}\nclipboard={}\n", word(self.files), word(self.clipboard)))
+        std::fs::write(state.join("host-settings"), format!("files={}\nclipboard={}\nunlock={}\n", word(self.files), word(self.clipboard), word(self.unlock)))
     }
 }
 
@@ -161,6 +163,7 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "pairing": host.pairing(),
                 "clipboard": allowed.clipboard.load(Ordering::Relaxed),
                 "files": allowed.files.load(Ordering::Relaxed),
+                "unlock": allowed.unlock.load(Ordering::Relaxed),
                 "client": *allowed.now.lock().unwrap(),
                 "pending": host.pending(),
                 "sent": sent,
@@ -185,10 +188,15 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
             Ok(false) => "no such device\n".into(),
             Err(e) => format!("the list couldn't be saved: {e:#}\n"),
         },
-        (Some("allow"), Some(what @ ("clipboard" | "files")), Some(word @ ("on" | "off"))) => {
+        (Some("allow"), Some(what @ ("clipboard" | "files" | "unlock")), Some(word @ ("on" | "off"))) => {
             let on = word == "on";
-            if what == "clipboard" { &allowed.clipboard } else { &allowed.files }.store(on, Ordering::Relaxed);
-            let saved = Saved { files: allowed.files.load(Ordering::Relaxed), clipboard: allowed.clipboard.load(Ordering::Relaxed) };
+            match what {
+                "clipboard" => &allowed.clipboard,
+                "files" => &allowed.files,
+                _ => &allowed.unlock,
+            }
+            .store(on, Ordering::Relaxed);
+            let saved = Saved { files: allowed.files.load(Ordering::Relaxed), clipboard: allowed.clipboard.load(Ordering::Relaxed), unlock: allowed.unlock.load(Ordering::Relaxed) };
             let kept = saved.save(state);
             // The next client hears it in the hello; the connected one is told now. A
             // clipboard being shared stops as if the client had switched it off; a file
@@ -202,6 +210,6 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
-        _ => "status | pair on|off|accept|decline | drop | revoke FINGERPRINT | allow clipboard|files on|off | send PATH\n".into(),
+        _ => "status | pair on|off|accept|decline | drop | revoke FINGERPRINT | allow clipboard|files|unlock on|off | send PATH\n".into(),
     }
 }

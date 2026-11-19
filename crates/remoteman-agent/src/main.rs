@@ -74,6 +74,11 @@ fn main() -> Result<()> {
             }
             "--socket" => socket = Some(value()?.into()),
             // Where the host's owner asks how things stand and changes them (see control.rs).
+            // Not a host at all: lock the session if a host left it unlocked for a device.
+            "--lock-if-left-unlocked" => {
+                session::lock_if_left_unlocked();
+                return Ok(());
+            }
             "--control" => control_at = Some(value()?.into()),
             // Tell the local network this host is here (or don't), whatever it listens on.
             "--advertise" => advertise = Some(true),
@@ -89,6 +94,7 @@ fn main() -> Result<()> {
     let saved = control::Saved::load(&state);
     allowed.files.store(allow_files || saved.files, std::sync::atomic::Ordering::Relaxed);
     allowed.clipboard.store(allow_clipboard || saved.clipboard, std::sync::atomic::Ordering::Relaxed);
+    allowed.unlock.store(saved.unlock, std::sync::atomic::Ordering::Relaxed);
     let features = control::features(&allowed);
     if daemon {
         // The system service's socket if it is there, else one run by hand as this user.

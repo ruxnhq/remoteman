@@ -68,6 +68,9 @@ pub struct Allowed {
     pub files: Arc<std::sync::atomic::AtomicBool>,
     /// Sharing the clipboard both ways: a device could otherwise read whatever is copied here.
     pub clipboard: Arc<std::sync::atomic::AtomicBool>,
+    /// A paired device gets in while this computer is locked: the session is unlocked for
+    /// it, with no password, and locked again when it leaves.
+    pub unlock: Arc<std::sync::atomic::AtomicBool>,
     /// The client being served, for whoever asks how things stand (the control socket).
     pub now: Arc<std::sync::Mutex<Option<Now>>>,
     /// What the device said became of the last file sent to it: how many have been answered,
@@ -122,6 +125,47 @@ pub struct Agent {
     /// Counts what was copied here and sent, for the client to tell new from stale.
     copies: Arc<AtomicU32>,
     live: Option<Live>,
+    /// The session was locked when this client came and was unlocked for it: this
+    /// computer's own screens stay off while it is here, and the session is locked again
+    /// when it goes.
+    unlocked_for_client: bool,
+}
+
+/// Whether the desktop this host serves is this user's own session, the one logind can lock
+/// and unlock: it is if the session bus is the user's own. A host in a desktop made for a
+/// test (a bus of its own) has nothing to do with that session's lock, and never touches it.
+fn own_desktop() -> bool {
+    let (Some(bus), Some(runtime)) = (std::env::var_os("DBUS_SESSION_BUS_ADDRESS"), std::env::var_os("XDG_RUNTIME_DIR")) else { return false };
+    bus.to_string_lossy().split(',').next().is_some_and(|first| first == format!("unix:path={}/bus", runtime.to_string_lossy()))
+}
+
+/// A note, in this user's runtime folder, that the session is unlocked for a device and
+/// has to be locked again.
+pub fn unlocked_note() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("remoteman-unlocked-for-a-device")
+}
+
+/// Lock the session if a host that unlocked it for a device went without locking it again
+/// (it was killed, or it crashed). Run when the host's service stops, however it stops.
+pub fn lock_if_left_unlocked() {
+    if !unlocked_note().exists() {
+        return;
+    }
+    let locked = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(anyhow::Error::from).and_then(|rt| rt.block_on(remoteman_desktop::logind::set_locked(true)));
+    match locked {
+        Ok(()) => {
+            let _ = std::fs::remove_file(unlocked_note());
+            eprintln!("remoteman: the host went while this computer was unlocked for a device: it is locked again");
+        }
+        Err(e) => eprintln!("remoteman: THIS COMPUTER WAS LEFT UNLOCKED FOR A DEVICE AND COULD NOT BE LOCKED: {e:#}"),
+    }
+}
+
+impl Drop for Agent {
+    /// The host is stopping with a device still here.
+    fn drop(&mut self) {
+        self.relock();
+    }
 }
 
 /// The lowest and highest bitrate a client may ask for, in bits a second.
@@ -141,7 +185,7 @@ impl Agent {
         if login_screen.is_some() {
             tracing::info!("this is a login screen's session: no files, no clipboard, and it ends when its client goes");
         }
-        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None })
+        Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None, unlocked_for_client: false })
     }
 
     /// What the picture is encoded at when the client's ceiling is `ceiling`.
@@ -151,6 +195,15 @@ impl Agent {
 
     /// Make the client's display and start its picture.
     fn start(&mut self, name: String, screen: Display, decoders: Vec<Mode>, cursor: bool, ceiling: u32, link: Link) -> Result<Accept, String> {
+        let started = self.start_picture(name, screen, decoders, cursor, ceiling, link);
+        // Unlocked for a device that then got no picture: not left unlocked for nobody.
+        if started.is_err() && self.live.is_none() {
+            self.relock();
+        }
+        started
+    }
+
+    fn start_picture(&mut self, name: String, screen: Display, decoders: Vec<Mode>, cursor: bool, ceiling: u32, link: Link) -> Result<Accept, String> {
         // The client's order of preference decides.
         let mode = decoders.iter().copied().find(|m| MODES.contains(m)).ok_or("no video mode in common")?;
         if screen.width % 2 != 0 || screen.height % 2 != 0 || screen.width < 64 || screen.height < 64 || screen.width > 8192 || screen.height > 8192 {
@@ -158,8 +211,36 @@ impl Agent {
         }
         let mut screen = screen;
         let mut refresh = screen.refresh.clamp(1, 240);
+        // A locked desktop lets no one in from outside (GNOME closes remote access while it
+        // is locked). If its owner has said paired devices may unlock it, it is unlocked now.
+        if self.login_screen.is_none() && own_desktop() && self.runtime.block_on(remoteman_desktop::logind::locked()).unwrap_or(false) {
+            if !self.allowed.unlock.load(Ordering::Relaxed) {
+                return Err("this computer is locked, and it is set not to be unlocked by devices".into());
+            }
+            self.runtime.block_on(remoteman_desktop::logind::set_locked(false)).map_err(|e| format!("this computer is locked and couldn't be unlocked: {e:#}"))?;
+            tracing::info!(device = name, "this computer was locked: unlocked for a paired device; its own screens stay off, and it locks again when the device leaves");
+            self.unlocked_for_client = true;
+            // Should this program die before it has locked the session again, what stops
+            // it finds this note and locks it (`--lock-if-left-unlocked`, run by the service).
+            let _ = std::fs::write(unlocked_note(), "");
+        }
+        // Unlocked for this device, in a room that may be empty: nothing of the desktop is
+        // shown on the computer's own screens, whatever the device asked for (mirroring
+        // needs them on, so the device gets a display of its own instead).
+        if self.unlocked_for_client {
+            screen.placement = remoteman_core::Placement::Only;
+        }
         let mirror = screen.placement == remoteman_core::Placement::Mirror;
-        let desktop = self.runtime.block_on(VirtualDisplay::create(cursor, mirror)).map_err(|e| format!("{e:#}"))?;
+        // (Just unlocked: the desktop takes a moment to let remote access back in.)
+        let mut tries = if self.unlocked_for_client { 15 } else { 1 };
+        let desktop = loop {
+            tries -= 1;
+            match self.runtime.block_on(VirtualDisplay::create(cursor, mirror)) {
+                Ok(desktop) => break desktop,
+                Err(e) if tries == 0 => return Err(format!("{e:#}")),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            }
+        };
         // Mirroring: the picture is the monitor's, at its size and scale, and no faster
         // than the client asked for.
         if let Some(m) = desktop.mirrored {
@@ -215,6 +296,20 @@ impl Agent {
             *now = Some(Now { name: l.name.clone(), since, width: screen.width, height: screen.height, refresh, placement, picture, sound: self.sound.is_some() });
         }
         Ok(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into() })
+    }
+
+    /// The client has gone. `left` does the rest; this, last of all, locks a session that was
+    /// unlocked for it.
+    fn relock(&mut self) {
+        if std::mem::take(&mut self.unlocked_for_client) {
+            match self.runtime.block_on(remoteman_desktop::logind::set_locked(true)) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(unlocked_note());
+                    tracing::info!("the device has left: this computer is locked again");
+                }
+                Err(e) => tracing::error!("THIS COMPUTER WAS UNLOCKED FOR A DEVICE AND COULD NOT BE LOCKED AGAIN: {e:#}"),
+            }
+        }
     }
 
     /// Stop the picture and take the display away. Files half received are thrown away.
@@ -722,6 +817,7 @@ impl HostHandler for Agent {
                 }
             }
         }
+        self.relock();
     }
 }
 

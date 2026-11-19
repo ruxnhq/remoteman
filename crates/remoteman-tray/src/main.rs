@@ -184,6 +184,7 @@ struct Ui {
     rows: RefCell<Vec<gtk::Widget>>,
     clipboard: adw::SwitchRow,
     files: adw::SwitchRow,
+    unlock: adw::SwitchRow,
     address: adw::ActionRow,
     key: adw::ActionRow,
     /// The widgets are being set from the host's state, not by the person.
@@ -294,7 +295,9 @@ impl Ui {
         }
         let none = |text: &str| adw::ActionRow::builder().title(text).sensitive(false).build();
         match &state {
-            State::Sharing { fingerprint, port, pairing, clipboard, files, devices, .. } => {
+            State::Sharing { fingerprint, port, pairing, clipboard, files, unlock, devices, .. } => {
+                self.unlock.set_sensitive(true);
+                self.unlock.set_active(*unlock);
                 self.pairing.set_revealed(*pairing);
                 self.pair.set_sensitive(!pairing);
                 self.clipboard.set_sensitive(true);
@@ -320,6 +323,7 @@ impl Ui {
                 self.pair.set_sensitive(false);
                 self.clipboard.set_sensitive(false);
                 self.files.set_sensitive(false);
+                self.unlock.set_sensitive(false);
                 self.address.set_subtitle("Shown while sharing is on");
                 self.key.set_subtitle("Shown while sharing is on");
                 let row = none("Shown while sharing is on");
@@ -423,6 +427,12 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     let sharing_what = adw::PreferencesGroup::builder().title("Clipboard and files").build();
     sharing_what.add(&clipboard);
     sharing_what.add(&files);
+    let unlock = adw::SwitchRow::builder()
+        .title("Paired devices can unlock this computer")
+        .subtitle("A paired device gets in while the screen is locked, with no password. This computer's own screens stay off while it is connected, and it locks again when the device leaves")
+        .build();
+    let locked = adw::PreferencesGroup::builder().title("When this computer is locked").build();
+    locked.add(&unlock);
     let address = adw::ActionRow::builder().title("Address").subtitle("").subtitle_selectable(true).css_classes(["property"]).build();
     let key = adw::ActionRow::builder().title("Key fingerprint").subtitle("").subtitle_selectable(true).css_classes(["property"]).build();
     let reach = adw::PreferencesGroup::builder().title("Address and key").description("What to enter on a device to reach this computer. A device shows the same fingerprint once it is paired.").build();
@@ -432,6 +442,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     devices_page.add(&pair_group);
     devices_page.add(&devices);
     devices_page.add(&sharing_what);
+    devices_page.add(&locked);
     devices_page.add(&reach);
 
     // About.
@@ -469,6 +480,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         rows: RefCell::new(Vec::new()),
         clipboard,
         files,
+        unlock,
         address,
         key,
         setting: Cell::new(false),
@@ -514,7 +526,7 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         let ui = ui.clone();
         move |_| ui.tell("pair off")
     });
-    for (row, what) in [(&ui.clipboard, "clipboard"), (&ui.files, "files")] {
+    for (row, what) in [(&ui.clipboard, "clipboard"), (&ui.files, "files"), (&ui.unlock, "unlock")] {
         let ui = ui.clone();
         row.connect_active_notify(move |row| {
             if !ui.setting.get() {
@@ -607,7 +619,7 @@ mod tests {
     fn the_icon_has_a_shape_for_each_state() {
         let (tx, _rx) = mpsc::channel();
         let mut icon = Icon { state: State::Paused, name: "desk".into(), tx };
-        let sharing = |client| State::Sharing { fingerprint: String::new(), port: 7791, pairing: false, clipboard: false, files: false, client, devices: Vec::new(), sent: host::Sent::default(), pending: None };
+        let sharing = |client| State::Sharing { fingerprint: String::new(), port: 7791, pairing: false, clipboard: false, files: false, unlock: false, client, devices: Vec::new(), sent: host::Sent::default(), pending: None };
         let device = host::Client { name: "pad".into(), since: 0, width: 1, height: 1, refresh: 60, placement: String::new(), picture: String::new(), sound: false };
         let mut names = Vec::new();
         for state in [State::Paused, State::Failed("why".into()), sharing(None), sharing(Some(device))] {
