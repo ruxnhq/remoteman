@@ -255,7 +255,7 @@ pub fn build(video: &Video) -> View {
         m.set_has_frame(false);
     }
     let tools = gtk::Box::builder().spacing(2).build();
-    for w in [send_keys.upcast_ref::<gtk::Widget>(), display.upcast_ref(), picture.upcast_ref(), pointer.upcast_ref(), camera.upcast_ref(), microphone.upcast_ref(), sound.upcast_ref(), sharing.upcast_ref()] {
+    for w in [send_keys.upcast_ref::<gtk::Widget>(), display.upcast_ref(), picture.upcast_ref(), pointer.upcast_ref(), sound.upcast_ref(), microphone.upcast_ref(), camera.upcast_ref(), sharing.upcast_ref()] {
         tools.append(w);
     }
     let pill_box = gtk::Box::builder().spacing(2).css_classes(["rm-pill"]).build();
