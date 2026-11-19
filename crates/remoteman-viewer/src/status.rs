@@ -268,27 +268,58 @@ pub fn problem(app: &Rc<App>, target: &Target, problem: Problem) -> adw::Navigat
             ("system-users-symbolic", format!("{name} Is Logging In for You"), format!("It was locked or logged out. {}{}", said, if said.ends_with('.') { "" } else { "." }))
         }
         Problem::Locked(said) => {
-            // The password goes to the computer with the next try and is kept nowhere here.
-            let password = gtk::PasswordEntry::builder().show_peek_icon(true).placeholder_text("Password").width_request(280).activates_default(true).build();
-            let unlock = pill("Unlock", true);
-            let go = {
-                let (app, target, password) = (app.clone(), target.clone(), password.clone());
-                move || {
-                    let typed = password.text().to_string();
-                    if !typed.is_empty() {
-                        *app.unlock.borrow_mut() = Some(typed);
-                        app.connect(target.clone(), false);
-                    }
+            let computer = app.store.borrow().key(&target.address).unwrap_or_default();
+            let wrong = said.to_ascii_lowercase().contains("not right");
+            // What became of the password that was just tried, if one was.
+            let tried = app.unlocking.borrow_mut().take();
+            if let Some(tried) = &tried {
+                if tried.kept && wrong {
+                    // The one kept is out of date.
+                    crate::keyring::forget(&tried.computer);
                 }
-            };
-            unlock.connect_clicked({
-                let go = go.clone();
-                move |_| go()
-            });
-            password.connect_activate(move |_| go());
-            extra.append(&adw::Clamp::builder().maximum_size(320).child(&password).build());
-            buttons.append(&unlock);
-            ("system-lock-screen-symbolic", format!("{name} Is Locked"), format!("{said} It locks again when you leave."))
+            }
+            // Asked for the first time in this try: a password kept for this computer is
+            // sent without anyone typing it.
+            let kept = if tried.is_none() && !computer.is_empty() { crate::keyring::find(&computer) } else { None };
+            if let Some(password) = kept {
+                *app.unlock.borrow_mut() = Some(password.clone());
+                *app.unlocking.borrow_mut() = Some(crate::window::Unlocking { computer, password, remember: false, kept: true });
+                if app.args.ui.is_some() {
+                    println!("~ unlocking with the password kept in the keyring");
+                }
+                let (again, target) = (app.clone(), target.clone());
+                gtk::glib::idle_add_local_once(move || again.connect(target, false));
+                extra.append(&adw::Spinner::builder().width_request(32).height_request(32).halign(gtk::Align::Center).build());
+                ("system-lock-screen-symbolic", format!("Unlocking {name}"), "With the password kept on this device.".to_owned())
+            } else {
+                // The password goes to the computer with the next try. It is kept in the
+                // desktop's keyring if that is ticked and it works, and nowhere otherwise.
+                let password = gtk::PasswordEntry::builder().show_peek_icon(true).placeholder_text("Password").width_request(280).activates_default(true).build();
+                let remember = gtk::CheckButton::builder().label("Remember it on this device").active(true).halign(gtk::Align::Center).tooltip_text("Kept in this desktop's keyring, which your login password protects").build();
+                let unlock = pill("Unlock", true);
+                let go = {
+                    let (app, target, password, remember, computer) = (app.clone(), target.clone(), password.clone(), remember.clone(), computer.clone());
+                    move || {
+                        let typed = password.text().to_string();
+                        if !typed.is_empty() {
+                            *app.unlock.borrow_mut() = Some(typed.clone());
+                            *app.unlocking.borrow_mut() = Some(crate::window::Unlocking { computer: computer.clone(), password: typed, remember: remember.is_active() && !computer.is_empty(), kept: false });
+                            app.connect(target.clone(), false);
+                        }
+                    }
+                };
+                unlock.connect_clicked({
+                    let go = go.clone();
+                    move |_| go()
+                });
+                password.connect_activate(move |_| go());
+                let fields = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(12).build();
+                fields.append(&password);
+                fields.append(&remember);
+                extra.append(&adw::Clamp::builder().maximum_size(320).child(&fields).build());
+                buttons.append(&unlock);
+                ("system-lock-screen-symbolic", format!("{name} Is Locked"), format!("{said} It locks again when you leave."))
+            }
         }
         Problem::Refused(said) => {
             buttons.append(&again("Try Again"));

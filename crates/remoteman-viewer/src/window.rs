@@ -24,6 +24,17 @@ pub struct Target {
     pub name: String,
 }
 
+/// A password being tried on a locked computer.
+pub struct Unlocking {
+    /// The computer's key, which is what a kept password is filed under.
+    pub computer: String,
+    pub password: String,
+    /// Keep it in the keyring if it gets this device in.
+    pub remember: bool,
+    /// It came from the keyring (so it is thrown away there if it is wrong).
+    pub kept: bool,
+}
+
 pub struct App {
     pub args: Args,
     pub app: adw::Application,
@@ -73,6 +84,9 @@ pub struct App {
     pub pairing: std::sync::Arc<std::sync::Mutex<Option<(String, u32)>>>,
     /// The password typed for a locked computer, for the next try and no longer.
     pub unlock: RefCell<Option<String>>,
+    /// The password on its way to a locked computer: for which computer (its key), whether it
+    /// is to be remembered if it works, and whether it came from the keyring.
+    pub unlocking: RefCell<Option<Unlocking>>,
     /// How many tries in a row a computer has answered that it is logging in.
     pub logging_in: Cell<u32>,
     pub capture: RefCell<Option<crate::capture::Capture>>,
@@ -735,6 +749,16 @@ impl App {
             // A picture: whatever the computer was doing before it let this device in is over.
             // (Not sooner: a computer that is logging in answers the hello and then closes.)
             self.logging_in.set(0);
+            // And a password that got this device in is one worth keeping, if that was asked.
+            if let Some(used) = self.unlocking.borrow_mut().take() {
+                if used.remember && !used.kept {
+                    let name = self.target.borrow().as_ref().map(|t| t.name.clone()).unwrap_or_default();
+                    let done = crate::keyring::keep(&used.computer, &name, &used.password);
+                    if self.args.ui.is_some() {
+                        println!("~ password kept in the keyring: {done}");
+                    }
+                }
+            }
             self.video.show(p);
         }
         if let Some(reason) = closed {
@@ -852,6 +876,7 @@ pub fn build(application: &adw::Application, args: Args) {
         pairing: Default::default(),
         unlock: RefCell::new(None),
         logging_in: Cell::new(0),
+        unlocking: RefCell::new(None),
         capture: RefCell::new(None),
         moved: Cell::new((0.0, 0.0)),
         fingers: RefCell::new(Vec::new()),
