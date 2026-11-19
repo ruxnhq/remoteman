@@ -68,6 +68,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         /// Running in the login window's session (LoginWindow.swift): the picture is the login
         /// window, so the device's display is always made the main one.
         var loginWindow = false
+        /// For tests: capture this Mac's own main screen, as the login window's host does.
+        var ownScreen = false
         /// For tests: so many seconds after a device starts waiting, say yes (negative: say no).
         var testDecide: Double?
         var testAllow: Double?
@@ -339,9 +341,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             hostLog("host: Screen Recording isn't reported as granted here; trying all the same")
         }
         // Where the client wants its display: 0 extra, 1 main, 2 only. --main yes still forces main.
-        let p = Picture(
+        let p = atLoginWindow(Picture(
             width: Int(c.width), height: Int(c.height), fps: Int(c.refresh), hiDPI: c.scale >= 1.5, cursorApart: c.cursor_apart != 0,
-            placement: max(Int(c.placement), options.makeMain || options.loginWindow ? 1 : 0))
+            placement: max(Int(c.placement), options.makeMain || options.loginWindow ? 1 : 0)))
         limit = 0
         if let failure = begin(p) { return refuse(failure) }
         clientName = name
@@ -364,6 +366,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var hiDPI: Bool
         var cursorApart: Bool
         var placement: Int
+        /// The Mac's own main screen is captured; no display is made.
+        var ownScreen = false
         init(width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int) {
             self.width = min(7680, max(640, width & ~1))
             self.height = min(4320, max(360, height & ~1))
@@ -396,6 +400,17 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Take down whatever picture there is and start this one. Blocks the core's thread until
     /// it runs; returns why not, if it doesn't.
+    /// At the login window the picture is the Mac's own screen as it is, not a display made for
+    /// the device: the login window is only dependably on a screen the Mac already has.
+    private func atLoginWindow(_ p: Picture) -> Picture {
+        guard options.loginWindow || options.ownScreen, let m = CGDisplayCopyDisplayMode(CGMainDisplayID()), m.pixelWidth >= 640, m.pixelHeight >= 360 else { return p }
+        var p = Picture(
+            width: m.pixelWidth, height: m.pixelHeight, fps: m.refreshRate >= 24 ? Int(m.refreshRate.rounded()) : 60, hiDPI: m.pixelWidth > m.width,
+            cursorApart: p.cursorApart, placement: 1)
+        p.ownScreen = true
+        return p
+    }
+
     private func begin(_ p: Picture) -> String? {
         let done = DispatchSemaphore(value: 0)
         var failure: String? = "starting the display timed out"
@@ -407,7 +422,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             Task { @MainActor in
                 failure = await self.setUp(
                     width: p.width, height: p.height, fps: p.fps, hiDPI: p.hiDPI, cursorApart: p.cursorApart, placement: p.placement,
-                    bitrate: rate, gen: gen)
+                    bitrate: rate, gen: gen, ownScreen: p.ownScreen)
                 done.signal()
             }
         }
@@ -568,10 +583,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         func int(_ k: String, _ now: Int) -> Int { (d[k] as? NSNumber)?.intValue ?? now }
         var placement = old.placement
         if let s = d["placement"] as? String { placement = ["extend": 0, "main": 1, "only": 2][s] ?? placement }
-        let new = Picture(
+        let new = atLoginWindow(Picture(
             width: int("width", old.width), height: int("height", old.height), fps: int("refresh", old.fps),
             hiDPI: (d["scale"] as? NSNumber).map { $0.doubleValue >= 1.5 } ?? old.hiDPI, cursorApart: old.cursorApart,
-            placement: max(placement, options.makeMain ? 1 : 0))
+            placement: max(placement, options.makeMain ? 1 : 0)))
         guard new != old else { return }
         hostLog("host: configure: display \(new.width)×\(new.height) at \(new.fps) Hz, 2× \(new.hiDPI), placement \(new.placement)")
         var now = new
@@ -646,31 +661,37 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Returns nil when the picture is running, or why it isn't.
     @MainActor
     private func setUp(
-        width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int, bitrate: Int, gen: Int
+        width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int, bitrate: Int, gen: Int, ownScreen: Bool = false
     ) async -> String? {
         holdAwake()
-        // A fixed serial first; one left behind by a crashed run can't be shared, so then a new one.
-        for serial in [UInt32(7791), UInt32.random(in: 10_000...60_000)] {
-            display = RMVirtualDisplay(
-                name: "remoteman", maxWidth: UInt32(max(width, 3840)), maxHeight: UInt32(max(height, 2880)), serial: serial)
-            if let d = display, d.displayID != 0 { break }
-            display = nil
+        let id: CGDirectDisplayID
+        if ownScreen {
+            id = CGMainDisplayID()
+            hostLog("host: this Mac's own screen \(id), \(width)×\(height) px at \(fps) Hz, as it is")
+        } else {
+            // A fixed serial first; one left behind by a crashed run can't be shared, so then a new one.
+            for serial in [UInt32(7791), UInt32.random(in: 10_000...60_000)] {
+                display = RMVirtualDisplay(
+                    name: "remoteman", maxWidth: UInt32(max(width, 3840)), maxHeight: UInt32(max(height, 2880)), serial: serial)
+                if let d = display, d.displayID != 0 { break }
+                display = nil
+            }
+            guard let display else { return "couldn't create a virtual display" }
+            guard display.applyWidth(UInt32(width), height: UInt32(height), refreshRate: Double(fps), hiDPI: hiDPI) else {
+                return "the virtual display refused \(width)×\(height) at \(fps) Hz"
+            }
+            id = display.displayID
+            await settle(id, width: width, height: height, hiDPI: hiDPI)
+            if let m = CGDisplayCopyDisplayMode(id) {
+                hostLog("host: display \(id): \(m.pixelWidth)×\(m.pixelHeight) px, \(m.width)×\(m.height) pt, \(m.refreshRate) Hz")
+            }
+            if placement >= 1, CGMainDisplayID() != id {
+                previousMain = CGMainDisplayID()
+                MacHost.makeMain(id)
+            }
+            if placement == 2 { mirrored = MacHost.mirrorOthers(onto: id) }
+            hostLog("host: placement \(["an extra display", "the main display", "the only display"][min(placement, 2)])")
         }
-        guard let display else { return "couldn't create a virtual display" }
-        guard display.applyWidth(UInt32(width), height: UInt32(height), refreshRate: Double(fps), hiDPI: hiDPI) else {
-            return "the virtual display refused \(width)×\(height) at \(fps) Hz"
-        }
-        let id = display.displayID
-        await settle(id, width: width, height: height, hiDPI: hiDPI)
-        if let m = CGDisplayCopyDisplayMode(id) {
-            hostLog("host: display \(id): \(m.pixelWidth)×\(m.pixelHeight) px, \(m.width)×\(m.height) pt, \(m.refreshRate) Hz")
-        }
-        if placement >= 1, CGMainDisplayID() != id {
-            previousMain = CGMainDisplayID()
-            MacHost.makeMain(id)
-        }
-        if placement == 2 { mirrored = MacHost.mirrorOthers(onto: id) }
-        hostLog("host: placement \(["an extra display", "the main display", "the only display"][min(placement, 2)])")
         // A new display takes a moment to show up in ScreenCaptureKit.
         var found: SCDisplay?
         for _ in 0..<30 {

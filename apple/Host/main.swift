@@ -71,6 +71,7 @@ while !args.isEmpty {
         options.allowClipboard = list.contains("clipboard")
         options.allowFiles = list.contains("files")
     case "--advertise": options.advertise = yes()
+    case "--own-screen": options.ownScreen = yes()
     case "--login-window":
         // Started by launchd in the login window's session: picture and input only.
         options.loginWindow = yes()
