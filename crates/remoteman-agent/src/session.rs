@@ -793,7 +793,11 @@ impl HostHandler for Agent {
         if let Some(ending) = self.ending.take() {
             ending.abort();
         }
-        self.unlock_for(client)?;
+        if let Err(why) = self.unlock_for(client) {
+            // (Said here too: the device is told, but its owner looking at this log is not.)
+            tracing::info!(device = client.name, "turned away: {}", why.strip_prefix("locked: ").unwrap_or(&why));
+            return Err(why);
+        }
         let screen = client.display;
         tracing::info!(name = %client.name, ?screen, decoders = ?client.decoders, cursor_apart = client.cursor, "client");
         self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link)

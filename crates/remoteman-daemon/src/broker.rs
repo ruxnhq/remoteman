@@ -404,6 +404,7 @@ fn attached(shared: Arc<Shared>, stream: UnixStream) {
                 }
             }
             ToDaemon::Refused(why) => {
+                tracing::info!(agent = id, "the agent turned the client away: {}", why.strip_prefix("locked: ").unwrap_or(&why));
                 let mut st = shared.state.lock().unwrap();
                 if st.waiting.as_ref().is_some_and(|w| w.agent == id) {
                     match st.waiting.take().and_then(|w| w.reply) {
