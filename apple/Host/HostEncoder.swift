@@ -29,7 +29,7 @@ final class HostEncoder {
     /// Called on VideoToolbox's thread; the encoder takes no new frame until it returns.
     var onFrame: ((Output) -> Void)?
 
-    init(width: Int, height: Int, fps: Int, bitrate: Int) throws {
+    init(width: Int, height: Int, fps: Int, bitrate: Int, tenBit: Bool = true) throws {
         self.width = width
         self.height = height
         var s: VTCompressionSession?
@@ -53,7 +53,7 @@ final class HostEncoder {
             (kVTCompressionPropertyKey_DataRateLimits, [bitrate * 3 / 16, 1] as CFArray),
             // Keyframes only when the client asks.
             (kVTCompressionPropertyKey_MaxKeyFrameInterval, Int(Int32.max)),
-            (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main10_AutoLevel),
+            (kVTCompressionPropertyKey_ProfileLevel, tenBit ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel),
             (kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, true),
             // What the stream says it is: BT.709, limited range.
             (kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2),

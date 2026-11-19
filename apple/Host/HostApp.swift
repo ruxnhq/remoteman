@@ -1,6 +1,7 @@
 // The host as an app: what the interface knows about the host (HostController), and the
 // menu-bar item with its panel and windows (HostAppDelegate). MacHost does the work.
 import ServiceManagement
+import UserNotifications
 import AppKit
 import ApplicationServices
 import Combine
@@ -60,6 +61,81 @@ final class HostController: ObservableObject {
             self?.microphoneInstalled = HostMicrophone.installed
             self?.host.refreshFeatures()
         }
+    }
+
+    // MARK: What the owner decides about devices (kept in the app's defaults)
+
+    @Published private(set) var lockOnLeave = UserDefaults.standard.bool(forKey: "lockOnLeave")
+    @Published private(set) var notifyOnConnect = UserDefaults.standard.bool(forKey: "notifyOnConnect")
+    /// Extra, main, only: which a device may ask for, and where it goes otherwise.
+    @Published private(set) var allowedPlacements: Set<Int> = Set((UserDefaults.standard.array(forKey: "allowedPlacements") as? [Int]) ?? [0, 1, 2])
+    @Published private(set) var defaultPlacement = UserDefaults.standard.integer(forKey: "defaultPlacement")
+    /// The most this Mac sends, in megabits a second; 0 lets it choose.
+    @Published private(set) var ownMegabits = UserDefaults.standard.integer(forKey: "ownMegabits")
+    @Published private(set) var notifyNote = ""
+    @Published private(set) var tenBit = UserDefaults.standard.object(forKey: "tenBit") as? Bool ?? true
+
+    func setTenBit(_ on: Bool) {
+        tenBit = on
+        UserDefaults.standard.set(on, forKey: "tenBit")
+        host.setTenBit(on)
+    }
+
+    func setLockOnLeave(_ on: Bool) {
+        lockOnLeave = on
+        UserDefaults.standard.set(on, forKey: "lockOnLeave")
+        host.setLockOnLeave(on)
+    }
+
+    /// Notifications are asked for only here, when the owner turns this on.
+    func setNotifyOnConnect(_ on: Bool) {
+        guard on else {
+            notifyOnConnect = false
+            UserDefaults.standard.set(false, forKey: "notifyOnConnect")
+            return
+        }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] ok, _ in
+            DispatchQueue.main.async {
+                self?.notifyOnConnect = ok
+                self?.notifyNote = ok ? "" : "macOS isn't letting remoteman host show notifications. Allow it under System Settings, Notifications."
+                UserDefaults.standard.set(ok, forKey: "notifyOnConnect")
+            }
+        }
+    }
+
+    func setPlacement(_ place: Int, allowed: Bool) {
+        var set = allowedPlacements
+        if allowed { set.insert(place) } else { set.remove(place) }
+        guard !set.isEmpty else { return }  // one place always stays
+        allowedPlacements = set
+        if !set.contains(defaultPlacement) { defaultPlacement = set.min() ?? 0 }
+        savePolicy()
+    }
+
+    func setDefaultPlacement(_ place: Int) {
+        defaultPlacement = place
+        allowedPlacements.insert(place)
+        savePolicy()
+    }
+
+    private func savePolicy() {
+        UserDefaults.standard.set(Array(allowedPlacements).sorted(), forKey: "allowedPlacements")
+        UserDefaults.standard.set(defaultPlacement, forKey: "defaultPlacement")
+        host.setPolicy(allowed: allowedPlacements, fallback: defaultPlacement)
+    }
+
+    func setOwnMegabits(_ m: Int) {
+        ownMegabits = max(0, m)
+        UserDefaults.standard.set(ownMegabits, forKey: "ownMegabits")
+        host.setOwnBitrate(ownMegabits * 1_000_000)
+    }
+
+    private func announce(_ name: String) {
+        guard notifyOnConnect else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "\(name) connected"
+        content.body = "It can see and use this Mac until it disconnects."
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
     /// Started by macOS when the owner logs in (a login item, listed in System Settings).
@@ -221,6 +297,13 @@ final class HostController: ObservableObject {
             options.advertise = UserDefaults.standard.bool(forKey: Self.advertiseKey)
         }
         if !unattended { options.silenceSpeakers = !UserDefaults.standard.bool(forKey: Self.speakersKey) }
+        if !unattended {
+            options.lockOnLeave = UserDefaults.standard.bool(forKey: "lockOnLeave")
+            options.tenBit = UserDefaults.standard.object(forKey: "tenBit") as? Bool ?? true
+            options.allowedPlacements = Set((UserDefaults.standard.array(forKey: "allowedPlacements") as? [Int]) ?? [0, 1, 2])
+            options.defaultPlacement = UserDefaults.standard.integer(forKey: "defaultPlacement")
+            if options.bitrate == 0 { options.bitrate = UserDefaults.standard.integer(forKey: "ownMegabits") * 1_000_000 }
+        }
         host = MacHost(options: options)
         silenceSpeakers = options.silenceSpeakers
         allowClipboard = options.allowClipboard
@@ -232,6 +315,7 @@ final class HostController: ObservableObject {
             var c = c
             if let b = before, c != nil { c?.since = b.since }
             self?.client = c
+            if let self, let c, before == nil { self.announce(c.name) }
             if let self, c != nil, before == nil {
                 hostLog("host: trusted devices: \(self.host.devices.map { "\($0.name) \($0.fingerprint.prefix(8))\($0.connected ? " (connected)" : "")" }.joined(separator: ", "))")
                 if let t = options.testAllow {

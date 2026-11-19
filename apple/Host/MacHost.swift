@@ -68,6 +68,14 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         /// Running in the login window's session (LoginWindow.swift): the picture is the login
         /// window, so the device's display is always made the main one.
         var loginWindow = false
+        /// Where a device's display may sit (0 extra, 1 main, 2 only), and where it goes when
+        /// it asks for a place that isn't allowed.
+        var allowedPlacements: Set<Int> = [0, 1, 2]
+        var defaultPlacement = 0
+        /// Lock this Mac when the device leaves.
+        var lockOnLeave = false
+        /// 10 bits a colour (the picture as the Mac draws it); off, 8 bits, which every device decodes.
+        var tenBit = true
         /// For tests: capture this Mac's own main screen, as the login window's host does.
         var ownScreen = false
         /// For tests: so many seconds after a device starts waiting, say yes (negative: say no).
@@ -97,7 +105,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// What this host offers now: the camera and the microphone only while remoteman's own are installed on this Mac.
     private var featureList: String {
-        "video,input,cursor,placement,configure" + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
+        "video,input,cursor,placement,configure,mirror" + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
             + (options.allowFiles ? ",files" : "") + (HostCamera.installed ? ",camera" : "") + (HostMicrophone.installed ? ",mic" : "")
     }
     private var announced = ""
@@ -281,6 +289,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private var listening = ("", "")
+    /// The device is shown this Mac's own screen as it is (it asked to mirror).
+    private var mirroring = false
     private var loggingIn = false
     private var logInFailure: String?
     private let advertiser = Advertise()
@@ -376,7 +386,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         // Where the client wants its display: 0 extra, 1 main, 2 only. --main yes still forces main.
         let p = atLoginWindow(Picture(
             width: Int(c.width), height: Int(c.height), fps: Int(c.refresh), hiDPI: c.scale >= 1.5, cursorApart: c.cursor_apart != 0,
-            placement: max(Int(c.placement), options.makeMain || options.loginWindow ? 1 : 0)))
+            placement: c.placement == 3 ? 1 : placed(Int(c.placement))), mirror: c.placement == 3)
+        mirroring = c.placement == 3
         limit = 0
         if let failure = begin(p) { return refuse(failure) }
         clientName = name
@@ -387,7 +398,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         sharing = s
         fill(accept, p)
-        let summary = Client(name: name, width: p.width, height: p.height, refresh: p.fps, placement: min(p.placement, 2))
+        let summary = Client(name: name, width: p.width, height: p.height, refresh: p.fps, placement: mirroring ? 3 : min(p.placement, 2))
         DispatchQueue.main.async { self.onClient?(summary) }
         return 1
     }
@@ -423,7 +434,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func fill(_ accept: UnsafeMutablePointer<rm_accept>, _ p: Picture) {
         accept.pointee.codec = 0
-        accept.pointee.depth = 10
+        accept.pointee.depth = options.tenBit ? 10 : 8
         accept.pointee.chroma = 420
         accept.pointee.width = UInt32(p.width)
         accept.pointee.height = UInt32(p.height)
@@ -435,13 +446,44 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     /// it runs; returns why not, if it doesn't.
     /// At the login window the picture is the Mac's own screen as it is, not a display made for
     /// the device: the login window is only dependably on a screen the Mac already has.
-    private func atLoginWindow(_ p: Picture) -> Picture {
-        guard options.loginWindow || options.ownScreen, let m = CGDisplayCopyDisplayMode(CGMainDisplayID()), m.pixelWidth >= 640, m.pixelHeight >= 360 else { return p }
+    private func atLoginWindow(_ p: Picture, mirror: Bool = false) -> Picture {
+        guard mirror || options.loginWindow || options.ownScreen, let m = CGDisplayCopyDisplayMode(CGMainDisplayID()), m.pixelWidth >= 640, m.pixelHeight >= 360 else { return p }
         var p = Picture(
             width: m.pixelWidth, height: m.pixelHeight, fps: m.refreshRate >= 24 ? Int(m.refreshRate.rounded()) : 60, hiDPI: m.pixelWidth > m.width,
             cursorApart: p.cursorApart, placement: 1)
         p.ownScreen = true
         return p
+    }
+
+    /// The place a device gets when it asks for `asked`: that one if the owner allows it,
+    /// otherwise the owner's default (or the first allowed).
+    private func placed(_ asked: Int) -> Int {
+        let wanted = max(min(asked, 2), options.makeMain ? 1 : 0)
+        if options.allowedPlacements.contains(wanted) { return wanted }
+        if options.allowedPlacements.contains(options.defaultPlacement) { return options.defaultPlacement }
+        return options.allowedPlacements.min() ?? 0
+    }
+
+    func setPolicy(allowed: Set<Int>, fallback: Int) {
+        options.allowedPlacements = allowed.isEmpty ? [0] : allowed
+        options.defaultPlacement = fallback
+    }
+
+    func setLockOnLeave(_ on: Bool) { options.lockOnLeave = on }
+    /// From the next connection (or the next change of display).
+    func setTenBit(_ on: Bool) { options.tenBit = on }
+
+    /// The most this Mac encodes at, in bits a second (0: it chooses), from now on.
+    func setOwnBitrate(_ bits: Int) {
+        options.bitrate = max(0, bits)
+        guard let p = picture else { return }
+        let rate = bitrate(for: p)
+        lock.lock()
+        let enc = encoder
+        lock.unlock()
+        enc?.setBitrate(rate)
+        if let host { rm_host_send_message(host, "{\"t\":\"status\",\"bitrate\":\(rate)}") }
+        hostLog("host: this Mac's own ceiling \(options.bitrate), encoding at \(rate / 1000) kbit/s")
     }
 
     private func begin(_ p: Picture) -> String? {
@@ -615,11 +657,14 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         guard let d = m["display"] as? [String: Any] else { return }
         func int(_ k: String, _ now: Int) -> Int { (d[k] as? NSNumber)?.intValue ?? now }
         var placement = old.placement
-        if let s = d["placement"] as? String { placement = ["extend": 0, "main": 1, "only": 2][s] ?? placement }
+        if let s = d["placement"] as? String {
+            mirroring = s == "mirror"
+            placement = mirroring ? 1 : placed(["extend": 0, "main": 1, "only": 2][s] ?? placement)
+        }
         let new = atLoginWindow(Picture(
             width: int("width", old.width), height: int("height", old.height), fps: int("refresh", old.fps),
             hiDPI: (d["scale"] as? NSNumber).map { $0.doubleValue >= 1.5 } ?? old.hiDPI, cursorApart: old.cursorApart,
-            placement: max(placement, options.makeMain ? 1 : 0)))
+            placement: max(placement, options.makeMain ? 1 : 0)), mirror: mirroring)
         guard new != old else { return }
         hostLog("host: configure: display \(new.width)×\(new.height) at \(new.fps) Hz, 2× \(new.hiDPI), placement \(new.placement)")
         var now = new
@@ -640,7 +685,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         rm_host_send_message(host, "{\"t\":\"status\",\"bitrate\":\(bitrate(for: now))}")
         // What was on stays on across the new picture, and the device hears the format again.
         soundQueue.sync { if sound != nil { rm_host_send_message(host, HostSound.format) } }
-        let summary = Client(name: clientName, width: now.width, height: now.height, refresh: now.fps, placement: now.placement)
+        let summary = Client(name: clientName, width: now.width, height: now.height, refresh: now.fps, placement: mirroring ? 3 : now.placement)
         DispatchQueue.main.async { self.onClient?(summary) }
     }
 
@@ -669,6 +714,13 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func clientLeft() {
         hostLog("host: client left")
+        if options.lockOnLeave, !options.loginWindow {
+            hostLog("host: locking this Mac, as set")
+            if let lib = dlopen("/System/Library/PrivateFrameworks/login.framework/login", RTLD_NOW), let sym = dlsym(lib, "SACLockScreenImmediate") {
+                typealias Lock = @convention(c) () -> Int32
+                _ = unsafeBitCast(sym, to: Lock.self)()
+            }
+        }
         picture = nil
         setCamera(["on": false])
         setMicrophone(["on": false])
@@ -742,7 +794,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         guard gen == generation else { return "replaced by a newer client" }
 
         let enc: HostEncoder
-        do { enc = try HostEncoder(width: width, height: height, fps: fps, bitrate: bitrate) } catch {
+        do { enc = try HostEncoder(width: width, height: height, fps: fps, bitrate: bitrate, tenBit: options.tenBit) } catch {
             return "no HEVC Main10 hardware encoder for \(width)×\(height) (\(error.localizedDescription))"
         }
         enc.maxInFlight = max(1, options.inFlight)
@@ -775,7 +827,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         if cursorApart { startCursor() }
         if options.testWindow { testWindow.show(on: id) }
         firstFrame(d, width: width, height: height, cursorApart: cursorApart, gen: gen)
-        hostLog("host: sending \(width)×\(height) at \(fps) Hz, HEVC Main10 4:2:0, \(bitrate / 1000) kbit/s, capture \(options.capture), cursor \(cursorApart ? "apart" : "in the picture")")
+        hostLog("host: sending \(width)×\(height) at \(fps) Hz, HEVC \(options.tenBit ? "Main10" : "Main (8-bit)") 4:2:0, \(bitrate / 1000) kbit/s, capture \(options.tenBit ? options.capture : "420v"), cursor \(cursorApart ? "apart" : "in the picture")")
         return nil
     }
 
@@ -784,7 +836,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         config.width = width
         config.height = height
         config.pixelFormat =
-            switch options.capture {
+            switch options.tenBit ? options.capture : "420v" {
             case "420v": kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             case "l10r": kCVPixelFormatType_ARGB2101010LEPacked
             default: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange

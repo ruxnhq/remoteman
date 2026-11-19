@@ -3,7 +3,7 @@
 import SwiftUI
 
 private enum HostWording {
-    static func place(_ p: Int) -> String { ["Extra display", "Main display", "Only display"][min(max(p, 0), 2)] }
+    static func place(_ p: Int) -> String { ["Extra display", "Main display", "Only display", "This Mac's own screen"][min(max(p, 0), 3)] }
 
     /// "42 min", "1 h 5 min", "under a minute".
     static func length(_ seconds: TimeInterval) -> String {
@@ -164,9 +164,9 @@ struct HostPanel: View {
                     "Picture",
                     controller.bitsPerSecond > 0
                         ? "HEVC 10-bit, \(max(1, controller.bitsPerSecond / 1_000_000)) Mb/s" : "HEVC 10-bit")
-                fact("Sound", "Not available yet", available: Features.sound)
-                fact("Microphone", "Not available yet", available: Features.deviceCameraAndMicrophone)
-                fact("Camera", "Not available yet", available: Features.deviceCameraAndMicrophone)
+                fact("Sound", "Offered; the device turns it on")
+                fact("Microphone", controller.microphoneInstalled ? "Offered; the device turns it on" : "Not installed (Settings)")
+                fact("Camera", controller.cameraInstalled ? "Offered; the device turns it on" : "Not installed (Settings)")
             }
             .font(.system(size: 11))
         }
@@ -269,17 +269,21 @@ struct HostSettings: View {
                     "Where a device's display sits",
                     footnote: "Extra display: beside this computer's own screens. Main display: the device becomes the main one and the others stay on. Only display: this computer's own screens are switched off while the device is connected, so nobody in the room sees the desktop."
                 ) {
-                    Row("Default for a new device", caption: "A device can pick any other allowed place, also during a session.") {
-                        Picker("Default for a new device", selection: .constant(0)) { Text("Extra Display").tag(0) }
-                            .labelsHidden().fixedSize().available(Features.placementPolicy)
-                    }
                     Row("Devices may choose") {
                         HStack(spacing: 14) {
-                            Toggle("Extra display", isOn: .constant(true))
-                            Toggle("Main display", isOn: .constant(true))
-                            Toggle("Only display", isOn: .constant(true))
+                            ForEach(0..<3, id: \.self) { place in
+                                Toggle(HostWording.place(place), isOn: Binding(
+                                    get: { controller.allowedPlacements.contains(place) },
+                                    set: { controller.setPlacement(place, allowed: $0) }))
+                            }
                         }
-                        .toggleStyle(.checkbox).available(Features.placementPolicy)
+                        .toggleStyle(.checkbox)
+                    }
+                    Row("Otherwise", caption: "Where a device goes when it asks for a place you don't allow. A change applies to the next connection.") {
+                        Picker("Otherwise", selection: Binding(get: { controller.defaultPlacement }, set: { controller.setDefaultPlacement($0) })) {
+                            ForEach(0..<3, id: \.self) { Text(HostWording.place($0)).tag($0) }
+                        }
+                        .labelsHidden().fixedSize()
                     }
                 }
                 UnattendedGroup(controller: controller)
@@ -331,16 +335,12 @@ struct HostSettings: View {
                             .labelsHidden().toggleStyle(.switch)
                     }
                     Row("Lock this Mac when the device leaves") {
-                        fixedSwitch("Lock this Mac when the device leaves", false, Features.lockOnLeave)
+                        Toggle("Lock this Mac when the device leaves", isOn: Binding(get: { controller.lockOnLeave }, set: { controller.setLockOnLeave($0) }))
+                            .labelsHidden().toggleStyle(.switch)
                     }
-                    Row("Notify me when a device connects") {
-                        fixedSwitch("Notify me when a device connects", false, Features.notifyOnConnect)
-                    }
-                    Row(
-                        "Use the device's camera and microphone on this Mac",
-                        caption: "They appear here as a camera and a microphone, for calls made on this Mac. The device decides when they are on."
-                    ) {
-                        fixedSwitch("Use the device's camera and microphone on this Mac", false, Features.deviceCameraAndMicrophone)
+                    Row("Notify me when a device connects", caption: controller.notifyNote.isEmpty ? "macOS asks once whether remoteman host may show notifications." : controller.notifyNote) {
+                        Toggle("Notify me when a device connects", isOn: Binding(get: { controller.notifyOnConnect }, set: { controller.setNotifyOnConnect($0) }))
+                            .labelsHidden().toggleStyle(.switch)
                     }
                 }
                 CardGroup("Paired devices") {
@@ -362,15 +362,19 @@ struct HostSettings: View {
                     }
                 }
                 CardGroup("Picture") {
-                    Row("Bitrate limit") {
-                        Slider(value: .constant(0.63)).frame(width: 200).available(Features.bitrateLimit)
-                        Text("Automatic").foregroundStyle(Tokens.l2)
+                    Row("Bitrate limit", caption: "The most this Mac sends. A device can ask for less, never for more.") {
+                        Picker("Bitrate limit", selection: Binding(get: { controller.ownMegabits }, set: { controller.setOwnMegabits($0) })) {
+                            Text("Automatic").tag(0)
+                            ForEach([100, 80, 60, 40, 25, 15, 10, 5], id: \.self) { Text("\($0) Mb/s").tag($0) }
+                        }
+                        .labelsHidden().fixedSize()
                     }
-                    Row("Encoder", caption: "Every device receives HEVC from this Mac.", value: "HEVC, hardware (VideoToolbox)")
-                    Row("Allow sharp text (4:4:4)", caption: "Full colour detail for small text, at a higher bitrate.") {
-                        fixedSwitch("Allow sharp text (4:4:4)", false, Features.sharpText)
+                    Row(
+                        "Encoder", caption: "Every device receives HEVC 4:2:0 from this Mac. Its hardware encoder has no 4:4:4, so sharp text isn't offered here.",
+                        value: "HEVC, hardware (VideoToolbox)")
+                    Row("10-bit colour", caption: "Off, the picture is sent with 8 bits a colour. Applies from the next connection.") {
+                        Toggle("10-bit colour", isOn: Binding(get: { controller.tenBit }, set: { controller.setTenBit($0) })).labelsHidden().toggleStyle(.switch)
                     }
-                    Row("10-bit colour") { fixedSwitch("10-bit colour", true, Features.tenBitChoice) }
                 }
                 CardGroup("Permissions") {
                     Row("Screen Recording") {
