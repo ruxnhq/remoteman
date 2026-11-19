@@ -281,6 +281,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private var listening = ("", "")
+    private var lastLogIn: Date?
     private let advertiser = Advertise()
 
     /// Show this Mac to devices on the network, or stop showing it.
@@ -334,10 +335,19 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         if options.loginWindow {
             // Nothing is shown from here: the owner is logged in for the device, which then
             // connects again to the owner's own host. (A viewer tries again by itself on "logging in:".)
-            if let why = Unattended.submit() {
+            // One attempt at a time, and not again for a while after one that failed: a wrong
+            // guess typed over and over would only make the Mac wait longer between tries.
+            let now = Date()
+            if let last = lastLogIn, now.timeIntervalSince(last) < 20 {
+                return refuse("logging in: this Mac is logging in for you")
+            }
+            lastLogIn = now
+            hostLog("host: login window: \(name) connected; logging in for it")
+            if let why = Unattended.logInAtLoginWindow() {
+                hostLog("host: login window: \(why)")
                 return refuse("this Mac is at its login window and couldn't log in for the device: \(why)")
             }
-            hostLog("host: the login window took the password for \(name)")
+            hostLog("host: login window: logged in for \(name)")
             return refuse("logging in: this Mac is logging in for you")
         }
         if Unattended.screenLocked, Unattended.enabled, CommandLine.arguments.contains("--no-unlock") == false {

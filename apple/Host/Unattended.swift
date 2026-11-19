@@ -110,6 +110,64 @@ enum Unattended {
     /// Fill in the password field the Mac is showing (its lock screen, or its login window) and
     /// confirm it. Returns nil when a field was found and filled, or why not. The words say
     /// what was found, never what was typed.
+    /// At the login window (run by the system, nobody logged in): the same thing a person
+    /// does, with every step given a time limit and said in the log before it is taken, because
+    /// the first version of this stopped somewhere without a word. The form's field is looked
+    /// for only briefly; the login window puts the cursor in it by itself, so the password is
+    /// typed whether or not the field was found to click.
+    static func logInAtLoginWindow() -> String? {
+        guard let password = password() else { return "no password is kept for the login window" }
+        guard let strokes = keystrokes(for: password) else { return "the password has characters outside a US keyboard" }
+        let was = whoIsOnScreen()
+        hostLog("host: login window: waking the screen")
+        HostInput.wake()
+        var at: CGPoint?
+        hostLog("host: login window: looking for the password field (4 s at most)")
+        let looked = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1)
+            for pid in pidsOfLoginWindow() {
+                let app = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(app, 1)
+                var seen: [String: Int] = [:]
+                if let field = find(app, role: "AXTextField", subrole: "AXSecureTextField", depth: 0, seen: &seen), let c = centre(of: field) {
+                    at = c
+                    break
+                }
+            }
+            looked.signal()
+        }
+        if looked.wait(timeout: .now() + 4) == .timedOut {
+            hostLog("host: login window: the field wasn't found in time; typing where the cursor is")
+        } else if let at {
+            hostLog("host: login window: field at \(Int(at.x)),\(Int(at.y)); clicking it")
+            click(at)
+            usleep(250_000)
+        } else {
+            hostLog("host: login window: no field to be seen; typing where the cursor is")
+        }
+        hostLog("host: login window: typing the password (\(strokes.count) keys) and Return")
+        typeKeys(strokes)
+        usleep(150_000)
+        pressReturn()
+        hostLog("host: login window: waiting for the log in")
+        if waitForChange(from: was, seconds: 12) { return nil }
+        return "the login window didn't log in within 12 s of the password being typed"
+    }
+
+    private static func pidsOfLoginWindow() -> [pid_t] {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        p.arguments = ["-x", "loginwindow"]
+        let out = Pipe()
+        p.standardOutput = out
+        guard (try? p.run()) != nil else { return [] }
+        p.waitUntilExit()
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        // The newest is the one showing the login window.
+        return text.split(separator: "\n").compactMap { pid_t($0) }.sorted(by: >)
+    }
+
     static func submit() -> String? {
         guard let password = password() else { return "no password is kept for this" }
         guard let pid = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.loginwindow" })?.processIdentifier
