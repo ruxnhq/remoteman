@@ -77,4 +77,7 @@ enum ViewerPrefs {
     static var rememberMedia: Bool { d.bool(forKey: rememberMediaKey) }
     static var saveData: Bool { d.object(forKey: saveDataKey) as? Bool ?? true }
     static var requireAuth: Bool { d.bool(forKey: requireAuthKey) }
+    /// Ask a computer for HDR when this screen can show it (on unless switched off).
+    static let hdrKey = "picture.hdr"
+    static var hdr: Bool { d.object(forKey: hdrKey) as? Bool ?? true }
 }

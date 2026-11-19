@@ -114,7 +114,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// What this host offers now: the camera and the microphone only while remoteman's own are installed on this Mac.
     private var featureList: String {
-        "video,input,cursor,placement,configure,mirror,displays" + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
+        "video,input,cursor,placement,configure,mirror,displays" + (MacHost.hdrCapture && options.tenBit ? ",hdr" : "") + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
             + (options.allowFiles ? ",files" : "") + (HostCamera.installed ? ",camera" : "") + (HostMicrophone.installed ? ",mic" : "")
     }
     private var announced = ""
@@ -253,7 +253,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         FileManager.default.createFile(atPath: path, contents: nil)
         return FileHandle(forWritingAtPath: path)
     }()
-    private var displayMax = (3840, 2880), shownPlacement = 0
+    private var displayMax = (3840, 2880), shownPlacement = 0, shownHDR = false
     private var sendMs = 0.0, sendMax = 0.0, largest = 0, keysSent = 0, captureGap = 0.0, lastCaptured = 0.0, refused = 0
 
     init(options: Options) {
@@ -413,9 +413,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             hostLog("host: Screen Recording isn't reported as granted here; trying all the same")
         }
         // Where the client wants its display: 0 extra, 1 main, 2 only. --main yes still forces main.
-        let p = atLoginWindow(Picture(
+        var p = atLoginWindow(Picture(
             width: Int(c.width), height: Int(c.height), fps: Int(c.refresh), hiDPI: c.scale >= 1.5, cursorApart: c.cursor_apart != 0,
             placement: c.placement == 3 ? 1 : placed(Int(c.placement))), mirror: c.placement == 3)
+        p.hdr = c.hdr != 0 && c.placement != 3
+        if p.hdr { hostLog("host: the device's screen shows HDR, headroom \(c.headroom)") }
         mirroring = c.placement == 3
         limit = 0
         if let failure = begin(p) { return refuse(failure) }
@@ -439,6 +441,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var hiDPI: Bool
         var cursorApart: Bool
         var placement: Int
+        /// The device's screen can show HDR and asked for it.
+        var hdr = false
         /// The Mac's own main screen is captured; no display is made.
         var ownScreen = false
         init(width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int) {
@@ -469,10 +473,14 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         accept.pointee.height = UInt32(p.height)
         accept.pointee.refresh = UInt32(p.fps)
         accept.pointee.hdr = hdrNow(p) ? 1 : 0
+        // macOS puts SDR white at 100 nits in an HDR capture for a canonical display (a patch at
+        // four times white read back as 397 nits), and a virtual HDR display has headroom 5.
+        accept.pointee.sdr_white = hdrNow(p) ? 100 : 0
+        accept.pointee.peak = hdrNow(p) ? 500 : 0
     }
 
     /// HDR needs 10 bits and a display of this host's making (not the Mac's own screen, not a mirror).
-    private func hdrNow(_ p: Picture) -> Bool { MacHost.hdrCapture && options.hdr && options.tenBit && !p.ownScreen }
+    private func hdrNow(_ p: Picture) -> Bool { MacHost.hdrCapture && (options.hdr || p.hdr) && options.tenBit && !p.ownScreen }
     /// ScreenCaptureKit captures HDR from macOS 15.
     static var hdrCapture: Bool { if #available(macOS 15.0, *) { return true } else { return false } }
 
@@ -529,6 +537,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             // Only the size, the refresh rate or 1×/2× differ: the same display takes the new mode,
             // so it stays where it is (and stays main) and the windows on it stay on it.
             let inPlace = keep && display != nil && !p.ownScreen && p.placement == shownPlacement && p.placement < 2
+                && p.hdr == shownHDR
                 && p.width <= displayMax.0 && p.height <= displayMax.1
             teardown(keepDisplay: inPlace)
             generation += 1
@@ -536,7 +545,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             Task { @MainActor in
                 failure = await self.setUp(
                     width: p.width, height: p.height, fps: p.fps, hiDPI: p.hiDPI, cursorApart: p.cursorApart, placement: p.placement,
-                    bitrate: rate, gen: gen, ownScreen: p.ownScreen, inPlace: inPlace)
+                    bitrate: rate, gen: gen, ownScreen: p.ownScreen, inPlace: inPlace, wantsHDR: p.hdr)
                 done.signal()
             }
         }
@@ -702,10 +711,12 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             mirroring = s == "mirror"
             placement = mirroring ? 1 : placed(["extend": 0, "main": 1, "only": 2][s] ?? placement)
         }
-        let new = atLoginWindow(Picture(
+        var new = atLoginWindow(Picture(
             width: int("width", old.width), height: int("height", old.height), fps: int("refresh", old.fps),
             hiDPI: (d["scale"] as? NSNumber).map { $0.doubleValue >= 1.5 } ?? old.hiDPI, cursorApart: old.cursorApart,
             placement: max(placement, options.makeMain ? 1 : 0)), mirror: mirroring)
+        // A display without the word is an SDR one, as in the hello.
+        new.hdr = (d["hdr"] as? Bool ?? false) && !mirroring
         guard new != old else { return }
         hostLog("host: configure: display \(new.width)×\(new.height) at \(new.fps) Hz, 2× \(new.hiDPI), placement \(new.placement)")
         var now = new
@@ -862,11 +873,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: Display and capture (main queue)
 
     /// An HDR mode is one with a transfer function (1: the system then treats the display as an
-    /// HDR screen with headroom); an ordinary one goes the ordinary way. HDR has no 2× mode yet.
+    /// HDR screen with headroom); an ordinary one goes the ordinary way. 
     private func applyMode(_ d: RMVirtualDisplay, width: Int, height: Int, fps: Int, hiDPI: Bool, hdr: Bool) -> Bool {
-        if hdr, !hiDPI {
-            return d.applyModes([[NSNumber(value: width), NSNumber(value: height), NSNumber(value: fps)]], transferFunction: 1, refreshDeadline: 0)
-        }
+        if hdr { return d.applyHDRWidth(UInt32(width), height: UInt32(height), refreshRate: Double(fps), hiDPI: hiDPI) }
         return d.applyWidth(UInt32(width), height: UInt32(height), refreshRate: Double(fps), hiDPI: hiDPI)
     }
 
@@ -874,9 +883,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     @MainActor
     private func setUp(
         width: Int, height: Int, fps: Int, hiDPI: Bool, cursorApart: Bool, placement: Int, bitrate: Int, gen: Int, ownScreen: Bool = false,
-        inPlace: Bool = false
+        inPlace: Bool = false, wantsHDR: Bool = false
     ) async -> String? {
-        let hdr = MacHost.hdrCapture && options.hdr && options.tenBit && !ownScreen
+        let hdr = MacHost.hdrCapture && (options.hdr || wantsHDR) && options.tenBit && !ownScreen
         holdAwake()
         let id: CGDirectDisplayID
         if inPlace, let display {
@@ -907,6 +916,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
             id = display.displayID
             await settle(id, width: width, height: height, hiDPI: hiDPI)
             shownPlacement = placement
+            shownHDR = wantsHDR
             if let m = CGDisplayCopyDisplayMode(id) {
                 hostLog("host: display \(id): \(m.pixelWidth)×\(m.pixelHeight) px, \(m.width)×\(m.height) pt, \(m.refreshRate) Hz")
             }

@@ -24,6 +24,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// half that size in points with a 2× backing store.
 - (BOOL)applyWidth:(uint32_t)width height:(uint32_t)height refreshRate:(double)refreshRate hiDPI:(BOOL)hiDPI;
 
+/// The same as an HDR screen (a mode with the PQ transfer function): the system gives it headroom.
+- (BOOL)applyHDRWidth:(uint32_t)width height:(uint32_t)height refreshRate:(double)refreshRate hiDPI:(BOOL)hiDPI;
+
 /// For finding out what the system offers (not used for a client yet): several modes at once,
 /// each @[width, height, refreshRate], with a transfer function (0: the ordinary initialiser)
 /// and a refresh deadline in seconds (0: left alone).

@@ -72,6 +72,19 @@
     return [(CGVirtualDisplay *)_display applySettings:s];
 }
 
+- (BOOL)applyHDRWidth:(uint32_t)width height:(uint32_t)height refreshRate:(double)refreshRate hiDPI:(BOOL)hiDPI {
+    if (!_display) return NO;
+    Class cls = NSClassFromString(@"CGVirtualDisplayMode");
+    if (![cls instancesRespondToSelector:@selector(initWithWidth:height:refreshRate:transferFunction:)]) return NO;
+    uint32_t w = hiDPI ? width / 2 : width, h = hiDPI ? height / 2 : height;
+    CGVirtualDisplayMode *mode = [[cls alloc] initWithWidth:w height:h refreshRate:refreshRate transferFunction:1];
+    if (!mode) return NO;
+    CGVirtualDisplaySettings *s = [[NSClassFromString(@"CGVirtualDisplaySettings") alloc] init];
+    s.modes = @[mode];
+    s.hiDPI = hiDPI ? 1 : 0;
+    return [(CGVirtualDisplay *)_display applySettings:s];
+}
+
 - (BOOL)applyModes:(NSArray<NSArray<NSNumber *> *> *)modes transferFunction:(uint32_t)transferFunction refreshDeadline:(double)deadline {
     if (!_display) return NO;
     NSMutableArray *list = [NSMutableArray array];

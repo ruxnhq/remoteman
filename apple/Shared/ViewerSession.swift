@@ -1,5 +1,10 @@
 // One viewing session: a source of frames (a host through the core, or a recording), the
 // decoder, the renderer, and the numbers for the stats overlay.
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 import AVFoundation
 import Combine
 import CoreMedia
@@ -74,6 +79,34 @@ final class ViewerSession: ObservableObject {
             func even(_ v: Int) -> Int { max(2, Int((Double(v) * f / 2).rounded()) * 2) }
             return Display(width: even(d.width), height: even(d.height), scale: d.scale * Float(f), refresh: d.refresh)
         }
+    }
+
+    /// How many times brighter than SDR white this device's screen can go (1: no HDR), and how
+    /// many it shows right now (it changes with the brightness setting and the room).
+    static var forcedHeadroom: Float?
+    static var screenHeadroom: Float {
+        if let f = forcedHeadroom { return f }
+        #if os(macOS)
+            return Float(NSScreen.main?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 1)
+        #else
+            if #available(iOS 16.0, *) { return Float(UIScreen.main.potentialEDRHeadroom) }
+            return 1
+        #endif
+    }
+    static var headroomNow: Float {
+        if let f = forcedHeadroom { return f }
+        #if os(macOS)
+            return Float(NSScreen.main?.maximumExtendedDynamicRangeColorComponentValue ?? 1)
+        #else
+            if #available(iOS 16.0, *) { return Float(UIScreen.main.currentEDRHeadroom) }
+            return 1
+        #endif
+    }
+    /// What the hello and configure say about HDR: asked for when the screen can show it and
+    /// the person hasn't switched it off.
+    static var hdrAsk: Float? {
+        let h = screenHeadroom
+        return ViewerPrefs.hdr && h > 1.05 ? h : nil
     }
 
     /// A computer's address as sessions know it (with the port).
@@ -177,6 +210,10 @@ final class ViewerSession: ObservableObject {
     }
 
     private func stream2Started(_ info: StreamInfo) {
+        DispatchQueue.main.async { [weak self] in
+            self?.renderer2?.headroom = { ViewerSession.headroomNow }
+            self?.renderer2?.setHDR(info.hdr)
+        }
         let d = VideoDecoder(
             info: info,
             onFrame: { [weak self] f in
@@ -460,10 +497,12 @@ final class ViewerSession: ObservableObject {
         display = d
         placement = p
         let ask = PictureSize.saved(for: target).fit(d)
-        return client.send([
-            "t": "configure",
-            "display": ["width": ask.width, "height": ask.height, "scale": Double(ask.scale), "refresh": ask.refresh, "placement": p.rawValue],
-        ])
+        var display: [String: Any] = ["width": ask.width, "height": ask.height, "scale": Double(ask.scale), "refresh": ask.refresh, "placement": p.rawValue]
+        if let h = Self.hdrAsk {
+            display["hdr"] = true
+            display["headroom"] = Double(h)
+        }
+        return client.send(["t": "configure", "display": display])
     }
 
     /// One of the host's feature messages (core thread).
@@ -478,6 +517,11 @@ final class ViewerSession: ObservableObject {
                 let why = (m["codec"] as? String ?? "opus") == "opus" ? sound.start(channels: channels, frameUs: frameUs) : "The computer's sound is in a form this device can't play."
                 if let why { DispatchQueue.main.async { if self.generation == gen { self.notice = why } } }
             }
+        case "stream_light":
+            // Before an HDR stream: where SDR white sits in it (nits).
+            let white = (m["sdr_white"] as? NSNumber)?.floatValue ?? 203
+            let second = (m["index"] as? NSNumber)?.intValue == 1
+            DispatchQueue.main.async { (second ? self.renderer2 : self.renderer)?.sdrWhite = white > 0 ? white : 203 }
         case "status":
             if let b = (m["bitrate"] as? NSNumber)?.intValue {
                 DispatchQueue.main.async { if self.generation == gen { self.hostBitrate = b } }
@@ -615,6 +659,8 @@ final class ViewerSession: ObservableObject {
                 // Only a session that is already running, never the computer's login screen
                 // (a computer that lists "way_in"; others take no notice).
                 attachOnly ? "way-in=attach" : nil,
+                // This screen can show HDR, so many times brighter than its SDR white.
+                Self.hdrAsk.map { String(format: "hdr=%.2f", $0) },
                 // The locked computer's password, as hex (the options are split on ";" and "=").
                 unlock.map { "unlock-hex=" + $0.utf8.map { String(format: "%02x", $0) }.joined() },
             ].compactMap { $0 }.joined(separator: ";"))
@@ -849,6 +895,10 @@ final class ViewerSession: ObservableObject {
     // MARK: Pipeline (core or playback thread)
 
     private func streamStarted(_ info: StreamInfo) {
+        DispatchQueue.main.async { [weak self] in
+            self?.renderer?.headroom = { ViewerSession.headroomNow }
+            self?.renderer?.setHDR(info.hdr)
+        }
         let d = VideoDecoder(
             info: info,
             onFrame: { [weak self] f in

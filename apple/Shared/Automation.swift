@@ -82,6 +82,7 @@ enum Automation {
             case "--scale": display.scale = Float(value()) ?? display.scale
             case "--refresh": display.refresh = Int(value()) ?? display.refresh
             case "--decoders": decoders = value()
+            case "--hdr": ViewerSession.forcedHeadroom = Float(value())  // as if the screen had this headroom
             case "--view-only": session.viewOnly = ["yes", "1", "true"].contains(value())
             case "--script": script = value()
             case "--opus-test":
@@ -315,6 +316,11 @@ enum Automation {
                         } else { print("remoteman: no window to resize") }
                     }
                 #endif
+                case "probe" where n.count == 2:
+                    // probe:x,y prints the picture's light there (1.0 is SDR white).
+                    let v = DispatchQueue.main.sync { session.renderer?.probe(x: Double(n[0]), y: Double(n[1])) }
+                    let hdr = DispatchQueue.main.sync { (session.renderer?.hdr ?? false, session.renderer?.sdrWhite ?? 0) }
+                    print("remoteman: probe \(n[0]),\(n[1]): \(v.map { String(format: "%.3f %.3f %.3f", $0.x, $0.y, $0.z) } ?? "no picture") (stream HDR \(hdr.0), SDR white \(hdr.1) nits)")
                 case "picture":
                     // picture:own|1440|1080, for the next connect or change of size.
                     let lines = Int(arg.trimmingCharacters(in: .whitespaces)) ?? 0

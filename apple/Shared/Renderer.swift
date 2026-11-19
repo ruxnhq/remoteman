@@ -31,6 +31,27 @@ fragment float4 rm_fragment(VOut in [[stage_in]], texture2d<float> luma [[textur
     float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);
     return float4(saturate(rgb), 1.0);
 }
+
+struct Light { float sdrWhite; float headroom; };
+
+// HDR: BT.2020 limited-range YCbCr with the PQ curve becomes linear BT.2020 light in which 1.0
+// is the host's SDR white, so that its ordinary white lands on this screen's and what is brighter
+// goes into the screen's headroom. What is brighter than the screen can show is eased towards
+// the top instead of cut off; nothing at or under SDR white is touched.
+fragment float4 rm_fragment_hdr(VOut in [[stage_in]], texture2d<float> luma [[texture(0)]],
+                                texture2d<float> chroma [[texture(1)]], constant Light &l [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float y = (luma.sample(s, in.uv).r - 64.0 / 1023.0) * (1023.0 / 876.0);
+    float2 c = (chroma.sample(s, in.uv).rg - 512.0 / 1023.0) * (1023.0 / 896.0);
+    float3 e = saturate(float3(y + 1.4746 * c.y, y - 0.16455 * c.x - 0.57135 * c.y, y + 1.8814 * c.x));
+    float3 p = pow(e, float3(1.0 / 78.84375));
+    float3 nits = 10000.0 * pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), float3(1.0 / 0.1593017578125));
+    float3 v = nits / l.sdrWhite;
+    float m = max(v.r, max(v.g, v.b));
+    float room = max(l.headroom - 1.0, 0.001);
+    if (m > 1.0) { v *= (1.0 + room * (1.0 - exp(-(m - 1.0) / room))) / m; }
+    return float4(v, 1.0);
+}
 """
 
 final class VideoRenderer {
@@ -46,7 +67,46 @@ final class VideoRenderer {
     let layer: CAMetalLayer
     private let queue: MTLCommandQueue
     private let library: MTLLibrary
-    private var pipelines: [MTLPixelFormat: MTLRenderPipelineState] = [:]
+    private var pipelines: [String: MTLRenderPipelineState] = [:]
+    /// The stream is HDR (BT.2020, PQ): drawn into a float layer in which 1.0 is SDR white.
+    private(set) var hdr = false
+    /// Where SDR white sits in the HDR signal, in nits (the host says; 203 if it doesn't).
+    var sdrWhite: Float = 203
+    /// How many times brighter than SDR white the screen shows right now. Asked at each frame.
+    var headroom: () -> Float = { 1 }
+    private let sdrFormat: MTLPixelFormat
+
+    /// Main thread: follow the stream between SDR and HDR.
+    func setHDR(_ on: Bool) {
+        guard on != hdr else { return }
+        hdr = on
+        if #available(iOS 16.0, macOS 10.11, *) { layer.wantsExtendedDynamicRangeContent = on }
+        layer.pixelFormat = on ? .rgba16Float : sdrFormat
+        layer.colorspace = CGColorSpace(name: on ? CGColorSpace.extendedLinearITUR_2020 : CGColorSpace.sRGB)
+        setNeedsRedraw()
+    }
+
+    /// For checking HDR: the picture's value at a point (fractions from its top left), in the
+    /// viewer's linear light where 1.0 is SDR white, with nothing eased for the screen.
+    func probe(x: Double, y: Double) -> SIMD4<Float>? {
+        lock.lock()
+        let frame = pending ?? current
+        lock.unlock()
+        guard let pb = frame?.pixelBuffer, let cb = queue.makeCommandBuffer() else { return nil }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
+        d.usage = [.renderTarget, .shaderRead]
+        d.storageMode = .shared
+        guard let target = device.makeTexture(descriptor: d) else { return nil }
+        let keep = encode(pb, into: target, format: .rgba16Float, commandBuffer: cb, zoomed: false, room: 1000)
+        cb.commit()
+        cb.waitUntilCompleted()
+        _ = keep
+        var px = [Float16](repeating: 0, count: 4)
+        let at = MTLRegionMake2D(min(w - 1, max(0, Int(x * Double(w)))), min(h - 1, max(0, Int(y * Double(h)))), 1, 1)
+        target.getBytes(&px, bytesPerRow: 8, from: at, mipmapLevel: 0)
+        return SIMD4(Float(px[0]), Float(px[1]), Float(px[2]), Float(px[3]))
+    }
     private var cache: CVMetalTextureCache!
     private let lock = NSLock()
     /// The size to draw at, in pixels: the view's. Set and used on the main thread.
@@ -81,24 +141,26 @@ final class VideoRenderer {
         layer = CAMetalLayer()
         layer.device = device
         #if os(macOS)
-            layer.pixelFormat = .bgr10a2Unorm
+            sdrFormat = .bgr10a2Unorm
         #else
-            layer.pixelFormat = .bgra8Unorm
+            sdrFormat = .bgra8Unorm
         #endif
+        layer.pixelFormat = sdrFormat
         layer.framebufferOnly = true
         layer.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         layer.isOpaque = true
         CVMetalTextureCacheCreate(nil, nil, device, nil, &cache)
     }
 
-    private func pipeline(_ format: MTLPixelFormat) -> MTLRenderPipelineState? {
-        if let p = pipelines[format] { return p }
+    private func pipeline(_ format: MTLPixelFormat, hdr: Bool) -> MTLRenderPipelineState? {
+        let key = "\(format.rawValue)-\(hdr)"
+        if let p = pipelines[key] { return p }
         let d = MTLRenderPipelineDescriptor()
         d.vertexFunction = library.makeFunction(name: "rm_vertex")
-        d.fragmentFunction = library.makeFunction(name: "rm_fragment")
+        d.fragmentFunction = library.makeFunction(name: hdr ? "rm_fragment_hdr" : "rm_fragment")
         d.colorAttachments[0].pixelFormat = format
         let p = try? device.makeRenderPipelineState(descriptor: d)
-        pipelines[format] = p
+        pipelines[key] = p
         return p
     }
 
@@ -178,8 +240,12 @@ final class VideoRenderer {
     }
 
     private func encode(
-        _ pb: CVPixelBuffer?, into target: MTLTexture, format: MTLPixelFormat, commandBuffer: MTLCommandBuffer, zoomed: Bool = true
+        _ pb: CVPixelBuffer?, into target: MTLTexture, format: MTLPixelFormat, commandBuffer: MTLCommandBuffer, zoomed: Bool = true,
+        room: Float? = nil
     ) -> [Any] {
+        // An HDR picture into a float target keeps its light; into any other (a screenshot) it is
+        // eased down to SDR white.
+        let float = format == .rgba16Float
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = target
         pass.colorAttachments[0].loadAction = .clear
@@ -187,7 +253,7 @@ final class VideoRenderer {
         pass.colorAttachments[0].storeAction = .store
         guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return [] }
         var keep: [Any] = []
-        if let pb, let (ty, tc, ky, kc) = textures(pb), let p = pipeline(format) {
+        if let pb, let (ty, tc, ky, kc) = textures(pb), let p = pipeline(format, hdr: hdr) {
             let tw = Double(target.width), th = Double(target.height)
             let vw = Double(CVPixelBufferGetWidth(pb)), vh = Double(CVPixelBufferGetHeight(pb))
             // The same rectangle input is mapped through, here in the target's pixels.
@@ -199,6 +265,10 @@ final class VideoRenderer {
             enc.setVertexBytes(&uniforms, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
             enc.setFragmentTexture(ty, index: 0)
             enc.setFragmentTexture(tc, index: 1)
+            if hdr {
+                var light = SIMD2<Float>(max(sdrWhite, 1), float ? (room ?? max(headroom(), 1)) : 1)
+                enc.setFragmentBytes(&light, length: MemoryLayout<SIMD2<Float>>.size, index: 0)
+            }
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             keep = [ky, kc, pb]
         }
