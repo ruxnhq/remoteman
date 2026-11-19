@@ -10,6 +10,7 @@
 #   RM_NODE=/dev/dri/renderD128   the GPU (default: the first that isn't NVIDIA's)
 #   RM_SIZE=1920x1080 RM_REFRESH=60 RM_SECONDS=16   the client's display and how long
 #   RM_STEPS=FILE   the client's script instead of the one below (then only frames are checked)
+#   RM_CLIENT_ARGS="--drop-one-in 500"   more options for the test client
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
 export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT="${RM_PORT:-7781}"
 export RM_SIZE="${RM_SIZE:-1920x1080}" RM_REFRESH="${RM_REFRESH:-60}" RM_SECONDS="${RM_SECONDS:-16}"
@@ -46,7 +47,7 @@ dbus-run-session -- bwrap --bind / / --dev-bind /dev /dev --proc /proc $binds sh
   sleep 1
   ( sleep 2.5; exec env -u DISPLAY WAYLAND_DISPLAY=rm-vaapi GDK_BACKEND=wayland python3 "$RM_ROOT/scripts/animate.py" >"$RM_LOGS/content.log" 2>&1 ) &
   cpid=$!
-  "$bin/remoteman-testclient" 127.0.0.1:$RM_PORT --pair --state "$RM_LOGS/client" --seconds $RM_SECONDS --size $RM_SIZE --scale 1 --refresh $RM_REFRESH --decoders hevc,av1 --script "$RM_LOGS/steps.txt" --out "$RM_LOGS/stream.hevc" >"$RM_LOGS/client.log" 2>&1
+  "$bin/remoteman-testclient" 127.0.0.1:$RM_PORT --pair --state "$RM_LOGS/client" --seconds $RM_SECONDS --size $RM_SIZE --scale 1 --refresh $RM_REFRESH --decoders hevc,av1 --script "$RM_LOGS/steps.txt" --out "$RM_LOGS/stream.hevc" $RM_CLIENT_ARGS >"$RM_LOGS/client.log" 2>&1
   kill $cpid $apid 2>/dev/null; sleep 0.5; kill $mpid 2>/dev/null
   wait 2>/dev/null
 ' >/dev/null 2>&1

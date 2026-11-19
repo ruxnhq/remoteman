@@ -79,7 +79,8 @@ impl Pipeline {
         let wanted = Arc::new(AtomicU32::new(bitrate));
         let wanted_r = wanted.clone();
         let out = link.clone();
-        let encoder = std::thread::Builder::new().name("encode".into()).spawn(move || {
+        let skipped_r = skipped.clone();
+        let encoder =std::thread::Builder::new().name("encode".into()).spawn(move || {
             let opened = (|| {
                 opener.open(&Config { codec, chroma444: chroma == Chroma::C444, width, height, fps, bitrate, preset: 1, long_term: refs.map_or(2, |r| r.1), short_term: refs.map(|r| r.0) })
             })();
@@ -109,13 +110,23 @@ impl Pipeline {
             // The last frame sent that a client can restart from (a keyframe or recovery point).
             let mut answer = None::<u64>;
             let mut tally = Tally::default();
+            let mut times = crate::gpu::Times::new();
             let mut rate = bitrate;
             // Where the last picture encoded is (it stays there until newer ones have come).
             let mut last = None::<usize>;
             loop {
                 // A still desktop sends no frames, and a new bitrate is answered all the same.
                 let c = match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                    Ok(c) => Some(c),
+                    // An encoder slower than the compositor (VA-API at 4K on a small GPU) takes
+                    // the newest picture waiting and skips the older ones: a full queue would
+                    // otherwise add its whole length to every frame's age.
+                    Ok(mut c) => {
+                        while let Ok(newer) = rx.try_recv() {
+                            skipped_r.fetch_add(1, Ordering::Relaxed);
+                            c = newer;
+                        }
+                        Some(c)
+                    }
                     Err(mpsc::RecvTimeoutError::Timeout) => None,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
@@ -198,8 +209,10 @@ impl Pipeline {
                     // Replace the older one (or fill an empty place).
                     how.mark = (0..slots).min_by_key(|&i| kept[i]).map(|i| i as u32);
                 }
+                let started = std::time::Instant::now();
                 match enc.encode_how(c.slot, n, how) {
                     Ok(made) => {
+                        times.add(started);
                         let (data, key) = (made.data, made.key);
                         if key && !how.idr {
                             kept = [None; 2];
@@ -235,7 +248,7 @@ impl Pipeline {
                     }
                 }
             }
-            tracing::info!(frames = n, "the picture ended");
+            tracing::info!(frames = n, encode = %times.summary(), "the picture ended");
             if tally.reports > 0 {
                 let Tally { reports, recovered, long_term, early, too_old, refused, unasked, unsure, behind } = tally;
                 tracing::info!(
@@ -262,6 +275,8 @@ impl Pipeline {
         let capture = std::thread::Builder::new().name("capture".into()).spawn(move || {
             let mut next = 0usize;
             let cursor_meta = cursor;
+            let converts = std::rc::Rc::new(std::cell::RefCell::new(crate::gpu::Times::new()));
+            let converts_w = converts.clone();
             let on_event = Box::new(move |ev: Event| match ev {
                 Event::Scale(s) => {
                     tracing::info!(scale = s, "the compositor draws the monitor at this scale");
@@ -282,7 +297,10 @@ impl Pipeline {
                         return;
                     }
                     let capture_us = link.now_us();
-                    match conv.convert(f.fd, f.modifier, f.offset, f.stride, next) {
+                    let started = std::time::Instant::now();
+                    let done = conv.convert(f.fd, f.modifier, f.offset, f.stride, next);
+                    converts_w.borrow_mut().add(started);
+                    match done {
                         Ok(()) => {
                             if tx.try_send(Converted { slot: next, capture_us }).is_ok() {
                                 next = (next + 1) % SLOTS;
@@ -297,6 +315,7 @@ impl Pipeline {
             if let Err(e) = capture::run(node, (width, height), fps, Some(scale), cursor_meta, &modifiers, on_event, quit_rx) {
                 tracing::error!("capture: {e:#}");
             }
+            tracing::info!(convert = %converts.borrow().summary(), "the capture ended");
         })?;
         Ok(Self { quit: Some(quit), keyframe, lost, bitrate: wanted, skipped, scale: actual_scale, threads: vec![capture, encoder] })
     }

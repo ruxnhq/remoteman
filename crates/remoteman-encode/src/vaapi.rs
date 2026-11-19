@@ -311,6 +311,31 @@ mod tests {
         }
     }
 
+    /// How long encoding takes, frame by frame: `RM_VA_BENCH=WxH cargo test --release -p
+    /// remoteman-encode -- --ignored --nocapture bench`. Pictures change every frame; the
+    /// upload from the CPU isn't timed, only the encoder's call.
+    #[test]
+    #[ignore]
+    fn bench() {
+        let Some((node, _)) = gpu() else { return };
+        let size = std::env::var("RM_VA_BENCH").unwrap_or("1920x1080".into());
+        let (w, h) = size.split_once('x').map(|(w, h)| (w.parse().unwrap(), h.parse().unwrap())).unwrap();
+        let (mut conv, mut enc) = open(&node, &Config { codec: Codec::Hevc, depth: 10, width: w, height: h, fps: 120, bitrate: 40_000_000, slots: 4 }).unwrap();
+        let pictures: Vec<Vec<u8>> = (0..8).map(|i| picture(w, h, i * 37)).collect();
+        let mut times = Vec::new();
+        for n in 0..300u32 {
+            let slot = (n % 4) as usize;
+            conv.fill(slot, &pictures[n as usize % 8], w * 4).unwrap();
+            let t = std::time::Instant::now();
+            enc.encode(slot, n as u64, false).unwrap();
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.drain(..10);
+        times.sort_by(f64::total_cmp);
+        let p = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
+        eprintln!("{size}: encode ms median {:.2} p99 {:.2} max {:.2}", p(0.5), p(0.99), p(1.0));
+    }
+
     trait Positions {
         fn positions(&self) -> Vec<usize>;
     }

@@ -212,6 +212,44 @@ impl Enc {
     }
 }
 
+/// How long a step took, frame by frame, in tenths of a millisecond (up to 100 ms), for the
+/// log at the end of a picture.
+pub struct Times {
+    tenths: Vec<u32>,
+    n: u32,
+}
+
+impl Times {
+    pub fn new() -> Self {
+        Self { tenths: vec![0; 1001], n: 0 }
+    }
+
+    pub fn add(&mut self, since: std::time::Instant) {
+        let t = (since.elapsed().as_secs_f64() * 10_000.0) as usize;
+        self.tenths[t.min(1000)] += 1;
+        self.n += 1;
+    }
+
+    /// The median, 99th percentile and the longest, in milliseconds, as text.
+    pub fn summary(&self) -> String {
+        if self.n == 0 {
+            return "none".into();
+        }
+        let at = |q: f64| {
+            let want = ((self.n - 1) as f64 * q) as u32;
+            let mut seen = 0;
+            for (i, c) in self.tenths.iter().enumerate() {
+                seen += c;
+                if seen > want {
+                    return i as f64 / 10.0;
+                }
+            }
+            100.0
+        };
+        format!("median {:.1} p99 {:.1} max {:.1} ms over {}", at(0.5), at(0.99), at(1.0), self.n)
+    }
+}
+
 /// Set up the picture path for this host's GPU: the converter, the DMA-BUF layouts to offer
 /// the compositor, and what the encoder thread opens its encoder from.
 pub fn open(width: u32, height: u32, mode: Mode, fps: u32, bitrate: u32, slots: usize) -> Result<(Conv, Vec<u64>, Opener)> {
