@@ -74,6 +74,10 @@ pub struct Computer {
     /// pixels are encoded sooner: a computer whose encoder can't keep up with this screen at
     /// its full size is quicker with a smaller picture, which is scaled up here.
     pub max_height: u32,
+    /// The most the picture may use, in Mbit/s, asked of the computer when a session starts
+    /// (0: the computer's own choice). More is a cleaner picture in fast movement on a link
+    /// that carries it; a still desktop uses little whatever this says.
+    pub bitrate: u32,
     /// The hardware addresses of its network cards, as it last advertised them on this
     /// network (comma-separated; empty: never seen): what waking it needs.
     pub cards: String,
@@ -265,7 +269,7 @@ impl Store {
             Ok(text) => {
                 for line in text.lines() {
                     if line == "[computer]" {
-                        store.computers.push(Computer { name: String::new(), address: String::new(), os: String::new(), paired: 0, used: 0, placement: Placement::Extend, quality: Quality::Automatic, media: Media::default(), cards: String::new(), attach_only: false, second_side: Side::Right, max_height: 0 });
+                        store.computers.push(Computer { name: String::new(), address: String::new(), os: String::new(), paired: 0, used: 0, placement: Placement::Extend, quality: Quality::Automatic, media: Media::default(), cards: String::new(), attach_only: false, second_side: Side::Right, max_height: 0, bitrate: 0 });
                         continue;
                     }
                     let (Some(c), Some((key, value))) = (store.computers.last_mut(), line.split_once('=')) else { continue };
@@ -279,6 +283,7 @@ impl Store {
                         "quality" => c.quality = Quality::from_key(value),
                         "cards" => c.cards = value.to_owned(),
                         "way-in" => c.attach_only = value == "attach",
+                        "bitrate" => c.bitrate = value.parse().unwrap_or(0),
                         "picture-lines" => c.max_height = if value == "window" { WINDOW } else { value.parse().unwrap_or(0) },
                         "second-side" => c.second_side = SIDES.iter().find(|(_, key)| *key == value).map_or(Side::Right, |(side, _)| *side),
                         other => {
@@ -297,7 +302,7 @@ impl Store {
                 let last = last.trim();
                 if !last.is_empty() && store.known(last).exists() {
                     let paired = std::fs::metadata(store.known(last)).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64);
-                    store.computers.push(Computer { name: host_part(last).to_owned(), address: last.to_owned(), os: String::new(), paired, used: paired, placement: store.settings.placement, quality: store.settings.quality, media: store.settings.media, cards: String::new(), attach_only: false, second_side: Side::Right, max_height: 0 });
+                    store.computers.push(Computer { name: host_part(last).to_owned(), address: last.to_owned(), os: String::new(), paired, used: paired, placement: store.settings.placement, quality: store.settings.quality, media: store.settings.media, cards: String::new(), attach_only: false, second_side: Side::Right, max_height: 0, bitrate: 0 });
                 }
             }
         }
@@ -348,7 +353,7 @@ impl Store {
             }
             None => {
                 let name = if host_name.is_empty() { host_part(address) } else { host_name };
-                self.computers.push(Computer { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: self.settings.quality, media: self.settings.media, cards: String::new(), attach_only: false, second_side: Side::Right, max_height: 0 });
+                self.computers.push(Computer { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: self.settings.quality, media: self.settings.media, cards: String::new(), attach_only: false, second_side: Side::Right, max_height: 0, bitrate: 0 });
             }
         }
         self.sort();
@@ -402,7 +407,7 @@ impl Store {
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         for c in &self.computers {
             out += &format!(
-                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\ncards={}\nway-in={}\nsecond-side={}\npicture-lines={}\n{}",
+                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\ncards={}\nway-in={}\nsecond-side={}\npicture-lines={}\nbitrate={}\n{}",
                 clean(&c.name),
                 clean(&c.address),
                 clean(&c.os),
@@ -414,6 +419,7 @@ impl Store {
                 if c.attach_only { "attach" } else { "any" },
                 SIDES.iter().find(|(side, _)| *side == c.second_side).map_or("right", |(_, key)| key),
                 if c.max_height == WINDOW { "window".to_owned() } else { c.max_height.to_string() },
+                c.bitrate,
                 c.media.lines()
             );
         }
@@ -489,6 +495,9 @@ pub fn when(unix: i64) -> String {
 /// The picture sizes a computer can be asked for, in the order they are offered: the most
 /// lines (0: this screen's own) and what the choice is called.
 pub const SIZES: [(u32, &str); 4] = [(0, "This screen's own"), (WINDOW, "The window's size"), (1440, "Up to 1440 lines"), (1080, "Up to 1080 lines")];
+
+/// The bitrate ceilings offered, in Mbit/s (0: the computer's own choice).
+pub const BITRATES: [u32; 7] = [0, 20, 50, 100, 150, 300, 500];
 
 /// In place of a number of lines: a display of exactly the pixels the picture has in the
 /// viewer's window, asked for again when the window has changed size ("window" in the file).

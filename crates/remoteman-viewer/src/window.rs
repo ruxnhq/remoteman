@@ -277,7 +277,7 @@ impl App {
         if most == crate::store::WINDOW && self.args.size.is_none() && placement != Placement::Mirror {
             (w, h) = self.picture_pixels(scale);
         }
-        Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement }
+        Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement, hdr: false, headroom: 0.0 }
     }
 
     /// How this display is to sit among a computer's own, and which stream to ask it for.
@@ -428,6 +428,11 @@ impl App {
         self.released.set(false);
         self.pointer_on.set(0);
         self.view.offer_second(session.offers("displays"));
+        // The bitrate ceiling chosen for this computer, if one was.
+        let most = self.store.borrow().find(&target.address).map_or(0, |c| c.bitrate);
+        if most > 0 && session.offers("configure") {
+            session.client.send_message(remoteman_core::Message::Configure { display: None, bitrate: Some(most * 1_000_000), decoders: None });
+        }
         self.fingers.borrow_mut().clear();
         self.view.show_pointer(input.capture);
         if input.capture {

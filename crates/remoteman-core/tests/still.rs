@@ -10,7 +10,7 @@ use remoteman_core::{Chroma, Client, Codec, Display, Event, Frame, Handler, Mode
 const MODE: Mode = Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 8 };
 
 fn accept() -> Accept {
-    Accept { mode: MODE, width: 640, height: 480, refresh: 60, colour: "bt709".into() }
+    Accept { mode: MODE, width: 640, height: 480, refresh: 60, colour: "bt709".into(), sdr_white: 0, peak: 0 }
 }
 
 /// Hands its link to the test, and counts what the client asks for.
@@ -82,7 +82,7 @@ fn pair(name: &str, drop_one_in: Option<u32>) -> Pair {
             state: dir.join("device"),
             name: "device".into(),
             pair: true,
-            display: Display { width: 640, height: 480, scale: 1.0, refresh: 60, placement: Default::default() },
+            display: Display { width: 640, height: 480, scale: 1.0, refresh: 60, placement: Default::default(), hdr: false, headroom: 0.0 },
             decoders: vec![MODE],
             test_drop_one_in: None,
             test_delay_lost_ms: None,

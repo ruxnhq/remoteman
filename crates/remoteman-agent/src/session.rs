@@ -209,7 +209,7 @@ impl Drop for Agent {
 }
 
 /// The lowest and highest bitrate a client may ask for, in bits a second.
-const BITRATE: std::ops::RangeInclusive<u32> = 1_000_000..=150_000_000;
+const BITRATE: std::ops::RangeInclusive<u32> = 1_000_000..=500_000_000;
 
 impl Agent {
     pub fn new(bitrate: u32, refs: Option<(u32, u32)>, allowed: Allowed, take_output: bool) -> anyhow::Result<Self> {
@@ -325,7 +325,7 @@ impl Agent {
             let picture = format!("{} {}-bit{}", if mode.codec == remoteman_core::Codec::Av1 { "AV1" } else { "HEVC" }, mode.depth, if mode.chroma == remoteman_core::Chroma::C444 { " 4:4:4" } else { "" });
             *now = Some(Now { name: l.name.clone(), since, width: screen.width, height: screen.height, refresh, placement, picture, sound: self.sound.is_some() });
         }
-        Ok(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into() })
+        Ok(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 })
     }
 
     /// A device has come to a locked computer (GNOME lets nothing in from outside while it
@@ -435,7 +435,7 @@ impl Agent {
         };
         let second = l.link.second();
         // Said before its first frame can be sent.
-        second.restart(Accept { mode: l.mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into() });
+        second.restart(Accept { mode: l.mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
         let settings = Settings { node: desktop.node, width: screen.width, height: screen.height, fps: refresh, scale: screen.scale.clamp(1.0, 4.0), mode: l.mode, bitrate: self.bitrate.min(40_000_000), cursor: false, refs: self.refs };
         let pipeline = match Pipeline::start(settings, second) {
             Ok(p) => p,
@@ -767,7 +767,7 @@ impl Agent {
         }
         let refresh = screen.refresh.clamp(1, 240);
         if let Some(mode) = mode {
-            link.restart(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into() });
+            link.restart(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
         }
         // (Not `start`, which locks a computer that was unlocked for a device left with no
         // picture: this device is still here, and gets the picture it had back.)
@@ -776,7 +776,7 @@ impl Agent {
             tracing::warn!("couldn't start that picture ({e}); going back to the one before");
             let refresh = was_screen.refresh.clamp(1, 240);
             if let Some(mode) = was_decoders.iter().copied().find(|m| modes().contains(m)) {
-                link.restart(Accept { mode, width: was_screen.width, height: was_screen.height, refresh, colour: "bt709".into() });
+                link.restart(Accept { mode, width: was_screen.width, height: was_screen.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
             }
             if let Err(e) = self.start(name, was_screen, was_decoders, cursor, ceiling, link) {
                 tracing::error!("couldn't restore the picture: {e}");

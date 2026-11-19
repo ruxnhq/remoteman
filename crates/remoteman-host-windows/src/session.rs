@@ -172,7 +172,7 @@ impl Host {
                 _ => "only",
             }, picture, sound: self.sound.is_some() });
         }
-        Ok(Accept { mode: started.mode, width: started.width, height: started.height, refresh, colour: "bt709".into() })
+        Ok(Accept { mode: started.mode, width: started.width, height: started.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 })
     }
 
     /// Stop the picture, let go of the client's keys, and put the monitor back.
@@ -221,7 +221,7 @@ impl Host {
         let refresh = mode.refresh.clamp(1, 240);
         let second = l.link.second();
         // Said before its first frame can be sent.
-        second.restart(Accept { mode: l.mode, width: mode.width, height: mode.height, refresh, colour: "bt709".into() });
+        second.restart(Accept { mode: l.mode, width: mode.width, height: mode.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
         let area = Arc::new(Mutex::new(at));
         let settings = pipeline::Settings {
             driver: self.screen.driver(),
