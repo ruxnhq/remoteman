@@ -68,11 +68,20 @@ pub struct Device {
     pub connected: bool,
 }
 
+/// What the device said became of files sent to it: how many it has answered for, and for
+/// the last, whether it arrived and where it was put or why not.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sent {
+    pub answered: u64,
+    pub ok: bool,
+    pub said: String,
+}
+
 /// How things stand.
 #[derive(Clone, Debug, PartialEq)]
 pub enum State {
     /// The host runs.
-    Sharing { fingerprint: String, port: u16, pairing: bool, clipboard: bool, files: bool, client: Option<Client>, devices: Vec<Device> },
+    Sharing { fingerprint: String, port: u16, pairing: bool, clipboard: bool, files: bool, client: Option<Client>, devices: Vec<Device>, sent: Sent },
     /// The host doesn't run because it was stopped (or never started).
     Paused,
     /// The host doesn't run because it failed; why, as far as systemd says.
@@ -109,6 +118,7 @@ pub fn state() -> State {
             files: status["files"].as_bool().unwrap_or(false),
             client,
             devices,
+            sent: Sent { answered: number(&status["sent"], "answered"), ok: status["sent"]["ok"].as_bool().unwrap_or(false), said: text(&status["sent"], "said") },
         };
     }
     match systemctl(&["is-failed", &unit()]).as_deref() {

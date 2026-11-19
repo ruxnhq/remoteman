@@ -12,6 +12,19 @@ Nothing here names an operating system. A host describes what it can do, a clien
 - The client opens the connection. Keep-alives every second; a silent connection is dropped after 10 s.
 - **Closing.** Either side closes the QUIC connection with an application code and a short reason in words. From the host: `0` it is stopping, or another device took over; `1` something failed (the reason says what); `2` the host's owner ended this connection (the device stays trusted and may come back); `3` the device was taken off the trust list (it is refused from now on, until it is paired again). A client shows the reason, and after `3` offers pairing instead of reconnecting.
 
+## Finding a host
+
+A host that can be reached from the network says so with DNS-SD (Bonjour, Avahi): a service of type `_remoteman._udp` whose instance name is the computer's name and whose port is the one it listens on. Its text records:
+
+| Record | Content |
+|---|---|
+| `v=0` | The protocol version. |
+| `fp=…` | The first 16 hex digits of the host key's fingerprint, so a viewer recognises a computer it is paired with (and never trusts one by this alone: the handshake checks the whole key). |
+| `os=…` | `linux`, `macos` or `windows`. |
+| `mac=…` | The hardware addresses of the computer's own network cards, comma-separated (`aa:bb:cc:dd:ee:ff`). Left out if there are none. |
+
+A viewer lists hosts it isn't paired with as nearby, and may mark a paired one as online while it sees its `fp`. Seeing nothing says nothing: a paired computer may be reached over a VPN or another network, where none of this travels. A viewer remembers a paired computer's `mac` and can wake it with the usual magic packet (six bytes of `0xFF`, then the address sixteen times) broadcast to UDP port 9 (and 7), which only works on the network the computer is on. The service is withdrawn when the host stops.
+
 ## Channels
 
 | Channel | Carried on | Direction | Content |

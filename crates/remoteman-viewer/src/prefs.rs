@@ -174,7 +174,12 @@ pub fn preferences(app: &Rc<App>) {
     });
     picture.add(&default_quality);
     let hz = app.display(Placement::Extend).refresh;
-    picture.add(&gate(switch("Match this display's refresh rate", &format!("Up to {hz} Hz on this display"), true), FEATURES.refresh_choice));
+    let match_refresh = switch("Match this display's refresh rate", &format!("Up to {hz} Hz on this display; 60 Hz when off. A change applies from the next session"), app.store.borrow().settings.match_refresh);
+    match_refresh.connect_active_notify({
+        let app = app.clone();
+        move |row| set(&app, &|s| s.match_refresh = row.is_active())
+    });
+    picture.add(&gate(match_refresh, FEATURES.refresh_choice));
     let show_figures = switch("Show figures", "Frames per second, picture age, bitrate, codec, lost frames and round trip", figures);
     show_figures.connect_active_notify({
         let app = app.clone();
@@ -200,9 +205,28 @@ pub fn preferences(app: &Rc<App>) {
 
     let sharing = adw::PreferencesGroup::builder().title("Sharing").build();
     sharing.add(&gate(starts_with("Share the clipboard", "With computers that allow it: text and images copied on either side can be pasted on the other", media_now.clipboard, |m, on| m.clipboard = on), FEATURES.sharing_settings));
-    let folder = adw::ActionRow::builder().title("Save received files to").build();
-    folder.add_suffix(&gtk::Label::builder().label("Downloads").css_classes(["dim-label"]).build());
+    let folder = adw::ActionRow::builder().title("Save received files to").subtitle("Files a computer sends to this device").activatable(true).build();
+    let folder_name = |app: &Rc<App>| app.store.borrow().receive_folder().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Downloads".into());
+    let shown = gtk::Label::builder().label(folder_name(app)).css_classes(["dim-label"]).build();
+    folder.add_suffix(&shown);
     folder.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+    folder.connect_activated({
+        let (app, shown) = (app.clone(), shown.clone());
+        move |_| {
+            let (app, shown) = (app.clone(), shown.clone());
+            let window = app.window.clone();
+            gtk::FileDialog::builder().title("Save Received Files To").build().select_folder(Some(&window), gtk::gio::Cancellable::NONE, move |chosen| {
+                if let Some(path) = chosen.ok().and_then(|f| f.path()) {
+                    set(&app, &|s| s.folder = path.display().to_string());
+                    shown.set_label(&folder_name(&app));
+                    // The session that is running takes it at once.
+                    if let Some(s) = app.session.borrow().as_ref() {
+                        *s.shared.folder.lock().unwrap() = path;
+                    }
+                }
+            });
+        }
+    });
     sharing.add(&gate(folder, FEATURES.receive_files));
     page.add(&sharing);
 

@@ -61,6 +61,11 @@ pub struct Shared {
     pub features: Mutex<Vec<String>>,
     /// The computer changed what it offers, until the window has caught up.
     pub features_changed: std::sync::atomic::AtomicBool,
+    /// Where files from the computer go.
+    pub folder: Mutex<PathBuf>,
+    /// What became of files the computer sent, until the window answers it and says so: the
+    /// computer's number for the file, and where it was put or why not.
+    pub received: Mutex<Vec<remoteman_core::receive::Outcome>>,
     /// Counts the copies and the files sent.
     copy_seq: AtomicU32,
     file_seq: AtomicU32,
@@ -76,6 +81,8 @@ struct Feed {
     shared: Arc<Shared>,
     /// Copies from the computer that are still arriving.
     arriving: HashMap<u32, (String, Vec<u8>)>,
+    /// Files from the computer that are still arriving.
+    files: remoteman_core::receive::Receiver,
 }
 
 impl Handler for Feed {
@@ -96,6 +103,10 @@ impl Handler for Feed {
     }
 
     fn blob(&mut self, event: &BlobEvent) {
+        let folder = self.shared.folder.lock().unwrap().clone();
+        if let Some(outcome) = self.files.blob(event, &folder) {
+            self.shared.received.lock().unwrap().push(outcome);
+        }
         match event {
             BlobEvent::Open { id, kind, header } if *kind == BLOB_CLIPBOARD => {
                 if let Ok(h) = serde_json::from_str::<ClipboardHeader>(header) {
@@ -165,6 +176,8 @@ pub struct Request {
     /// The computer's cursor comes apart from the picture, for this window's pointer to wear;
     /// otherwise the computer draws it into the picture.
     pub cursor: bool,
+    /// Where files from the computer go.
+    pub folder: PathBuf,
 }
 
 impl Session {
@@ -319,6 +332,7 @@ impl Session {
     /// Connect (this blocks) and start decoding.
     pub fn start(r: Request) -> Result<Self> {
         let shared = Arc::new(Shared::default());
+        *shared.folder.lock().unwrap() = r.folder.clone();
         let (tx, rx) = mpsc::sync_channel::<Msg>(8);
         let s = shared.clone();
         std::thread::Builder::new().name("decode".into()).spawn(move || {
@@ -365,7 +379,7 @@ impl Session {
         })?;
         let hostname = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "Linux".into());
         let options = Options { host: r.host, state: r.state, name: hostname, pair: r.pair, display: r.display, decoders: r.decoders, test_drop_one_in: None, test_delay_lost_ms: None, cursor: r.cursor };
-        let client = Client::connect(options, Feed { tx, shared: shared.clone(), arriving: HashMap::new() })?;
+        let client = Client::connect(options, Feed { tx, shared: shared.clone(), arriving: HashMap::new(), files: Default::default() })?;
         // What it said in its hello, unless it has already said otherwise since.
         if !shared.features_changed.load(Ordering::Relaxed) {
             *shared.features.lock().unwrap() = client.host_features.clone();

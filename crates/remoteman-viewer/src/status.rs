@@ -174,7 +174,22 @@ pub fn problem(app: &Rc<App>, target: &Target, problem: Problem) -> adw::Navigat
             });
             buttons.append(&edit);
             buttons.append(&again("Try Again"));
-            ("network-wireless-offline-symbolic", format!("Can't Reach {name}"), "It did not answer at its saved address. It may be switched off or asleep, or on a network this device can't get to. It can't be woken from here.".to_owned())
+            // A computer whose network cards were once seen on this network can be sent the
+            // packet that wakes it, which does nothing if it is off or somewhere else.
+            let wakeable = crate::features::FEATURES.wake && app.store.borrow().find(&target.address).is_some_and(|c| !c.cards.is_empty());
+            if wakeable {
+                let wake = pill("Wake Up", false);
+                wake.connect_clicked({
+                    let (app, address) = (app.clone(), target.address.clone());
+                    move |_| {
+                        app.show_list();
+                        app.wake(&address);
+                    }
+                });
+                buttons.append(&wake);
+            }
+            let last = if wakeable { "If it is asleep on this network, remoteman can try to wake it." } else { "It can't be woken from here: it has not been seen on this device's network." };
+            ("network-wireless-offline-symbolic", format!("Can't Reach {name}"), format!("It did not answer at its saved address. It may be switched off or asleep, or on a network this device can't get to. {last}"))
         }
         Problem::Asleep => {
             let wake = gate(pill("Wake Up", true), FEATURES.wake);

@@ -38,6 +38,7 @@ fn main() -> Result<()> {
     let mut listen: SocketAddr = format!("0.0.0.0:{}", remoteman_core::PORT).parse()?;
     let (mut pair, mut state, mut bitrate, mut drop_one_in) = (false, state_dir(), 40u32, None::<u32>);
     let (mut daemon, mut socket) = (false, None::<PathBuf>);
+    let (mut advertise, mut advertise_as) = (None::<bool>, None::<String>);
     let mut refs = None::<(u32, u32)>;
     let allowed = session::Allowed::default();
     let (mut allow_files, mut allow_clipboard) = (false, false);
@@ -74,6 +75,10 @@ fn main() -> Result<()> {
             "--socket" => socket = Some(value()?.into()),
             // Where the host's owner asks how things stand and changes them (see control.rs).
             "--control" => control_at = Some(value()?.into()),
+            // Tell the local network this host is here (or don't), whatever it listens on.
+            "--advertise" => advertise = Some(true),
+            "--no-advertise" => advertise = Some(false),
+            "--advertise-as" => advertise_as = Some(value()?),
             // For tests: lose one video packet in this many.
             "--test-drop-one-in" => drop_one_in = Some(value()?.parse().context("--test-drop-one-in N")?),
             other => anyhow::bail!("unknown option {other}"),
@@ -113,6 +118,7 @@ fn main() -> Result<()> {
         }
     }
     let name = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "linux".into());
+    let said_name = advertise_as.unwrap_or_else(|| name.clone());
     let options = HostOptions { listen, state, name, os: "linux".into(), features, pair, test_drop_one_in: drop_one_in };
     let state_dir = options.state.clone();
     let host = std::sync::Arc::new(Host::start(options, session::Agent::new(bitrate * 1_000_000, refs, allowed.clone(), take_output)?)?);
@@ -122,6 +128,22 @@ fn main() -> Result<()> {
     if pair {
         tracing::info!("pairing: the next unknown device to connect will be trusted");
     }
+    // Viewers on this network find a host that can be reached from it; one that listens on
+    // this computer alone (a test's) keeps to itself unless told otherwise.
+    let _advert = if advertise.unwrap_or(!listen.ip().is_loopback()) {
+        match remoteman_desktop::advertise::Advert::start(&said_name, host.address.port(), remoteman_desktop::advertise::records(&host.fingerprint, "linux")) {
+            Ok(advert) => {
+                tracing::info!(name = said_name, "viewers on this network can find this host");
+                Some(advert)
+            }
+            Err(e) => {
+                tracing::warn!("this host isn't advertised on the network (viewers need its address): {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Until Ctrl-C or a request to stop.
     let wait = tokio::runtime::Builder::new_current_thread().enable_all().build()?;

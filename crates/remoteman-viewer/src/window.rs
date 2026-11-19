@@ -66,6 +66,8 @@ pub struct App {
     /// down, and whether another key spoiled it.
     pub chord: Cell<(bool, bool, bool)>,
     /// The pointer held in the window, its raw movement sent, while that is wanted.
+    /// Every advertisement of a remoteman host seen on this network now.
+    pub nearby: RefCell<Vec<crate::nearby::Found>>,
     pub capture: RefCell<Option<crate::capture::Capture>>,
     /// How far a captured pointer has been sent in this run, for tests.
     pub moved: Cell<(f64, f64)>,
@@ -158,8 +160,9 @@ impl App {
             scale = m.scale() as f32;
             w = (g.width() as f64 * m.scale()).round() as u32;
             h = (g.height() as f64 * m.scale()).round() as u32;
-            // Decoding and uploading is sized for 120 a second for now.
-            refresh = ((m.refresh_rate() as f64 / 1000.0).round() as u32).clamp(30, 120);
+            // Decoding and uploading is sized for 120 a second for now. Without the match, 60:
+            // what every display and every stream can do.
+            refresh = if self.store.borrow().settings.match_refresh { ((m.refresh_rate() as f64 / 1000.0).round() as u32).clamp(30, 120) } else { 60 };
         }
         if let Some((sw, sh)) = self.args.size {
             (w, h) = (sw, sh);
@@ -186,6 +189,10 @@ impl App {
 
     /// What is known of a computer before trying it, as far as this build may say.
     pub fn reach_of(&self, address: &str) -> Option<status::Reach> {
+        // Seen on this network now beats what an earlier attempt found.
+        if FEATURES.presence && self.seen(address).is_some() {
+            return Some(status::Reach::Online);
+        }
         self.reach.borrow().get(address).copied().filter(|r| FEATURES.presence || *r == status::Reach::Unreachable)
     }
 
@@ -213,7 +220,7 @@ impl App {
         let id = self.attempt.get().wrapping_add(1);
         self.attempt.set(id);
         let (placement, quality) = self.choices(&target.address);
-        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture } };
+        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, folder: self.store.borrow().receive_folder() };
         let app = self.clone();
         glib::spawn_future_local(async move {
             let result = match gio::spawn_blocking(move || Session::start(request)).await {
@@ -243,11 +250,6 @@ impl App {
     /// Connect to a computer: the connecting page, then its session or what went wrong.
     pub fn connect(self: &Rc<Self>, target: Target, pair: bool) {
         if self.streaming() {
-            return;
-        }
-        if self.reach_of(&target.address) == Some(status::Reach::Asleep) {
-            // Known to be asleep: offer to wake it rather than wait for no answer.
-            self.show_page(&status::problem(self, &target, status::Problem::Asleep));
             return;
         }
         let (placement, _) = self.choices(&target.address);
@@ -651,6 +653,22 @@ impl App {
     /// word of files sent.
     fn arrivals(&self) {
         self.follow_features();
+        // Files the computer sent: it is told what became of each, and so is the person here.
+        let received = self.session.borrow().as_ref().map(|s| std::mem::take(&mut *s.shared.received.lock().unwrap())).unwrap_or_default();
+        for (id, outcome) in received {
+            if let Some(s) = self.session.borrow().as_ref() {
+                s.client.send_message(remoteman_core::Message::FileResult { id, ok: outcome.is_ok(), message: match &outcome { Ok(at) => at.display().to_string(), Err(why) => why.clone() } });
+            }
+            match outcome {
+                Ok(at) => {
+                    self.toast(&format!("A file from the computer: {}", at.display()));
+                    if self.args.ui.is_some() {
+                        println!("~ received {}", at.display());
+                    }
+                }
+                Err(why) => self.toast(&format!("A file from the computer didn't arrive: {why}")),
+            }
+        }
         // A camera that couldn't be opened: say why, and let its button out (which tells the
         // computer it is off again).
         let failed = self.session.borrow().as_ref().and_then(|s| s.shared.camera_failed.lock().unwrap().take());
@@ -820,6 +838,7 @@ pub fn build(application: &adw::Application, args: Args) {
         bar_out: Cell::new(false),
         released: Cell::new(false),
         chord: Cell::new((false, false, false)),
+        nearby: RefCell::new(Vec::new()),
         capture: RefCell::new(None),
         moved: Cell::new((0.0, 0.0)),
         fingers: RefCell::new(Vec::new()),
@@ -846,6 +865,9 @@ pub fn build(application: &adw::Application, args: Args) {
     });
 
     computers::wire(&app);
+    if FEATURES.discovery {
+        crate::nearby::watch(&app);
+    }
     session::wire(&app);
     // Whatever is copied on this computer while the clipboard is shared goes to the other.
     window.clipboard().connect_changed({

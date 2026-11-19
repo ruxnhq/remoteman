@@ -66,6 +66,9 @@ pub struct Computer {
     pub quality: Quality,
     /// What a session with this computer starts with.
     pub media: Media,
+    /// The hardware addresses of its network cards, as it last advertised them on this
+    /// network (comma-separated; empty: never seen): what waking it needs.
+    pub cards: String,
 }
 
 /// What a session starts with switched on: the computer's sound played here, this device's
@@ -197,6 +200,10 @@ pub struct Settings {
     /// What a newly paired computer's sessions start with.
     pub media: Media,
     pub input: Input,
+    /// Ask for this display's own refresh rate (up to 120); otherwise 60.
+    pub match_refresh: bool,
+    /// Where files from a computer go; empty: the Downloads folder.
+    pub folder: String,
 }
 
 pub struct Store {
@@ -232,6 +239,8 @@ impl Store {
             fullscreen: yes("fullscreen", false),
             shortcuts: yes("shortcuts", true),
             quality: Quality::from_key(&get("quality").unwrap_or_default()),
+            match_refresh: yes("match-refresh", true),
+            folder: get("folder").unwrap_or_default(),
             media: Media { sound: yes("sound", false), microphone: yes("microphone", false), camera: yes("camera", false), clipboard: yes("clipboard", false) },
             input: Input {
                 super_key: Stand::from_key(&get("super-key").unwrap_or_default()),
@@ -248,7 +257,7 @@ impl Store {
             Ok(text) => {
                 for line in text.lines() {
                     if line == "[computer]" {
-                        store.computers.push(Computer { name: String::new(), address: String::new(), os: String::new(), paired: 0, used: 0, placement: Placement::Extend, quality: Quality::Automatic, media: Media::default() });
+                        store.computers.push(Computer { name: String::new(), address: String::new(), os: String::new(), paired: 0, used: 0, placement: Placement::Extend, quality: Quality::Automatic, media: Media::default(), cards: String::new() });
                         continue;
                     }
                     let (Some(c), Some((key, value))) = (store.computers.last_mut(), line.split_once('=')) else { continue };
@@ -260,6 +269,7 @@ impl Store {
                         "used" => c.used = value.parse().unwrap_or(0),
                         "placement" => c.placement = placement_from_key(value).unwrap_or(Placement::Extend),
                         "quality" => c.quality = Quality::from_key(value),
+                        "cards" => c.cards = value.to_owned(),
                         other => {
                             if let Some(field) = c.media.field(other) {
                                 *field = value == "yes";
@@ -276,11 +286,19 @@ impl Store {
                 let last = last.trim();
                 if !last.is_empty() && store.known(last).exists() {
                     let paired = std::fs::metadata(store.known(last)).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs() as i64);
-                    store.computers.push(Computer { name: host_part(last).to_owned(), address: last.to_owned(), os: String::new(), paired, used: paired, placement: store.settings.placement, quality: store.settings.quality, media: store.settings.media });
+                    store.computers.push(Computer { name: host_part(last).to_owned(), address: last.to_owned(), os: String::new(), paired, used: paired, placement: store.settings.placement, quality: store.settings.quality, media: store.settings.media, cards: String::new() });
                 }
             }
         }
         store
+    }
+
+    /// Where files from a computer go: the folder chosen, or Downloads.
+    pub fn receive_folder(&self) -> PathBuf {
+        if !self.settings.folder.is_empty() {
+            return PathBuf::from(&self.settings.folder);
+        }
+        glib::user_special_dir(glib::UserDirectory::Downloads).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Downloads"))
     }
 
     /// Where the core keeps the fingerprint of the computer at this address.
@@ -319,7 +337,7 @@ impl Store {
             }
             None => {
                 let name = if host_name.is_empty() { host_part(address) } else { host_name };
-                self.computers.push(Computer { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: self.settings.quality, media: self.settings.media });
+                self.computers.push(Computer { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: self.settings.quality, media: self.settings.media, cards: String::new() });
             }
         }
         self.sort();
@@ -373,7 +391,7 @@ impl Store {
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         for c in &self.computers {
             out += &format!(
-                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\n{}",
+                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\ncards={}\n{}",
                 clean(&c.name),
                 clean(&c.address),
                 clean(&c.os),
@@ -381,6 +399,7 @@ impl Store {
                 c.used,
                 placement_key(c.placement),
                 c.quality.key(),
+                clean(&c.cards),
                 c.media.lines()
             );
         }
@@ -392,7 +411,7 @@ impl Store {
         let s = &self.settings;
         let yes = |b: bool| if b { "yes" } else { "no" };
         let out = format!(
-            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\n{}super-key={}\nctrl-key={}\nctrl-as-command={}\nscroll-reversed={}\ndraw-pointer={}\ncapture-pointer={}\ntouch={}\n",
+            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\n{}super-key={}\nctrl-key={}\nctrl-as-command={}\nscroll-reversed={}\ndraw-pointer={}\ncapture-pointer={}\ntouch={}\nmatch-refresh={}\nfolder={}\n",
             placement_key(s.placement),
             yes(s.hover_bar),
             yes(s.figures),
@@ -406,7 +425,9 @@ impl Store {
             yes(s.input.scroll_reversed),
             yes(s.input.draw_pointer),
             yes(s.input.capture),
-            yes(s.input.touch)
+            yes(s.input.touch),
+            yes(s.match_refresh),
+            s.folder.replace(['\n', '\r'], " ")
         );
         let _ = std::fs::create_dir_all(&self.dir);
         let _ = std::fs::write(self.dir.join("viewer-settings"), out);

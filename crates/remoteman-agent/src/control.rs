@@ -105,10 +105,56 @@ pub fn serve(path: &Path, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
     });
 }
 
+/// Send a file to the connected device, on a thread of its own. The device decides where it
+/// goes and answers when it has it (`Allowed::sent`).
+fn send_file(host: &Host, path: &Path) -> Result<(), String> {
+    use std::io::Read;
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let link = host.link().ok_or("no device is connected")?;
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let size = file.metadata().map_err(|e| e.to_string())?.len();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+    let header = remoteman_core::media::FileHeader { id: NEXT.fetch_add(1, Ordering::Relaxed), name, size };
+    let blob = link.open_blob(remoteman_core::media::BLOB_FILE, serde_json::to_string(&header).unwrap_or_default());
+    std::thread::Builder::new()
+        .name("file".into())
+        .spawn(move || {
+            let mut piece = vec![0u8; 256 * 1024];
+            loop {
+                match file.read(&mut piece) {
+                    Ok(0) => {
+                        let _ = blob.finish();
+                        return;
+                    }
+                    Ok(n) if blob.write(&piece[..n]) => {}
+                    // The connection went, or the file can't be read on: given up (dropping
+                    // the blob tells the device).
+                    _ => return,
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
+    // A path may have spaces in it: everything after the word.
+    if let Some(path) = line.trim().strip_prefix("send ") {
+        if !allowed.files.load(Ordering::Relaxed) {
+            return "files are switched off on this computer\n".into();
+        }
+        return match send_file(host, Path::new(path.trim())) {
+            Ok(()) => "ok\n".into(),
+            Err(why) => format!("{why}\n"),
+        };
+    }
     let mut words = line.split_whitespace();
     match (words.next(), words.next(), words.next()) {
         (Some("status") | None, _, _) => {
+            let sent = {
+                let sent = allowed.sent.lock().unwrap();
+                serde_json::json!({ "answered": sent.0, "ok": sent.1, "said": sent.2 })
+            };
             let status = serde_json::json!({
                 "address": host.address.to_string(),
                 "fingerprint": host.fingerprint,
@@ -116,6 +162,7 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "clipboard": allowed.clipboard.load(Ordering::Relaxed),
                 "files": allowed.files.load(Ordering::Relaxed),
                 "client": *allowed.now.lock().unwrap(),
+                "sent": sent,
                 "devices": host.devices(),
             });
             format!("{status}\n")
@@ -147,6 +194,6 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
-        _ => "status | pair on|off | drop | revoke FINGERPRINT | allow clipboard|files on|off\n".into(),
+        _ => "status | pair on|off | drop | revoke FINGERPRINT | allow clipboard|files on|off | send PATH\n".into(),
     }
 }

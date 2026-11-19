@@ -17,7 +17,7 @@
 //! - `keys?` and `size?` print whether keys go to the other computer, and the window's size
 //! - `share` (the clipboard), `copy=TEXT` (as if copied in this window), `clipboard?` (print
 //!   what this clipboard holds), `sendfile=PATH`, `offers?` (print which lines of the sharing
-//!   menu can be chosen), `pointer?` (print whether the pointer is captured and how far it has
+//!   menu can be chosen), `reach?=ADDRESS` (print what is known of a computer), `pointer?` (print whether the pointer is captured and how far it has
 //!   been sent)
 //! - things that can't happen yet, to see how they are laid out: `pair-code=NAME` (the code
 //!   dialog, with a made-up code), `asleep=ADDRESS` (the asleep page), `state=asleep:ADDRESS`
@@ -215,6 +215,16 @@ pub fn run(app: &Rc<App>, script: String) {
                     let held = app.capture.borrow_mut().as_mut().map(|c| c.take().1);
                     let (dx, dy) = app.moved.get();
                     println!("~ pointer captured: {}, held now: {}, sent {dx:.0},{dy:.0}", held.is_some(), held == Some(true));
+                }
+                "reach?" => {
+                    let reach = match app.reach_of(value) {
+                        Some(Reach::Online) => "online",
+                        Some(Reach::Asleep) => "asleep",
+                        Some(Reach::Unreachable) => "not reachable",
+                        None => "not known",
+                    };
+                    let cards = app.store.borrow().find(value).map_or(0, |c| c.cards.split(',').filter(|c| !c.is_empty()).count());
+                    println!("~ {value} is {reach}; {cards} network cards remembered");
                 }
                 "offers?" => println!("~ the sharing menu: clipboard {}, files {}, shared {}", app.view.offers().0, app.view.offers().1, app.view.clipboard_shown()),
                 "copy" => app.window.clipboard().set_text(value),

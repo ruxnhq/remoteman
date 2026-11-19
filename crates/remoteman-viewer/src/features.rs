@@ -60,9 +60,9 @@ pub struct Features {
 }
 
 pub const FEATURES: Features = Features {
-    discovery: false,
-    presence: false,
-    wake: false,
+    discovery: true,
+    presence: true,
+    wake: true,
     pairing_code: false,
     sound: true,
     sound_setting: true,
@@ -72,9 +72,9 @@ pub const FEATURES: Features = Features {
     clipboard: true,
     files: true,
     sharing_settings: true,
-    receive_files: false,
+    receive_files: true,
     hdr: false,
-    refresh_choice: false,
+    refresh_choice: true,
     pointer_capture: true,
     pointer_choice: true,
     scroll_direction: true,

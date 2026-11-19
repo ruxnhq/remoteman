@@ -21,6 +21,7 @@
 //! the window, for tests).
 
 mod capture;
+mod nearby;
 mod computers;
 mod decode;
 mod features;

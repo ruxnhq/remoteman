@@ -3,6 +3,7 @@
 //! The first backend is GNOME, through Mutter's ScreenCast and RemoteDesktop D-Bus interfaces.
 //! Those are marked private by Mutter, so every call to them lives in this crate.
 
+pub mod advertise;
 pub mod clipboard;
 pub mod logind;
 pub mod mutter;
