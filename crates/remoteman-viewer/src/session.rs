@@ -679,6 +679,11 @@ pub fn wire(app: &Rc<App>) {
         let app = app.clone();
         move |g, _, x, y| {
             app.video.picture.grab_focus();
+            // A finger that is being sent as a finger is not a click as well.
+            if g.current_sequence().is_some() && app.store.borrow().settings.input.touch {
+                return;
+            }
+            app.spoil_chord();
             if app.capture.borrow().is_none() {
                 let (x, y) = app.video.fraction(x, y);
                 app.send(Event::PointerTo { x, y });
@@ -688,7 +693,12 @@ pub fn wire(app: &Rc<App>) {
     });
     click.connect_released({
         let app = app.clone();
-        move |g, _, _, _| app.send(Event::Button { button: button(g), down: false })
+        move |g, _, _, _| {
+            if g.current_sequence().is_some() && app.store.borrow().settings.input.touch {
+                return;
+            }
+            app.send(Event::Button { button: button(g), down: false })
+        }
     });
     stack.add_controller(click);
 
@@ -699,6 +709,7 @@ pub fn wire(app: &Rc<App>) {
             // A wheel reports notches; a touchpad reports pixels.
             let k = if c.unit() == gdk::ScrollUnit::Wheel { 40.0 } else { 1.0 };
             let k = if app.store.borrow().settings.input.scroll_reversed { -k } else { k };
+            app.spoil_chord();
             app.send(Event::Scroll { dx: (dx * k) as f32, dy: (dy * k) as f32 });
             glib::Propagation::Stop
         }

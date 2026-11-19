@@ -377,6 +377,16 @@ impl App {
         self.store.borrow().settings.input.map(usage, &os)
     }
 
+    /// Something other than Ctrl and Alt happened while they were held (a button, the wheel):
+    /// it is a shortcut of the other computer's, not the chord that releases. (Movement
+    /// doesn't count: a hand resting on the mouse would make the pointer impossible to free.)
+    pub fn spoil_chord(&self) {
+        let (ctrl, alt, _) = self.chord.get();
+        if ctrl || alt {
+            self.chord.set((ctrl, alt, true));
+        }
+    }
+
     /// Hold the pointer in the window and send its raw movement, or let it go.
     pub fn hold_pointer(&self, hold: bool) {
         if !hold {

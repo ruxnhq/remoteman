@@ -26,9 +26,10 @@ struct State {
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
     fn event(state: &mut Self, registry: &wl_registry::WlRegistry, event: wl_registry::Event, _: &(), _: &Connection, qh: &QueueHandle<Self>) {
-        let wl_registry::Event::Global { name, interface, .. } = event else { return };
+        let wl_registry::Event::Global { name, interface, version } = event else { return };
         match interface.as_str() {
-            "wl_seat" if state.seat.is_none() => state.seat = Some(registry.bind(name, 1, qh, ())),
+            // (From version 5 the seat and its pointer can be given back when done with.)
+            "wl_seat" if state.seat.is_none() => state.seat = Some(registry.bind(name, version.min(5), qh, ())),
             "zwp_pointer_constraints_v1" => state.constraints = Some(registry.bind(name, 1, qh, ())),
             "zwp_relative_pointer_manager_v1" => state.relative = Some(registry.bind(name, 1, qh, ())),
             _ => {}
@@ -68,6 +69,9 @@ quiet!(wl_seat::WlSeat, wl_pointer::WlPointer, zwp_pointer_constraints_v1::ZwpPo
 pub struct Capture {
     queue: EventQueue<State>,
     state: State,
+    seat: wl_seat::WlSeat,
+    constraints: zwp_pointer_constraints_v1::ZwpPointerConstraintsV1,
+    relative: zwp_relative_pointer_manager_v1::ZwpRelativePointerManagerV1,
     pointer: wl_pointer::WlPointer,
     lock: zwp_locked_pointer_v1::ZwpLockedPointerV1,
     motion: zwp_relative_pointer_v1::ZwpRelativePointerV1,
@@ -94,7 +98,7 @@ impl Capture {
         // Persistent: taken again whenever the window gets the pointer back.
         let lock = constraints.lock_pointer(&wl_surface, &pointer, None, zwp_pointer_constraints_v1::Lifetime::Persistent, &handle, ());
         let _ = queue.flush();
-        Ok(Capture { queue, state, pointer, lock, motion })
+        Ok(Capture { queue, state, seat, constraints, relative, pointer, lock, motion })
     }
 
     /// How far the pointer has moved since this was last asked, and whether it is held now.
@@ -105,12 +109,19 @@ impl Capture {
 }
 
 impl Drop for Capture {
+    /// Everything made here is given back: a pointer left behind would go on being sent every
+    /// movement of the mouse, with nobody reading it.
     fn drop(&mut self) {
         self.lock.destroy();
         self.motion.destroy();
         if self.pointer.version() >= 3 {
             self.pointer.release();
         }
+        if self.seat.version() >= 5 {
+            self.seat.release();
+        }
+        self.constraints.destroy();
+        self.relative.destroy();
         let _ = self.queue.flush();
     }
 }
