@@ -95,8 +95,16 @@ stop)
         echo "ending headless login screen session $s"; loginctl terminate-session "$s" 2>/dev/null || true
     done
     loginctl terminate-user "$U" 2>/dev/null || true
-    sleep 2
-    userdel --remove "$U" 2>/dev/null && echo "user $U deleted" || echo "user $U was not there"
+    # A user with a session still closing can't be deleted: wait for its processes to go.
+    n=0
+    while [ $n -lt 20 ] && pgrep -u "$U" >/dev/null 2>&1; do sleep 0.5; n=$((n + 1)); done
+    if ! id "$U" >/dev/null 2>&1; then
+        echo "user $U was not there"
+    elif userdel --remove "$U" 2>/dev/null; then
+        echo "user $U deleted"
+    else
+        echo "user $U could NOT be deleted (is something of it still running?): run this again, or: userdel --remove $U"
+    fi
     rm -rf "$LIB" "$RUN" "$STATE"
     echo "left: $(loginctl list-sessions --no-legend | awk -v u="$U" '$3 == u' | wc -l) sessions of $U"
     ;;
