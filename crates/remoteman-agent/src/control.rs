@@ -315,7 +315,8 @@ fn answer(back: &Back, allowed: &Allowed, state: &Path, line: &str) -> String {
                 }
                 // (The daemon's hello lists everything an agent might allow; the connected
                 // device is told what this session allows now. A clipboard being shared
-                // stops with the device's next session.)
+                // stops by itself: the session sees the switch, session.rs,
+                // `clipboard_switched_off`.)
                 Back::Daemon(_) => {
                     if let Some(link) = back.link(allowed) {
                         link.send_message(Message::Features { features: features(allowed) });
