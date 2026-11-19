@@ -63,6 +63,21 @@ begin
   Result := Code;
 end;
 
+// Installed over an earlier install: the running host holds its program file, so it is
+// stopped first (its task ended, then the process by its pid, only the one in this folder).
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Code: Integer;
+begin
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -Command "Stop-ScheduledTask -TaskName ''remoteman host'' -ErrorAction SilentlyContinue; ' +
+    'Get-Process -Name remoteman-host -ErrorAction SilentlyContinue | Where-Object Path -eq ''' +
+    ExpandConstant('{app}\remoteman-host.exe') +
+    ''' | ForEach-Object { Stop-Process -Id $_.Id -Force; $_.WaitForExit(5000) | Out-Null }"',
+    '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Result := '';
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then

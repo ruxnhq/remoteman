@@ -99,6 +99,16 @@ function Install {
     Save-Record $made
   }
 
+  # Installed over an earlier install: its driver package goes first. pnputil keeps a package
+  # it already has (same INF and files) whatever its catalog says, so the old one would stay,
+  # signed by the certificate removed just below, and Windows would no longer trust it.
+  foreach ($inf in @($made.driverInfs | Where-Object { $_ })) {
+    $out = & pnputil.exe /delete-driver $inf /force
+    Say "earlier driver package ${inf}: $($out | Select-Object -Last 1)"
+  }
+  $made.driverInfs = @()
+  Save-Record $made
+
   # Sign the driver here: a catalog over its two files, signed by a certificate made now and
   # trusted only on this machine, whose private key is deleted before the driver goes in.
   Remove-Certificates
@@ -125,7 +135,7 @@ function Install {
   $added = (& pnputil.exe /add-driver $inf) -join "`n"
   $new = @(Driver-Packages | Where-Object { $before -notcontains $_ })
   if ($new.Count -eq 0 -and $added -notmatch 'Published Name') { throw "pnputil did not take the driver: $added" }
-  $made.driverInfs = @($made.driverInfs + $new | Select-Object -Unique)
+  $made.driverInfs = @($new)
   Save-Record $made
   Say "driver packages added: $($new -join ', ') (pnputil: $(($added -split "`n" | Select-String 'Published Name') -join ''))"
   Add-Type $source

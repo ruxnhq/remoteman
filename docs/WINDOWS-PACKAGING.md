@@ -6,7 +6,11 @@ package's contents) is in `/mnt/data/vms/remoteman-win/out/packaging/`.
 
 ## What the Microsoft Store allows, and what that decides
 
-Read on Microsoft Learn on 2026-11-19 (Store Policies version 7.20, effective 2026-10-22):
+From Microsoft Learn on 2026-11-19 (Store Policies version 7.20, effective 2026-10-22). Read in
+full: the Store policies, the MSI/EXE package requirements and "Prepare to package"; the
+capability declarations page partly (the fetch was cut). The rows on firewall rules, startup
+tasks, services' manifest element, the certificate element and the free account come from
+Microsoft Learn's search excerpts of those pages, not a full reading.
 
 | The app needs to | In a Store MSIX? | Source |
 |---|---|---|
@@ -37,8 +41,9 @@ prompt is allowed) and download nothing.
   first-run setup" doesn't get round policy 10.2.4 (the dependency on the driver is the same,
   however it gets installed) or the elevation rule. So the host ships as **its own installer,
   outside the Store** (an Inno Setup `.exe`, unsigned), downloaded from our site.
-- What would change that, for the owner: the driver WHCP-certified (attestation signing through
-  Microsoft's Hardware Dev Center, which needs an EV code-signing certificate: paid), disclosed in
+- What would change that, for the owner: the driver WHCP-certified (through Microsoft's
+  Hardware Dev Center, which as far as I know needs an EV code-signing certificate: paid; not
+  looked up today), disclosed in
   the certification notes, and the host's elevated part as a packaged service; even then the
   Store decides case by case. Or a CA-signed MSI/EXE through the Store's installer route (paid
   certificate too). Neither is free.
@@ -101,16 +106,17 @@ installed with the test certificate (`signed Developer`); found in Start by typi
 yet"); paired with 10.0.2.2:7799 (`viewer-3-pair.png`); connected, the host's moving content shown
 in the window with the session's pill (`viewer-4-session.png`); stopped; `Remove-AppxPackage`:
 no package left, its data folder (`LocalState\remoteman` with the client's key and the paired
-host) gone with it, nothing in Credential Manager. Eight launches in a row from the app's Start
-entry all ran.
+host) gone with it, nothing in Credential Manager. Eight launches in a row through `shell:AppsFolder` (what its Start
+entry starts, without typing into Start) all ran.
 
-**Not right yet:** one launch from Start (out of four through Start, eight through
-`shell:AppsFolder`) crashed at start, with the same signature as the trimming failure
-(`MoAppCrash` in `combase.dll`, `802b000a`, a XAML stowed exception). It didn't come back in
-nine launches afterwards. The view now writes an unhandled exception to
-`LocalState\remoteman-crash.log` in the package's folder even without `--log`, so the next one
-says why. The engine now logs a panic's message before the app ends (it can't unwind out of the
-C functions, and a window app has no stderr).
+**One launch not explained:** on the first launch after the guest's restart, the test's UI
+Automation didn't find the window, though the app's process was running (it was stopped by its
+pid at the end). The crash reports in Windows' log at that time were older ones, logged again at
+10:00:11, before that launch at 10:00:47. The cause isn't established. Thirteen other launches
+showed their window. In case one does crash, the view now writes an unhandled exception to
+`LocalState\remoteman-crash.log` in the package's folder even without `--log`. The engine now
+logs a panic's message before the app ends: it can't unwind out of the C functions, and a window
+app has no stderr.
 
 **Left in the VM by the test** (test tooling, not the app): the test certificate in
 `LocalMachine\TrustedPeople` and its key in SYSTEM's own store, so that the next `--msix` build
@@ -122,7 +128,8 @@ the Windows App Certification Kit, an upgrade from one version to the next, arm6
 FFmpeg are x64 only).
 
 **A Store submission still needs:** the identity from Partner Center in the manifest; the
-version scheme (Store versions must have the last field 0: `0.1.0.0` does); real logos at every
+version scheme (as I understand it, not looked up today, Store versions keep the last field 0:
+`0.1.0.0` does); real logos at every
 scale and the listing's art; the Windows App Certification Kit run on the package; the privacy
 policy and `runFullTrust` justification above. Then the unsigned `.msix` is uploaded as it is.
 
@@ -132,19 +139,19 @@ policy and `runFullTrust` justification above. Then the unsigned `.msix` is uplo
 
     scripts/win-host-installer.sh [VERSION]
 
-It cross-builds `remoteman-host.exe` here, sends it with `windows/host` and Guesthouse's display
+It cross-builds `remoteman-host.exe` here, sends it with `windows/host-installer` and Guesthouse's display
 driver (`GuesthouseDisplay.dll`, `.inf`, `vdd_settings.xml` set to three monitors, the driver's
 MIT and MS-PL licences; from `$GUESTHOUSE_DRIVER`, by default the VM's copy) into the guest and
 runs the command that does it inside Windows:
 
-    powershell -File windows\host\build.ps1 [-Version 0.1.0]
+    powershell -File windows\host-installer\build.ps1 [-Version 0.1.0]
 
 which needs Inno Setup 6 (installed in the VM at `C:\rm\pkgtools\inno`, version 6.7.4, from
 jrsoftware.org, its signature checked) and leaves `C:\rm\installer\remoteman-host-setup-0.1.0.exe`
 (3.7 MB).
 
-**What it does,** with one UAC prompt and no terminal (`windows/host/remoteman-host.iss`,
-`windows/host/setup.ps1`):
+**What it does,** with one UAC prompt and no terminal (`windows/host-installer/remoteman-host.iss`,
+`windows/host-installer/setup.ps1`):
 
 1. the files into `C:\Program Files\remoteman host`;
 2. the display driver: a catalog over its two files, signed with a certificate made on this
@@ -181,6 +188,21 @@ without pairing, 121 fps (`host-2-session-after-reboot.png`); a silent uninstall
 "Removed all? Yes"); the snapshot after it **identical to the one before**; the guest's desktop
 1920×1080 alone, as before.
 
+**Installing over an earlier install:** the installer first stops the running host (its task,
+then the process from its folder, by pid), which holds its program file: without that a second
+install failed with exit code 5. **[V]** installed twice in a row, silently: exit 0 both times,
+the host running again under a new pid, then uninstalled back to the snapshot from before.
+pnputil keeps a driver package it already has (same
+INF and files) whatever its catalog says, so `setup.ps1` deletes the package an earlier install
+added before it adds the new one; otherwise the kept package would stay signed by the
+certificate the new install just replaced, which Windows no longer trusts. (That deletion did not run in the VM, where the package was
+Guesthouse's, not ours.)
+
+**Not tested: what a person sees.** Every install and uninstall here was silent
+(`/VERYSILENT`), started from a task that was already elevated. The wizard's pages, the one UAC
+prompt, uninstalling from Settings > Apps, and the failure path (the message, exit code 1) have
+not been run or seen.
+
 **What the VM could not show:** the VM already had Guesthouse's own build of the same driver
 (same INF and DLL) as a display device. `pnputil` therefore kept the existing package (`oem3.inf`,
 signed by Guesthouse's certificate) instead of adding ours, and the installer only updated the
@@ -196,8 +218,9 @@ firewall prompt (the rule exists before the host first listens, so none should a
 
 ## What an unsigned download shows a user
 
-Neither of these was seen here (the VM's files have no "downloaded from the internet" mark), so
-this is what Microsoft documents and what users commonly report:
+Neither of these was seen here (the VM's files have no "downloaded from the internet" mark, and
+the tests ran the installer from an already elevated task, so no UAC prompt either). The wording
+below is from memory of how Windows 11 shows them, not looked up today:
 
 - **The viewer from the Store:** nothing. The Store signs it; it installs and updates like any
   Store app.
@@ -223,3 +246,21 @@ this is what Microsoft documents and what users commonly report:
 4. **Store identity:** open the Partner Center account, reserve the name, and answer the age
    rating and privacy questions.
 5. **A smaller FFmpeg** for the viewer (94 MB of its 130).
+
+## When the owner's app (Remoteman Host) lands
+
+From the host session's list (shared notes, `win-host-install.md`; branch
+`claude/win-host-rest-55f8f7`, app in `windows/host`, which is why the installer lives in
+`windows/host-installer`). The installer then also needs to:
+
+- carry the app's publish folder (`scripts/win-host-app.sh`, self-contained, with
+  `Assets\*.ico`) into `{app}\app` and start `remoteman-host-app.exe --background` at sign-in,
+  not elevated (HKCU or HKLM `Run`), removed by the uninstaller;
+- agree on the host's state folder: this installer gives the host
+  `C:\ProgramData\remoteman\host` (Administrators and SYSTEM only, deleted on uninstall); the
+  host session's list says `%LOCALAPPDATA%\remoteman\host`. The app talks to the host over its
+  pipe, so either works; per-machine fits a host started for whoever logs on;
+- drop `--ask` from the task once the app asks about new devices.
+
+Its list also says the host needs the VC++ runtime: no longer, with this branch's
+`.cargo/config.toml` (static CRT; the host's imports were checked).

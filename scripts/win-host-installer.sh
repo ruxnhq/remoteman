@@ -2,9 +2,9 @@
 # Builds the Windows host's installer in the VM, from this PC, in one command:
 #   scripts/win-host-installer.sh [VERSION]
 # 1. cross-builds remoteman-host.exe with cargo-xwin (docs/HANDOFF.md, "The VM and the tools");
-# 2. sends it, windows/host and the display driver's files (Guesthouse's user-mode display
+# 2. sends it, windows/host-installer and the display driver's files (Guesthouse's user-mode display
 #    driver, from $GUESTHOUSE_DRIVER, by default the VM's copy) into the guest (C:\rm\hostpkg);
-# 3. runs windows/host/build.ps1 there, which leaves C:\rm\installer\remoteman-host-setup-VERSION.exe.
+# 3. runs windows/host-installer/build.ps1 there, which leaves C:\rm\installer\remoteman-host-setup-VERSION.exe.
 # Hold the VM first (tools/vm.sh take NAME). Inside Windows alone, build.ps1 is the command.
 # docs/WINDOWS-PACKAGING.md has the rest.
 set -euo pipefail
@@ -21,7 +21,7 @@ for f in GuesthouseDisplay.dll GuesthouseDisplay.inf vdd_settings.xml LICENSE LI
 # The host can give a device a monitor of its own and a second display: the driver's first
 # monitor plus two more (the host keeps those out of the desktop until a device takes one).
 sed -i 's|<count>1</count>|<count>3</count>|' "$work/host/native/vdd_settings.xml"
-cp "$root"/windows/host/{build.ps1,setup.ps1,remoteman-host.iss} "$work/host/"
+cp "$root"/windows/host-installer/{build.ps1,setup.ps1,remoteman-host.iss} "$work/host/"
 tar -C "$work" -czf "$work/hostpkg.tar.gz" host
 bash $T/tools/vm.sh put "$work/hostpkg.tar.gz" >/dev/null
 bash $T/tools/vm.sh run '
