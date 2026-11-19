@@ -1,5 +1,6 @@
 // The host as an app: what the interface knows about the host (HostController), and the
 // menu-bar item with its panel and windows (HostAppDelegate). MacHost does the work.
+import ServiceManagement
 import AppKit
 import ApplicationServices
 import Combine
@@ -59,6 +60,21 @@ final class HostController: ObservableObject {
             self?.microphoneInstalled = HostMicrophone.installed
             self?.host.refreshFeatures()
         }
+    }
+
+    /// Started by macOS when the owner logs in (a login item, listed in System Settings).
+    @Published private(set) var openAtLogin = SMAppService.mainApp.status == .enabled
+    @Published private(set) var openAtLoginNote = ""
+
+    func setOpenAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            openAtLoginNote = ""
+        } catch {
+            openAtLoginNote = "It didn't work: \(error.localizedDescription)"
+        }
+        openAtLogin = SMAppService.mainApp.status == .enabled
+        hostLog("host: opens at login: \(openAtLogin)")
     }
 
     /// Reaching this Mac at its login window (LoginWindow.swift).

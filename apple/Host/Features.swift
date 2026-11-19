@@ -9,7 +9,7 @@ enum Features {
     /// The list of paired devices and "Revoke…" (the core keeps the list to itself so far).
     static let trustedDevices = true
     /// "Open remoteman at login".
-    static let openAtLogin = false
+    static let openAtLogin = true
     /// "Default for a new device" and "Devices may choose" (today the device chooses, freely).
     static let placementPolicy = false
     /// "Lock this Mac when the device leaves".

@@ -237,7 +237,15 @@ struct HostSettings: View {
                     if let error = controller.startError {
                         Row("Sharing couldn't start", caption: error) { EmptyView() }
                     }
-                    Row("Open remoteman at login") { fixedSwitch("Open remoteman at login", false, Features.openAtLogin) }
+                    Row(
+                        "Open remoteman host when you log in",
+                        caption: controller.openAtLoginNote.isEmpty
+                            ? "So that this Mac is shared again after a restart, once you (or automatic login) have logged in."
+                            : controller.openAtLoginNote
+                    ) {
+                        Toggle("Open remoteman host when you log in", isOn: Binding(get: { controller.openAtLogin }, set: { controller.setOpenAtLogin($0) }))
+                            .labelsHidden().toggleStyle(.switch).available(Features.openAtLogin)
+                    }
                 }
                 CardGroup("Address and key") {
                     Row(
