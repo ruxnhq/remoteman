@@ -9,12 +9,13 @@
 //! - `pair[=ADDRESS]`, `pair-go=ADDRESS` (open the dialog and press Pair), `connect=ADDRESS`,
 //!   `disconnect`, `back`
 //! - `prefs`, `computer=ADDRESS`, `addresses=ADDRESS`
-//! - `menu=keys|display|picture|main|none`, `bar` (bring a hidden bar out), `figures`,
+//! - `menu=keys|display|picture|main|none`, `bar` (bring a hidden pill out), `figures`,
 //!   `fullscreen`, `send=ctrl-alt-delete` (an entry of the Send Keys menu)
 //! - `click=BUTTON LABEL`, `row=ROW TITLE`, `entry=ROW TITLE:TEXT` (type and apply)
 //! - `shot=FILE.png` (the window's contents, with any open menu), `page=FILE.png` (the whole
 //!   scrolling page of the open dialog)
-//! - `keys?` and `size?` print whether keys go to the other computer, and the window's size
+//! - `keys?`, `size?` and `pill?` print whether keys go to the other computer, the window's
+//!   size, and where the pill, the picture and the figures are
 //! - `share` (the clipboard), `copy=TEXT` (as if copied in this window), `clipboard?` (print
 //!   what this clipboard holds), `sendfile=PATH`, `offers?` (print which lines of the sharing
 //!   menu can be chosen), `unlock=PASSWORD` (type it into a locked computer's page), `reach?=ADDRESS` (print what is known of a computer), `second` (add or remove the second display), `second?` (print how it stands), `pointer?` (print whether the pointer is captured and how far it has
@@ -212,7 +213,18 @@ pub fn run(app: &Rc<App>, script: String) {
                 "place?" => {
                     let stack = &app.video.stack;
                     let at = stack.compute_point(&app.window, &graphene::Point::new(0.0, 0.0)).map(|p| (p.x(), p.y()));
-                    println!("~ window {} x {}, picture's place {} x {} at {:?}, bar {} tall, the middle of the window is {:?} of the picture", app.window.width(), app.window.height(), stack.width(), stack.height(), at, app.view.bar_height(), app.video.fraction(stack.width() as f64 / 2.0, stack.height() as f64 / 2.0));
+                    println!("~ window {} x {}, picture's place {} x {} at {:?}, pill {} tall, the middle of the window is {:?} of the picture", app.window.width(), app.window.height(), stack.width(), stack.height(), at, app.view.pill_height(), app.video.fraction(stack.width() as f64 / 2.0, stack.height() as f64 / 2.0));
+                }
+                // The pill: whether it is out, where it is in the window and how wide it is
+                // against what its controls ask for; and where the picture and the figures are.
+                "pill?" => {
+                    let (pill, view) = (&app.view.pill_box, &app.view);
+                    let out = view.pill.reveals_child() && view.pill.is_child_revealed() && pill.is_mapped();
+                    let b = pill.compute_bounds(&app.window).map(|b| (b.x().round() as i32, b.y().round() as i32, b.width().round() as i32, b.height().round() as i32)).unwrap_or_default();
+                    let stack = &app.video.stack;
+                    let at = stack.compute_point(&app.window, &graphene::Point::new(0.0, 0.0)).map(|p| (p.x().round() as i32, p.y().round() as i32)).unwrap_or((-1, -1));
+                    let figures = view.figures.root.compute_bounds(&app.window).filter(|_| view.figures.root.is_mapped()).map(|f| (f.x().round() as i32, f.y().round() as i32, f.width().round() as i32, f.height().round() as i32));
+                    println!("~ pill out {out}, at {},{} size {} x {}, asks for width {}; window {} x {}; picture's place {} x {} at {},{}; figures {:?}", b.0, b.1, b.2, b.3, pill.measure(gtk::Orientation::Horizontal, -1).1, app.window.width(), app.window.height(), stack.width(), stack.height(), at.0, at.1, figures);
                 }
                 "size?" => println!("~ window {} x {}, default {:?}", app.window.width(), app.window.height(), app.window.default_size()),
                 "keys?" => println!("~ keys go to the other computer: {}", app.forwarding()),

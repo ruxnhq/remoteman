@@ -128,9 +128,12 @@ pub struct App {
 
 const STYLE: &str = "
 .rm-video { background: black; }
-/* The bar keeps its own background when it lies over the picture (libadwaita makes a bar
-   that content extends under see-through). */
-toolbarview.rm-session > .top-bar > windowhandle { background-color: @headerbar_bg_color; box-shadow: 0 1px alpha(black, 0.35); }
+/* The session's bar: a pill floating over the picture, with a background of its own that
+   reads on any picture, a hairline edge and a soft shadow. */
+.rm-pill { padding: 5px 6px; border-radius: 999px; background-color: color-mix(in srgb, var(--headerbar-bg-color) 94%, transparent); color: var(--headerbar-fg-color); border: 1px solid color-mix(in srgb, currentColor 13%, transparent); box-shadow: 0 1px 2px alpha(black, 0.2), 0 6px 20px alpha(black, 0.3); }
+.rm-pill button { border-radius: 999px; }
+.rm-pill .rm-disconnect { padding-left: 14px; padding-right: 14px; font-weight: 700; }
+.rm-pill .rm-pill-sep { margin: 8px 4px; background-color: alpha(currentColor, 0.15); }
 .rm-state { font-size: 13px; font-weight: 700; }
 .rm-dot { min-width: 8px; min-height: 8px; border-radius: 4px; background-color: currentColor; }
 .rm-code { font-size: 52px; font-weight: 800; letter-spacing: 2px; font-feature-settings: 'tnum'; }
@@ -176,14 +179,17 @@ impl App {
         self.streaming() && self.window.visible_dialog().is_none() && !self.view.menu_open()
     }
 
-    /// Show or hide the window's bar. While a stream is up it is hidden in full screen, and in
-    /// a window too if the user chose that; the pointer at the top edge brings it out.
+    /// Show or hide the session's pill. While a stream is up it is hidden in full screen, and
+    /// in a window too if the user chose that; the pointer at the top edge brings it out. It
+    /// floats over the picture, which has the whole window either way.
     pub fn place_bar(&self) {
         let hidden = self.streaming() && (self.window.is_fullscreen() || self.hover_bar.get());
-        // Over the picture when it comes and goes, so the picture doesn't jump.
-        self.view.toolbar.set_extend_content_to_top_edge(hidden);
-        self.view.toolbar.set_reveal_top_bars(!hidden || self.bar_out.get() || self.view.menu_open());
-        self.view.place_figures(hidden);
+        self.view.pill.set_reveal_child(!hidden || self.bar_out.get() || self.view.menu_open());
+        self.view.place_figures();
+        // The window no narrower than the pill, as it was no narrower than a header bar: an
+        // overlay asks only for what its picture needs.
+        let least = self.view.pill_box.measure(gtk::Orientation::Horizontal, -1).0;
+        self.view.page.set_size_request(least + 2 * crate::session::PILL_TOP, -1);
     }
 
     pub fn toggle_fullscreen(&self) {
@@ -201,8 +207,8 @@ impl App {
         self.display_for(address.as_deref(), placement)
     }
 
-    /// How many pixels the picture has to itself in the window, at this scale: the window
-    /// without its bar, or all of it where the bar lies over the picture.
+    /// How many pixels the picture has to itself in the window, at this scale: all of it, as
+    /// the pill floats over the picture.
     fn picture_pixels(&self, scale: f32) -> (u32, u32) {
         let (mut w, mut h) = (self.window.width(), self.window.height());
         if self.streaming() && self.video.stack.width() > 0 {
@@ -210,12 +216,9 @@ impl App {
             (w, h) = (self.video.stack.width(), self.video.stack.height());
         } else {
             // Not connected yet: the size the window is about to have (a small one is made
-            // room in when the picture comes, see `started`), less its bar if that stays.
+            // room in when the picture comes, see `started`).
             if !self.window.is_maximized() && !self.window.is_fullscreen() && (w < 1280 || h < 800) && w > 0 {
                 (w, h) = (1280, 800);
-            }
-            if !(self.window.is_fullscreen() || self.hover_bar.get()) {
-                h -= self.view.bar_height();
             }
         }
         let pixels = |points: i32| (((points.max(1) as f32 * scale).round() as u32) & !1).clamp(320, 8192);
@@ -1035,7 +1038,7 @@ pub fn build(application: &adw::Application, args: Args) {
     let view = session::build(&video);
     let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).build();
     stack.add_named(&nav, Some("front"));
-    stack.add_named(&view.toolbar, Some("stream"));
+    stack.add_named(&view.page, Some("stream"));
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&stack));
     window.set_content(Some(&toasts));
