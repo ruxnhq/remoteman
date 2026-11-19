@@ -557,16 +557,7 @@ final class ViewerSession: ObservableObject {
                     guard let self, self.generation == gen else { return }
                     // A computer that is logging its owner in for this device (it was locked,
                     // or nobody was logged in) is tried again until it is ready.
-                    if "\(error)".lowercased().contains("logging in:"), self.loginRetries < 10, let again = self.again {
-                        self.loginRetries += 1
-                        self.loggingIn = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                            guard self.generation == gen else { return }
-                            self.retrying = true
-                            again()
-                        }
-                        return
-                    }
+                    if self.comeBack(after: "\(error)", generation: gen) { return }
                     self.loggingIn = false
                     self.lockedAsk = Self.lockedWords("\(error)")
                     self.state = .failed(Self.plain("\(error)"))
@@ -627,8 +618,28 @@ final class ViewerSession: ObservableObject {
         state = .idle
     }
 
+    /// A computer that says it is logging its owner in for this device is tried again in a few
+    /// seconds, some ten times. The words can come as the refusal of the hello or as the reason
+    /// the connection was closed. True if another try is on its way.
+    private func comeBack(after reason: String, generation gen: Int) -> Bool {
+        guard ["logging in:", "logging_in:"].contains(where: { reason.lowercased().contains($0) }), loginRetries < 10, let again else { return false }
+        loginRetries += 1
+        loggingIn = true
+        let c = client
+        client = nil
+        c?.close()
+        state = .connecting(target)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, self.generation == gen else { return }
+            self.retrying = true
+            again()
+        }
+        return true
+    }
+
     private func closed(_ reason: String, generation gen: Int) {
         guard gen == generation else { return }
+        if comeBack(after: reason, generation: gen) { return }
         closeCode = client?.closeCode ?? -1
         // On 3 the computer's key is kept: pairing again still checks it is the same computer.
         client = nil

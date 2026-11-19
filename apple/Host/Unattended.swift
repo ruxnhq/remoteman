@@ -1,18 +1,24 @@
-// Unlocking for a paired device. The Mac's owner gives the host their Mac password once; after
-// that a paired device that connects while the Mac is locked is let in without anyone typing:
-// the host clicks the lock screen's password field and types the password as key presses, and
-// the device is shown the desktop. The lock screen is never captured.
+// Unlocking, and logging in, for a paired device. The Mac's owner gives the host their Mac
+// password once; after that a paired device that connects while the Mac is locked, or while it
+// shows its login window, is let in without anyone typing, and is shown the desktop. Neither
+// screen is ever captured (macOS would ask at the Mac itself, with a prompt that takes no
+// posted clicks).
 //
-// What is known to work, and what isn't (macOS 27):
-// - A click in the field followed by key presses with their own key codes, then Return, unlocks.
-// - Text put into the field through the accessibility interface shows there but is not taken;
-//   nor are the field's confirm action, its button, or key presses that carry only characters.
-// - The login window (nobody logged in) is not covered: an agent there, run by the system, did
-//   not get this far. With automatic login on, a restart ends at the lock screen, which is.
+// What each screen takes, found by trying everything on macOS 27:
+// - The lock screen (owner logged in, this app in their session): a click in the password
+//   field, the password as key presses with their own key codes, Return. Text put into the
+//   field through the accessibility interface shows there but is not taken; nor is its button.
+// - The login window (nobody logged in; an agent run by the system, LoginWindow.swift): the
+//   other way round. The form belongs to the system's SecurityAgent, found as whichever program
+//   holds the keyboard's focus in a password field; the field filled through the accessibility
+//   interface and the form's own button pressed logs in, in under a second. Key presses of any
+//   kind do nothing there, and posting an ordinary key or pointer event from the agent never
+//   comes back, so that is not done.
 //
-// The password is kept in the owner's login keychain, only if they turn this on. It is never
-// sent anywhere and never logged.
+// The password is kept in the owner's login keychain, and for the login window in a file only
+// the system can read. Only if the owner turns this on; never sent anywhere, never logged.
 import AppKit
+import Carbon
 import ApplicationServices
 import Foundation
 import OpenDirectory
@@ -100,6 +106,43 @@ enum Unattended {
         return "Off. The password was removed from this Mac."
     }
 
+    /// Whether the login window is covered too: its agent and its copy of the password are there.
+    static var coversLoginWindow: Bool { FileManager.default.fileExists(atPath: rootFile) && LoginWindow.installed }
+
+    /// Cover the login window as well (nobody logged in), or stop covering it. The agent that
+    /// macOS starts there is run by the system and no keychain is open to it, so it gets its
+    /// own copy of the password in a file only the system can read. One administrator prompt.
+    static func setLoginWindow(_ on: Bool, stateDir: String, listen: String, name: String) -> String {
+        var commands: [String]
+        var temp: URL?
+        if on {
+            guard let password = keychainPassword() else { return "Turn on unlocking first." }
+            guard let binary = Bundle.main.executablePath, binary.hasPrefix("/Applications/") else {
+                return "Move remoteman host into the Applications folder first: the login window starts it from there."
+            }
+            let t = FileManager.default.temporaryDirectory.appendingPathComponent("remoteman-\(UUID().uuidString)")
+            guard FileManager.default.createFile(atPath: t.path, contents: Data(password.utf8), attributes: [.posixPermissions: 0o600]),
+                let agent = LoginWindow.agentDescription(binary: binary, stateDir: stateDir, listen: listen, name: name)
+            else { return "It didn't work: the password couldn't be handed over." }
+            temp = t
+            commands = [
+                "mkdir -p '/Library/Application Support/remoteman-host'", "install -m 600 -o root -g wheel '\(t.path)' '\(rootFile)'",
+                "cp '\(agent.path)' '\(LoginWindow.plist)'", "chown root:wheel '\(LoginWindow.plist)'", "chmod 644 '\(LoginWindow.plist)'",
+            ]
+        } else {
+            commands = ["rm -f '\(rootFile)' '\(LoginWindow.plist)'"]
+        }
+        let shell = commands.joined(separator: " && ").replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        var error: NSDictionary?
+        NSAppleScript(source: "do shell script \"\(shell)\" with administrator privileges")?.executeAndReturnError(&error)
+        if let temp { try? FileManager.default.removeItem(at: temp) }
+        if let error {
+            return (error[NSAppleScript.errorNumber] as? Int) == -128 ? "" : "It didn't work: \(error[NSAppleScript.errorMessage] as? String ?? "unknown")"
+        }
+        hostLog("host: logging in at the login window for paired devices is \(on ? "on" : "off")")
+        return on ? "On. It starts the next time this Mac shows its login window." : "Off."
+    }
+
     // MARK: The screens
 
     static var screenLocked: Bool {
@@ -121,38 +164,145 @@ enum Unattended {
         let was = whoIsOnScreen()
         hostLog("host: login window: waking the screen")
         HostInput.wake()
-        var at: CGPoint?
-        hostLog("host: login window: looking for the password field (4 s at most)")
+        describeScreen()
+        // The form is whichever program holds the keyboard's focus in a password field (at the
+        // login window that is the system's SecurityAgent, not the loginwindow program).
+        var form: (app: AXUIElement, field: AXUIElement, pid: pid_t)?
         let looked = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
-            AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1)
-            for pid in pidsOfLoginWindow() {
-                let app = AXUIElementCreateApplication(pid)
-                AXUIElementSetMessagingTimeout(app, 1)
-                var seen: [String: Int] = [:]
-                if let field = find(app, role: "AXTextField", subrole: "AXSecureTextField", depth: 0, seen: &seen), let c = centre(of: field) {
-                    at = c
-                    break
+            let system = AXUIElementCreateSystemWide()
+            AXUIElementSetMessagingTimeout(system, 1)
+            var focused: CFTypeRef?
+            if AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &focused) == .success, let e = focused {
+                let field = e as! AXUIElement
+                var sub: CFTypeRef?
+                AXUIElementCopyAttributeValue(field, kAXSubroleAttribute as CFString, &sub)
+                var pid: pid_t = 0
+                AXUIElementGetPid(field, &pid)
+                if (sub as? String) == "AXSecureTextField", pid != 0 {
+                    let app = AXUIElementCreateApplication(pid)
+                    AXUIElementSetMessagingTimeout(app, 1)
+                    var labels: [String] = []
+                    describe(app, depth: 0, into: &labels)
+                    hostLog("host: login window: the form is process \(pid); its controls: \(labels.prefix(24).joined(separator: ", "))")
+                    form = (app, field, pid)
                 }
             }
             looked.signal()
         }
-        if looked.wait(timeout: .now() + 4) == .timedOut {
-            hostLog("host: login window: the field wasn't found in time; typing where the cursor is")
-        } else if let at {
-            hostLog("host: login window: field at \(Int(at.x)),\(Int(at.y)); clicking it")
-            click(at)
-            usleep(250_000)
-        } else {
-            hostLog("host: login window: no field to be seen; typing where the cursor is")
+        if looked.wait(timeout: .now() + 5) == .timedOut { hostLog("host: login window: finding the form took too long") }
+
+        /// One way of typing, given 8 s; a way that never comes back ends the agent (macOS
+        /// starts it afresh), so the login window is never left with a stuck helper.
+        func attempt(_ name: String, _ work: @escaping () -> String) -> Bool {
+            hostLog("host: login window: trying \(name)")
+            let done = DispatchSemaphore(value: 0)
+            var note = ""
+            DispatchQueue.global().async {
+                note = work()
+                done.signal()
+            }
+            if done.wait(timeout: .now() + 8) == .timedOut {
+                hostLog("host: login window: \(name) didn't come back in 8 s; ending this agent so that it isn't left stuck")
+                exit(1)
+            }
+            if waitForChange(from: was, seconds: 6) {
+                hostLog("host: login window: logged in by \(name) (\(note))")
+                return true
+            }
+            hostLog("host: login window: \(name): \(note); no log in")
+            return false
         }
-        hostLog("host: login window: typing the password (\(strokes.count) keys) and Return")
-        typeKeys(strokes)
-        usleep(150_000)
-        pressReturn()
-        hostLog("host: login window: waiting for the log in")
-        if waitForChange(from: was, seconds: 12) { return nil }
-        return "the login window didn't log in within 12 s of the password being typed"
+
+        // What the login window is known to take (macOS 27): the field filled and the form's
+        // own button pressed. The other two are kept behind it in case another macOS differs.
+        if let form {
+            if attempt("the field filled and its button pressed", {
+                let set = AXUIElementSetAttributeValue(form.field, kAXValueAttribute as CFString, password as CFString)
+                var buttons: [AXUIElement] = []
+                collect(form.app, depth: 0, into: &buttons) { role, label in
+                    role == "AXButton" && ["login", "log in", "unlock", "ok", "continue"].contains(label.lowercased())
+                }
+                let confirm = AXUIElementPerformAction(form.field, kAXConfirmAction as CFString)
+                for b in buttons { AXUIElementPerformAction(b, kAXPressAction as CFString) }
+                return "set \(set.rawValue), confirm \(confirm.rawValue), \(buttons.count) button(s) pressed"
+            }) { return nil }
+        }
+        if let form {
+            if attempt("keys sent to the form's own process", {
+                for k in strokes { stroke(form.app, k.code, shift: k.shift) }
+                usleep(150_000)
+                var held: CFTypeRef?
+                AXUIElementCopyAttributeValue(form.field, kAXValueAttribute as CFString, &held)
+                stroke(form.app, 36, shift: false)
+                return "the field held \((held as? String)?.count ?? -1) of \(strokes.count) before Return"
+            }) { return nil }
+        }
+        if attempt("the system's keyboard stream", {
+            var accepted = 0
+            for k in strokes {
+                if RMHIDKey(k.code, true, k.shift) { accepted += 1 }
+                usleep(15_000)
+                RMHIDKey(k.code, false, k.shift)
+                usleep(25_000)
+            }
+            usleep(150_000)
+            var held: CFTypeRef?
+            if let form { AXUIElementCopyAttributeValue(form.field, kAXValueAttribute as CFString, &held) }
+            RMHIDKey(36, true, false)
+            usleep(15_000)
+            RMHIDKey(36, false, false)
+            return "took \(accepted) of \(strokes.count) keys, the field held \((held as? String)?.count ?? -1) before Return"
+        }) { return nil }
+        return "none of the ways of typing logged this Mac in"
+    }
+
+    /// What is on screen, told without looking at any picture: which programs own the windows
+    /// in front, what the accessibility interface answers for each login window process, and
+    /// where the keyboard's focus is. For the log, to find out where typed keys go.
+    static func describeScreen() {
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            var owners: [String] = []
+            if let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] {
+                for w in list.prefix(40) {
+                    let owner = w[kCGWindowOwnerName as String] as? String ?? "?"
+                    let layer = (w[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+                    let b = w[kCGWindowBounds as String] as? [String: Any]
+                    let size = "\((b?["Width"] as? NSNumber)?.intValue ?? 0)x\((b?["Height"] as? NSNumber)?.intValue ?? 0)"
+                    let text = "\(owner)@\(layer) \(size)"
+                    if !owners.contains(text) { owners.append(text) }
+                }
+            }
+            hostLog("host: login window: windows in front, by owner@layer: \(owners.prefix(16).joined(separator: ", "))")
+            AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1)
+            for pid in pidsOfLoginWindow() {
+                let app = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(app, 1)
+                var role: CFTypeRef?
+                let answer = AXUIElementCopyAttributeValue(app, kAXRoleAttribute as CFString, &role)
+                var seen: [String: Int] = [:]
+                _ = find(app, role: "AXTextField", subrole: "AXSecureTextField", depth: 0, seen: &seen)
+                var labels: [String] = []
+                describe(app, depth: 0, into: &labels)
+                hostLog("host: login window: process \(pid): accessibility answers \(answer.rawValue); kinds \(seen.sorted { $0.key < $1.key }.map { "\($0.key)×\($0.value)" }.joined(separator: " ")); controls \(labels.prefix(20).joined(separator: ", "))")
+            }
+            var focused: CFTypeRef?
+            let f = AXUIElementCopyAttributeValue(AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute as CFString, &focused)
+            var what = "none (\(f.rawValue))"
+            if f == .success, let e = focused {
+                let el = e as! AXUIElement
+                var r: CFTypeRef?, s: CFTypeRef?
+                AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &r)
+                AXUIElementCopyAttributeValue(el, kAXSubroleAttribute as CFString, &s)
+                var pid: pid_t = 0
+                AXUIElementGetPid(el, &pid)
+                what = "\(r as? String ?? "?")/\(s as? String ?? "-") in process \(pid)"
+            }
+            hostLog("host: login window: keyboard focus: \(what); this process trusted for accessibility: \(AXIsProcessTrusted()); secure typing on: \(IsSecureEventInputEnabled())")
+            done.signal()
+        }
+        if done.wait(timeout: .now() + 10) == .timedOut { hostLog("host: login window: describing the screen took too long; going on") }
     }
 
     private static func pidsOfLoginWindow() -> [pid_t] {

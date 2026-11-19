@@ -571,8 +571,8 @@ private struct UnattendedGroup: View {
 
     var body: some View {
         CardGroup(
-            "When this Mac is locked",
-            footnote: "The password stays in your keychain on this Mac and is typed for you only when a device you have paired connects. Anyone holding a paired device can then get into this Mac, so revoke a device you lose. It covers the lock screen, which is also where this Mac lands after a restart with automatic login. After a log out, someone has to log in at the Mac."
+            "When this Mac is locked or nobody is logged in",
+            footnote: "The password stays on this Mac: in your keychain for the lock screen, and for the login window in a file only the system can read. It is used only when a device you have paired connects. Anyone holding a paired device can then get into this Mac, so revoke a device you lose. After a restart with FileVault on, the disk has to be unlocked at this Mac first."
         ) {
             Row(
                 "Unlock for paired devices",
@@ -593,6 +593,15 @@ private struct UnattendedGroup: View {
                     }
                     .disabled(password.isEmpty)
                 }
+            }
+            Row(
+                "Log in for paired devices when nobody is logged in",
+                caption: controller.loginWindowOn
+                    ? "On. A paired device that connects while this Mac shows its login window is logged in as you, and reaches your desktop a few seconds later."
+                    : "After a log out, or a restart without automatic login. Installs a small helper that macOS runs at the login window; macOS asks for an administrator's password."
+            ) {
+                Toggle("Log in for paired devices when nobody is logged in", isOn: Binding(get: { controller.loginWindowOn }, set: { controller.setUnattendedLoginWindow($0) }))
+                    .labelsHidden().toggleStyle(.switch).disabled(!controller.unattendedOn)
             }
         }
     }

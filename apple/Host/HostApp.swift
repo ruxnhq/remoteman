@@ -94,9 +94,22 @@ final class HostController: ObservableObject {
         unattendedNote = Unattended.set(
             password, stateDir: unattended ? options.stateDir : support, listen: "0.0.0.0:\(port.isEmpty ? "7791" : port)", name: options.name)
         unattendedOn = Unattended.enabled
+        loginWindowOn = Unattended.coversLoginWindow
         loginInstalled = LoginWindow.installed
         // After a log in someone has to be listening: the host opens with the session.
         if unattendedOn, !openAtLogin { setOpenAtLogin(true) }
+    }
+
+    @Published private(set) var loginWindowOn = Unattended.coversLoginWindow
+
+    func setUnattendedLoginWindow(_ on: Bool) {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("remoteman-host", isDirectory: true).path
+        unattendedNote = Unattended.setLoginWindow(
+            on, stateDir: unattended ? options.stateDir : support, listen: "0.0.0.0:\(port.isEmpty ? "7791" : port)", name: options.name)
+        loginWindowOn = Unattended.coversLoginWindow
+        loginInstalled = LoginWindow.installed
+        if loginWindowOn, !openAtLogin { setOpenAtLogin(true) }
     }
 
     func installLoginWindow(_ install: Bool? = nil) {
@@ -110,8 +123,18 @@ final class HostController: ObservableObject {
 
     /// One port, two hosts: this one has it while its session is on screen; the login window's
     /// has it while the login window is.
+    /// When this program's file was written, as it was when this process started.
+    private let builtAt = (try? FileManager.default.attributesOfItem(atPath: Bundle.main.executablePath ?? ""))?[.modificationDate] as? Date
+
     private func shareThePort() {
         if options.loginWindow {
+            // A newer build put in place: this agent ends, and macOS starts the new one.
+            let now = (try? FileManager.default.attributesOfItem(atPath: Bundle.main.executablePath ?? ""))?[.modificationDate] as? Date
+            if let builtAt, let now, now != builtAt {
+                hostLog("host: a newer build is installed: this agent makes way for it")
+                host.stop()
+                exit(0)
+            }
             let want = LoginWindow.showing
             if want, !host.isRunning {
                 do {
