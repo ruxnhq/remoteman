@@ -258,7 +258,10 @@ pub fn view(app: &App, ui: &mut Ui, menu: &Menu) {
                 item("display.hdr", "HDR", Msg::CloseMenu).caption("When the computer offers it and this monitor is in HDR").toggle(false).en(gate(FEATURES.hdr)).line(),
                 item("display.vrr", "Variable refresh rate", Msg::CloseMenu).caption("Shows each frame when it arrives, in full screen").toggle(false).en(gate(FEATURES.variable_refresh)).line(),
                 Line::Rule,
-                item("display.second", "Add a second display…", Msg::CloseMenu).en(gate(FEATURES.second_display)).line(),
+                item("display.second", if s.is_some_and(|s| s.second_on) { "Remove the second display" } else { "Add a second display" }, Msg::ToggleSecond)
+                    .caption("In a window of its own")
+                    .en(if !FEATURES.second_display { gate(false) } else if s.is_some_and(|s| s.offers("displays")) { ON } else { off("This computer gives a device one display") })
+                    .line(),
             ]);
             (320.0, lines)
         }

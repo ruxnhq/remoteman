@@ -100,6 +100,11 @@ pub struct Shared {
     /// The decoder was given frames and gave no picture: the window asks the computer for a
     /// keyframe (nothing was lost on the way, so nothing else will).
     pub stuck: AtomicBool,
+    /// The second display's picture and figures, which come as a stream of their own
+    /// (`None` in the second display's own).
+    pub second: Option<Arc<Shared>>,
+    /// The computer took the second display away, or couldn't make it; with why.
+    pub second_gone: Mutex<Option<String>>,
     /// Number the clipboard blobs and the files sent.
     pub copy_seq: AtomicU32,
     pub file_seq: AtomicU32,
@@ -124,9 +129,11 @@ pub struct Shared {
 }
 
 impl Shared {
-    fn new(scene: Arc<Scene>) -> Self {
+    fn new(scene: Arc<Scene>, second: Option<Arc<Shared>>) -> Self {
         Self {
             scene,
+            second,
+            second_gone: Mutex::default(),
             picture: Mutex::default(),
             cursor: Mutex::default(),
             cursor_gone: AtomicBool::default(),
@@ -176,6 +183,8 @@ enum Msg {
 
 pub struct Feed {
     tx: mpsc::SyncSender<Msg>,
+    /// To the second display's decoder.
+    tx2: mpsc::SyncSender<Msg>,
     shared: Arc<Shared>,
     /// Clipboard blobs on their way in: what kind, and what has come.
     arriving: std::collections::HashMap<u32, (String, Vec<u8>)>,
@@ -205,6 +214,19 @@ impl Handler for Feed {
         let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us));
     }
 
+    fn stream2(&mut self, info: &StreamInfo) {
+        say!("second display: {:?} {}x{} at {} Hz", info.mode, info.width, info.height, info.refresh);
+        if let Some(second) = &self.shared.second {
+            second.stream_size.store(pack(info.width, info.height), Ordering::Relaxed);
+            second.refresh.store(info.refresh, Ordering::Relaxed);
+        }
+        let _ = self.tx2.send(Msg::Stream(info.clone()));
+    }
+
+    fn frame2(&mut self, frame: &Frame, age_us: Option<i64>) {
+        let _ = self.tx2.send(Msg::Frame(frame.data.clone(), age_us));
+    }
+
     fn stage(&mut self, stage: Stage) {
         self.shared.stage.store(stage as u8, Ordering::Relaxed);
         self.wake_window();
@@ -215,6 +237,10 @@ impl Handler for Feed {
             Message::Status { bitrate: Some(bits) } => self.shared.bitrate.store(*bits, Ordering::Relaxed),
             Message::Features { features } => {
                 *self.shared.features.lock().unwrap() = Some(features.clone());
+                self.wake_window();
+            }
+            Message::Display { index: 1, on: false, message, .. } => {
+                *self.shared.second_gone.lock().unwrap() = Some(message.clone());
                 self.wake_window();
             }
             Message::FileResult { ok, message, .. } => {
@@ -292,17 +318,27 @@ impl Handler for Feed {
 
 /// Start the decode thread; what comes back is handed to `Client::connect`.
 pub fn start(gpu: &Gpu, scene: &Arc<Scene>) -> Result<(Arc<Shared>, Feed)> {
-    let shared = Arc::new(Shared::new(scene.clone()));
+    // The second display has a window of its own, so a scene of its own; its decoder waits
+    // for a stream that only comes if one is asked for.
+    let second = Arc::new(Shared::new(Arc::new(Scene::default()), None));
+    let shared = Arc::new(Shared::new(scene.clone(), Some(second.clone())));
     let (tx, rx) = mpsc::sync_channel::<Msg>(8);
-    let (s, gpu) = (shared.clone(), gpu.clone());
-    std::thread::Builder::new().name("decode".into()).spawn(move || {
-        if let Err(e) = decode_loop(&s, &gpu, rx) {
-            say!("decoding stopped: {e:#}");
-            *s.closed.lock().unwrap() = Some(format!("{e:#}"));
-            s.scene.wake_window();
-        }
-    })?;
-    Ok((shared.clone(), Feed { tx, shared, arriving: Default::default(), files: Default::default() }))
+    let (tx2, rx2) = mpsc::sync_channel::<Msg>(8);
+    for (s, rx, first) in [(shared.clone(), rx, true), (second, rx2, false)] {
+        let (gpu, main) = (gpu.clone(), shared.clone());
+        std::thread::Builder::new().name("decode".into()).spawn(move || {
+            if let Err(e) = decode_loop(&s, &gpu, rx) {
+                say!("decoding stopped: {e:#}");
+                if first {
+                    *s.closed.lock().unwrap() = Some(format!("{e:#}"));
+                } else {
+                    *main.second_gone.lock().unwrap() = Some(format!("{e:#}"));
+                }
+                main.scene.wake_window();
+            }
+        })?;
+    }
+    Ok((shared.clone(), Feed { tx, tx2, shared, arriving: Default::default(), files: Default::default() }))
 }
 
 fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {

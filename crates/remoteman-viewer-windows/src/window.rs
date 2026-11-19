@@ -82,6 +82,10 @@ struct Win {
     walk: RefCell<Option<Walk>>,
     /// The colours follow Windows' setting (not fixed on the command line).
     follow_theme: bool,
+    /// The second display's window, its draw thread and what they share, while there is one.
+    second: RefCell<Option<(isize, std::thread::JoinHandle<()>, std::sync::Arc<crate::stream::Shared>)>>,
+    /// Which display of the session the pointer was last on (0: this window's).
+    pointer_on: Cell<u8>,
 }
 
 thread_local! {
@@ -256,6 +260,8 @@ pub fn create(mut app: App) -> Result<HWND> {
             hook: Cell::new(0),
             walk: RefCell::new(walk),
             follow_theme,
+            second: RefCell::new(None),
+            pointer_on: Cell::new(0),
         });
         WIN.with(|w| *w.borrow_mut() = Some(state.clone()));
         state.app.borrow().scene.hwnd.store(hwnd.0 as isize, Ordering::Relaxed);
@@ -423,6 +429,18 @@ impl Win {
                     }
                 }
                 Effect::SetClipboard(text) => clipboard_set(&text),
+                Effect::OpenSecond(title) => {
+                    self.close_second();
+                    let shared = self.ask(|app| app.session.as_ref().and_then(|s| s.shared.second.clone())).flatten();
+                    match shared.context("no session").and_then(|shared| open_second(self, shared, &title)) {
+                        Ok(()) => say!("second display: its window is open"),
+                        Err(e) => {
+                            say!("second display: no window: {e:#}");
+                            self.event(|app| app.set_second(false, true));
+                        }
+                    }
+                }
+                Effect::CloseSecond => self.close_second(),
                 Effect::ReadClipboard => {
                     if let Some(text) = clipboard_get() {
                         self.event(|app| app.copied_here(text));
@@ -462,6 +480,27 @@ impl Win {
         self.resync(hwnd);
     }
 
+    /// Take the second display's window away, and its draw thread with it.
+    fn close_second(&self) {
+        let Some((hwnd, drawing, shared)) = self.second.borrow_mut().take() else { return };
+        shared.scene.quit.store(true, Ordering::Relaxed);
+        shared.scene.poke();
+        let _ = drawing.join();
+        *shared.scene.session.lock().unwrap() = None;
+        // SAFETY: our own window.
+        unsafe {
+            let _ = DestroyWindow(HWND(hwnd as *mut _));
+        }
+        self.point_at(0);
+    }
+
+    /// The pointer is on this display of the session from here on (0: the first window's).
+    fn point_at(&self, index: u8) {
+        if self.pointer_on.replace(index) != index {
+            self.send(Event::Display(index));
+        }
+    }
+
     // To the other computer.
 
     fn send(&self, event: Event) {
@@ -472,6 +511,7 @@ impl Win {
 
     /// The pointer at a place in the client area, as the other computer is told.
     fn pointer(&self, x: i32, y: i32) {
+        self.point_at(0);
         if let Some(Some((x, y))) = self.ask(|app| app.fraction(x as f32, y as f32)) {
             self.send(Event::PointerTo { x, y });
         }
@@ -737,6 +777,113 @@ impl Win {
     }
 }
 
+/// Open a plain window for the session's second display and start drawing its stream there.
+fn open_second(win: &Win, shared: std::sync::Arc<crate::stream::Shared>, title: &str) -> Result<()> {
+    let gpu = win.ask(|app| app.gpu.clone()).context("the app is busy")?;
+    // SAFETY: Win32 calls with structures that live through each call.
+    unsafe {
+        let instance = GetModuleHandleW(None)?;
+        let class = WNDCLASSW { lpfnWndProc: Some(second_procedure), hInstance: instance.into(), lpszClassName: w!("remoteman-second"), hCursor: win.arrow, ..Default::default() };
+        // (Registered already, the second time: that is fine.)
+        RegisterClassW(&class);
+        let mut r = RECT { left: 0, top: 0, right: 1280, bottom: 720 };
+        let _ = AdjustWindowRectEx(&mut r, WS_OVERLAPPEDWINDOW, false, WS_EX_NOREDIRECTIONBITMAP);
+        let hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, w!("remoteman-second"), &windows::core::HSTRING::from(title), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, None, None, Some(instance.into()), None).context("create the second window")?;
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let scene = shared.scene.clone();
+        scene.quit.store(false, Ordering::Relaxed);
+        scene.client_size.store(pack(client.right.max(1) as u32, client.bottom.max(1) as u32), Ordering::Relaxed);
+        *scene.session.lock().unwrap() = Some(shared.clone());
+        let drawing = crate::draw::start(gpu, scene, hwnd, None)?;
+        *win.second.borrow_mut() = Some((hwnd.0 as isize, drawing, shared));
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    Ok(())
+}
+
+/// The second display's window: its picture is all there is in it, and everything done in it
+/// is the other computer's, on that display.
+unsafe extern "system" fn second_procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    // SAFETY: passing the message on as it came.
+    let pass = || unsafe { DefWindowProcW(hwnd, msg, w, l) };
+    let Some(win) = win() else { return pass() };
+    let Some(shared) = win.second.try_borrow().ok().and_then(|s| s.as_ref().filter(|s| s.0 == hwnd.0 as isize).map(|s| s.2.clone())) else { return pass() };
+    // A place in this window as fractions of the second display, allowing for the bands
+    // that keep the picture's shape.
+    let pointer = |l: LPARAM| {
+        let (x, y) = point(l);
+        let (vw, vh) = crate::stream::unpack(shared.stream_size.load(Ordering::Relaxed));
+        let (cw, ch) = crate::stream::unpack(shared.scene.client_size.load(Ordering::Relaxed));
+        if vw == 0 || vh == 0 || cw == 0 || ch == 0 {
+            return;
+        }
+        let (vw, vh, cw, ch) = (vw as f32, vh as f32, cw as f32, ch as f32);
+        let fit = (cw / vw).min(ch / vh);
+        let (dw, dh) = (vw * fit, vh * fit);
+        win.point_at(1);
+        win.send(Event::PointerTo { x: ((x as f32 - ((cw - dw) / 2.0).floor()) / dw).clamp(0.0, 1.0), y: ((y as f32 - ((ch - dh) / 2.0).floor()) / dh).clamp(0.0, 1.0) });
+    };
+    let button = |button: Button, down: bool| {
+        pointer(l);
+        win.send(Event::Button { button, down });
+        // SAFETY: capture for our own window, so the release comes here.
+        unsafe {
+            if down {
+                SetCapture(hwnd);
+            } else {
+                let _ = ReleaseCapture();
+            }
+        }
+    };
+    // SAFETY: Win32 calls on our own window.
+    unsafe {
+        match msg {
+            WM_MOUSEMOVE => pointer(l),
+            WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => button(Button::Left, true),
+            WM_LBUTTONUP => button(Button::Left, false),
+            WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => button(Button::Right, true),
+            WM_RBUTTONUP => button(Button::Right, false),
+            WM_MBUTTONDOWN | WM_MBUTTONDBLCLK => button(Button::Middle, true),
+            WM_MBUTTONUP => button(Button::Middle, false),
+            WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+                let notches = ((w.0 >> 16) & 0xFFFF) as i16 as f32 / 120.0;
+                let k = if win.ask(|app| app.store.settings.scroll_reversed).unwrap_or(false) { -NOTCH } else { NOTCH };
+                win.point_at(1);
+                win.send(if msg == WM_MOUSEHWHEEL { Event::Scroll { dx: notches * k, dy: 0.0 } } else { Event::Scroll { dx: 0.0, dy: -notches * k } });
+            }
+            // Keys typed in this window go to the computer as the first window's do.
+            WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
+                let mut scancode = ((l.0 >> 16) & 0xFF) as u16;
+                if scancode == 0 {
+                    scancode = MapVirtualKeyW(w.0 as u32, MAPVK_VK_TO_VSC) as u16;
+                }
+                win.key(scancode, l.0 & (1 << 24) != 0, matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN));
+            }
+            WM_SYSCHAR => {}
+            WM_KILLFOCUS => win.release_keys(),
+            WM_SIZE => {
+                let (cw, ch) = ((l.0 & 0xFFFF) as u32, ((l.0 >> 16) & 0xFFFF) as u32);
+                if cw > 0 && ch > 0 {
+                    shared.scene.client_size.store(pack(cw, ch), Ordering::Relaxed);
+                    shared.scene.poke();
+                }
+            }
+            WM_ERASEBKGND => return LRESULT(1),
+            WM_PAINT => {
+                let _ = windows::Win32::Graphics::Gdi::ValidateRect(Some(hwnd), None);
+                shared.scene.poke();
+            }
+            // Closing the window takes the display away on the computer too.
+            WM_CLOSE => {
+                win.event(|app| app.set_second(false, true));
+            }
+            _ => return pass(),
+        }
+    }
+    LRESULT(0)
+}
+
 unsafe extern "system" fn keyboard_hook(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         // SAFETY: for this hook the parameter points at the key's description.
@@ -941,6 +1088,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             WM_TIMER => win.tick(),
             WM_CLOSE => {
                 win.release_keys();
+                win.close_second();
                 win.event(|app| {
                     app.closing();
                     app.scene.quit.store(true, Ordering::Relaxed);

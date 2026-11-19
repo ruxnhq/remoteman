@@ -489,6 +489,12 @@ impl Drawer {
     }
 }
 
+/// Held by a draw thread while it draws. Every window's draw thread uses the one device's
+/// one context, Direct2D included, and a drawing is many calls that set the context up and
+/// then use it: two threads at it at once draw with each other's settings (seen as garbled
+/// text in the first window as soon as a second display's window was drawing).
+static DRAWING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const WAITABLE: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
 /// How long after the first picture `--shot` is taken: long enough for the host's content to
@@ -546,6 +552,7 @@ fn run(gpu: Gpu, scene: &Scene, hwnd: HWND, mut shot: Option<PathBuf>) -> Result
         let mut painted = false;
         if let Some(frame) = &frame {
             if drawer.ui_target.is_none() || drawn.as_ref().is_none_or(|d| d.serial != frame.serial) {
+                let _alone = DRAWING.lock().unwrap();
                 drawer.paint(frame)?;
                 drawn = Some(frame.clone());
                 painted = true;
@@ -572,6 +579,7 @@ fn run(gpu: Gpu, scene: &Scene, hwnd: HWND, mut shot: Option<PathBuf>) -> Result
         }
         let picture = drawer.shown.take();
         if draws {
+            let _alone = DRAWING.lock().unwrap();
             drawer.draw(picture.as_ref(), video)?;
         }
         let backdrop = frame.as_ref().map_or(crate::ui::Color(0.0, 0.0, 0.0, 1.0), |f| f.backdrop);

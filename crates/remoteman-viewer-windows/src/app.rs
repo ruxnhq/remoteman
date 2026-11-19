@@ -135,6 +135,8 @@ pub enum Msg {
     Toggle(Flag, Option<String>),
     ToggleSound,
     ToggleClipboard,
+    /// Add a second display in a window of its own, or take it away.
+    ToggleSecond,
     /// Choose a file to send to the computer.
     SendFile,
     /// Try the locked computer with the password that was typed.
@@ -161,6 +163,10 @@ pub enum Effect {
     SetClipboard(String),
     /// Read this PC's clipboard; text on it comes to `App::copied_here`.
     ReadClipboard,
+    /// Open the second display's window (with this title) on the session's second stream,
+    /// or close it.
+    OpenSecond(String),
+    CloseSecond,
     Quit,
 }
 
@@ -197,6 +203,8 @@ pub struct Session {
     /// The computer's sound is played here; the clipboard is shared.
     pub sound_on: bool,
     pub clipboard_on: bool,
+    /// There is a second display, in a window of its own.
+    pub second_on: bool,
     /// The text that last came from the computer's clipboard: not to be sent back. And the
     /// text last sent: Windows says "the clipboard changed" several times for one copy.
     from_computer: Option<String>,
@@ -209,7 +217,7 @@ pub struct Session {
 impl Session {
     #[allow(clippy::too_many_arguments)]
     pub fn new(client: Option<Arc<Client>>, shared: Arc<Shared>, target: Target, features: Vec<String>, display: Display, quality: Quality, bitrate: u32, os: String) -> Self {
-        Self { client, shared, target, features, display, quality, bitrate, began: Instant::now(), os, sound_on: false, clipboard_on: false, from_computer: None, sent_copy: None, asked: None, wanted: (0, 0) }
+        Self { client, shared, target, features, display, quality, bitrate, began: Instant::now(), os, sound_on: false, clipboard_on: false, second_on: false, from_computer: None, sent_copy: None, asked: None, wanted: (0, 0) }
     }
 
     pub fn offers(&self, feature: &str) -> bool {
@@ -495,7 +503,8 @@ impl App {
         let Some(s) = &self.session else { return };
         let (address, placement) = (s.target.address.clone(), s.display.placement);
         let most = self.store.find(&address).map_or(0, |c| c.max_height);
-        if most != WINDOW || self.args.size.is_some() || placement == Placement::Mirror || !s.offers("configure") || self.screen != Screen::Session {
+        // (Not with a second display on: a display made afresh takes the second away.)
+        if most != WINDOW || self.args.size.is_some() || placement == Placement::Mirror || !s.offers("configure") || self.screen != Screen::Session || s.second_on {
             return;
         }
         let display = self.display_for(Some(&address), placement);
@@ -695,6 +704,13 @@ impl App {
             self.dirty = true;
         }
         self.arrivals();
+        // The computer took the second display away, or couldn't make it.
+        if let Some(why) = self.session.as_ref().and_then(|s| s.shared.second_gone.lock().unwrap().take()) {
+            if self.session.as_ref().is_some_and(|s| s.second_on) {
+                self.say(&if why.is_empty() { "The second display is gone".to_owned() } else { format!("The second display couldn't be made: {why}") });
+                self.set_second(false, false);
+            }
+        }
         // A decoder that takes frames and gives no pictures gets a keyframe.
         if let Some(s) = &self.session {
             if s.shared.stuck.swap(false, Ordering::Relaxed) {
@@ -806,6 +822,39 @@ impl App {
             *s.shared.sound.lock().unwrap() = None;
             s.sound_on = false;
         }
+        self.dirty = true;
+    }
+
+    /// Add a second display to the session, or take it away. `tell`: the computer doesn't
+    /// know yet.
+    pub fn set_second(&mut self, on: bool, tell: bool) {
+        let Some(s) = &self.session else { return };
+        if on == s.second_on {
+            return;
+        }
+        let (address, name, client, second) = (s.target.address.clone(), s.target.name.clone(), s.client.clone(), s.shared.second.clone());
+        if on {
+            if !s.offers("displays") {
+                return self.say("This computer gives a device one display");
+            }
+            if second.is_none() {
+                return;
+            }
+            // The size of this monitor, like the first; beside the computer's other displays.
+            let display = Display { placement: Placement::Extend, ..self.display_for(Some(&address), Placement::Extend) };
+            if let Some(client) = &client {
+                say!("second display: asked for {}x{} at {} Hz", display.width, display.height, display.refresh);
+                client.send_message(Message::Display { index: 1, on: true, display: Some(display), side: Default::default(), message: String::new() });
+            }
+            self.effects.push(Effect::OpenSecond(format!("{name}: second display")));
+        } else {
+            if let (true, Some(client)) = (tell, &client) {
+                say!("second display: given back");
+                client.send_message(Message::Display { index: 1, on: false, display: None, side: Default::default(), message: String::new() });
+            }
+            self.effects.push(Effect::CloseSecond);
+        }
+        self.session.as_mut().unwrap().second_on = on;
         self.dirty = true;
     }
 
@@ -1003,6 +1052,9 @@ impl App {
         if starts.1 {
             self.set_clipboard(true);
         }
+        if self.args.second {
+            self.set_second(true, true);
+        }
         self.dirty = true;
     }
 
@@ -1044,6 +1096,12 @@ impl App {
             ended: None,
         });
         *s.shared.sound.lock().unwrap() = None;
+        if s.second_on {
+            if let Some(second) = &s.shared.second {
+                say!("second display: {} decoded, {} presented", second.decoded_total.load(Ordering::Relaxed), second.presented_total.load(Ordering::Relaxed));
+            }
+            self.effects.push(Effect::CloseSecond);
+        }
         if let Some(client) = s.client {
             retire(client);
         }
@@ -1129,6 +1187,11 @@ impl App {
             Msg::ToggleSound => {
                 let on = self.session.as_ref().is_some_and(|s| s.sound_on);
                 self.set_sound(!on);
+            }
+            Msg::ToggleSecond => {
+                self.menu = None;
+                let on = self.session.as_ref().is_some_and(|s| s.second_on);
+                self.set_second(!on, true);
             }
             Msg::ToggleClipboard => {
                 self.menu = None;
