@@ -13,10 +13,16 @@ path = "src/main.rs"
 [dependencies]
 remoteman-core = { path = "../remoteman-core" }
 remoteman-audio = { path = "../remoteman-audio" }
+remoteman-camera = { path = "../remoteman-camera" }
 anyhow = "1"
 serde_json = "1"
 gtk = { package = "gtk4", version = "0.11", features = ["v4_20"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }
+# Pointer capture: GTK has no way to lock the pointer, so the two Wayland protocols for it are
+# spoken directly, on GTK's own connection.
+gdk4-wayland = { version = "0.11", features = ["wayland_crate"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format"] }
 
 [build-dependencies]

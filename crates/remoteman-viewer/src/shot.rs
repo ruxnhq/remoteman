@@ -16,7 +16,9 @@
 //!   scrolling page of the open dialog)
 //! - `keys?` and `size?` print whether keys go to the other computer, and the window's size
 //! - `share` (the clipboard), `copy=TEXT` (as if copied in this window), `clipboard?` (print
-//!   what this clipboard holds), `sendfile=PATH`
+//!   what this clipboard holds), `sendfile=PATH`, `offers?` (print which lines of the sharing
+//!   menu can be chosen), `pointer?` (print whether the pointer is captured and how far it has
+//!   been sent)
 //! - things that can't happen yet, to see how they are laid out: `pair-code=NAME` (the code
 //!   dialog, with a made-up code), `asleep=ADDRESS` (the asleep page), `state=asleep:ADDRESS`
 //!   or `state=online:ADDRESS` (shown in the list only with `Features::presence`)
@@ -209,6 +211,12 @@ pub fn run(app: &Rc<App>, script: String) {
                 "keys?" => println!("~ keys go to the other computer: {}", app.forwarding()),
                 // Sharing: the clipboard on, a copy made here, what this clipboard holds, a file.
                 "share" => app.set_clipboard(true),
+                "pointer?" => {
+                    let held = app.capture.borrow_mut().as_mut().map(|c| c.take().1);
+                    let (dx, dy) = app.moved.get();
+                    println!("~ pointer captured: {}, held now: {}, sent {dx:.0},{dy:.0}", held.is_some(), held == Some(true));
+                }
+                "offers?" => println!("~ the sharing menu: clipboard {}, files {}, shared {}", app.view.offers().0, app.view.offers().1, app.view.clipboard_shown()),
                 "copy" => app.window.clipboard().set_text(value),
                 "clipboard?" => app.window.clipboard().read_text_async(gtk::gio::Cancellable::NONE, |text| {
                     println!("~ this clipboard holds: {}", text.ok().flatten().map(|t| t.to_string()).unwrap_or_default());

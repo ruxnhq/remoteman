@@ -60,6 +60,18 @@ pub struct App {
     ended: RefCell<String>,
     /// Keys the other computer has been told are down.
     pub held: RefCell<HashSet<u16>>,
+    /// System shortcuts were given back to this computer with Ctrl+Alt, until it is pressed again.
+    pub released: Cell<bool>,
+    /// Ctrl and Alt on their way to being pressed and let go alone: which of them have been
+    /// down, and whether another key spoiled it.
+    pub chord: Cell<(bool, bool, bool)>,
+    /// The pointer held in the window, its raw movement sent, while that is wanted.
+    pub capture: RefCell<Option<crate::capture::Capture>>,
+    /// How far a captured pointer has been sent in this run, for tests.
+    pub moved: Cell<(f64, f64)>,
+    /// The fingers on a touchscreen that the other computer knows of: each one's place in
+    /// this list is its number there.
+    pub fingers: RefCell<Vec<Option<usize>>>,
     /// The window's size before a session made it larger.
     front_size: Cell<Option<(i32, i32)>>,
     /// Go back to full screen when the next session starts (it was left to reconnect).
@@ -201,7 +213,7 @@ impl App {
         let id = self.attempt.get().wrapping_add(1);
         self.attempt.set(id);
         let (placement, quality) = self.choices(&target.address);
-        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality) };
+        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture } };
         let app = self.clone();
         glib::spawn_future_local(async move {
             let result = match gio::spawn_blocking(move || Session::start(request)).await {
@@ -285,6 +297,26 @@ impl App {
         self.view.show_figures(self.store.borrow().settings.figures);
         self.video.attach(session.shared.clone());
         self.shown_before.set(self.video.shown_total.get());
+        // What this computer's sessions start with, as its settings say (the switches in the
+        // bar are then this session's own).
+        let (media, input) = {
+            let store = self.store.borrow();
+            (store.find(&target.address).map_or(store.settings.media, |c| c.media), store.settings.input)
+        };
+        if self.store.borrow().settings.media.clipboard {
+            self.clipboard_on.set(true);
+        }
+        // The computer draws its pointer into the picture: this window's own is in the way.
+        if !input.draw_pointer || input.capture {
+            self.video.stack.set_cursor(gdk::Cursor::from_name("none", None).as_ref());
+        }
+        self.released.set(false);
+        self.fingers.borrow_mut().clear();
+        self.view.show_pointer(input.capture);
+        if input.capture {
+            self.hold_pointer(true);
+            self.toast("The pointer is captured. Ctrl+Alt lets it go");
+        }
         // So does a shared clipboard.
         let shares = session.offers("clipboard") && self.clipboard_on.get();
         self.view.offer_sharing(session.offers("clipboard"), session.offers("files"), shares);
@@ -293,7 +325,7 @@ impl App {
         }
         // Sound that was on carries over when the same computer is joined again.
         self.view.offer_sound(session.offers("sound"));
-        if self.args.sound && session.offers("sound") {
+        if (self.args.sound || media.sound) && session.offers("sound") {
             self.view.sound.set_active(true);
         }
         if self.view.sound.is_active() {
@@ -303,13 +335,21 @@ impl App {
         }
         // And the microphone.
         self.view.offer_microphone(session.offers("mic"));
-        if self.args.mic && session.offers("mic") {
+        if (self.args.mic || media.microphone) && session.offers("mic") {
             self.view.microphone.set_active(true);
         }
         if self.view.microphone.is_active() {
             if let Err(e) = session.set_microphone(true, self.args.mic_from.as_deref()) {
                 self.toast(&format!("The microphone can't be used: {e:#}"));
             }
+        }
+        // And the camera.
+        self.view.offer_camera(session.offers("camera"));
+        if (self.args.camera || media.camera) && session.offers("camera") {
+            self.view.camera.set_active(true);
+        }
+        if self.view.camera.is_active() {
+            session.set_camera(true, self.args.camera_from.as_deref());
         }
         *self.session.borrow_mut() = Some(session);
         *self.target.borrow_mut() = Some(Target { address: target.address.clone(), name });
@@ -330,10 +370,96 @@ impl App {
         }
     }
 
+    /// The usage to send for a key on this keyboard: the settings may have one key stand in
+    /// for another, and swap Ctrl and Command for a Mac.
+    pub fn key_for(&self, usage: u16) -> u16 {
+        let os = self.session.borrow().as_ref().map(|s| s.client.host_os.clone()).unwrap_or_default();
+        self.store.borrow().settings.input.map(usage, &os)
+    }
+
+    /// Something other than Ctrl and Alt happened while they were held (a button, the wheel):
+    /// it is a shortcut of the other computer's, not the chord that releases. (Movement
+    /// doesn't count: a hand resting on the mouse would make the pointer impossible to free.)
+    pub fn spoil_chord(&self) {
+        let (ctrl, alt, _) = self.chord.get();
+        if ctrl || alt {
+            self.chord.set((ctrl, alt, true));
+        }
+    }
+
+    /// Hold the pointer in the window and send its raw movement, or let it go.
+    pub fn hold_pointer(&self, hold: bool) {
+        if !hold {
+            if self.capture.borrow_mut().take().is_some() {
+                self.video.stack.set_cursor(None);
+            }
+            return;
+        }
+        match crate::capture::Capture::start(&self.window) {
+            Ok(capture) => {
+                *self.capture.borrow_mut() = Some(capture);
+                self.video.stack.set_cursor(gdk::Cursor::from_name("none", None).as_ref());
+            }
+            Err(e) => self.toast(&format!("The pointer can't be captured: {e}")),
+        }
+    }
+
+    /// The bar's Pointer Mode button: captured or following this pointer, from now on. The
+    /// computer draws a captured pointer into the picture, which it is asked for when a
+    /// session starts, so this one starts again.
+    pub fn toggle_capture(self: &Rc<Self>) {
+        {
+            let mut store = self.store.borrow_mut();
+            store.settings.input.capture = !store.settings.input.capture;
+            store.save_settings();
+        }
+        self.reconnect();
+    }
+
+    /// Ctrl+Alt, pressed and let go with no other key, gives the system's shortcuts back to
+    /// this computer, and takes them again. `usage` is the key as it is on this keyboard.
+    pub fn chord_key(&self, usage: u16, down: bool) {
+        let (ctrl, alt) = (matches!(usage, 0xE0 | 0xE4), matches!(usage, 0xE2 | 0xE6));
+        let (mut had_ctrl, mut had_alt, mut spoiled) = self.chord.get();
+        if down {
+            had_ctrl |= ctrl;
+            had_alt |= alt;
+            spoiled |= !ctrl && !alt;
+            self.chord.set((had_ctrl, had_alt, spoiled));
+            return;
+        }
+        // Let go: the chord is over when nothing is held any more.
+        if !self.held.borrow().is_empty() {
+            return;
+        }
+        self.chord.set((false, false, false));
+        let (shortcuts, capture) = {
+            let store = self.store.borrow();
+            (store.settings.shortcuts, store.settings.input.capture)
+        };
+        if had_ctrl && had_alt && !spoiled && (shortcuts || capture) {
+            let released = !self.released.get();
+            self.released.set(released);
+            self.grab_shortcuts();
+            if capture {
+                self.hold_pointer(!released);
+            }
+            self.toast(match (released, capture) {
+                (true, true) => "The pointer and shortcuts are back with this computer. Ctrl+Alt gives them to the other again",
+                (true, false) => "Shortcuts are back with this computer. Ctrl+Alt sends them to the other again",
+                (false, true) => "The pointer is captured. Ctrl+Alt lets it go",
+                (false, false) => "Shortcuts go to the other computer",
+            });
+            if self.args.ui.is_some() {
+                println!("~ shortcuts released: {released}");
+            }
+        }
+    }
+
     /// Super, Alt+Tab and the like go to the other computer while this has focus, if wanted.
     pub fn grab_shortcuts(&self) {
         let Some(top) = self.window.surface().and_downcast::<gdk::Toplevel>() else { return };
-        if self.streaming() && self.store.borrow().settings.shortcuts {
+        if self.streaming() && self.store.borrow().settings.shortcuts && !self.released.get() {
             top.inhibit_system_shortcuts(None::<&gdk::Event>);
         } else {
             top.restore_system_shortcuts();
@@ -365,10 +491,13 @@ impl App {
         self.video.free_gl();
         let _ = session.set_sound(false, None);
         let _ = session.set_microphone(false, None);
+        session.set_camera(false, None);
+        self.hold_pointer(false);
         session.client.close();
         if !stay {
             self.view.sound.set_active(false);
             self.view.microphone.set_active(false);
+            self.view.camera.set_active(false);
             self.clipboard_on.set(false);
             self.view.show_clipboard(false);
         }
@@ -454,7 +583,7 @@ impl App {
     /// This computer's clipboard changed (or sharing has just begun): send text if it holds
     /// any, else a picture. What came from the other computer is not sent back.
     pub fn copied_here(self: &Rc<Self>) {
-        if !self.clipboard_on.get() || self.session.borrow().is_none() {
+        if !self.clipboard_on.get() || !self.session.borrow().as_ref().is_some_and(|s| s.offers("clipboard")) {
             return;
         }
         let clipboard = self.window.clipboard();
@@ -479,7 +608,8 @@ impl App {
         if self.from_computer.get() == Some(mark_of(kind, &bytes)) || !self.clipboard_on.get() {
             return;
         }
-        if let Some(s) = self.session.borrow().as_ref() {
+        // Only to a computer that still allows it: its owner may have switched it off since.
+        if let Some(s) = self.session.borrow().as_ref().filter(|s| s.offers("clipboard")) {
             s.send_copy(kind, bytes);
         }
     }
@@ -494,9 +624,40 @@ impl App {
         }
     }
 
+    /// The computer's owner switched something on or off while this device is connected: the
+    /// bar offers what it offers now. A clipboard that was shared, or chosen before it was
+    /// allowed, follows; sound and a microphone that are withdrawn stop.
+    fn follow_features(&self) {
+        let session = self.session.borrow();
+        let Some(s) = session.as_ref() else { return };
+        if !s.shared.features_changed.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let was_shared = self.view.clipboard_shown();
+        let shares = s.offers("clipboard") && self.clipboard_on.get();
+        self.view.offer_sharing(s.offers("clipboard"), s.offers("files"), shares);
+        if shares && !was_shared {
+            s.share_clipboard(true);
+        }
+        self.view.offer_sound(s.offers("sound"));
+        self.view.offer_microphone(s.offers("mic"));
+        self.view.offer_camera(s.offers("camera"));
+        if self.args.ui.is_some() {
+            println!("~ the computer now offers: clipboard {}, files {}", s.offers("clipboard"), s.offers("files"));
+        }
+    }
+
     /// What arrived from the computer since the last frame: copies for this clipboard, and
     /// word of files sent.
     fn arrivals(&self) {
+        self.follow_features();
+        // A camera that couldn't be opened: say why, and let its button out (which tells the
+        // computer it is off again).
+        let failed = self.session.borrow().as_ref().and_then(|s| s.shared.camera_failed.lock().unwrap().take());
+        if let Some(why) = failed {
+            self.toast(&format!("The camera can't be used: {why}"));
+            self.view.camera.set_active(false);
+        }
         let (copies, results) = match self.session.borrow().as_ref() {
             Some(s) => (std::mem::take(&mut *s.shared.copies.lock().unwrap()), std::mem::take(&mut *s.shared.results.lock().unwrap())),
             None => return,
@@ -520,6 +681,15 @@ impl App {
     /// Once per frame of this window: show the newest picture, and notice the session ending.
     fn tick(self: &Rc<Self>) {
         self.arrivals();
+        // A captured pointer's movement since the last frame.
+        let moved = self.capture.borrow_mut().as_mut().map(|c| c.take());
+        if let Some(((dx, dy), _)) = moved {
+            if dx != 0.0 || dy != 0.0 {
+                let so_far = self.moved.get();
+                self.moved.set((so_far.0 + dx, so_far.1 + dy));
+                self.send(Event::PointerBy { dx: dx as f32, dy: dy as f32 });
+            }
+        }
         let (picture, closed, cursor) = match self.session.borrow().as_ref() {
             Some(s) => (s.shared.picture.lock().unwrap().take(), s.shared.closed.lock().unwrap().clone(), s.shared.cursor.lock().unwrap().take()),
             None => return,
@@ -648,6 +818,11 @@ pub fn build(application: &adw::Application, args: Args) {
         attempt: Cell::new(0),
         hover_bar: Cell::new(hover_bar),
         bar_out: Cell::new(false),
+        released: Cell::new(false),
+        chord: Cell::new((false, false, false)),
+        capture: RefCell::new(None),
+        moved: Cell::new((0.0, 0.0)),
+        fingers: RefCell::new(Vec::new()),
         said_placement: Cell::new(args.placement),
         reach: RefCell::new(HashMap::new()),
         ended: RefCell::new(String::new()),

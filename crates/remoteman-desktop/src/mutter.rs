@@ -57,7 +57,20 @@ impl VirtualDisplay {
             bail!("Mutter's ScreenCast API is version {version}; virtual monitors as real monitors need 3");
         }
 
-        let before = display_state(&conn).await.map(|s| Before::of(&s)).unwrap_or_default();
+        // A device that leaves and comes straight back finds the monitor of its last session
+        // still listed for a moment. Counted among the displays that were there before, it
+        // would hide the new one, which gets the same name: wait for it to go (two seconds
+        // at most; a virtual monitor that stays is someone else's and is left alone).
+        let mut before = Before::default();
+        for _ in 0..20 {
+            let Ok(state) = display_state(&conn).await else { break };
+            let stale = state.1.iter().any(|m| m.0.0.starts_with("Meta-"));
+            before = Before::of(&state);
+            if !stale {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         let remote_path: OwnedObjectPath = Proxy::new(&conn, REMOTE, "/org/gnome/Mutter/RemoteDesktop", REMOTE).await?.call("CreateSession", &()).await?;
         let remote = Proxy::new(&conn, REMOTE, remote_path, "org.gnome.Mutter.RemoteDesktop.Session").await?;
         let session_id: String = remote.get_property("SessionId").await?;
@@ -199,6 +212,14 @@ mod tests {
     use super::keysym;
 
     #[test]
+    fn a_scale_the_desktop_refuses_becomes_the_nearest_it_takes() {
+        assert_eq!(allowed_scale(2.0, &[1.0, 1.25, 1.5, 1.75, 2.0]), 2.0);
+        assert_eq!(allowed_scale(2.0, &[1.0, 1.25, 1.5]), 1.5);
+        assert_eq!(allowed_scale(3.0, &[1.0]), 1.0);
+        assert_eq!(allowed_scale(2.0, &[]), 2.0);
+    }
+
+    #[test]
     fn keysyms() {
         assert_eq!(keysym('a'), 0x61);
         assert_eq!(keysym('é'), 0xe9);
@@ -252,6 +273,17 @@ impl Before {
     }
 }
 
+/// The scale to lay a monitor out at. Mutter draws a virtual monitor at the scale the device
+/// asked for, but takes a layout only with a scale from the mode's own list, which leaves out
+/// those that would make the desktop too small to use (2 at 1280 by 720): then the nearest one
+/// it does take, so the display is still placed where it was asked to be.
+fn allowed_scale(scale: f64, allowed: &[f64]) -> f64 {
+    if allowed.is_empty() || allowed.iter().any(|a| (a - scale).abs() < 0.01) {
+        return scale;
+    }
+    allowed.iter().copied().min_by(|a, b| (a - scale).abs().total_cmp(&(b - scale).abs())).unwrap_or(scale)
+}
+
 /// One go at [`VirtualDisplay::place`].
 async fn place_once(conn: &Connection, before: &Before, placement: Placement) -> Result<()> {
     // The monitor appears a moment after the stream's format is agreed, and joins the layout
@@ -262,7 +294,7 @@ async fn place_once(conn: &Connection, before: &Before, placement: Placement) ->
         let found = state.1.iter().find(|m| m.0.0.starts_with("Meta-") && !before.connectors.contains(&m.0.0)).and_then(|m| {
             let mode = m.1.iter().find(|mode| mode.6.get("is-current").and_then(|v| bool::try_from(v).ok()).unwrap_or(false))?;
             let scale = state.2.iter().find(|l| l.5.iter().any(|id| id.0 == m.0.0))?.2;
-            Some((m.0.0.clone(), scale, mode.0.clone()))
+            Some((m.0.0.clone(), allowed_scale(scale, &mode.5), mode.0.clone()))
         });
         match found {
             Some((c, scale, mode)) => break (state, c, scale, mode),

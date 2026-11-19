@@ -15,7 +15,8 @@ icons="$prefix/share/icons/hicolor"
 id=dev.remoteman.Host
 if [ "$1" = remove ]; then
     systemctl --user disable --now remoteman-host.service 2>/dev/null
-    rm -f "$units/remoteman-host.service" "$prefix/bin/remoteman-tray" "$prefix/lib/remoteman/remoteman-agent" "$apps/$id.desktop" "$icons/scalable/apps/$id.svg" "$icons/symbolic/apps/$id-symbolic.svg"
+    rm -f "$units/remoteman-host.service" "$prefix/bin/remoteman-tray" "$prefix/lib/remoteman/remoteman-agent" "$apps/$id.desktop" "$icons/scalable/apps/$id.svg" "$icons/symbolic/apps/$id-symbolic.svg" "${XDG_CONFIG_HOME:-$HOME/.config}/autostart/$id.desktop"
+    for state in connected paused failed; do rm -f "$icons/symbolic/apps/$id-$state-symbolic.svg"; done
 else
     for program in remoteman-agent remoteman-tray; do
         [ -x "$root/target/release/$program" ] || { echo "build it first: cargo build --release -p remoteman-agent -p remoteman-tray" >&2; exit 1; }
@@ -26,6 +27,7 @@ else
     install -Dm755 "$root/target/release/remoteman-tray" "$prefix/bin/remoteman-tray"
     install -Dm644 "$root/packaging/linux/$id.svg" "$icons/scalable/apps/$id.svg"
     install -Dm644 "$root/packaging/linux/$id-symbolic.svg" "$icons/symbolic/apps/$id-symbolic.svg"
+    for state in connected paused failed; do install -Dm644 "$root/packaging/linux/$id-$state-symbolic.svg" "$icons/symbolic/apps/$id-$state-symbolic.svg"; done
     install -Dm644 "$root/packaging/linux/$id.desktop" "$apps/$id.desktop"
     sed -i "s|^Exec=remoteman-tray|Exec=$prefix/bin/remoteman-tray|" "$apps/$id.desktop"
     install -Dm644 "$root/packaging/systemd/user/remoteman-host.service" "$units/remoteman-host.service"

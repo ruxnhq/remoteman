@@ -23,7 +23,48 @@ use gtk::{glib, graphene};
 use host::{Device, State};
 use ksni::blocking::TrayMethods;
 
-const NOT_YET: &str = "Not available yet";
+/// Where this program keeps its own two choices (the host's are the host's).
+fn state_dir() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state"));
+    base.join("remoteman")
+}
+
+/// The entry that opens this program, icon only, when its owner signs in.
+fn autostart() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"));
+    base.join("autostart/dev.remoteman.Host.desktop")
+}
+
+fn set_autostart(on: bool) -> std::io::Result<()> {
+    let path = autostart();
+    if !on {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    let program = std::env::current_exe()?;
+    std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new("/")))?;
+    std::fs::write(path, format!("[Desktop Entry]\nType=Application\nName=Remoteman Host\nComment=The icon in the top bar for this computer's sharing\nExec=\"{}\" --background\nIcon=dev.remoteman.Host\nX-GNOME-Autostart-enabled=true\n", program.display()))
+}
+
+/// Whether its owner wants to be told when a device connects. Off until asked for.
+fn notifies() -> bool {
+    state_dir().join("tray-notify").exists()
+}
+
+fn set_notifies(on: bool) -> std::io::Result<()> {
+    let path = state_dir().join("tray-notify");
+    if on {
+        std::fs::create_dir_all(state_dir())?;
+        std::fs::write(path, "on\n")
+    } else {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+}
 
 /// What the icon's menu asks of the program.
 enum Cmd {
@@ -78,8 +119,16 @@ impl ksni::Tray for Icon {
         "remoteman".into()
     }
 
+    /// One shape for each way things can stand: the desktop recolours these icons, so colour
+    /// can't tell them apart.
     fn icon_name(&self) -> String {
-        "dev.remoteman.Host-symbolic".into()
+        match &self.state {
+            State::Sharing { client: Some(_), .. } => "dev.remoteman.Host-connected-symbolic",
+            State::Sharing { .. } => "dev.remoteman.Host-symbolic",
+            State::Paused => "dev.remoteman.Host-paused-symbolic",
+            State::Failed(_) => "dev.remoteman.Host-failed-symbolic",
+        }
+        .into()
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
@@ -114,12 +163,6 @@ impl ksni::Tray for Icon {
         menu.push(act(if sharing { "Stop Sharing and Quit" } else { "Quit" }, || Cmd::Quit));
         menu
     }
-}
-
-/// A switch for something that isn't there yet, where the design has it.
-fn not_yet(title: &str, subtitle: &str) -> adw::SwitchRow {
-    let row = adw::SwitchRow::builder().title(title).subtitle(subtitle).sensitive(false).tooltip_text(NOT_YET).build();
-    row
 }
 
 struct Ui {
@@ -170,6 +213,17 @@ impl Ui {
         let state = host::state();
         if self.shown.borrow().as_ref() == Some(&state) {
             return;
+        }
+        // A device that wasn't connected a moment ago is now. Not at this program's start: a
+        // device already connected then is no news.
+        let device = |s: &State| if let State::Sharing { client: Some(c), .. } = s { Some((c.name.clone(), c.since)) } else { None };
+        if let (Some(before), Some((name, since))) = (self.shown.borrow().as_ref(), device(&state)) {
+            if device(before).is_none_or(|b| b.1 != since) && notifies() {
+                let note = gtk::gio::Notification::new(&format!("{name} connected"));
+                note.set_body(Some(&format!("It is using {} now.", self.name)));
+                self.app.send_notification(Some("device"), &note);
+                println!("notified: {name} connected");
+            }
         }
         if let Some(icon) = self.icon.borrow().as_ref() {
             let for_icon = state.clone();
@@ -287,8 +341,10 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     sharing_group.add(&share);
     sharing_group.add(&status);
     let later = adw::PreferencesGroup::new();
-    later.add(&not_yet("Open remoteman when I sign in", "Sharing itself starts at sign-in once it has been turned on"));
-    later.add(&not_yet("Notify me when a device connects", ""));
+    let at_sign_in = adw::SwitchRow::builder().title("Open remoteman when I sign in").subtitle("The icon in the top bar. Sharing itself starts at sign-in once it has been turned on").active(autostart().exists()).build();
+    let notify = adw::SwitchRow::builder().title("Notify me when a device connects").active(notifies()).build();
+    later.add(&at_sign_in);
+    later.add(&notify);
     let sharing_page = adw::PreferencesPage::new();
     sharing_page.add(&sharing_group);
     sharing_page.add(&later);
@@ -356,6 +412,23 @@ fn build(app: &adw::Application) -> Rc<Ui> {
         icon: RefCell::new(None),
     });
 
+    at_sign_in.connect_active_notify({
+        let ui = ui.clone();
+        move |row| {
+            if let Err(e) = set_autostart(row.is_active()) {
+                ui.toast(&format!("That couldn't be changed: {e}"));
+            }
+        }
+    });
+    notify.connect_active_notify({
+        let ui = ui.clone();
+        move |row| {
+            if let Err(e) = set_notifies(row.is_active()) {
+                ui.toast(&format!("That couldn't be changed: {e}"));
+            }
+        }
+    });
+
     ui.share.connect_active_notify({
         let ui = ui.clone();
         move |row| {
@@ -418,7 +491,9 @@ fn main() -> glib::ExitCode {
         // The icon lives on while the window is closed.
         std::mem::forget(app.hold());
         let (tx, rx) = mpsc::channel::<Cmd>();
-        match (Icon { state: State::Paused, name: built.name.clone(), tx }).spawn() {
+        // Started at sign-in, the top bar's place for icons may not be up yet: wait for it
+        // then, where a start by hand says at once that there is none.
+        match (Icon { state: State::Paused, name: built.name.clone(), tx }).assume_sni_available(background).spawn() {
             Ok(handle) => *built.icon.borrow_mut() = Some(handle),
             // No place for icons on this desktop: the window is all there is.
             Err(e) => eprintln!("remoteman-tray: no icon in the top bar ({e}); use the window"),
@@ -456,4 +531,54 @@ fn main() -> glib::ExitCode {
         *ui.borrow_mut() = Some(built);
     });
     app.run_with_args::<&str>(&[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ksni::Tray;
+
+    #[test]
+    fn the_icon_has_a_shape_for_each_state() {
+        let (tx, _rx) = mpsc::channel();
+        let mut icon = Icon { state: State::Paused, name: "desk".into(), tx };
+        let sharing = |client| State::Sharing { fingerprint: String::new(), port: 7791, pairing: false, clipboard: false, files: false, client, devices: Vec::new() };
+        let device = host::Client { name: "pad".into(), since: 0, width: 1, height: 1, refresh: 60, placement: String::new(), picture: String::new(), sound: false };
+        let mut names = Vec::new();
+        for state in [State::Paused, State::Failed("why".into()), sharing(None), sharing(Some(device))] {
+            icon.state = state;
+            names.push(icon.icon_name());
+        }
+        assert_eq!(names, ["dev.remoteman.Host-paused-symbolic", "dev.remoteman.Host-failed-symbolic", "dev.remoteman.Host-symbolic", "dev.remoteman.Host-connected-symbolic"]);
+        // Each has its picture, where the installer takes it from.
+        for name in names {
+            let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/linux").join(format!("{name}.svg"));
+            assert!(file.exists(), "{} is missing", file.display());
+        }
+    }
+
+    #[test]
+    fn the_two_choices_are_kept_and_taken_back() {
+        let dir = std::env::temp_dir().join(format!("remoteman-tray-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: the only test that reads or sets these.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+            std::env::set_var("XDG_STATE_HOME", dir.join("state"));
+        }
+        assert!(!autostart().exists() && !notifies());
+        set_autostart(true).unwrap();
+        let entry = std::fs::read_to_string(autostart()).unwrap();
+        assert!(autostart().starts_with(dir.join("config/autostart")));
+        assert!(entry.contains("--background") && entry.contains("Type=Application"), "{entry}");
+        set_autostart(false).unwrap();
+        set_autostart(false).unwrap();
+        assert!(!autostart().exists());
+        set_notifies(true).unwrap();
+        assert!(notifies());
+        set_notifies(false).unwrap();
+        set_notifies(false).unwrap();
+        assert!(!notifies());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
