@@ -220,6 +220,7 @@ enum Automation {
                 func usage() -> UInt16 { UInt16(arg.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "0x", with: ""), radix: arg.contains("0x") ? 16 : 10) ?? 0 }
                 switch op {
                 case "move" where n.count == 2: c.pointerTo(x: n[0], y: n[1])
+                case "by" where n.count == 2: c.pointerBy(dx: n[0], dy: n[1])
                 case "down" where n.count == 1: c.button(UInt8(n[0]), down: true)
                 case "up" where n.count == 1: c.button(UInt8(n[0]), down: false)
                 case "click" where n.count == 1:

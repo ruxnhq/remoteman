@@ -16,6 +16,8 @@ final class HostInput {
     private var pressed: [CGMouseButton] = []
     private var modifiers: CGEventFlags = []
     private var last = CGPoint.zero
+    /// When this host last put the pointer somewhere (uptime seconds).
+    private var movedAt = 0.0
     private var lastDown: (button: CGMouseButton, at: CGPoint, time: TimeInterval, count: Int)?
     private var touchSlot: UInt8?
 
@@ -61,6 +63,13 @@ final class HostInput {
             case .pointerTo(let x, let y):
                 move(to: at(x, y))
             case .pointerBy(let dx, let dy):
+                // From where the pointer really is, when this host hasn't just put it somewhere
+                // itself: the first relative movement of a session used to start from the display's
+                // corner, and so did the first after anything else had moved the pointer. Between
+                // quick movements the running position is kept, so that none of them is lost to
+                // an event that hasn't landed yet.
+                let now = ProcessInfo.processInfo.systemUptime
+                if now - movedAt > 0.3, let real = CGEvent(source: nil)?.location { last = real }
                 // Display pixels to points, kept on the display.
                 let p = CGPoint(x: last.x + CGFloat(dx) / scale, y: last.y + CGFloat(dy) / scale)
                 move(to: CGPoint(x: min(b.maxX - 1, max(b.minX, p.x)), y: min(b.maxY - 1, max(b.minY, p.y))))
@@ -109,6 +118,7 @@ final class HostInput {
 
     private func move(to p: CGPoint) {
         last = p
+        movedAt = ProcessInfo.processInfo.systemUptime
         let type: CGEventType =
             pressed.contains(.left)
             ? .leftMouseDragged

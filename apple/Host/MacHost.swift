@@ -1324,6 +1324,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let visible = b.contains(p)
         let at = (Float((p.x - b.minX) / b.width), Float((p.y - b.minY) / b.height), visible)
         if cursorAt == nil || cursorAt! != at {
+            // In the log: every time the pointer goes off the device's display or comes back.
+            if cursorAt == nil || cursorAt!.2 != visible {
+                hostLog(String(format: "host: cursor %@ the device's display (at %.0f, %.0f; the display is %.0f, %.0f, %.0f×%.0f)", visible ? "on" : "off", p.x, p.y, b.minX, b.minY, b.width, b.height))
+            }
             cursorAt = at
             rm_host_cursor_at(host, at.0, at.1, visible ? 1 : 0)
         }
@@ -1346,6 +1350,16 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         guard drawn, cursorPixels == nil || cursorPixels! != pixels else { return }
         cursorPixels = pixels
+        // In the log: each shape sent (premultiplied RGBA, 8 bits, sRGB), with what it is made of.
+        var opaque = 0, clear = 0, sum = (0, 0, 0), hash: UInt32 = 2166136261
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            let a = pixels[i + 3]
+            if a == 0 { clear += 1 } else if a == 255 { opaque += 1 }
+            sum.0 += Int(pixels[i]); sum.1 += Int(pixels[i + 1]); sum.2 += Int(pixels[i + 2])
+        }
+        for v in pixels { hash = (hash ^ UInt32(v)) &* 16777619 }
+        let n = max(1, w * h - clear)
+        hostLog("host: cursor shape \(w)×\(h), hot spot \(Int((c.hotSpot.x * scale).rounded())),\(Int((c.hotSpot.y * scale).rounded())), \(opaque) opaque and \(clear) clear of \(w * h) pixels, mean colour where drawn \(sum.0 / n),\(sum.1 / n),\(sum.2 / n), id \(String(hash, radix: 16))")
         rm_host_cursor_shape(
             host, pixels, UInt32(w), UInt32(h), Int32((c.hotSpot.x * scale).rounded()), Int32((c.hotSpot.y * scale).rounded()))
     }
