@@ -16,7 +16,6 @@ use crate::window::App;
 struct Item {
     button: gtk::Button,
     mark: Option<gtk::CheckButton>,
-    #[allow(dead_code)]
     label: gtk::Label,
     hint: gtk::Label,
 }
@@ -140,6 +139,8 @@ pub struct View {
     show_figures: Item,
     /// Plays the computer's sound here while it is pressed in.
     pub sound: gtk::ToggleButton,
+    /// Adds a second display in a window of its own, or takes it away.
+    second: Item,
     /// Captures the pointer, or lets it follow this one, from now on.
     pub pointer: gtk::Button,
     /// Lets the computer use this device's camera while it is pressed in.
@@ -175,7 +176,7 @@ pub fn build(video: &Video) -> View {
     let extra = item("Extra Display", "Beside the computer's own", Mark::Radio(None));
     let main = item("Main Display", "", Mark::Radio(extra.mark.as_ref()));
     let only = item("Only Display", "Computer's screens off", Mark::Radio(extra.mark.as_ref()));
-    let second = item("Add a Second Display…", "", Mark::None);
+    let second = item("Add a Second Display", "In a window of its own", Mark::None);
     gate(second.button.clone(), FEATURES.second_display);
     let mirror = item("Mirror the Main Monitor", "The computer's own picture", Mark::Radio(extra.mark.as_ref()));
     gate(mirror.button.clone(), FEATURES.mirror);
@@ -251,6 +252,7 @@ pub fn build(video: &Video) -> View {
         qualities: [(Quality::Automatic, automatic), (Quality::Sharp, sharp)],
         show_figures,
         sound,
+        second,
         pointer,
         camera,
         microphone,
@@ -308,6 +310,20 @@ impl View {
     /// Whether the sharing menu shows the clipboard as shared.
     pub fn clipboard_shown(&self) -> bool {
         self.share_clipboard.mark.as_ref().is_some_and(|m| m.is_active())
+    }
+
+    /// Whether this computer gives a device a second display: the line is there for those
+    /// that do.
+    pub fn offer_second(&self, offered: bool) {
+        if FEATURES.second_display {
+            self.second.button.set_sensitive(offered);
+            self.second.button.set_tooltip_text((!offered).then_some("This computer gives a device one display"));
+        }
+    }
+
+    /// Say on the menu's line whether there is a second display now.
+    pub fn show_second(&self, there: bool) {
+        self.second.label.set_text(if there { "Remove the Second Display" } else { "Add a Second Display" });
     }
 
     /// Say on the Pointer Mode button which way it is now.
@@ -473,6 +489,10 @@ pub fn wire(app: &Rc<App>) {
             });
         }
     });
+    view.second.button.connect_clicked({
+        let app = app.clone();
+        move |_| app.toggle_second()
+    });
     view.pointer.connect_clicked({
         let app = app.clone();
         move |_| app.toggle_capture()
@@ -619,6 +639,7 @@ pub fn wire(app: &Rc<App>) {
     motion.connect_motion({
         let app = app.clone();
         move |_, x, y| {
+            app.point_at(0);
             // (A captured pointer says how far it moved instead: see `App::tick`.)
             if app.capture.borrow().is_none() {
                 let (x, y) = app.video.fraction(x, y);
@@ -680,6 +701,7 @@ pub fn wire(app: &Rc<App>) {
                 return;
             }
             app.spoil_chord();
+            app.point_at(0);
             if app.capture.borrow().is_none() {
                 let (x, y) = app.video.fraction(x, y);
                 app.send(Event::PointerTo { x, y });

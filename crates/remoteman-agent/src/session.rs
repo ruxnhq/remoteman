@@ -24,7 +24,19 @@ const MODES: [Mode; 3] = [
 ];
 
 /// A client being served.
+/// A second display in the same session: a monitor and a picture of its own.
+struct Second {
+    desktop: VirtualDisplay,
+    pipeline: Pipeline,
+    size: (u32, u32),
+    placing: tokio::task::JoinHandle<()>,
+}
+
 struct Live {
+    /// The client's second display, while it has one.
+    second: Option<Second>,
+    /// Which of its displays the client's pointer is on (0, or 1 for the second).
+    target: u8,
     desktop: VirtualDisplay,
     pipeline: Pipeline,
     size: (u32, u32),
@@ -297,7 +309,7 @@ impl Agent {
                 tracing::warn!("couldn't make the display {:?}: {e:#}", screen.placement);
             }
         });
-        self.live = Some(Live { desktop, pipeline, size: (screen.width, screen.height), pointed: None, placing, name, link, screen, decoders, cursor, mode, ceiling, files: BTreeMap::new(), clipboard: None, copied: BTreeMap::new() });
+        self.live = Some(Live { second: None, target: 0, desktop, pipeline, size: (screen.width, screen.height), pointed: None, placing, name, link, screen, decoders, cursor, mode, ceiling, files: BTreeMap::new(), clipboard: None, copied: BTreeMap::new() });
         // The clipboard belongs to the display's session, so a new display shares it anew.
         self.share_clipboard(self.clipboard_wanted);
         *self.allowed.link.lock().unwrap() = self.live.as_ref().map(|l| l.link.clone());
@@ -391,10 +403,63 @@ impl Agent {
         }
     }
 
+    /// Give the client a second display beside its first, or take it away. It gets a monitor
+    /// of its own to the right of everything else and a picture of its own, in the codec of
+    /// the first; its pointer is drawn into the picture.
+    fn second_display(&mut self, on: bool, display: Option<Display>) {
+        let Some(l) = self.live.as_mut() else { return };
+        if let Some(old) = l.second.take() {
+            old.placing.abort();
+            drop(old.pipeline);
+            self.runtime.block_on(old.desktop.close());
+            l.target = 0;
+            tracing::info!("the device's second display is gone");
+        }
+        let (true, Some(screen)) = (on, display) else { return };
+        let link = l.link.clone();
+        let gone = |why: String| link.send_message(Message::Display { index: 1, on: false, display: None, message: why });
+        if self.login_screen.is_some() {
+            return gone("a login screen has one display".into());
+        }
+        if screen.width % 2 != 0 || screen.height % 2 != 0 || screen.width < 64 || screen.height < 64 || screen.width > 8192 || screen.height > 8192 {
+            return gone("display sizes must be even, from 64 to 8192".into());
+        }
+        let refresh = screen.refresh.clamp(1, 240);
+        let desktop = match self.runtime.block_on(VirtualDisplay::create_beside(false)) {
+            Ok(d) => d,
+            Err(e) => return gone(format!("{e:#}")),
+        };
+        let second = l.link.second();
+        // Said before its first frame can be sent.
+        second.restart(Accept { mode: l.mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into() });
+        let settings = Settings { node: desktop.node, width: screen.width, height: screen.height, fps: refresh, scale: screen.scale.clamp(1.0, 4.0), mode: l.mode, bitrate: self.bitrate.min(40_000_000), cursor: false, refs: self.refs };
+        let pipeline = match Pipeline::start(settings, second) {
+            Ok(p) => p,
+            Err(e) => {
+                self.runtime.block_on(desktop.close());
+                return gone(format!("{e:#}"));
+            }
+        };
+        let place = desktop.place(remoteman_core::Placement::Extend);
+        let placing = self.runtime.spawn(async move {
+            if let Err(e) = place.await {
+                tracing::warn!("couldn't place the second display: {e:#}");
+            }
+        });
+        tracing::info!(width = screen.width, height = screen.height, refresh, "the device has a second display");
+        l.second = Some(Second { desktop, pipeline, size: (screen.width, screen.height), placing });
+    }
+
     /// Stop the picture and take the display away. Files half received are thrown away.
     fn stop(&mut self) -> Option<Live> {
         let mut l = self.live.take()?;
         *self.allowed.link.lock().unwrap() = None;
+        // The second display goes with the first.
+        if let Some(second) = l.second.take() {
+            second.placing.abort();
+            drop(second.pipeline);
+            self.runtime.block_on(second.desktop.close());
+        }
         tracing::info!(skipped = l.pipeline.skipped.load(std::sync::atomic::Ordering::Relaxed), "session over");
         l.placing.abort();
         for (_, f) in std::mem::take(&mut l.files) {
@@ -850,6 +915,12 @@ impl HostHandler for Agent {
                 }
             }
             Message::Mic { on, .. } => self.take_microphone(*on),
+            Message::Display { index: 1, on, display, .. } => self.second_display(*on, *display),
+            Message::DisplayKeyframe { index: 1 } => {
+                if let Some(second) = self.live.as_ref().and_then(|l| l.second.as_ref()) {
+                    second.pipeline.request_keyframe();
+                }
+            }
             // The device's word on a file this computer sent it.
             Message::FileResult { ok, message, .. } => {
                 tracing::info!(ok, said = message, "the device answered for a file sent to it");
@@ -904,8 +975,19 @@ impl HostHandler for Agent {
             }
             _ => {}
         }
-        let scale = f32::from_bits(l.pipeline.scale.load(std::sync::atomic::Ordering::Relaxed));
-        if let Err(e) = self.runtime.block_on(l.desktop.inject(&event, l.size, scale)) {
+        // Which of its displays the pointer is on from here on.
+        if let Event::Display(index) = event {
+            l.target = index;
+            return;
+        }
+        // The pointer and touches go to the display they are on; keys to the desktop, by way
+        // of the first.
+        let pointing = matches!(event, Event::PointerTo { .. } | Event::PointerBy { .. } | Event::Button { .. } | Event::Scroll { .. } | Event::Touch { .. });
+        let (desktop, size, scale) = match &l.second {
+            Some(second) if l.target == 1 && pointing => (&second.desktop, second.size, f32::from_bits(second.pipeline.scale.load(std::sync::atomic::Ordering::Relaxed))),
+            _ => (&l.desktop, l.size, f32::from_bits(l.pipeline.scale.load(std::sync::atomic::Ordering::Relaxed))),
+        };
+        if let Err(e) = self.runtime.block_on(desktop.inject(&event, size, scale)) {
             tracing::warn!("input: {e:#}");
         }
     }

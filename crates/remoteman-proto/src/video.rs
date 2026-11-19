@@ -7,6 +7,8 @@ use crate::Error;
 
 pub const KIND_VIDEO: u8 = 1;
 pub const KIND_CURSOR: u8 = 2;
+/// A second display's picture: laid out as `KIND_VIDEO`, with epochs and frame numbers of its own.
+pub const KIND_VIDEO2: u8 = 6;
 
 /// Where the host's cursor is: a datagram of its own, sent when it moves (only to clients that
 /// draw the cursor themselves).

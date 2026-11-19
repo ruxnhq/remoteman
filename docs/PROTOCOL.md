@@ -35,6 +35,18 @@ While a host is unlocked for a device this way it may give the device another pl
 
 A host that can both bring a device into a session that is already running and show it a login screen when there is none (the Linux daemon) lists `way_in` in its features. A client may then say `"way_in":"attach"` in its hello: only a session that is already running, never a login screen. Left out, the host uses whatever way fits. With `attach` and nobody logged in, the host refuses with an ordinary error saying so. A host with one way in takes no notice.
 
+### A second display
+
+A host that can give one device two displays in one session lists `displays` in its features.
+
+- Client → host: `{"t":"display","index":1,"on":true,"display":{...}}` adds a second display of that size (the `display` of the hello), beside everything else; `"on":false` takes it away. Only index 1 exists.
+- Host → client: a `stream` message with `"index":1` says what the second picture is; its epochs count by themselves, from 1. Its frames come as datagrams of kind 6, laid out like the picture's (kind 1), with their own frame numbers. The cursor is drawn into this picture (there is no cursor channel for it), and it is in the codec of the first.
+- A client that misses part of it asks with `{"t":"display_keyframe","index":1}` and gets a keyframe (there are no loss reports for the second picture).
+- Host → client: `{"t":"display","index":1,"on":false,"message":"..."}` when the second display could not be made, or is gone.
+- Input: the input event `8, index` (two bytes) says which display the pointer and touch events that follow are on: 0 the first (and where every session starts), 1 the second. Keys go to the desktop whichever it is.
+
+The second display goes when the session ends, and when the first is made afresh (`configure`).
+
 ### A host that logs its user in by itself
 
 Some hosts neither show a login or lock screen nor ask for a password: they log their user in, or unlock, for a paired device (the Mac host, where its owner has switched that on and given it the password once). That takes a few seconds, during which there is no session to show. Such a host answers the hello with `{"t":"error","code":"logging_in","message":"..."}` and closes, its closing reason beginning `logging in: `. A client says so, waits about three seconds and connects again, by itself, some ten times before it asks its user. Through the core a host's handler gets this by refusing with words that begin `logging in: `.

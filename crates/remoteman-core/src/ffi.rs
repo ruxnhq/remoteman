@@ -563,6 +563,8 @@ impl HostHandler for RmHostCallbacks {
                 i.kind = 7;
                 text = Some(CString::new(s.replace('\0', " ")).unwrap_or_default());
             }
+            // Which display the pointer is on (`slot`: 0 the first, 1 the second).
+            Event::Display(index) => (i.kind, i.slot) = (8, index),
         }
         if let Some(t) = &text {
             i.text = t.as_ptr();

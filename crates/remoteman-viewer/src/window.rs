@@ -89,6 +89,9 @@ pub struct App {
     pub unlocking: RefCell<Option<Unlocking>>,
     /// How many tries in a row a computer has answered that it is logging in.
     pub logging_in: Cell<u32>,
+    /// The second display's window, while there is one, and which display the pointer is on.
+    pub second: RefCell<Option<crate::second::Second>>,
+    pub pointer_on: Cell<u8>,
     pub capture: RefCell<Option<crate::capture::Capture>>,
     /// How far a captured pointer has been sent in this run, for tests.
     pub moved: Cell<(f64, f64)>,
@@ -334,6 +337,8 @@ impl App {
             self.video.stack.set_cursor(gdk::Cursor::from_name("none", None).as_ref());
         }
         self.released.set(false);
+        self.pointer_on.set(0);
+        self.view.offer_second(session.offers("displays"));
         self.fingers.borrow_mut().clear();
         self.view.show_pointer(input.capture);
         if input.capture {
@@ -516,6 +521,8 @@ impl App {
         let _ = session.set_microphone(false, None);
         session.set_camera(false, None);
         self.hold_pointer(false);
+        // (Dropped with the session on the computer's side.)
+        self.close_second(false);
         session.client.close();
         if !stay {
             self.view.sound.set_active(false);
@@ -720,6 +727,7 @@ impl App {
     /// Once per frame of this window: show the newest picture, and notice the session ending.
     fn tick(self: &Rc<Self>) {
         self.arrivals();
+        self.tick_second();
         // A captured pointer's movement since the last frame.
         let moved = self.capture.borrow_mut().as_mut().map(|c| c.take());
         if let Some(((dx, dy), _)) = moved {
@@ -877,6 +885,8 @@ pub fn build(application: &adw::Application, args: Args) {
         unlock: RefCell::new(None),
         logging_in: Cell::new(0),
         unlocking: RefCell::new(None),
+        second: RefCell::new(None),
+        pointer_on: Cell::new(0),
         capture: RefCell::new(None),
         moved: Cell::new((0.0, 0.0)),
         fingers: RefCell::new(Vec::new()),

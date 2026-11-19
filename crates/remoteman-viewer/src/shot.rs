@@ -17,7 +17,7 @@
 //! - `keys?` and `size?` print whether keys go to the other computer, and the window's size
 //! - `share` (the clipboard), `copy=TEXT` (as if copied in this window), `clipboard?` (print
 //!   what this clipboard holds), `sendfile=PATH`, `offers?` (print which lines of the sharing
-//!   menu can be chosen), `unlock=PASSWORD` (type it into a locked computer's page), `reach?=ADDRESS` (print what is known of a computer), `pointer?` (print whether the pointer is captured and how far it has
+//!   menu can be chosen), `unlock=PASSWORD` (type it into a locked computer's page), `reach?=ADDRESS` (print what is known of a computer), `second` (add or remove the second display), `second?` (print how it stands), `pointer?` (print whether the pointer is captured and how far it has
 //!   been sent)
 //! - things that can't happen yet, to see how they are laid out: `pair-code=NAME` (the code
 //!   dialog, with a made-up code), `asleep=ADDRESS` (the asleep page), `state=asleep:ADDRESS`
@@ -242,6 +242,12 @@ pub fn run(app: &Rc<App>, script: String) {
                         None => println!("no password field"),
                     }
                 }
+                // The second display: add or remove it, and say how it stands.
+                "second" => app.toggle_second(),
+                "second?" => match app.second.borrow().as_ref() {
+                    Some(second) => println!("~ second display: a window, {} pictures shown, {} x {}", second.video.shown_total.get(), second.video.size.get().0, second.video.size.get().1),
+                    None => println!("~ second display: none"),
+                },
                 "offers?" => println!("~ the sharing menu: clipboard {}, files {}, shared {}", app.view.offers().0, app.view.offers().1, app.view.clipboard_shown()),
                 "copy" => app.window.clipboard().set_text(value),
                 "clipboard?" => app.window.clipboard().read_text_async(gtk::gio::Cancellable::NONE, |text| {

@@ -21,6 +21,7 @@
 //! the window, for tests).
 
 mod capture;
+mod second;
 mod keyring;
 mod nearby;
 mod computers;

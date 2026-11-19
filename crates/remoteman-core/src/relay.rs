@@ -74,6 +74,9 @@ pub enum ToDaemon {
     /// The picture starts afresh as this (another size, another codec): the frames that
     /// follow count from 0 again and begin with a keyframe.
     Restart(Accept),
+    /// A frame of the session's second display, and its picture starting (afresh).
+    Frame2 { key: bool, recovery: bool, capture_us: u64, data: Vec<u8> },
+    Restart2(Accept),
 }
 
 fn put_blob(w: &mut impl Write, kind: u8, event: &BlobEvent) -> io::Result<()> {
@@ -194,6 +197,8 @@ impl ToDaemon {
             ToDaemon::Sound(p) => put(w, 0x08, &[&p.write()]),
             ToDaemon::Blob(event) => put_blob(w, 0x09, event),
             ToDaemon::Restart(accept) => put(w, 0x0A, &[&serde_json::to_vec(accept)?]),
+            ToDaemon::Frame2 { key, recovery, capture_us, data } => put(w, 0x0B, &[&[*key as u8 | (*recovery as u8) << 1], &capture_us.to_le_bytes(), data]),
+            ToDaemon::Restart2(accept) => put(w, 0x0C, &[&serde_json::to_vec(accept)?]),
         }
     }
 
@@ -215,6 +220,8 @@ impl ToDaemon {
             0x08 => ToDaemon::Sound(Packet::parse(&b).map_err(|_| bad("sound packet"))?),
             0x09 => ToDaemon::Blob(get_blob(&b)?),
             0x0A => ToDaemon::Restart(serde_json::from_slice(&b)?),
+            0x0B if b.len() >= 9 => ToDaemon::Frame2 { key: b[0] & 1 != 0, recovery: b[0] & 2 != 0, capture_us: u64::from_le_bytes(b[1..9].try_into().unwrap()), data: b[9..].to_vec() },
+            0x0C => ToDaemon::Restart2(serde_json::from_slice(&b)?),
             _ => return Err(bad("unknown message for the daemon")),
         }))
     }
@@ -264,6 +271,11 @@ pub fn run_agent(socket: UnixStream, features: Vec<String>, mut handler: impl Ho
                                 let m = match out {
                                     Out::Frame(f) => ToDaemon::Frame { key: f.key, recovery: f.recovery, capture_us: f.capture_us, data: f.data },
                                     Out::Restart(accept) => ToDaemon::Restart(accept),
+                                    Out::Second(second) => match *second {
+                                        Out::Frame(f) => ToDaemon::Frame2 { key: f.key, recovery: f.recovery, capture_us: f.capture_us, data: f.data },
+                                        Out::Restart(accept) => ToDaemon::Restart2(accept),
+                                        Out::Second(_) => continue,
+                                    },
                                 };
                                 if m.write(&mut *w.lock().unwrap()).is_err() {
                                     break;
