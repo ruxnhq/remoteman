@@ -39,7 +39,7 @@ impl App {
         let Some(second) = self.second.borrow_mut().take() else { return };
         if tell {
             if let Some(s) = self.session.borrow().as_ref() {
-                s.client.send_message(Message::Display { index: 1, on: false, display: None, message: String::new() });
+                s.client.send_message(Message::Display { index: 1, on: false, display: None, side: Default::default(), message: String::new() });
             }
         }
         second.video.detach();
@@ -143,7 +143,9 @@ impl App {
         });
         window.present();
         if let Some(s) = self.session.borrow().as_ref() {
-            s.client.send_message(Message::Display { index: 1, on: true, display: Some(display), message: String::new() });
+            // On the side of the computer's other displays chosen for this computer.
+            let side = self.target.borrow().as_ref().and_then(|t| self.store.borrow().find(&t.address).map(|c| c.second_side)).unwrap_or_default();
+            s.client.send_message(Message::Display { index: 1, on: true, display: Some(display), side, message: String::new() });
         }
         *self.second.borrow_mut() = Some(Second { window, video });
         self.view.show_second(true);

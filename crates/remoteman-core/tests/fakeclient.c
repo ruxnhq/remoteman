@@ -38,7 +38,7 @@ int main(int argc, char **argv) {
     if (!c) { printf("client: failed: %s\n", err); return 1; }
     sleep(1);
     int before = frames2;
-    rm_client_second_display(c, 1, 1280, 720, 1.0f, 60);
+    rm_client_second_display(c, 1, 1280, 720, 1.0f, 60, 0);
     sleep(2);
     rm_client_pointer_on(c, 1);
     rm_client_pointer_to(c, 0.5f, 0.5f);
@@ -46,18 +46,18 @@ int main(int argc, char **argv) {
     sleep(1);
     int first = frames2, first_keys = keys2;
     // Another size while it is on: the picture starts afresh.
-    rm_client_second_display(c, 1, 1920, 1080, 1.0f, 60);
+    rm_client_second_display(c, 1, 1920, 1080, 1.0f, 60, 1);
     sleep(1);
     int resized = streams2 == 2 && w2 == 1920 && h2 == 1080;
     rm_client_pointer_on(c, 0);
-    rm_client_second_display(c, 0, 0, 0, 0, 0);
+    rm_client_second_display(c, 0, 0, 0, 0, 0, 0);
     sleep(1);
     int after = frames2;
     sleep(1);
     int still = frames2 == after;
     // One the test host refuses: the answer comes as a message.
     int told = gone;
-    rm_client_second_display(c, 1, 1280, 5000, 1.0f, 60);
+    rm_client_second_display(c, 1, 1280, 5000, 1.0f, 60, 0);
     sleep(1);
     int refused = gone == told + 1 && frames2 == after;
     printf("client: first picture %d frames; second before asking %d, then %d frames (%d keyframes, asked %d), resized %d, none after giving it back %d, refusal told %d\n",

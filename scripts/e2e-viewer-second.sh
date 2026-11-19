@@ -3,9 +3,12 @@
 # Mutter with moving content on each of the device's displays, and the viewer in a second
 # Mutter. The viewer adds a second display from its Display menu's line: a second window must
 # open and show that display's picture at its size, and removing it must close the window and
-# take the monitor away on the host.
+# take the monitor away on the host. The side chosen for the computer must reach the host.
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
 export RM_ROOT="$root" RM_LOGS="${RM_LOGS:-$(mktemp -d)}" RM_PORT="${RM_PORT:-7796}"
+# The viewer already knows this computer, with "A second display goes: Above" chosen for it.
+mkdir -p "$RM_LOGS/vstate"
+printf '[computer]\nname=test\naddress=127.0.0.1:%s\nsecond-side=above\n' "$RM_PORT" > "$RM_LOGS/vstate/viewer-computers"
 dbus-run-session -- mutter --headless --wayland --no-x11 --wayland-display rm-view --virtual-monitor 1920x1080@60 >"$RM_LOGS/mutter-view.log" 2>&1 &
 vpid=$!
 dbus-run-session -- sh -c '
@@ -39,6 +42,7 @@ shown=$(echo "$readings" | sed -n 2p | sed -n 's/.*a window, \([0-9]*\) pictures
 # (Taken away while the session went on: the host says so. What the desktop has after the
 # viewer has left depends on how far its leaving has got, and scripts/e2e-second-display.sh
 # counts the monitors in mid-session.)
+sed 's/\x1b\[[0-9;]*m//g' "$RM_LOGS/agent.log" | grep -q "has a second display.*side=Above" || { echo "the host was not asked for the side chosen for this computer"; fail=1; }
 sed 's/\x1b\[[0-9;]*m//g' "$RM_LOGS/agent.log" | grep -q "second display is gone" || { echo "the host did not take the second display away"; fail=1; }
 grep -q "Meta-1" "$RM_LOGS/monitors-after.txt" 2>/dev/null && { echo "the second monitor stayed on the host"; fail=1; }
 [ $fail = 0 ] && { echo "PASS"; exit 0; }

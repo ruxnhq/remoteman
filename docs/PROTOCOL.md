@@ -43,7 +43,7 @@ A host that can both bring a device into a session that is already running and s
 
 A host that can give one device two displays in one session lists `displays` in its features.
 
-- Client → host: `{"t":"display","index":1,"on":true,"display":{...}}` adds a second display of that size (the `display` of the hello), beside everything else; `"on":false` takes it away. Only index 1 exists.
+- Client → host: `{"t":"display","index":1,"on":true,"display":{...}}` adds a second display of that size (the `display` of the hello), beside everything else; `"on":false` takes it away. `"side":"left"`, `"above"` or `"below"` beside `on` says which side of the host's other displays it sits on, level with its neighbour there; left out, or a word the host doesn't know: the right. The others keep their places among themselves. Asking again while it is on, with another size or side, makes it afresh. Only index 1 exists.
 - Host → client: a `stream` message with `"index":1` says what the second picture is; its epochs count by themselves, from 1. Its frames come as datagrams of kind 6, laid out like the picture's (kind 1), with their own frame numbers. The cursor is drawn into this picture (there is no cursor channel for it), and it is in the codec of the first.
 - A client that misses part of it asks with `{"t":"display_keyframe","index":1}` and gets a keyframe (there are no loss reports for the second picture).
 - Host → client: `{"t":"display","index":1,"on":false,"message":"..."}` when the second display could not be made, or is gone.

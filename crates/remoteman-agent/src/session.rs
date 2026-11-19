@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use remoteman_core::media::{BLOB_CLIPBOARD, BLOB_FILE, CLIPBOARD_LIMIT, ClipboardHeader, FileHeader, safe_file_name};
 use remoteman_desktop::clipboard::{self, Clipboard};
 use remoteman_audio::{DefaultSink, MicSource, SpeakerSink};
-use remoteman_core::{BlobEvent, Chroma, Codec, Display, Event, Message, Mode, Packet};
+use remoteman_core::{BlobEvent, Chroma, Codec, Display, Event, Message, Mode, Packet, Side};
 use remoteman_desktop::mutter::VirtualDisplay;
 
 use crate::pipeline::{Pipeline, Settings};
@@ -404,9 +404,9 @@ impl Agent {
     }
 
     /// Give the client a second display beside its first, or take it away. It gets a monitor
-    /// of its own to the right of everything else and a picture of its own, in the codec of
+    /// of its own on the side the client names (the right, unless it says) and a picture of its own, in the codec of
     /// the first; its pointer is drawn into the picture.
-    fn second_display(&mut self, on: bool, display: Option<Display>) {
+    fn second_display(&mut self, on: bool, display: Option<Display>, side: Side) {
         let Some(l) = self.live.as_mut() else { return };
         if let Some(old) = l.second.take() {
             old.placing.abort();
@@ -417,7 +417,7 @@ impl Agent {
         }
         let (true, Some(screen)) = (on, display) else { return };
         let link = l.link.clone();
-        let gone = |why: String| link.send_message(Message::Display { index: 1, on: false, display: None, message: why });
+        let gone = |why: String| link.send_message(Message::Display { index: 1, on: false, display: None, side: Default::default(), message: why });
         if self.login_screen.is_some() {
             return gone("a login screen has one display".into());
         }
@@ -425,6 +425,12 @@ impl Agent {
             return gone("display sizes must be even, from 64 to 8192".into());
         }
         let refresh = screen.refresh.clamp(1, 240);
+        // The first display must be in its place before the second is made: asked for in the
+        // session's first moments, the second would be taken for the first by whichever of
+        // the two is placed, and neither would end up where it belongs.
+        if !l.placing.is_finished() {
+            let _ = self.runtime.block_on(async { tokio::time::timeout(std::time::Duration::from_secs(6), &mut l.placing).await });
+        }
         let desktop = match self.runtime.block_on(VirtualDisplay::create_beside(false)) {
             Ok(d) => d,
             Err(e) => return gone(format!("{e:#}")),
@@ -440,13 +446,13 @@ impl Agent {
                 return gone(format!("{e:#}"));
             }
         };
-        let place = desktop.place(remoteman_core::Placement::Extend);
+        let place = desktop.place_on(side);
         let placing = self.runtime.spawn(async move {
             if let Err(e) = place.await {
                 tracing::warn!("couldn't place the second display: {e:#}");
             }
         });
-        tracing::info!(width = screen.width, height = screen.height, refresh, "the device has a second display");
+        tracing::info!(width = screen.width, height = screen.height, refresh, ?side, "the device has a second display");
         l.second = Some(Second { desktop, pipeline, size: (screen.width, screen.height), placing });
     }
 
@@ -915,7 +921,7 @@ impl HostHandler for Agent {
                 }
             }
             Message::Mic { on, .. } => self.take_microphone(*on),
-            Message::Display { index: 1, on, display, .. } => self.second_display(*on, *display),
+            Message::Display { index: 1, on, display, side, .. } => self.second_display(*on, *display, *side),
             Message::DisplayKeyframe { index: 1 } => {
                 if let Some(second) = self.live.as_ref().and_then(|l| l.second.as_ref()) {
                     second.pipeline.request_keyframe();

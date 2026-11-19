@@ -353,6 +353,15 @@ pub fn computer(app: &Rc<App>, address: &str, addresses: bool) {
         }
     });
     connection.add(&gate(way_in, FEATURES.way_in));
+    let side = combo("A second display goes", "Where the computer puts a second display you add, among its other displays", &["To the right", "To the left", "Above", "Below"], crate::store::SIDES.iter().position(|(side, _)| *side == c.second_side).unwrap_or(0) as u32);
+    side.connect_selected_notify({
+        let (app, address) = (app.clone(), address.clone());
+        move |row| {
+            let side = crate::store::SIDES[(row.selected() as usize).min(3)].0;
+            app.store.borrow_mut().update(&address.borrow(), |c| c.second_side = side);
+        }
+    });
+    connection.add(&gate(side, FEATURES.second_display));
     let quality = quality_row("Picture quality", "", c.quality);
     quality.connect_selected_notify({
         let (app, address) = (app.clone(), address.clone());

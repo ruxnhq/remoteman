@@ -56,6 +56,26 @@ impl Placement {
     }
 }
 
+/// Which side of the host's other displays a client's second display sits on. The numbers
+/// are the C interface's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Left = 1,
+    Above = 2,
+    Below = 3,
+    /// Also what a side this version doesn't know is read as.
+    #[default]
+    #[serde(other)]
+    Right = 0,
+}
+
+impl Side {
+    fn is_default(&self) -> bool {
+        *self == Side::Right
+    }
+}
+
 /// A client's screen.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Display {
@@ -119,6 +139,9 @@ pub enum Message {
         on: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display: Option<Display>,
+        /// Client to host, with `on` true: which side of everything else it should sit on.
+        #[serde(default, skip_serializing_if = "Side::is_default")]
+        side: Side,
         /// Host to client: why it is gone.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         message: String,

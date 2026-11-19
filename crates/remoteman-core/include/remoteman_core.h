@@ -118,8 +118,9 @@ int32_t rm_client_send_message(const rm_client *client, const char *json);
 // on_frame2. If the host can't make it, or takes it away, on_message gets
 // {"t":"display","index":1,"on":false,"message":"..."}. A decoder that lost its place asks for
 // a keyframe with rm_client_send_message: {"t":"display_keyframe","index":1} (losses on the
-// network are seen to by the core). Never blocks.
-void rm_client_second_display(const rm_client *client, int32_t on, uint32_t width, uint32_t height, float scale, uint32_t refresh);
+// network are seen to by the core). `side`: which side of the host's other displays it sits
+// on, 0 right, 1 left, 2 above, 3 below (asking again with another side moves it). Never blocks.
+void rm_client_second_display(const rm_client *client, int32_t on, uint32_t width, uint32_t height, float scale, uint32_t refresh, uint8_t side);
 // Which display the pointer events after this are on: 0 the first, 1 the second. Send it when
 // the pointer goes from one picture to the other; positions are fractions of that display.
 void rm_client_pointer_on(const rm_client *client, uint8_t index);
@@ -310,7 +311,8 @@ int32_t rm_host_restart(const rm_host *host, const rm_accept *accept);
 
 // A second display (docs/PROTOCOL.md, "A second display"), for hosts that list the feature
 // "displays". The client's {"t":"display","index":1,"on":true,"display":{...}} comes to
-// on_message (again while it is on: another size), as do "on":false (it gives the display
+// on_message (again while it is on: another size or side; "side" is "left", "above" or
+// "below", and left out for the right), as do "on":false (it gives the display
 // back) and {"t":"display_keyframe","index":1} (the next frame of it must be a keyframe).
 // rm_host_second_start: its picture starts, or starts afresh, as `accept` says; the client is
 // told, the next frame must be a keyframe, and frames count from 0. rm_host_send_frame2: one
