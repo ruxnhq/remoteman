@@ -60,6 +60,8 @@ pub struct App {
     attempt: Cell<u32>,
     /// Hide the window's bar while connected.
     pub hover_bar: Cell<bool>,
+    /// Seconds of streaming counted, for the line in the log every ten.
+    pub log_tick: Cell<u32>,
     /// The pointer is at the top edge (or on the bar), so a hidden bar is out.
     pub bar_out: Cell<bool>,
     /// The placement from the command line, until another is chosen in the window.
@@ -173,6 +175,13 @@ impl App {
 
     /// The display to ask the host for: this monitor's, unless the command line says otherwise.
     pub fn display(&self, placement: Placement) -> Display {
+        let address = self.target.borrow().as_ref().map(|t| t.address.clone());
+        self.display_for(address.as_deref(), placement)
+    }
+
+    /// The same, as it is asked of the computer at this address (its picture size may have
+    /// been chosen smaller).
+    pub fn display_for(&self, address: Option<&str>, placement: Placement) -> Display {
         let monitor = self
             .window
             .surface()
@@ -191,7 +200,10 @@ impl App {
         if let Some((sw, sh)) = self.args.size {
             (w, h) = (sw, sh);
         }
-        Display { width: w & !1, height: h & !1, scale: self.args.scale.unwrap_or(scale), refresh: self.args.refresh.unwrap_or(refresh), placement }
+        // Fewer pixels, if that was chosen for this computer.
+        let most = address.and_then(|a| self.store.borrow().find(a).map(|c| c.max_height)).unwrap_or(0);
+        let (w, h, scale) = crate::store::fit_lines(w, h, self.args.scale.unwrap_or(scale), most);
+        Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement }
     }
 
     /// How this display is to sit among a computer's own, and which stream to ask it for.
@@ -244,7 +256,7 @@ impl App {
         let id = self.attempt.get().wrapping_add(1);
         self.attempt.set(id);
         let (placement, quality) = self.choices(&target.address);
-        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display(placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, unlock: self.unlock.borrow_mut().take(), attach_only: self.store.borrow().find(&target.address).is_some_and(|c| c.attach_only), folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
+        let request = Request { host: target.address.clone(), state: self.args.state.clone(), pair, display: self.display_for(Some(&target.address), placement), decoders: self.decoders(quality), cursor: { let i = self.store.borrow().settings.input; i.draw_pointer && !i.capture }, unlock: self.unlock.borrow_mut().take(), attach_only: self.store.borrow().find(&target.address).is_some_and(|c| c.attach_only), folder: self.store.borrow().receive_folder(), pairing: { *self.pairing.lock().unwrap() = None; self.pairing.clone() } };
         let app = self.clone();
         glib::spawn_future_local(async move {
             let result = match gio::spawn_blocking(move || Session::start(request)).await {
@@ -282,7 +294,7 @@ impl App {
             Ok(session) => app.enter(session, &to),
             Err(e) => app.failed(&to, &e),
         });
-        let page = status::connecting(self, &target, self.display(placement), id);
+        let page = status::connecting(self, &target, self.display_for(Some(&target.address), placement), id);
         self.show_page(&page);
         *self.target.borrow_mut() = Some(target);
     }
@@ -806,6 +818,19 @@ impl App {
             println!("{} | drawn {}", line.replace('\n', " | "), self.video.drawn.replace(0));
         }
         let megabits = s.shared.bytes.swap(0, Ordering::Relaxed) as f64 * 8.0 / 1e6;
+        // Every ten seconds, to the log (the journal, when started from the desktop): what a
+        // report of "it got stuck" or "it is slow" can be checked against afterwards. Numbers
+        // only, nothing of what is on the screen.
+        let tick = self.log_tick.get() + 1;
+        self.log_tick.set(tick);
+        if tick % 10 == 0 {
+            eprintln!(
+                "remoteman: {decoder} via {}: this second {shown} shown, {decoded} decoded, {megabits:.1} Mbit/s, {age:.1} ms old, decode up to {decode:.1} ms; in all {} lost, {replaced} replaced unseen, {} keyframes asked; round trip {round_trip:.1} ms",
+                self.video.path.get(),
+                stats.lost,
+                stats.keyframe_requests
+            );
+        }
         self.view.figures.set(&[
             shown.to_string(),
             decoded.to_string(),
@@ -877,6 +902,7 @@ pub fn build(application: &adw::Application, args: Args) {
         target: RefCell::new(None),
         attempt: Cell::new(0),
         hover_bar: Cell::new(hover_bar),
+        log_tick: Cell::new(0),
         bar_out: Cell::new(false),
         released: Cell::new(false),
         chord: Cell::new((false, false, false)),

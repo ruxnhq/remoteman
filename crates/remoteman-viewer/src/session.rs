@@ -573,9 +573,11 @@ pub fn wire(app: &Rc<App>) {
     // the bar.
     let edge = gtk::EventControllerMotion::new();
     edge.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let at = Rc::new(std::cell::Cell::new(f64::MAX));
     edge.connect_motion({
-        let app = app.clone();
+        let (app, at) = (app.clone(), at.clone());
         move |_, _, y| {
+            at.set(y);
             let out = if app.bar_out.get() { y < 64.0 } else { y < 2.0 };
             if out != app.bar_out.get() {
                 app.bar_out.set(out);
@@ -583,10 +585,14 @@ pub fn wire(app: &Rc<App>) {
             }
         }
     });
+    // The pointer leaving the window from below the bar takes the bar away. Leaving while it
+    // is on the bar does not: that is what dragging the window by its bar looks like from
+    // here (the desktop takes the pointer for the move), and the bar going at that moment
+    // took the grip away with it. It goes when the pointer is next seen below it.
     edge.connect_leave({
-        let app = app.clone();
+        let (app, at) = (app.clone(), at.clone());
         move |_| {
-            if app.bar_out.replace(false) {
+            if at.get() >= 64.0 && app.bar_out.replace(false) {
                 app.place_bar();
             }
         }
