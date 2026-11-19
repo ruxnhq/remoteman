@@ -237,6 +237,7 @@ pub fn build(video: &Video) -> View {
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_top_bar_style(adw::ToolbarStyle::Raised);
+    toolbar.add_css_class("rm-session");
     toolbar.set_content(Some(&overlay));
 
     View {

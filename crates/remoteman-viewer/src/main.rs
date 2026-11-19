@@ -128,6 +128,15 @@ fn parse_args() -> anyhow::Result<Args> {
 }
 
 fn main() -> glib::ExitCode {
+    // GTK draws with OpenGL here, not Vulkan (its default where there is one): the decoder's
+    // pictures are drawn by an OpenGL widget, and getting each of those into a Vulkan-drawn
+    // window costs so much at 4K that every other picture was never shown (measured at
+    // 3840×2160 and 120 a second on an NVIDIA card: 60 shown of 121 with Vulkan, 110 of 120
+    // with OpenGL). Whoever sets GSK_RENDERER themselves is left alone.
+    if std::env::var_os("GSK_RENDERER").is_none() {
+        // SAFETY: nothing else runs yet; no other thread reads the environment.
+        unsafe { std::env::set_var("GSK_RENDERER", "gl") };
+    }
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

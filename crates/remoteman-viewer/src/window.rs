@@ -110,6 +110,9 @@ pub struct App {
 
 const STYLE: &str = "
 .rm-video { background: black; }
+/* The bar keeps its own background when it lies over the picture (libadwaita makes a bar
+   that content extends under see-through). */
+toolbarview.rm-session > .top-bar > windowhandle { background-color: @headerbar_bg_color; box-shadow: 0 1px alpha(black, 0.35); }
 .rm-state { font-size: 13px; font-weight: 700; }
 .rm-dot { min-width: 8px; min-height: 8px; border-radius: 4px; background-color: currentColor; }
 .rm-code { font-size: 52px; font-weight: 800; letter-spacing: 2px; font-feature-settings: 'tnum'; }
