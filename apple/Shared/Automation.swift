@@ -66,6 +66,7 @@ enum Automation {
         var verbose = false
         var frameLog: String?
         var placement = ViewerSession.Placement.extend
+        var attachOnly = false
         while !args.isEmpty {
             let a = args.removeFirst()
             func value() -> String { args.isEmpty ? "" : args.removeFirst() }
@@ -94,6 +95,7 @@ enum Automation {
                 }
             case "--frame-log": frameLog = value()
             case "--placement": placement = ViewerSession.Placement(rawValue: value()) ?? .extend
+            case "--way-in": attachOnly = value() == "attach"
             case "--mute": SoundPlayer.silent = ["yes", "1", "true"].contains(value())
             case "--verbose": verbose = ["yes", "1", "true"].contains(value())
             case "--bench": bench = value()
@@ -137,7 +139,7 @@ enum Automation {
             session.play(recording: resolve(play))
         } else if let host {
             print("remoteman: hello \(display.width)x\(display.height) scale \(display.scale) @\(display.refresh), decoders \(decoders), placement \(placement.rawValue)")
-            let join = { session.connect(host: host, pair: pair, name: name, display: display, decoders: decoders, placement: placement) }
+            let join = { session.connect(host: host, pair: pair, name: name, display: display, decoders: decoders, placement: placement, attachOnly: attachOnly) }
             if script?.contains("mem") == true { print("remoteman: memory before any session \(memory())") }
             join()
             if let script {
