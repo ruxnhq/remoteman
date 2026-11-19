@@ -1,5 +1,5 @@
-//! The session: the other computer's picture, the bar over it with its controls and menus, the
-//! figures, and the keys and pointer going back.
+//! The session: the other computer's picture, the pill floating over it with its controls and
+//! menus, the figures, and the keys and pointer going back.
 
 use std::rc::Rc;
 
@@ -93,7 +93,7 @@ fn sliders() -> gtk::DrawingArea {
 
 /// The numbers over the picture.
 pub struct Figures {
-    root: gtk::Grid,
+    pub root: gtk::Grid,
     values: Vec<gtk::Label>,
 }
 
@@ -125,12 +125,21 @@ impl Figures {
 
 /// The session's part of the window.
 pub struct View {
-    pub toolbar: adw::ToolbarView,
+    /// The session's page: the picture, and over it the figures, the other computer's pointer
+    /// and the pill.
+    pub page: gtk::Overlay,
     /// The other computer's pointer drawn over the picture, while this one's is captured: a
     /// layer over the picture and the image on it.
     pointer_layer: gtk::Fixed,
     pointer_image: gtk::Picture,
-    header: adw::HeaderBar,
+    /// The session's bar: a pill floating at the top of the picture, as wide as its controls.
+    /// The revealer brings it out and takes it away; the box is the pill itself.
+    pub pill: gtk::Revealer,
+    pub pill_box: gtk::Box,
+    /// The window's own buttons (minimise, maximise, close), at whichever end the desktop
+    /// puts them; and whether the window is in full screen, where they are not shown.
+    controls: [gtk::WindowControls; 2],
+    full: Rc<std::cell::Cell<bool>>,
     title: adw::WindowTitle,
     disconnect: gtk::Button,
     fullscreen: gtk::Button,
@@ -162,12 +171,18 @@ fn icon_toggle(icon: &str, name: &str) -> gtk::ToggleButton {
     gtk::ToggleButton::builder().icon_name(icon).tooltip_text(name).build()
 }
 
+/// How far the pill sits below the window's top edge.
+pub const PILL_TOP: i32 = 8;
+
+/// The window's own buttons at one end of the pill: shown when the desktop puts some there and
+/// the window is not in full screen.
+fn sync_controls(controls: &gtk::WindowControls, full: bool) {
+    controls.set_visible(!full && !controls.is_empty());
+}
+
 pub fn build(video: &Video) -> View {
-    let header = adw::HeaderBar::new();
-    let title = adw::WindowTitle::new("", "");
-    header.set_title_widget(Some(&title));
-    let disconnect = gtk::Button::builder().label("Disconnect").css_classes(["flat"]).build();
-    header.pack_start(&disconnect);
+    let title = adw::WindowTitle::builder().margin_start(10).margin_end(10).build();
+    let disconnect = gtk::Button::builder().label("Disconnect").css_classes(["flat", "rm-disconnect"]).build();
 
     // Send keys: the ones this computer or this window would keep for itself.
     let keys_menu = gio::Menu::new();
@@ -221,17 +236,51 @@ pub fn build(video: &Video) -> View {
     menu_model.append(Some("About remoteman"), Some("win.about"));
     let menu = gtk::MenuButton::builder().icon_name("open-menu-symbolic").tooltip_text("Main Menu").menu_model(&menu_model).primary(true).build();
 
-    // Packed from the end inwards.
-    header.pack_end(&menu);
-    header.pack_end(&fullscreen);
-    header.pack_end(&sharing);
-    header.pack_end(&sound);
-    header.pack_end(&microphone);
-    header.pack_end(&camera);
-    header.pack_end(&pointer);
-    header.pack_end(&picture);
-    header.pack_end(&display);
-    header.pack_end(&send_keys);
+    // The pill: the window's buttons wherever the desktop wants them, Disconnect and the
+    // computer's name, the session's tools, and full screen and the main menu.
+    let full = Rc::new(std::cell::Cell::new(false));
+    let controls = [gtk::WindowControls::new(gtk::PackType::Start), gtk::WindowControls::new(gtk::PackType::End)];
+    for c in &controls {
+        sync_controls(c, false);
+        let full = full.clone();
+        c.connect_empty_notify(move |c| sync_controls(c, full.get()));
+    }
+    controls[0].set_margin_end(4);
+    controls[1].set_margin_start(4);
+    // Flat, as in a header bar.
+    for b in [fullscreen.upcast_ref::<gtk::Widget>(), pointer.upcast_ref(), camera.upcast_ref(), microphone.upcast_ref(), sound.upcast_ref()] {
+        b.add_css_class("flat");
+    }
+    for m in [&send_keys, &display, &picture, &sharing, &menu] {
+        m.set_has_frame(false);
+    }
+    let tools = gtk::Box::builder().spacing(2).build();
+    for w in [send_keys.upcast_ref::<gtk::Widget>(), display.upcast_ref(), picture.upcast_ref(), pointer.upcast_ref(), camera.upcast_ref(), microphone.upcast_ref(), sound.upcast_ref(), sharing.upcast_ref()] {
+        tools.append(w);
+    }
+    let pill_box = gtk::Box::builder().spacing(2).css_classes(["rm-pill"]).build();
+    pill_box.append(&controls[0]);
+    pill_box.append(&disconnect);
+    pill_box.append(&title);
+    pill_box.append(&gtk::Separator::builder().orientation(gtk::Orientation::Vertical).css_classes(["rm-pill-sep"]).build());
+    pill_box.append(&tools);
+    pill_box.append(&gtk::Separator::builder().orientation(gtk::Orientation::Vertical).css_classes(["rm-pill-sep"]).build());
+    pill_box.append(&fullscreen);
+    pill_box.append(&menu);
+    pill_box.append(&controls[1]);
+    // Moved by, and maximised with a double click on, as a header bar is.
+    let handle = gtk::WindowHandle::builder().child(&pill_box).build();
+    // Visible overflow: the pill's shadow lies outside it, and it slides in from the top edge.
+    let pill = gtk::Revealer::builder()
+        .child(&handle)
+        .transition_type(gtk::RevealerTransitionType::SlideDown)
+        .transition_duration(180)
+        .reveal_child(true)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Start)
+        .margin_top(PILL_TOP)
+        .overflow(gtk::Overflow::Visible)
+        .build();
 
     let figures = Figures::new();
     let overlay = gtk::Overlay::builder().child(&video.stack).build();
@@ -241,18 +290,17 @@ pub fn build(video: &Video) -> View {
     let pointer_image = gtk::Picture::builder().can_shrink(true).content_fit(gtk::ContentFit::Fill).visible(false).build();
     pointer_layer.put(&pointer_image, 0.0, 0.0);
     overlay.add_overlay(&pointer_layer);
-
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_top_bar_style(adw::ToolbarStyle::Raised);
-    toolbar.add_css_class("rm-session");
-    toolbar.set_content(Some(&overlay));
+    // Last, so that it is over the other computer's pointer and takes the clicks on it.
+    overlay.add_overlay(&pill);
 
     View {
-        toolbar,
+        page: overlay,
         pointer_layer,
         pointer_image,
-        header,
+        pill,
+        pill_box,
+        controls,
+        full,
         title,
         disconnect,
         fullscreen,
@@ -338,12 +386,16 @@ impl View {
         self.pointer_image.set_visible(true);
     }
 
-    /// How tall the window's bar is, whether it has been shown yet or not.
-    pub fn bar_height(&self) -> i32 {
-        match self.header.height() {
-            0 => self.header.measure(gtk::Orientation::Vertical, -1).1,
-            h => h,
-        }
+    /// How tall the pill is, whether it is out or not.
+    pub fn pill_height(&self) -> i32 {
+        // Asked of it, with its padding and edge: what `height` gives leaves those out.
+        self.pill_box.measure(gtk::Orientation::Vertical, -1).1
+    }
+
+    /// How far down from the window's top edge a pill that has come out stays out: its band
+    /// and a little more.
+    pub fn pill_reach(&self) -> f64 {
+        (PILL_TOP + self.pill_height() + 16) as f64
     }
 
     pub fn offer_second(&self, offered: bool) {
@@ -424,7 +476,10 @@ impl View {
     pub fn set_fullscreen(&self, full: bool) {
         self.fullscreen.set_icon_name(if full { "view-restore-symbolic" } else { "view-fullscreen-symbolic" });
         self.fullscreen.set_tooltip_text(Some(if full { "Leave Full Screen (F11)" } else { "Full Screen (F11)" }));
-        self.header.set_show_end_title_buttons(!full);
+        self.full.set(full);
+        for c in &self.controls {
+            sync_controls(c, full);
+        }
     }
 
     pub fn show_figures(&self, on: bool) {
@@ -434,9 +489,10 @@ impl View {
         }
     }
 
-    /// Keep the figures clear of a bar that comes out over the picture.
-    pub fn place_figures(&self, bar_hidden: bool) {
-        self.figures.root.set_margin_top(if bar_hidden { 44 } else { 16 });
+    /// Keep the figures below the pill's band, whether it is out or not, so that they don't
+    /// move when it comes and goes.
+    pub fn place_figures(&self) {
+        self.figures.root.set_margin_top(PILL_TOP + self.pill_height() + 12);
     }
 
     /// Open one of the bar's menus by name, closing any other (for pictures of the window).
@@ -601,8 +657,8 @@ pub fn wire(app: &Rc<App>) {
     });
     app.window.add_action(&keys_action);
 
-    // A hidden bar comes out when the pointer reaches the top edge and goes when it has left
-    // the bar.
+    // A hidden pill comes out when the pointer reaches the top edge and goes when it has left
+    // the pill's band.
     let edge = gtk::EventControllerMotion::new();
     edge.set_propagation_phase(gtk::PropagationPhase::Capture);
     let at = Rc::new(std::cell::Cell::new(f64::MAX));
@@ -610,7 +666,7 @@ pub fn wire(app: &Rc<App>) {
         let (app, at) = (app.clone(), at.clone());
         move |_, _, y| {
             at.set(y);
-            let out = if app.bar_out.get() { y < 64.0 } else { y < 2.0 };
+            let out = if app.bar_out.get() { y < app.view.pill_reach() } else { y < 2.0 };
             if out != app.bar_out.get() {
                 app.bar_out.set(out);
                 app.place_bar();
@@ -624,7 +680,7 @@ pub fn wire(app: &Rc<App>) {
     edge.connect_leave({
         let (app, at) = (app.clone(), at.clone());
         move |_| {
-            if at.get() >= 64.0 && app.bar_out.replace(false) {
+            if at.get() >= app.view.pill_reach() && app.bar_out.replace(false) {
                 app.place_bar();
             }
         }
