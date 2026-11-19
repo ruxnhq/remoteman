@@ -10,6 +10,7 @@ pub mod ffi;
 pub mod host;
 #[cfg(unix)]
 pub mod receive;
+#[cfg(unix)]
 pub mod relay;
 
 use std::net::ToSocketAddrs;
