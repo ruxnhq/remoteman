@@ -167,6 +167,8 @@ struct Row<Trailing: View>: View {
             }
             .padding(.horizontal, 20).padding(.vertical, 8)
             .frame(minHeight: 54)
+            // The whole row takes a tap, the empty middle too, when it is a button's label.
+            .contentShape(Rectangle())
             if !last { Rectangle().fill(Theme.separator).frame(height: 0.5).padding(.leading, 20) }
         }
     }

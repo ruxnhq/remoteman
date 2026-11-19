@@ -326,14 +326,19 @@ struct ChoiceRow: View {
     @Binding var value: String
     let choices: [(String, String)]
     var body: some View {
+        // The whole row opens the choices, not only the value at its end: a clear menu lies over it.
         Row(title: title, last: last) {
+            RowValue(text: choices.first { $0.0 == value }?.1 ?? "", chevron: true)
+        }
+        .overlay {
             Menu {
                 Picker(title, selection: $value) {
                     ForEach(choices, id: \.0) { Text($0.1).tag($0.0) }
                 }
             } label: {
-                RowValue(text: choices.first { $0.0 == value }?.1 ?? "", chevron: true)
+                Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity).contentShape(Rectangle())
             }
+            .accessibilityLabel(title)
         }
     }
 }
