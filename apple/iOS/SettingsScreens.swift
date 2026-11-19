@@ -80,6 +80,17 @@ struct ComputerSettingsScreen: View {
                                 }),
                                 choices: [("any", "Automatic"), ("attach", "Only a running session")])
                             ChoiceRow(
+                                title: "Picture size",
+                                value: Binding(
+                                    get: { String(ViewerSession.PictureSize.saved(for: target(c)).rawValue) },
+                                    set: { v in
+                                        (ViewerSession.PictureSize(rawValue: Int(v) ?? 0) ?? .own).save(for: target(c))
+                                        sideChanged += 1
+                                    }),
+                                choices: ViewerSession.PictureSize.allCases.map { (String($0.rawValue), $0.label) }
+                            )
+                            .id(sideChanged)
+                            ChoiceRow(
                                 title: "A second display goes",
                                 value: Binding(
                                     get: { String(ViewerSession.SecondSide.saved(for: target(c)).rawValue) },

@@ -303,6 +303,10 @@ enum Automation {
                     // side:right|left|above|below, for the second display asked for after this.
                     let which = ["right": 0, "left": 1, "above": 2, "below": 3][arg.trimmingCharacters(in: .whitespaces)] ?? 0
                     DispatchQueue.main.sync { UserDefaults.standard.set(which, forKey: "secondSide." + session.hostKey) }
+                case "picture":
+                    // picture:own|1440|1080, for the next connect or change of size.
+                    let lines = Int(arg.trimmingCharacters(in: .whitespaces)) ?? 0
+                    DispatchQueue.main.sync { UserDefaults.standard.set(lines, forKey: "pictureSize." + session.hostKey) }
                 case "second":
                     // second:w,h[,scale[,refresh]] asks for a second display; second:off gives it back.
                     DispatchQueue.main.sync {

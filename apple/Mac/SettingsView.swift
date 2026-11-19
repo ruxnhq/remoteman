@@ -282,6 +282,15 @@ struct ComputerSettings: View {
                         }
                         .labelsHidden().fixedSize()
                     }
+                    Row("Picture size", caption: "Fewer pixels reach you sooner: a Mac takes about twice as long over a 4K picture as over 1440 lines. Applies the next time you connect.") {
+                        Picker("Picture size", selection: Binding(
+                            get: { ViewerSession.PictureSize.saved(for: ViewerSession.key(for: c.address)) },
+                            set: { $0.save(for: ViewerSession.key(for: c.address)); sideChanged += 1 })
+                        ) {
+                            ForEach(ViewerSession.PictureSize.allCases) { Text($0.label).tag($0) }
+                        }
+                        .labelsHidden().fixedSize().id(sideChanged)
+                    }
                     Row("A second display goes", caption: "Which side of the computer's other displays it sits on. Applies the next time one is added.") {
                         Picker("A second display goes", selection: Binding(
                             get: { ViewerSession.SecondSide.saved(for: ViewerSession.key(for: c.address)) },

@@ -233,6 +233,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private var aimedAtSecond = false
     private var sent = 0, bytes = 0, encodeMs = 0.0, dropped = 0, keyframes = 0
     private var captureMs = 0.0, captured = 0, ageMs = 0.0
+    private var askedFps = 60, saidSlow = false
     private var sendMs = 0.0, sendMax = 0.0, largest = 0, keysSent = 0, captureGap = 0.0, lastCaptured = 0.0, refused = 0
 
     init(options: Options) {
@@ -890,13 +891,15 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         lastBuffer = nil
         geometry = (b, b.width > 0 ? CGFloat(width) / b.width : 1)
         sent = 0; bytes = 0; encodeMs = 0; dropped = 0
+        askedFps = fps
+        saidSlow = false
         lock.unlock()
         stream = s
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.stats() }
         if cursorApart { startCursor() }
         if options.testWindow { testWindow.show(on: id) }
         firstFrame(d, width: width, height: height, cursorApart: cursorApart, gen: gen)
-        hostLog("host: sending \(width)×\(height) at \(fps) Hz, HEVC \(options.tenBit ? "Main10" : "Main (8-bit)") 4:2:0, \(bitrate / 1000) kbit/s, capture \(options.tenBit ? options.capture : "420v"), cursor \(cursorApart ? "apart" : "in the picture")")
+        hostLog("host: sending \(width)×\(height) at \(fps) Hz, HEVC \(options.tenBit ? "Main10" : "Main (8-bit)") 4:2:0, \(bitrate / 1000) kbit/s, capture \(options.tenBit ? options.capture : "420v"), cursor \(cursorApart ? "apart" : "in the picture"), \(width * height * fps / 1_000_000) megapixels a second")
         return nil
     }
 
@@ -1137,7 +1140,16 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let line = sent > 0 || dropped > 0
             ? String(format: "host: %d fps, %d kbit/s, capture %.2f ms, encode %.2f ms, %.2f ms old when sent, send %.2f ms (longest %.2f), largest frame %d bytes, %d keyframes sent, longest wait for the screen %.0f ms, %d dropped (busy), %d not taken by the core, %d keyframe requests", sent, bytes * 8 / 1000, captureMs / Double(max(captured, 1)), encodeMs / Double(max(sent, 1)), ageMs / Double(max(sent, 1)), sendMs / Double(max(sent, 1)), sendMax, largest, keysSent, captureGap, dropped, refused, keyframes)
             : nil
-        let fps = sent, bits = bytes * 8
+        // Asked for more than the encoder does in a frame time: said once a session.
+        let frameMs = 1000 / Double(max(askedFps, 1)), took = encodeMs / Double(max(sent, 1))
+        let slow = !saidSlow && sent >= 20 && dropped > 0 && took > frameMs
+        if slow { saidSlow = true }
+        let fps = sent, bits = bytes * 8, wasDropped = dropped
+        defer {
+            if slow {
+                hostLog(String(format: "host: the device asked for more than this Mac encodes in a frame time: %.1f ms a frame at this size against %.1f ms at %d Hz, so frames are being dropped (%d sent, %d dropped in the last second). A smaller picture would be quicker.", took, frameMs, askedFps, fps, wasDropped))
+            }
+        }
         sent = 0; bytes = 0; encodeMs = 0; dropped = 0; captureMs = 0; captured = 0; ageMs = 0; sendMs = 0; sendMax = 0; largest = 0; keysSent = 0; captureGap = 0; refused = 0
         lock.unlock()
         if let line { hostLog(line) }

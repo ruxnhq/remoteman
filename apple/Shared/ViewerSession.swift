@@ -34,6 +34,33 @@ final class ViewerSession: ObservableObject {
         func save(for host: String) { UserDefaults.standard.set(Int(rawValue), forKey: "secondSide." + host) }
     }
 
+    /// How many pixels to ask a computer for, chosen per computer: this screen's own, or the same
+    /// shape with its shorter side held to 1440 or 1080. The scale shrinks by the same factor
+    /// (it may fall below 1), so things keep their size on this screen. Fewer pixels are quicker
+    /// to encode: a Mac's encoder takes about 16 ms over 3840×2160, twice a 120 Hz frame.
+    enum PictureSize: Int, CaseIterable, Identifiable {
+        case own = 0, lines1440 = 1440, lines1080 = 1080
+        var id: Int { rawValue }
+        var label: String {
+            switch self {
+            case .own: return "This screen's own"
+            case .lines1440: return "Up to 1440 lines"
+            case .lines1080: return "Up to 1080 lines"
+            }
+        }
+        static func saved(for host: String) -> PictureSize {
+            PictureSize(rawValue: UserDefaults.standard.integer(forKey: "pictureSize." + host)) ?? .own
+        }
+        func save(for host: String) { UserDefaults.standard.set(rawValue, forKey: "pictureSize." + host) }
+        func fit(_ d: Display) -> Display {
+            let short = min(d.width, d.height)
+            guard self != .own, short > rawValue else { return d }
+            let f = Double(rawValue) / Double(short)
+            func even(_ v: Int) -> Int { max(2, Int((Double(v) * f / 2).rounded()) * 2) }
+            return Display(width: even(d.width), height: even(d.height), scale: d.scale * Float(f), refresh: d.refresh)
+        }
+    }
+
     /// A computer's address as sessions know it (with the port).
     static func key(for address: String) -> String { address.contains(":") ? address : address + ":7791" }
 
@@ -417,9 +444,10 @@ final class ViewerSession: ObservableObject {
         if d == display, p == placement { return true }
         display = d
         placement = p
+        let ask = PictureSize.saved(for: target).fit(d)
         return client.send([
             "t": "configure",
-            "display": ["width": d.width, "height": d.height, "scale": Double(d.scale), "refresh": d.refresh, "placement": p.rawValue],
+            "display": ["width": ask.width, "height": ask.height, "scale": Double(ask.scale), "refresh": ask.refresh, "placement": p.rawValue],
         ])
     }
 
@@ -562,6 +590,8 @@ final class ViewerSession: ObservableObject {
         closeCode = -1
         self.display = display
         self.placement = placement
+        // `self.display` stays this screen's own; what is asked for may be smaller.
+        let display = PictureSize.saved(for: target).fit(display)
         let config = CoreClient.Config(
             host: target, stateDir: Self.stateDir, name: name, pair: pair, width: display.width,
             height: display.height, scale: display.scale, refresh: display.refresh, decoders: decoders,
