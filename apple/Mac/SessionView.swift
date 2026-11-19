@@ -448,12 +448,16 @@ struct HoverBar: View {
                 WindowButtons(window: model.window).padding(.leading, 8).padding(.trailing, 4)
                 BarDivider()
             }
-            HStack(spacing: 6) {
+            // The computer's name over the picture's size and rate, as on the iPad and the Linux viewer.
+            HStack(spacing: 7) {
                 StatusDot(color: Tokens.green)
-                Text(computer.name).fontWeight(.semibold)
-                Text("Attached").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(computer.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    if let w = facts.width, let h = facts.height, let r = facts.refresh {
+                        Text("\(w) × \(h) at \(r) Hz").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
             }
-            .font(.system(size: 13))
             .padding(.horizontal, 8)
             .frame(height: 48)
             .contentShape(Rectangle())
