@@ -444,10 +444,24 @@ struct PairDevice: View {
                         Text("or \(controller.addresses.map { controller.port == "7791" ? $0 : "\($0):\(controller.port)" }.joined(separator: ", "))")
                             .font(.system(size: 11, design: .monospaced)).foregroundStyle(Tokens.l2).textSelection(.enabled)
                     }
-                    Text("– – –  – – –").font(.system(size: 30, weight: .semibold, design: .monospaced)).tracking(1.8)
-                        .foregroundStyle(Tokens.l3).opacity(Features.codePairing ? 1 : 0.4)
-                        .accessibilityLabel("Pairing code, not available yet")
-                    Text("Comparing a 6-digit code isn't available yet.").font(.system(size: 11)).foregroundStyle(Tokens.l3)
+                    if let p = controller.pendingDevice {
+                        Text(p.code).font(.system(size: 30, weight: .semibold, design: .monospaced)).tracking(1.8)
+                            .foregroundStyle(Tokens.label).accessibilityLabel("Pairing code \(p.code)")
+                        Text("\(p.name) asks to pair. Pair it only if it shows this same code.")
+                            .font(.system(size: 12)).foregroundStyle(Tokens.l2).multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 10) {
+                            Button("Don't Pair") { controller.decide(false) }
+                            Button("Pair") { controller.decide(true) }.buttonStyle(.borderedProminent)
+                        }
+                        Text("\(p.seconds) s left").font(.system(size: 11)).foregroundStyle(Tokens.l3)
+                    } else {
+                        Text("– – –  – – –").font(.system(size: 30, weight: .semibold, design: .monospaced)).tracking(1.8)
+                            .foregroundStyle(Tokens.l3).opacity(0.4)
+                            .accessibilityLabel("No device is asking to pair")
+                        Text("When a device asks to pair, a 6-digit code appears here and on the device.")
+                            .font(.system(size: 11)).foregroundStyle(Tokens.l3)
+                    }
                 }
                 .padding(14)
                 .frame(maxWidth: .infinity)

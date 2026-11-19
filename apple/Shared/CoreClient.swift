@@ -47,6 +47,9 @@ final class CoreClient: SharingLink {
     /// How far connecting has got: 0 looking the host up, 1 reaching it and checking
     /// identities (pairing happens here), 2 hello, 3 the host is making the display.
     var onStage: ((Int) -> Void)?
+    /// The computer is holding this new device until its owner confirms: the six digits both
+    /// sides show ("123 456"), and how long the owner has. On the connecting thread.
+    var onPairing: ((String, Int) -> Void)?
 
     static let clipboardKind: UInt8 = 0x40
     static let fileKind: UInt8 = 0x41
@@ -135,6 +138,11 @@ final class CoreClient: SharingLink {
             on_stage: { ctx, stage in
                 let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
                 me.onStage?(Int(stage))
+            },
+            on_pairing: { ctx, code, seconds in
+                let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
+                print("remoteman: the computer is waiting for its owner; pairing code \(code.map { String(cString: $0) } ?? "?"), \(seconds) s")
+                me.onPairing?(code.map { String(cString: $0) } ?? "", Int(seconds))
             })
         var err = [CChar](repeating: 0, count: 512)
         let h = rm_client_connect(

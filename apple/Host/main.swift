@@ -65,6 +65,8 @@ while !args.isEmpty {
         options.allowClipboard = list.contains("clipboard")
         options.allowFiles = list.contains("files")
     case "--advertise": options.advertise = yes()
+    case "--confirm": options.confirm = yes()
+    case "--test-decide": options.testDecide = Double(value())
     case "--test-tone": options.testTone = yes()
     // For tests: so many seconds after a device connects, allow the clipboard and files; 4 s later, take them away.
     case "--test-allow": options.testAllow = Double(value())

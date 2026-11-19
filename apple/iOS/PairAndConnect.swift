@@ -57,8 +57,6 @@ struct PairSheet: View {
             VStack(spacing: 10) {
                 Button("Pair and Connect", action: add).buttonStyle(WideButtonStyle()).disabled(trimmed.isEmpty)
                     .opacity(trimmed.isEmpty ? 0.5 : 1)
-                Button("Compare a 6-Digit Code Instead") {}.buttonStyle(WideButtonStyle(kind: .secondary))
-                    .available(Features.codePairing)
             }
         }
         .padding(.horizontal, 28).padding(.bottom, 24)
@@ -123,6 +121,15 @@ struct GettingInScreen: View {
             step(session.stage >= 2 ? .current : .pending, placementTitle, nil)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        if let code = session.pairingCode {
+            VStack(spacing: 6) {
+                Text(code).font(.system(size: 40, weight: .semibold, design: .monospaced)).tracking(2).foregroundStyle(.white)
+                    .accessibilityLabel("Pairing code \(code)")
+                Text("\(name) is waiting for its owner. Check that it shows the same code, then confirm the pairing there.")
+                    .font(Theme.subhead).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+        }
         Button("Cancel") { model.cancelConnecting() }.buttonStyle(WideButtonStyle(kind: .secondary))
     }
 

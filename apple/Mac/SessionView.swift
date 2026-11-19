@@ -719,6 +719,15 @@ struct ConnectingView: View {
                 step("Attach", answered ? "Waiting for the picture" : "To its session", stage >= 2 ? .busy : .waiting)
             }
             .frame(maxWidth: 720)
+            if let code = session.pairingCode {
+                VStack(spacing: 6) {
+                    Text(code).font(.system(size: 40, weight: .semibold, design: .monospaced)).tracking(2)
+                        .accessibilityLabel("Pairing code \(code)")
+                    Text("\(computer.name) is waiting for its owner. Check that it shows the same code, then confirm the pairing there.")
+                        .font(.system(size: 13)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+                .padding(.vertical, 6)
+            }
             Label(joinsAs, systemImage: "lock")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center).frame(maxWidth: 620)

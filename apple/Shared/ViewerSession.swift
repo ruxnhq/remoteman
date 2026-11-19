@@ -50,6 +50,8 @@ final class ViewerSession: ObservableObject {
     @Published private(set) var state: State = .idle
     /// How far connecting has got (CoreClient.onStage); when it fails, the stage that failed.
     @Published private(set) var stage = 0
+    /// While the computer waits for its owner to confirm this device: the six digits to compare.
+    @Published private(set) var pairingCode: String?
     /// Why the host ended the last session (CoreClient.closeCode); -1 when it wasn't the host.
     @Published private(set) var closeCode = -1
     /// The computer took this device off its trust list: it has to be paired again.
@@ -77,6 +79,16 @@ final class ViewerSession: ObservableObject {
     var modifiersLatched = false
     /// Where input goes: the client, unless the session is view-only.
     var input: CoreClient? { viewOnly ? nil : client }
+
+    /// A refusal as the computer worded it ("the host refused: not_paired: pairing was declined
+    /// on the computer" is shown as "Pairing was declined on the computer").
+    static func plain(_ reason: String) -> String {
+        guard let r = reason.range(of: "the host refused: ") else { return reason }
+        var text = String(reason[r.upperBound...])
+        // The code in front of the words is for programs.
+        if let colon = text.range(of: ": "), !text[..<colon.lowerBound].contains(" ") { text = String(text[colon.upperBound...]) }
+        return text.prefix(1).uppercased() + text.dropFirst()
+    }
 
     /// A key of this device's own keyboard, sent as the settings say (InputSettings).
     func hardKey(_ usage: UInt16, down: Bool) {
@@ -435,7 +447,15 @@ final class ViewerSession: ObservableObject {
                     let sharing = Sharing(client: c)
                     shared = sharing
                     c.onStage = { [weak self] stage in
-                        DispatchQueue.main.async { if let self, self.generation == gen { self.stage = stage } }
+                        DispatchQueue.main.async {
+                            guard let self, self.generation == gen else { return }
+                            self.stage = stage
+                            // Past the hello the owner has said yes.
+                            if stage >= 3 { self.pairingCode = nil }
+                        }
+                    }
+                    c.onPairing = { [weak self] code, _ in
+                        DispatchQueue.main.async { if let self, self.generation == gen { self.pairingCode = code } }
                     }
                     c.onMessage = { [weak self] m in self?.message(m, sharing: sharing, generation: gen) }
                     c.onSound = { [weak self] data, start, seq, _ in self?.sound.packet(data, start: start, seq: seq) }
@@ -483,6 +503,7 @@ final class ViewerSession: ObservableObject {
                         guard let self, self.generation == gen else { return }
                         self.transferChanged(t)
                     }
+                    self.pairingCode = nil
                     self.state = .streaming(hostName.isEmpty ? target : hostName)
                     self.startStats()
                     // What was on for this computer last time comes back on. The microphone and
@@ -504,7 +525,7 @@ final class ViewerSession: ObservableObject {
             } catch {
                 DispatchQueue.main.async {
                     guard let self, self.generation == gen else { return }
-                    self.state = .failed("\(error)")
+                    self.state = .failed(Self.plain("\(error)"))
                 }
             }
         }
@@ -523,7 +544,7 @@ final class ViewerSession: ObservableObject {
         guard !isActive else { return }
         let rec: Recording
         do { rec = try Recording(url: url) } catch {
-            state = .failed("\(error)")
+            state = .failed(Self.plain("\(error)"))
             return
         }
         generation += 1
@@ -567,10 +588,11 @@ final class ViewerSession: ObservableObject {
         // On 3 the computer's key is kept: pairing again still checks it is the same computer.
         client = nil
         teardown()
-        state = .failed(reason)
+        state = .failed(Self.plain(reason))
     }
 
     private func teardown() {
+        pairingCode = nil
         timer?.invalidate()
         timer = nil
         pipeLock.lock()

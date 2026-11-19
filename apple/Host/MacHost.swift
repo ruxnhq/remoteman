@@ -61,6 +61,10 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var allowFiles = false
         /// Say on the network that this Mac can be reached (DNS-SD). Off until the owner turns it on.
         var advertise = false
+        /// A new device waits until this Mac's owner has compared the code and said yes.
+        var confirm = false
+        /// For tests: so many seconds after a device starts waiting, say yes (negative: say no).
+        var testDecide: Double?
         var testAllow: Double?
         var testDrop: Double?
         var testRevoke: Double?
@@ -128,6 +132,36 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         get { host.map { rm_host_pairing($0) != 0 } ?? false }
         set { if let h = host { rm_host_set_pairing(h, newValue ? 1 : 0) } }
     }
+    /// A new device that is waiting for the owner's yes, and the code both sides show.
+    struct Pending: Equatable {
+        var name: String
+        var fingerprint: String
+        var code: String
+        var seconds: Int
+    }
+
+    /// Hold a new device until the owner confirms it (off: it is trusted as it connects).
+    func setConfirm(_ on: Bool) {
+        options.confirm = on
+        if let h = host { rm_host_set_confirm(h, on ? 1 : 0) }
+    }
+
+    var pending: Pending? {
+        guard let h = host else { return nil }
+        var out = [CChar](repeating: 0, count: 1024)
+        guard rm_host_pending(h, &out, out.count) > 0,
+            let o = try? JSONSerialization.jsonObject(with: Data(String(cString: out).utf8)) as? [String: Any],
+            let code = o["code"] as? String
+        else { return nil }
+        return Pending(
+            name: o["name"] as? String ?? "A device", fingerprint: o["fingerprint"] as? String ?? "", code: code,
+            seconds: (o["seconds"] as? NSNumber)?.intValue ?? 0)
+    }
+
+    /// The owner's answer for the device that is waiting. True if one was.
+    @discardableResult
+    func decide(_ accept: Bool) -> Bool { host.map { rm_host_decide($0, accept ? 1 : 0) != 0 } ?? false }
+
     /// A device this Mac trusts.
     struct Device: Identifiable, Equatable {
         var fingerprint: String
@@ -235,6 +269,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let parts = String(cString: info).split(separator: "\t").map(String.init)
         hostLog("host: listening on \(parts.first ?? options.listen), fingerprint \(parts.count > 1 ? parts[1] : "?"), pairing \(rm_host_pairing(h) != 0 ? "on" : "off")")
         listening = (parts.first ?? options.listen, parts.count > 1 ? parts[1] : "")
+        if options.confirm { rm_host_set_confirm(h, 1) }
         advertise(options.advertise)
     }
 

@@ -380,7 +380,6 @@ struct AddComputerSheet: View {
             HStack(spacing: 10) {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Codes Match") {}.available(Features.codePairing)
                 Button("Add", action: add)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)

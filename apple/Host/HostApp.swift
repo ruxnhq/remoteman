@@ -201,9 +201,21 @@ final class HostController: ObservableObject {
     }
 
     /// Let the next unknown device in, for two minutes.
+    /// A new device waiting for a yes here, with the code to compare.
+    @Published private(set) var pendingDevice: MacHost.Pending?
+    private var testDeciding = false
+
+    func decide(_ accept: Bool) {
+        let who = pendingDevice?.name ?? "a device"
+        if host.decide(accept) { hostLog("host: \(accept ? "paired" : "turned away") \(who)") }
+        pendingDevice = nil
+    }
+
     func beginPairing() {
         guard host.isRunning else { return }
         pairedJustNow = false
+        // Opened by hand here: the new device waits until its code has been compared.
+        host.setConfirm(true)
         host.pairing = true
         pairing = true
         pairingEnds = Date().addingTimeInterval(Self.pairingSeconds)
@@ -247,6 +259,20 @@ final class HostController: ObservableObject {
         let mic = HostMicrophone.installed
         if mic != microphoneInstalled { microphoneInstalled = mic }
         host.refreshFeatures()  // the camera and the microphone are offered while they are installed
+        let waiting = host.pending
+        if waiting != pendingDevice {
+            if let w = waiting, pendingDevice?.fingerprint != w.fingerprint {
+                hostLog("host: \(w.name) asks to pair, code \(w.code)")
+                if let t = options.testDecide, !testDeciding {
+                    testDeciding = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + abs(t)) {
+                        self.testDeciding = false
+                        self.decide(t >= 0)
+                    }
+                }
+            }
+            pendingDevice = waiting
+        }
         let core = host.pairing
         if pairing, !core {
             // The core turns pairing off once it has let a device in.
