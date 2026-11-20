@@ -1,8 +1,9 @@
 //! remoteman_engine.dll: the engine of the Windows viewer, behind the WinUI 3 app in
 //! `windows/viewer`. Everything below the interface is here and in Rust: sessions with the
 //! shared core, FFmpeg's decoders, the picture in a swap chain the app puts into its
-//! `SwapChainPanel`, input, sound, clipboard, files, the second display, the figures and the
-//! store of computers and settings. The app is the view: it shows the engine's state (one JSON
+//! `SwapChainPanel`, input (touches too), sound, this PC's microphone and camera lent to the
+//! computer, clipboard, files, the second display, the figures, finding and waking computers on
+//! the network, and the store of computers and settings. The app is the view: it shows the engine's state (one JSON
 //! document) and hands it what people do (`engine.rs` has the C interface).
 //!
 //! For now this builds the old program's modules too, the hand-drawn kit among them: the

@@ -524,7 +524,8 @@ impl Engine {
         say!("play: {} access units of {}, {colour}", units.len(), path.display());
         let display = remoteman_core::Display { width: w, height: h, scale: 1.0, refresh: 60, placement: remoteman_core::Placement::Extend, hdr: colour != "bt709", headroom: 0.0 };
         let target = crate::app::Target { address: "test.invalid:7791".into(), name: format!("{} (played)", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()) };
-        app.session = Some(crate::app::Session::new(None, shared, target, vec!["video".into()], display, crate::store::Quality::Automatic, 0, "linux".into()));
+        let features = std::iter::once("video".to_owned()).chain(app.args.play_features.iter().cloned()).collect();
+        app.session = Some(crate::app::Session::new(None, shared, target, features, display, crate::store::Quality::Automatic, 0, "linux".into()));
         app.enter();
         drop(app);
         std::thread::Builder::new().name("play".into()).spawn(move || {
@@ -1113,7 +1114,8 @@ fn state(app: &App) -> Value {
         Screen::Computer(a) => json!({"kind": "computer", "address": a}),
     };
     let dialog = app.dialog.as_ref().map(|d| match d {
-        Dialog::Pair { waiting, problem } => json!({"kind": "pair", "waiting": waiting, "problem": problem}),
+        // (`address`: what the dialog opens with, as from Nearby's "Pair…".)
+        Dialog::Pair { waiting, problem } => json!({"kind": "pair", "waiting": waiting, "problem": problem, "address": app.fields.get(&id("pair.address")).map(|f| f.string()).unwrap_or_default()}),
         Dialog::Code { name, code, until } => json!({"kind": "code", "name": name, "code": code, "seconds": until.saturating_duration_since(Instant::now()).as_secs()}),
         Dialog::Paired { target, key } => json!({"kind": "paired", "name": target.name, "address": target.address, "key": key}),
         Dialog::Forget(a) => json!({"kind": "forget", "address": a, "name": app.name_of(a)}),

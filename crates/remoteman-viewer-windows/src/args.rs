@@ -42,6 +42,12 @@ pub struct Args {
     /// picture, through the same decoding and drawing; `--play-colour bt2020-pq` for HDR.
     pub play: Option<PathBuf>,
     pub play_colour: String,
+    /// For tests: what the made-up session's computer says it can do besides `video`
+    /// (`--play-features mic,camera`), so those controls can be tried with no computer.
+    pub play_features: Vec<String>,
+    /// For tests: browse for this DNS-SD service instead of remoteman's (`_name._udp.local`),
+    /// so what a test advertises shows as nearby without a remoteman host on the network.
+    pub browse: Option<String>,
 }
 
 const USAGE: &str = "usage: remoteman [HOST:PORT] [--pair] [--state DIR] [--size WxH] [--refresh HZ] [--decoders av1,hevc] [--seconds N] [--fullscreen] [--shot FILE.png] [--stats] [--input-demo] [--log FILE] [--sound] [--ui STEPS --shots DIR [--dark|--light]]";
@@ -92,6 +98,8 @@ pub fn parse_from(words: Vec<String>) -> Result<Args> {
         screen_hdr: None,
         play: None,
         play_colour: "bt709".into(),
+        play_features: Vec::new(),
+        browse: None,
     };
     while let Some(arg) = words.next() {
         let mut value = || words.next().ok_or_else(|| anyhow!("{arg} needs a value"));
@@ -124,6 +132,8 @@ pub fn parse_from(words: Vec<String>) -> Result<Args> {
             "--screen-hdr" => args.screen_hdr = Some(value()? == "yes"),
             "--play" => args.play = Some(value()?.into()),
             "--play-colour" => args.play_colour = value()?,
+            "--browse" => args.browse = Some(value()?),
+            "--play-features" => args.play_features = value()?.split(',').map(str::to_owned).filter(|f| !f.is_empty()).collect(),
             other => bail!("unknown option {other}\n{USAGE}"),
         }
     }

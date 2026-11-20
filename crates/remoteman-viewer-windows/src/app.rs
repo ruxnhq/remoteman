@@ -446,7 +446,7 @@ impl App {
             panel: false,
             shown_format: None,
             // Not for pictures of the window: what is really nearby isn't to be in them.
-            sightings: crate::nearby::Sightings::start(args.ui.is_none().then(|| scene.clone())),
+            sightings: crate::nearby::Sightings::start(args.ui.is_none().then(|| scene.clone()), args.browse.as_deref()),
             args,
             gpu,
             scene,

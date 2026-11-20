@@ -518,9 +518,16 @@ pub struct Sightings {
 
 impl Sightings {
     /// Start looking for computers (`None`: for pictures of the window, where nothing real is
-    /// to be shown).
-    pub fn start(scene: Option<Arc<Scene>>) -> Self {
-        let browser = if FEATURES.discovery { scene.and_then(Nearby::start) } else { None };
+    /// to be shown); `service`: another service than remoteman's, for tests (`--browse`).
+    pub fn start(scene: Option<Arc<Scene>>, service: Option<&str>) -> Self {
+        let browser = match (FEATURES.discovery, scene, service) {
+            (true, Some(scene), None) => Nearby::start(scene),
+            (true, Some(scene), Some(service)) => {
+                say!("nearby: browsing for {service}, not remoteman's service (a test)");
+                Nearby::start_for(scene, Box::leak(service.to_owned().into_boxed_str()))
+            }
+            _ => None,
+        };
         Self { browser, ..Self::default() }
     }
 }
@@ -659,15 +666,29 @@ mod tests {
         }
     }
 
-    /// Browse and resolve end to end on this PC: an instance of a test service type (not
-    /// remoteman's, so no viewer on the network takes it for a computer) is advertised through
-    /// Windows' own `DnsServiceRegister`, with a name that has a space and the text records a
-    /// host gives, and found by the same browser the app runs; then withdrawn.
-    /// `cargo test -p remoteman-viewer-windows --lib advertised -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn an_advertised_instance_is_found_and_resolved() {
-        const TEST: &str = "_remoteman-test._udp.local";
+    /// A test service type: not remoteman's, so no viewer on the network takes what is
+    /// advertised under it for a computer.
+    const TEST: &str = "_remoteman-test._udp.local";
+
+    /// An instance advertised through Windows' own DNS-SD until dropped.
+    struct Advert {
+        request: DNS_SERVICE_REGISTER_REQUEST,
+        instance: *mut DNS_SERVICE_INSTANCE,
+    }
+
+    impl Drop for Advert {
+        fn drop(&mut self) {
+            unsafe {
+                DnsServiceDeRegister(&self.request, None);
+                std::thread::sleep(Duration::from_millis(500));
+                DnsServiceFreeInstance(self.instance);
+            }
+        }
+    }
+
+    /// Advertise `name` under [`TEST`] at this PC's first network address, with these text
+    /// records.
+    fn advertise(name: &str, port: u16, records: &[(&str, &str)]) -> Advert {
         unsafe extern "system" fn registered(status: u32, _: *const c_void, instance: *const DNS_SERVICE_INSTANCE) {
             println!("registered: {status}");
             if !instance.is_null() {
@@ -677,19 +698,45 @@ mod tests {
         let (ip, _) = networks().into_iter().next().expect("a network");
         let ip4 = u32::from_ne_bytes(ip.octets());
         let host = format!("{}.local", std::env::var("COMPUTERNAME").unwrap_or_else(|_| "test".into()));
-        let keys: Vec<Vec<u16>> = ["v", "fp", "os", "mac"].iter().map(|k| wide(k)).collect();
-        let values: Vec<Vec<u16>> = ["0", "00112233AABBCCDD", "windows", "02:00:00:00:00:01,not-a-card"].iter().map(|v| wide(v)).collect();
+        let keys: Vec<Vec<u16>> = records.iter().map(|r| wide(r.0)).collect();
+        let values: Vec<Vec<u16>> = records.iter().map(|r| wide(r.1)).collect();
         let key_ptrs: Vec<PCWSTR> = keys.iter().map(|k| PCWSTR(k.as_ptr())).collect();
         let value_ptrs: Vec<PCWSTR> = values.iter().map(|v| PCWSTR(v.as_ptr())).collect();
-        let name = wide(&format!("remoteman test PC.{TEST}"));
+        let full = wide(&format!("{name}.{TEST}"));
         let host_w = wide(&host);
         unsafe {
-            let instance = DnsServiceConstructInstance(PCWSTR(name.as_ptr()), PCWSTR(host_w.as_ptr()), Some(&ip4), None, 65001, 0, 0, 4, key_ptrs.as_ptr(), value_ptrs.as_ptr());
+            let instance = DnsServiceConstructInstance(PCWSTR(full.as_ptr()), PCWSTR(host_w.as_ptr()), Some(&ip4), None, port, 0, 0, records.len() as u32, key_ptrs.as_ptr(), value_ptrs.as_ptr());
             assert!(!instance.is_null());
             let request = DNS_SERVICE_REGISTER_REQUEST { Version: 1, InterfaceIndex: 0, pServiceInstance: instance, pRegisterCompletionCallback: Some(registered), pQueryContext: std::ptr::null_mut(), ..Default::default() };
             let status = DnsServiceRegister(&request, None);
-            println!("register: {status}");
+            println!("register {name}: {status}");
             assert_eq!(status as i32, DNS_REQUEST_PENDING);
+            Advert { request, instance }
+        }
+    }
+
+    /// For the app's own check (`--browse _remoteman-test._udp.local`): advertise, for 60
+    /// seconds, one computer that the test state's "Test PC" is paired with (its key starts
+    /// with this fp; a made-up card) and one that nothing is paired with.
+    /// `cargo test -p remoteman-viewer-windows --lib advertise_for_the_app -- --ignored`
+    #[test]
+    #[ignore]
+    fn advertise_for_the_app() {
+        let _paired = advertise("Test PC", 65002, &[("v", "0"), ("fp", "00112233AABBCCDD"), ("os", "linux"), ("mac", "02:00:00:00:00:02")]);
+        let _other = advertise("Den laptop", 65003, &[("v", "0"), ("fp", "FFEEDDCCBBAA0099"), ("os", "linux")]);
+        std::thread::sleep(Duration::from_secs(60));
+    }
+
+    /// Browse and resolve end to end on this PC: an instance of [`TEST`] is advertised through
+    /// Windows' own `DnsServiceRegister`, with a name that has a space and the text records a
+    /// host gives, and found by the same browser the app runs; then withdrawn.
+    /// `cargo test -p remoteman-viewer-windows --lib advertised -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn an_advertised_instance_is_found_and_resolved() {
+        let (ip, _) = networks().into_iter().next().expect("a network");
+        let advert = advertise("remoteman test PC", 65001, &[("v", "0"), ("fp", "00112233AABBCCDD"), ("os", "windows"), ("mac", "02:00:00:00:00:01,not-a-card")]);
+        {
             let nearby = Nearby::start_for(Arc::new(Scene::default()), TEST).unwrap();
             let mut found = Vec::new();
             for _ in 0..30 {
@@ -699,9 +746,7 @@ mod tests {
                     break;
                 }
             }
-            DnsServiceDeRegister(&request, None);
-            std::thread::sleep(Duration::from_millis(500));
-            DnsServiceFreeInstance(instance);
+            drop(advert);
             println!("found: {found:?}");
             assert_eq!(found.len(), 1, "the advertised instance wasn't found");
             let f = &found[0];

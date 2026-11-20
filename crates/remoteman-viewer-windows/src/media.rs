@@ -103,17 +103,16 @@ impl App {
             return;
         }
         let Some(s) = self.session.as_mut() else { return };
-        let Some(client) = s.client.clone() else {
-            // A made-up session (pictures of the window): the switch alone.
-            s.mic_on = on;
-            self.dirty = true;
-            return;
-        };
+        // (A made-up session, `--play`, has no computer: the microphone is recorded all the
+        // same and its packets go nowhere, for trying the app's whole path.)
+        let client = s.client.clone();
         let shared = s.shared.clone();
         let mut microphone = shared.microphone.lock().unwrap();
         if !on {
             if microphone.take().is_some() {
-                client.send_message(Message::Mic { on: false, codec: String::new(), rate: 0, channels: 0, frame_us: 0 });
+                if let Some(client) = &client {
+                    client.send_message(Message::Mic { on: false, codec: String::new(), rate: 0, channels: 0, frame_us: 0 });
+                }
                 say!("microphone: given back");
             }
             s.mic_on = false;
@@ -123,17 +122,21 @@ impl App {
         if microphone.is_some() {
             return;
         }
-        let sender = client.mic_sender();
+        let sender = client.as_ref().map(|c| c.mic_sender());
         // Silence is left out by the framer; the first packet after a gap says so.
         let mut last = None::<u64>;
         let opened = crate::mic::Capture::open(crate::mic::Source::Microphone, move |packet| {
             let start = last.is_none_or(|at| packet.capture_us.saturating_sub(at) > 25_000);
             last = Some(packet.capture_us);
-            sender.send(start, packet.seq, packet.capture_us, &packet.data);
+            if let Some(sender) = &sender {
+                sender.send(start, packet.seq, packet.capture_us, &packet.data);
+            }
         });
         match opened {
             Ok(capture) => {
-                client.send_message(Message::Mic { on: true, codec: "opus".into(), rate: remoteman_audio::SAMPLE_RATE, channels: 1, frame_us: remoteman_audio::FRAME_US as u32 });
+                if let Some(client) = &client {
+                    client.send_message(Message::Mic { on: true, codec: "opus".into(), rate: remoteman_audio::SAMPLE_RATE, channels: 1, frame_us: remoteman_audio::FRAME_US as u32 });
+                }
                 *microphone = Some(capture);
                 s.mic_on = true;
             }
@@ -156,7 +159,9 @@ impl App {
         let Some(s) = self.session.as_mut() else { return };
         s.camera_on = on;
         self.dirty = true;
-        let Some(client) = s.client.clone() else { return };
+        // (A made-up session, `--play`: the camera is read and encoded, and its frames go
+        // nowhere.)
+        let client = s.client.clone();
         let shared = s.shared.clone();
         // Each change of mind has a number, so a camera that opens after it was switched off
         // again is let go of.
@@ -165,7 +170,9 @@ impl App {
             let had = shared.camera.lock().unwrap().take();
             drop(had);
             if shared.camera_told.swap(false, Ordering::Relaxed) {
-                client.send_message(Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 });
+                if let Some(client) = &client {
+                    client.send_message(Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 });
+                }
                 say!("camera: given back");
             }
             return;
@@ -174,11 +181,17 @@ impl App {
             return;
         }
         // Said first: frames that reach the computer before it are thrown away there.
-        client.send_message(Message::Camera { on: true, codec: "h264".into(), width: crate::camera::MAX.0, height: crate::camera::MAX.1, fps: crate::camera::FPS });
+        if let Some(client) = &client {
+            client.send_message(Message::Camera { on: true, codec: "h264".into(), width: crate::camera::MAX.0, height: crate::camera::MAX.1, fps: crate::camera::FPS });
+        }
         let began = std::time::Instant::now();
-        let sender = client.camera_sender();
+        let sender = client.as_ref().map(|c| c.camera_sender());
         let started = std::thread::Builder::new().name("camera-start".into()).spawn(move || {
-            let opened = crate::camera::Camera::start(move |data, key| sender.send(data, key, began.elapsed().as_micros() as u64));
+            let opened = crate::camera::Camera::start(move |data, key| {
+                if let Some(sender) = &sender {
+                    sender.send(data, key, began.elapsed().as_micros() as u64);
+                }
+            });
             let current = || shared.camera_turn.load(Ordering::Relaxed) == turn;
             match opened {
                 Ok(camera) => {
