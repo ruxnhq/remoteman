@@ -547,9 +547,14 @@ fn pc_arrangement(screens: &[Placed], device: &str, index: u32, mode: Mode) -> i
 /// Says the desktop afterwards.
 pub fn layout_test(state: &std::path::Path, step: &str, output: &str, index: u32, mode: Mode) -> Result<()> {
     let layout = state.join("screens.txt");
-    let _alone = arranging();
+    // (`watch INDEX`: the watch between devices for INDEX seconds, which takes the lock itself.)
+    let _alone = (step != "watch").then(arranging);
     crate::desk::follow();
     match step {
+        "watch" => {
+            watch_between_devices(layout.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            std::thread::sleep(Duration::from_secs(index as u64));
+        }
         "beside" | "main" => {
             if !layout.exists() {
                 let screens = own_screens();
@@ -583,7 +588,7 @@ pub fn layout_test(state: &std::path::Path, step: &str, output: &str, index: u32
                 println!("{} ({}): ChangeDisplaySettingsEx testing its own settings: {}", s.device, if s.driver() { "the driver's" } else { "the PC's" }, said.0);
             }
         }
-        other => bail!("--layout-test: no step {other:?} (beside, main, back, drop, probe)"),
+        other => bail!("--layout-test: no step {other:?} (beside, main, back, drop, probe, watch)"),
     }
     for s in ccd::shown()? {
         println!("{} {}x{}@{} at {},{}{} {}", s.device, s.width, s.height, s.refresh, s.left, s.top, if (s.left, s.top) == (0, 0) { " main" } else { "" }, s.monitor);
@@ -1000,6 +1005,23 @@ impl Screen {
         self.busy.store(true, std::sync::atomic::Ordering::Relaxed);
         let _alone = arranging();
         crate::desk::follow();
+        let given = self.give_pc_arranging(want, place);
+        if let Err(e) = &given {
+            // Nothing half done is left on the desktop: the PC's screens back as written down
+            // (or at least the driver's monitors off), and the watch between devices on again.
+            tracing::warn!("couldn't give the device a monitor of its own: {e:#}; putting the PC's screens back");
+            let back = if self.layout.exists() { restore_layout(&self.layout) } else { ccd::drop_driver(None).map(|_| ()) };
+            if let Err(e) = back {
+                tracing::warn!("{e:#}");
+            }
+            self.own = None;
+            self.busy.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        given
+    }
+
+    /// [`Screen::give_pc`]'s work, with [`ARRANGING`] held.
+    fn give_pc_arranging(&mut self, want: Mode, place: Place) -> Result<Mode> {
         if !self.layout.exists() {
             let screens = own_screens();
             anyhow::ensure!(!screens.is_empty(), "this PC's own screens aren't on the desktop");

@@ -200,7 +200,7 @@ mod windows_main {
         // INDEX WxHxR`, see `display::layout_test`).
         if args.peek().map(String::as_str) == Some("--layout-test") {
             args.next();
-            const USE: &str = "--layout-test STATE beside|main|back|drop|probe OUTPUT INDEX WxHxR";
+            const USE: &str = "--layout-test STATE beside|main|back|drop|probe OUTPUT INDEX WxHxR, or STATE watch - SECONDS";
             let state = PathBuf::from(args.next().context(USE)?);
             let step = args.next().context(USE)?;
             let output = args.next().unwrap_or_default();
