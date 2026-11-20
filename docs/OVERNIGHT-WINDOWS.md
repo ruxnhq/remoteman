@@ -133,3 +133,8 @@ sound, pen, placement, displays, hdr and camera (the camera's class is registere
 still off (the owner turns it on). The same log explains the morning: after the 00:09 restart the
 OLD host tried to put the screens back with `ChangeDisplaySettingsEx` and Windows refused every
 call (-1, -2), so the driver's monitor stayed the main display.
+
+## A 0.1.2 installer (08:05)
+`C:\rm\installer-2026-11-20-multi\remoteman-host-setup-0.1.2.exe`, built from 8cff415: the
+installed 0.1.1 plus more than one device at once. Optional; the default ("It takes over") behaves
+as 0.1.1 does.
