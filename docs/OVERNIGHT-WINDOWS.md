@@ -140,3 +140,12 @@ installed 0.1.1 plus more than one device at once. Optional; the default ("It ta
 as 0.1.1 does.
 
 Installed by the owner at 08:08: started clean (the driver's monitors unplugged in 16 ms, the PC's three screens as they were, "When a second device connects: It takes over"); sharing still off.
+
+## The Apple side on the new core (Mac session, 08:09)
+`origin/main` (eeaef22) merged into `apple/phase1-client` (9667a3e): the core and every Apple
+target build. The Mac host follows the bitrate (a 5 Mbit/s ceiling followed on loopback), lists
+`parity` and `pen` and injects the pen as tablet events; the iPad sends the Pencil as pen events
+(pressure, tilt, roll on a Pencil Pro) to hosts that list `pen`; the viewers say "View only" when
+the host leaves `input` out. Installed on the everyday Mac host, the test host 7803, the iPad and
+the iPhone. Not yet on the Apple side: game controllers, the second factor's prompt, more than one
+device, permissions UI. Not run: rate cuts and parity under real loss, the pen end to end.
