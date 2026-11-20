@@ -197,7 +197,8 @@ impl Driver {
     /// (what it made of the command is only in its ETW trace, provider `remoteman.Display`),
     /// so success here means no more than that it was delivered.
     ///
-    /// Only `SETMODES` and `REFRESHMODES` are sent by this host. Most of the others rewrite the
+    /// Only `SETMODES`, `REFRESHMODES`, `CREATEMONITOR`, `PLUGMONITOR n` and `DESTROYMONITOR n` are sent
+    /// by this host (the last two from driver 0.1.1.0; an older driver ignores the one and doesn't know the other). Most of the others rewrite the
     /// driver's settings file and reload it, which is not this program's to do.
     pub fn command(&self, text: &str) -> Result<()> {
         let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();

@@ -457,11 +457,85 @@ void HandleCreateMonitorCommand(wchar_t *param)
 	}
 }
 
-// From Guesthouse's fork: monitors live as long as the driver. remoteman's host takes a device's monitor out of the
-// desktop instead of destroying it (crates/remoteman-host-windows/src/display.rs).
-void HandleDestroyMonitorCommand(wchar_t *)
+// "DESTROYMONITOR <n>" (n: the monitor's number from 0, as in CREATEMONITOR's order): the monitor departs, as if
+// its cable were pulled, and Windows takes it off the desktop and out of Settings. "PLUGMONITOR <n>" brings it back
+// with the same EDID, serial number and connector index, so Windows knows it again and keeps its settings.
+// A bare "DESTROYMONITOR" does nothing, as it always did (old hosts send no number).
+static bool ParseMonitorNumber(const wchar_t *param, const char *command, unsigned int &index)
 {
-	VDD_LOG_INFO("Ignoring DESTROYMONITOR");
+	unsigned int value = 0;
+	if (param == nullptr || swscanf_s(param, L"%u", &value) != 1 || value >= 16)
+	{
+		VDD_LOG_INFO_STREAM(command << ": no valid monitor number; ignored");
+		return false;
+	}
+	index = value;
+	return true;
+}
+
+void HandleDestroyMonitorCommand(wchar_t *param)
+{
+	unsigned int index = 0;
+	if (!ParseMonitorNumber(param, "DESTROYMONITOR", index))
+	{
+		return;
+	}
+	if (g_GlobalDevice == nullptr)
+	{
+		VDD_LOG_ERROR("DESTROYMONITOR: global device not initialized");
+		return;
+	}
+
+	lock_guard<mutex> lock(g_Mutex);
+	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+	if (!pContext || !pContext->pContext)
+	{
+		VDD_LOG_ERROR("DESTROYMONITOR: invalid device context");
+		return;
+	}
+
+	// DestroyMonitor stops the monitor's swap-chain thread and cursor event, then reports departure.
+	bool departed = pContext->pContext->DestroyMonitor(index);
+	VDD_LOG_INFO_STREAM("DESTROYMONITOR " << index << ": " << (departed ? "departed" : "failed, monitor kept"));
+}
+
+void HandlePlugMonitorCommand(wchar_t *param)
+{
+	unsigned int index = 0;
+	if (!ParseMonitorNumber(param, "PLUGMONITOR", index))
+	{
+		return;
+	}
+	if (g_GlobalDevice == nullptr)
+	{
+		VDD_LOG_ERROR("PLUGMONITOR: global device not initialized");
+		return;
+	}
+
+	lock_guard<mutex> lock(g_Mutex);
+	if (index >= numVirtualDisplays)
+	{
+		VDD_LOG_WARNING_STREAM("PLUGMONITOR " << index << ": the driver's settings allow " << numVirtualDisplays << " monitor(s); ignored");
+		return;
+	}
+	auto *pContext = WdfObjectGet_IndirectDeviceContextWrapper(g_GlobalDevice);
+	if (!pContext || !pContext->pContext)
+	{
+		VDD_LOG_ERROR("PLUGMONITOR: invalid device context");
+		return;
+	}
+
+	// The same defaults CREATEMONITOR uses without parameters. A monitor that departed a moment ago may not be
+	// creatable again until IddCx has finished with it: try a few times.
+	for (int attempt = 0; attempt < 3 && !pContext->pContext->HasMonitor(index); attempt++)
+	{
+		if (attempt > 0)
+		{
+			Sleep(200);
+		}
+		pContext->pContext->CreateMonitor(index, nullptr, 1000.0f, 0.0001f, 1000.0f, 0.0f, 0.0f);
+	}
+	VDD_LOG_INFO_STREAM("PLUGMONITOR " << index << ": " << (pContext->pContext->HasMonitor(index) ? "monitor is there" : "failed"));
 }
 
 void HandleRefreshModesCommand(wchar_t *)

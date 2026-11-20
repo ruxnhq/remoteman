@@ -119,7 +119,9 @@ pub fn driver_output(index: u32) -> Option<Output> {
     let showing = |i: u32| all.iter().any(|(_, m)| m.contains(&(i, true)));
     // Among the outputs showing nothing: the first for the lowest monitor that isn't shown,
     // the second for the next, and so on.
-    let before = (0..index).filter(|i| !showing(*i)).count();
+    // (Lower monitors that are unplugged are in no list: they don't count.)
+    let listed = |i: u32| all.iter().any(|(_, m)| m.iter().any(|(n, _)| *n == i));
+    let before = (0..index).filter(|i| !showing(*i) && listed(*i)).count();
     all.iter().filter(|(_, m)| m.iter().all(|(_, on)| !on) && m.iter().any(|(i, _)| *i == index)).nth(before).map(|(o, _)| o.clone())
 }
 
@@ -638,6 +640,10 @@ pub struct Screen {
     /// A device has a monitor on the desktop (on a PC with screens of its own): the watch
     /// between devices leaves the desktop alone meanwhile.
     busy: Arc<std::sync::atomic::AtomicBool>,
+    /// The driver has a monitor 1 / a monitor 2 to give (found out when the host starts, before
+    /// they are unplugged: a monitor that is unplugged isn't listed).
+    second_monitor: bool,
+    had_third: bool,
 }
 
 /// On a PC with screens of its own, between devices: every few seconds, take the driver's
@@ -715,13 +721,14 @@ impl Screen {
                 }
             }
             watch_between_devices(layout.clone(), busy.clone());
-            let first = driver_output(0).context("the display driver lists no monitor")?;
-            tracing::info!(driver = %driver.path, first = %first.device, "display driver; this PC has screens of its own, so the driver's monitors join the desktop only while a device is here");
-            return Ok(Self { driver: Arc::new(driver), pc, layout, device: first.device, switched: false, own: None, first_was: None, second: None, busy });
+            // (A driver that unplugs its monitors between devices may list none now.)
+            let first = driver_output(0).map(|o| o.device).unwrap_or_default();
+            tracing::info!(driver = %driver.path, first = %first, "display driver; this PC has screens of its own, so the driver's monitors are plugged in only while a device is here");
+            return Ok(Self { driver: Arc::new(driver), pc, layout, device: first, switched: false, own: None, first_was: None, second: None, busy, second_monitor: false, had_third: false });
         }
         let (output, sure) = find_output()?;
         tracing::info!(driver = %driver.path, output = %output.device, adapter = %output.description, recognised = sure, "display driver");
-        Ok(Self { driver: Arc::new(driver), pc, layout, device: output.device, switched: false, own: None, first_was: None, second: None, busy })
+        Ok(Self { driver: Arc::new(driver), pc, layout, device: output.device, switched: false, own: None, first_was: None, second: None, busy, second_monitor: false, had_third: false })
     }
 
     /// Has this PC screens of its own, so that the driver's monitors are there only for devices?
@@ -774,10 +781,21 @@ impl Screen {
             if let Some(first) = driver_output(0) {
                 self.device = first.device;
             }
-            let _alone = arranging();
-            if let Err(e) = ccd::drop_driver(None) {
-                tracing::warn!("couldn't take the driver's monitors off the desktop: {e:#}");
+            {
+                let _alone = arranging();
+                if let Err(e) = ccd::drop_driver(None) {
+                    tracing::warn!("couldn't take the driver's monitors off the desktop: {e:#}");
+                }
             }
+            // Which monitors the driver has to give, then all of them unplugged until a device
+            // comes (a driver that doesn't know how keeps them, off the desktop as before).
+            let seen = Instant::now();
+            while driver_output(2).is_none() && seen.elapsed() < Duration::from_millis(2000) {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            self.second_monitor = true;
+            self.had_third = driver_output(2).is_some();
+            self.unplug_all();
             return true;
         }
         if attached(&own.device) {
@@ -807,7 +825,64 @@ impl Screen {
 
     /// Has the driver a third monitor, for a device's second display?
     pub fn has_second(&self) -> bool {
-        driver_outputs().iter().any(|(_, m)| m.iter().any(|(i, _)| *i == 2))
+        self.had_third || driver_outputs().iter().any(|(_, m)| m.iter().any(|(i, _)| *i == 2))
+    }
+
+    /// Is the driver's monitor `index` plugged in (listed by Windows, on the desktop or not)?
+    fn plugged(index: u32) -> bool {
+        driver_outputs().iter().any(|(_, m)| m.iter().any(|(i, _)| *i == index))
+    }
+
+    /// On a PC with screens of its own: plug the driver's monitor `index` in if it isn't (the
+    /// driver's `PLUGMONITOR`; a driver that never unplugged it has nothing to do, and one that
+    /// doesn't know the command is asked to make all its monitors, as before). Joins the
+    /// desktop on its own, which the arrangement that follows deals with.
+    fn plug(&self, index: u32) -> bool {
+        if Self::plugged(index) {
+            return true;
+        }
+        let _ = self.driver.command(&format!("PLUGMONITOR {index}"));
+        let asked = Instant::now();
+        while !Self::plugged(index) && asked.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if !Self::plugged(index) {
+            let _ = self.driver.command("CREATEMONITOR");
+            while !Self::plugged(index) && asked.elapsed() < Duration::from_secs(7) {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+        tracing::info!(index, took_ms = asked.elapsed().as_millis() as u64, "plugged in the driver's monitor");
+        Self::plugged(index)
+    }
+
+    /// Unplug the driver's monitors `indices` (the driver's `DESTROYMONITOR`), for those that
+    /// are plugged in, and wait for Windows to stop listing them. A driver that ignores the
+    /// command leaves them as they were (off the desktop; the watch between devices sees to
+    /// that), which is logged once.
+    fn unplug(&self, indices: &[u32]) {
+        let indices: Vec<u32> = indices.iter().copied().filter(|i| Self::plugged(*i)).collect();
+        for i in &indices {
+            let _ = self.driver.command(&format!("DESTROYMONITOR {i}"));
+        }
+        let asked = Instant::now();
+        while indices.iter().any(|i| Self::plugged(*i)) && asked.elapsed() < Duration::from_secs(4) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let kept: Vec<u32> = indices.iter().copied().filter(|i| Self::plugged(*i)).collect();
+        if !indices.is_empty() {
+            if kept.is_empty() {
+                tracing::info!(?indices, took_ms = asked.elapsed().as_millis() as u64, "unplugged the driver's monitors");
+            } else {
+                static ONCE: std::sync::Once = std::sync::Once::new();
+                ONCE.call_once(|| tracing::info!(?kept, "the driver's monitors stay plugged in (an older driver, or it couldn't): they are kept off the desktop instead"));
+            }
+        }
+    }
+
+    /// Unplug all of the driver's monitors (see [`Screen::unplug`]).
+    fn unplug_all(&self) {
+        self.unplug(&[0, 1, 2]);
     }
 
     /// Give the device a second display of this size on that side of everything else on the
@@ -818,6 +893,9 @@ impl Screen {
         // Of the driver's monitors 1 and 2, the one the device's own monitor isn't.
         let own_index = self.monitor();
         let other = if own_index == 2 { 1 } else { 2 };
+        if self.pc {
+            self.plug(other);
+        }
         let mut second = driver_output(other).context("the display driver has no monitor left for a second display")?;
         if !modes(&second.device).contains(&want) {
             let offered = modes(self.own.as_deref().unwrap_or(&self.device));
@@ -903,14 +981,23 @@ impl Screen {
     pub fn take_second(&mut self) {
         if self.pc {
             let Some(second) = self.second.take() else { return };
-            let _alone = arranging();
-            crate::desk::follow();
-            let kept = ccd::shown().map(|shown| {
-                shown.into_iter().filter(|s| !s.device.eq_ignore_ascii_case(&second)).map(|s| ccd::Want { device: s.device, monitor: s.monitor, width: s.width, height: s.height, refresh: 0, left: s.left, top: s.top }).collect::<Vec<_>>()
-            });
-            match kept.and_then(|wants| ccd::arrange(&wants)) {
-                Ok(()) => tracing::info!("the device's second display is off the desktop again"),
-                Err(e) => tracing::warn!("couldn't take the device's second display off the desktop: {e:#}"),
+            let index = driver_index(&second);
+            {
+                let _alone = arranging();
+                crate::desk::follow();
+                let kept = ccd::shown().map(|shown| {
+                    shown.into_iter().filter(|s| !s.device.eq_ignore_ascii_case(&second)).map(|s| ccd::Want { device: s.device, monitor: s.monitor, width: s.width, height: s.height, refresh: 0, left: s.left, top: s.top }).collect::<Vec<_>>()
+                });
+                match kept.and_then(|wants| ccd::arrange(&wants)) {
+                    Ok(()) => {
+                        tracing::info!("the device's second display is off the desktop again");
+                        // And unplugged, now that it is off the desktop.
+                        if let Some(index) = index {
+                            self.unplug(&[index]);
+                        }
+                    }
+                    Err(e) => tracing::warn!("couldn't take the device's second display off the desktop: {e:#}"),
+                }
             }
             return;
         }
@@ -1028,14 +1115,12 @@ impl Screen {
             save_layout(&self.layout, &screens)?;
         }
         let screens = load_layout(&self.layout)?;
-        if driver_output(1).is_none() {
-            let _ = self.driver.command("CREATEMONITOR");
-            let asked = Instant::now();
-            while driver_output(1).is_none() && asked.elapsed() < Duration::from_secs(4) {
-                std::thread::sleep(Duration::from_millis(200));
-            }
+        // The device's monitor: plugged in now (it was unplugged when the last device left).
+        let mut index = if self.second_monitor { 1 } else { 0 };
+        if !self.plug(index) && index == 1 {
+            index = 0;
+            self.plug(0);
         }
-        let index = if driver_output(1).is_some() { 1 } else { 0 };
         let mut own = driver_output(index).context("the display driver lists no monitor")?;
         if !modes(&own.device).contains(&want) {
             let offered = modes(&own.device);
@@ -1095,8 +1180,10 @@ impl Screen {
                 let _alone = arranging();
                 crate::desk::follow();
                 let done = if self.layout.exists() { restore_layout(&self.layout) } else { ccd::drop_driver(None).map(|_| ()) };
-                if let Err(e) = done {
-                    tracing::warn!("couldn't put the PC's screens back as they were: {e:#}");
+                match done {
+                    // The device's monitors go last, once the PC's screens are as they were.
+                    Ok(()) => self.unplug_all(),
+                    Err(e) => tracing::warn!("couldn't put the PC's screens back as they were: {e:#}"),
                 }
             }
             self.busy.store(false, std::sync::atomic::Ordering::Relaxed);
