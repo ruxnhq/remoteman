@@ -125,10 +125,13 @@ pub struct Installer {
     outcome: Option<Outcome>,
     events: Option<Arc<Mutex<Receiver<Event>>>>,
     close_refused: bool,
+    /// The checkbox: install Steam's sound devices from the Steam folder.
+    install_steam: bool,
 }
 
 #[derive(Clone)]
 pub enum Message {
+    ToggleSteam,
     Hwnd(isize),
     Go,
     Cancel,
@@ -147,7 +150,7 @@ impl Component for Installer {
         let _ = context.run_window(|window| Message::Hwnd(window.as_raw() as isize));
         SENDER.with(|s| *s.borrow_mut() = Some(context.sender()));
         let rows = start.plan.iter().map(|_| Row { state: State::Waiting, detail: None, word: None }).collect();
-        Installer { page: Page::Welcome, rows, outcome: None, events: None, close_refused: false }
+        Installer { page: Page::Welcome, rows, outcome: None, events: None, close_refused: false, install_steam: true }
     }
 
     fn update(&mut self, message: Message, context: &ComponentContext<Self>) {
@@ -162,7 +165,8 @@ impl Component for Installer {
                 self.page = Page::Running;
                 BUSY.store(true, Ordering::SeqCst);
                 let (send, receive) = mpsc::channel();
-                let (ctx, facts) = (start.ctx.clone(), start.facts.clone());
+                let (mut ctx, facts) = (start.ctx.clone(), start.facts.clone());
+                ctx.install_steam = self.install_steam;
                 let spawned = std::thread::Builder::new().name("steps".into()).spawn(move || {
                     let mut emit = |e: Event| {
                         let _ = send.send(e);
@@ -237,6 +241,7 @@ impl Component for Installer {
                     next_event(events, context);
                 }
             }
+            Message::ToggleSteam => self.install_steam = !self.install_steam,
             Message::Cancel | Message::Close => {
                 if !BUSY.load(Ordering::SeqCst) {
                     let _ = context.close_window();
@@ -358,6 +363,18 @@ impl Installer {
             items.push(("Remoteman Host", "The app in the notification area, for pairing devices and its settings. It starts when you sign in."));
         }
         parts.push(card(items.iter().enumerate().map(|(i, (title, words))| row(badge(i + 1, State::Waiting), title, Some(words), None)).collect()));
+        // Steam is here and its sound devices aren't: they can be installed from its folder.
+        let steam = crate::steam::detect(crate::steam::registry_steam_dir(), &crate::steam::driver_store());
+        if steam.installable() {
+            parts.push(
+                CheckBox::new()
+                    .content("Install Steam's speakers and microphone (from your Steam folder)")
+                    .is_checked(self.install_steam)
+                    .on_click(context.message(Message::ToggleSteam))
+                    .into(),
+            );
+            parts.push(caption("A device's microphone is played into Steam Streaming Microphone, and the PC's own speakers go quiet while a device listens through Steam Streaming Speakers. They are Valve's signed drivers, taken from Steam's own drivers.exe; remoteman doesn't carry them, and they stay if remoteman is removed.").into());
+        }
         parts.push(caption("Settings > Apps > remoteman host removes all of it again.").into());
         buttons.push(button("Cancel", context.message(Message::Cancel), false));
         buttons.push(button("Install", context.message(Message::Go), true));

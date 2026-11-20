@@ -65,6 +65,9 @@ pub struct Ctx {
     pub real_dir: PathBuf,
     /// Where the files go: `real_dir`, or in a dry run a folder in %TEMP%.
     pub dir: PathBuf,
+    /// Install Steam's sound devices from the owner's Steam folder, if Steam is there and they
+    /// aren't (the checkbox on the first page).
+    pub install_steam: bool,
 }
 
 impl Ctx {
@@ -78,6 +81,7 @@ impl Ctx {
             source,
             real_dir,
             dir,
+            install_steam: false,
         }
     }
 
@@ -152,7 +156,7 @@ pub fn plan(ctx: &Ctx, facts: &Facts) -> Vec<StepInfo> {
                 ),
                 step(StepId::Files, "Files", &format!("Into {dir}")),
                 step(StepId::Setup, "Driver, firewall and service", "setup.ps1 signs remoteman's display driver with a certificate made on this PC, lets in UDP port 7791, and starts the service"),
-                step(StepId::Steam, "Steam's sound devices", "Looks for Steam's Streaming Microphone and Streaming Speakers, which a device's microphone and a quiet PC speaker need; nothing is installed or changed"),
+                step(StepId::Steam, "Steam's sound devices", "Looks for Steam's Streaming Microphone and Streaming Speakers, which a device's microphone and a quiet PC speaker need; if Steam is here without them and you chose it, they are installed from your Steam folder"),
             ];
             if facts.has_app {
                 steps.push(step(StepId::App, "Remoteman Host at sign-in", "Started for everyone who signs in to this PC, with a shortcut in Start"));
@@ -581,13 +585,46 @@ impl Run<'_> {
         Err(reason)
     }
 
-    /// Looks for Steam's sound devices and says what it found (src/steam.rs); changes nothing, and
-    /// never fails the install.
+    /// Looks for Steam's sound devices and says what it found (src/steam.rs). When Steam is here
+    /// without them and the owner chose it, setup.ps1's `steam` verb installs them from Steam's
+    /// own folder. It never fails the install: what went wrong is the step's line.
     fn steam(&mut self) -> StepResult {
         let found = crate::steam::detect(crate::steam::registry_steam_dir(), &crate::steam::driver_store());
         log::say(&format!("  Steam: {:?}", found));
         let (word, line) = crate::steam::say(&found);
-        Ok((word, Some(line)))
+        if !found.installable() {
+            return Ok((word, Some(line)));
+        }
+        if !self.ctx.install_steam {
+            log::say("  Steam's sound devices: not chosen, left alone");
+            return Ok((word, Some(format!("{line} (You didn't choose to install them from your Steam folder.)"))));
+        }
+        let drivers = found.drivers_exe.clone().unwrap_or_default();
+        if self.ctx.dry_run {
+            // What would be installed, read from drivers.exe's directory (nothing is extracted).
+            let listed = std::fs::File::open(&drivers).and_then(|mut f| crate::steam::appended_zip_names(&mut f));
+            match listed {
+                Ok(names) => self.would(&format!("install from {}: {}", drivers.display(), crate::steam::wanted(&names).join(", "))),
+                Err(e) => log::say(&format!("  {} can't be read: {e}", drivers.display())),
+            }
+            self.would("run setup.ps1 steam (extract the .inf/.sys/.cat, pnputil /add-driver /install, make the devices)");
+            return Ok(("Installed".into(), Some("Steam's Streaming Speakers and Microphone, from your Steam folder (dry run)".into())));
+        }
+        match self.setup("steam", StepId::Steam) {
+            Ok(_) => {
+                let now = crate::steam::detect(crate::steam::registry_steam_dir(), &crate::steam::driver_store());
+                log::say(&format!("  Steam, after: {:?}", now));
+                if now.microphone && now.speakers {
+                    Ok(("Installed".into(), Some("Steam's Streaming Speakers and Streaming Microphone, from your Steam folder; they stay if remoteman is removed, Steam uses them too".into())))
+                } else {
+                    Ok(("Not installed".into(), Some(format!("setup.ps1 finished, but Windows doesn't list both drivers yet ({}).", crate::steam::say(&now).1))))
+                }
+            }
+            Err(reason) => {
+                log::say(&format!("  Steam's sound devices couldn't be installed: {reason}"));
+                Ok(("Not installed".into(), Some(format!("They couldn't be installed from your Steam folder: {reason}. The rest of the install is not affected."))))
+            }
+        }
     }
 
     fn app(&mut self) -> StepResult {
@@ -788,7 +825,7 @@ mod tests {
 
     /// Not a dry run: what only a real install runs, in a folder of the test's own.
     fn real_in(dir: &Path, source: PathBuf) -> Ctx {
-        Ctx { mode: Mode::Install, dry_run: false, fail_at: None, source, real_dir: dir.to_path_buf(), dir: dir.to_path_buf() }
+        Ctx { mode: Mode::Install, dry_run: false, fail_at: None, source, real_dir: dir.to_path_buf(), dir: dir.to_path_buf(), install_steam: false }
     }
 
     fn facts() -> Facts {
