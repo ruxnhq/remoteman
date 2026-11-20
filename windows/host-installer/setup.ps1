@@ -1,9 +1,9 @@
 # What the host's installer does once its files are in place, and what its uninstaller undoes.
 # Run by the installer (remoteman-host.iss), elevated, hidden; never by hand except to repair:
 #   powershell -ExecutionPolicy Bypass -File setup.ps1 install|uninstall
-# install:   the display driver (Guesthouse's user-mode display driver, signed here with a
-#            certificate made on this machine, trusted only on it, its private key deleted at
-#            once), the inbound firewall rule for the host's port, a task that starts the host
+# install:   the display driver (remoteman's own user-mode display driver, windows/display-driver,
+#            signed here with a certificate made on this machine, trusted only on it, its private
+#            key deleted at once), the inbound firewall rule for the host's port, a task that starts the host
 #            at each logon (elevated, in the user's own desktop session, where it must run), and
 #            the host started now.
 # uninstall: all of that taken away again, and the host's state (its identity and the paired
@@ -20,10 +20,10 @@ $record = Join-Path $app 'installed.json'
 $log = Join-Path $app 'setup.log'
 $port = 7791
 $name = 'remoteman host'                   # the task's and the firewall rule's name
-$hardwareId = 'Root\GuesthouseDisplay'
+$hardwareId = 'Root\RemotemanDisplay'
 $subject = 'CN=remoteman display driver, this machine only'
 $ours = '*remoteman display driver, this machine only*'
-$settingsFolder = 'C:\VirtualDisplayDriver'  # where the driver reads its settings
+$settingsFolder = Join-Path $env:ProgramData 'remoteman\display'  # where the driver reads its settings
 
 function Say([string]$line) { Add-Content -Path $log -Value "$(Get-Date -Format s) $line" }
 
@@ -91,9 +91,12 @@ function Install {
   New-Item -ItemType Directory -Force $state | Out-Null
   & icacls.exe $state /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null
 
-  # The driver's settings, unless a driver of Guesthouse's already has some here.
+  # The driver's settings, unless an earlier install left some (the owner may have changed them).
+  # The driver runs as LOCAL SERVICE, which may change them (its toggle commands write them back);
+  # other users may only read them.
   if (-not (Test-Path (Join-Path $settingsFolder 'vdd_settings.xml'))) {
     New-Item -ItemType Directory -Force $settingsFolder | Out-Null
+    & icacls.exe $settingsFolder /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)M' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
     Copy-Item (Join-Path $app 'driver\vdd_settings.xml') $settingsFolder -Force
     $made.settingsMade = $true
     Save-Record $made
@@ -113,10 +116,10 @@ function Install {
   # trusted only on this machine, whose private key is deleted before the driver goes in.
   Remove-Certificates
   $package = Join-Path $app 'driver\pkg'
-  $catalog = Join-Path $app 'driver\GuesthouseDisplay.cat'
-  Remove-Item (Join-Path $package 'GuesthouseDisplay.cat'), $catalog -ErrorAction SilentlyContinue
+  $catalog = Join-Path $app 'driver\RemotemanDisplay.cat'
+  Remove-Item (Join-Path $package 'RemotemanDisplay.cat'), $catalog -ErrorAction SilentlyContinue
   New-FileCatalog -Path $package -CatalogFilePath $catalog -CatalogVersion 2.0 | Out-Null
-  Move-Item $catalog (Join-Path $package 'GuesthouseDisplay.cat') -Force
+  Move-Item $catalog (Join-Path $package 'RemotemanDisplay.cat') -Force
   $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject -CertStoreLocation Cert:\LocalMachine\My `
     -KeyExportPolicy NonExportable -NotAfter (Get-Date).AddYears(10)
   $public = New-Object Security.Cryptography.X509Certificates.X509Certificate2 (, $certificate.Export('Cert'))
@@ -124,14 +127,14 @@ function Install {
     $store = New-Object Security.Cryptography.X509Certificates.X509Store $storeName, 'LocalMachine'
     $store.Open('ReadWrite'); $store.Add($public); $store.Close()
   }
-  $signed = Set-AuthenticodeSignature -FilePath (Join-Path $package 'GuesthouseDisplay.cat') -Certificate $certificate -HashAlgorithm SHA256
+  $signed = Set-AuthenticodeSignature -FilePath (Join-Path $package 'RemotemanDisplay.cat') -Certificate $certificate -HashAlgorithm SHA256
   Remove-Item "Cert:\LocalMachine\My\$($certificate.Thumbprint)" -DeleteKey
   if ($signed.Status -ne 'Valid') { throw "signing the driver failed: $($signed.StatusMessage)" }
   Say "driver signed by $($certificate.Thumbprint)"
 
   # Only a package that is new is ours: pnputil names an existing one if it is the same.
   $before = @(Driver-Packages)
-  $inf = Join-Path $package 'GuesthouseDisplay.inf'
+  $inf = Join-Path $package 'RemotemanDisplay.inf'
   $added = (& pnputil.exe /add-driver $inf) -join "`n"
   $new = @(Driver-Packages | Where-Object { $before -notcontains $_ })
   if ($new.Count -eq 0 -and $added -notmatch 'Published Name') { throw "pnputil did not take the driver: $added" }

@@ -206,16 +206,17 @@ pub fn outputs() -> Vec<Output> {
 }
 
 /// The driver's monitor among the outputs: the one whose adapter looks like the driver's, else
-/// the primary display (in a guest where the driver's monitor is the only display, the same).
+/// the only display there is (in a guest where the driver's monitor is the only display, the
+/// same). Never one of several: on a PC with screens of its own, that would be one of them,
+/// switched to a device's size while the picture still came from the driver's monitor.
 pub fn find_output() -> Result<(Output, bool)> {
     let all = outputs();
-    let by_name = all.iter().find(|o| {
-        let what = format!("{} {}", o.description, o.id).to_lowercase();
-        vdd::ADAPTER_HINTS.iter().any(|h| what.contains(h))
-    });
-    match by_name.or_else(|| all.iter().find(|o| o.primary)).or(all.first()) {
+    // The hints in their order, so that this driver's own hardware id wins over a name it shares.
+    let by_name = vdd::ADAPTER_HINTS.iter().find_map(|h| all.iter().find(|o| format!("{} {}", o.description, o.id).to_lowercase().contains(h)));
+    match by_name.or_else(|| if all.len() == 1 { all.first() } else { None }) {
         Some(o) => Ok((o.clone(), by_name.is_some())),
-        None => bail!("Windows lists no display that is part of the desktop (is this process in a session with a desktop?)"),
+        None if all.is_empty() => bail!("Windows lists no display that is part of the desktop (is this process in a session with a desktop?)"),
+        None => bail!("the display driver's monitor isn't part of the desktop, and this computer's own screens aren't used in its place (turn the driver's display back on in Settings > System > Display)"),
     }
 }
 

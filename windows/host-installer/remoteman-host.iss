@@ -43,7 +43,7 @@ Source: "stage\driver\*"; DestDir: "{app}\driver"; Flags: ignoreversion recurses
 ; What setup.ps1 writes beside itself, and the catalog it makes.
 Type: files; Name: "{app}\installed.json"
 Type: files; Name: "{app}\setup.log"
-Type: files; Name: "{app}\driver\pkg\GuesthouseDisplay.cat"
+Type: files; Name: "{app}\driver\pkg\RemotemanDisplay.cat"
 Type: dirifempty; Name: "{app}\driver\pkg"
 Type: dirifempty; Name: "{app}\driver"
 Type: dirifempty; Name: "{app}"
