@@ -239,6 +239,9 @@ pub enum ThemeBrush {
     SystemCaution,
     SystemCautionBackground,
     SystemSuccess,
+    // remoteman patch (VENDORED.md, patch 8): WinUI's in-app acrylic, for the viewer's bar over
+    // the picture.
+    AcrylicInApp,
 }
 
 impl ThemeBrush {
@@ -259,6 +262,7 @@ impl ThemeBrush {
             Self::SystemCaution => "SystemFillColorCautionBrush",
             Self::SystemCautionBackground => "SystemFillColorCautionBackgroundBrush",
             Self::SystemSuccess => "SystemFillColorSuccessBrush",
+            Self::AcrylicInApp => "AcrylicInAppFillColorDefaultBrush",
         }
     }
 }

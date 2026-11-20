@@ -61,6 +61,10 @@ comment ("Spike patch" for blurman's, "remoteman patch" for ours).
    windows-bindgen's output. Upstream's pointer events had neither, and the viewer sends the
    wheel to the other computer and tells fingers from the mouse.
 
+8. **In-app acrylic** (remoteman, for the viewer's bar over the picture): `ThemeBrush::
+   AcrylicInApp` (`AcrylicInAppFillColorDefaultBrush`) in `src/declaration.rs`, beside patch 2's
+   brushes.
+
 Cargo.toml: the `[lints]` and docs.rs sections are gone (with `[lints.rust]` set here instead)
 and the dependencies name the git commit instead of the windows-rs workspace. `public-api.txt` is
 upstream's and does not list the patches.
