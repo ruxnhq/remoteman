@@ -420,6 +420,13 @@ int32_t rm_host_second_start(const rm_host *host, const rm_accept *accept);
 int32_t rm_host_send_frame2(const rm_host *host, const uint8_t *data, size_t len, uint8_t key, uint64_t capture_us);
 int32_t rm_host_second_stop(const rm_host *host, const char *message);
 
+// What happens when a device connects while another is using this computer: 0 it takes over
+// (the default), 1 it watches, 2 it can control too (docs/PROTOCOL.md, "More than one device").
+// Kept with the host's state; takes effect for the next connection. The host program hears of
+// the first device only; a device that joined is served inside the core.
+void rm_host_set_second_device(const rm_host *host, uint8_t mode);
+uint8_t rm_host_second_device(const rm_host *host);
+
 // Stop listening, drop the client, and free the host.
 void rm_host_stop(rm_host *host);
 

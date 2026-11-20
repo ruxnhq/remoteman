@@ -378,6 +378,7 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "address": host.address.to_string(),
                 "fingerprint": host.fingerprint,
                 "pairing": host.pairing(),
+                "second_device": host.second_device().as_str(),
                 "pending": host.pending(),
                 "devices": devices_json(host),
                 "notify": allowed.notify.load(Ordering::Relaxed),
@@ -457,6 +458,16 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
+        // What a device that connects while another is using the PC does: take over, watch, or
+        // control too. Kept by the core with the host's state.
+        (Some("set"), Some("second-device"), Some(word)) => match remoteman_core::host::SecondDevice::parse(word) {
+            Some(mode) => {
+                host.set_second_device(mode);
+                tracing::info!(mode = mode.as_str(), "what a second device does was set by the owner");
+                "ok\n".into()
+            }
+            None => "set second-device take-over|watch|control\n".into(),
+        },
         // Host settings: lock the PC when a device's session ends; Steam's speakers as the
         // default output while a device listens.
         (Some("set"), Some(what @ ("lock" | "speakers" | "notify")), Some(word @ ("on" | "off"))) => {
@@ -480,7 +491,7 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
         }
         (Some("device"), _, _) => device(host, line.trim()["device".len()..].trim()),
         (Some("second-factor"), what, arg) => second_factor(host, what, arg),
-        _ => "status | second-factor on|confirm CODE|off|status|forget | pair on|off|accept|decline | allow clipboard|files on|off | set lock|speakers|notify on|off | device NAME [view-only on|off | allow clipboard|files|sound|mic|camera on|off] | connections [N] | drop | revoke FINGERPRINT | send PATH | sharing on|off\n".into(),
+        _ => "status | second-factor on|confirm CODE|off|status|forget | pair on|off|accept|decline | allow clipboard|files on|off | set lock|speakers|notify on|off | set second-device take-over|watch|control | device NAME [view-only on|off | allow clipboard|files|sound|mic|camera on|off] | connections [N] | drop | revoke FINGERPRINT | send PATH | sharing on|off\n".into(),
     }
 }
 

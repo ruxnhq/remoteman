@@ -90,6 +90,9 @@ pub enum AppMessage {
     Files(bool),
     LockOnLeave(bool),
     Speakers(bool),
+    /// What a second device that connects does: the choice's index (0 takes over, 1 watches,
+    /// 2 controls too).
+    SecondDevice(Option<usize>),
     Notify(bool),
     /// The switch "Ask for a code from an authenticator app".
     SecondFactor(bool),
@@ -193,6 +196,7 @@ impl HostApp {
                 for n in s.notices.iter().filter(|n| n.seq > seen) {
                     if s.notify {
                         let text = match n.event.as_str() {
+                            "connected" if n.joined => format!("{} joined the session on {pc}.", n.name),
                             "connected" => match s.client.as_ref().filter(|c| c.name == n.name) {
                                 Some(c) => format!("It has {} on {pc}.", host::placement_phrase(&c.placement)),
                                 None => format!("{} is now connected to {pc}.", n.name),
@@ -372,6 +376,13 @@ impl Application for HostApp {
                     self.tell(format!("set lock {}", if on { "on" } else { "off" }));
                 }
             }
+            AppMessage::SecondDevice(Some(i)) if i < 3 => {
+                let word = ["take-over", "watch", "control"][i];
+                if matches!(&self.status, Ok(s) if s.second_device != word.replace('-', "_")) {
+                    self.tell(format!("set second-device {word}"));
+                }
+            }
+            AppMessage::SecondDevice(_) => {}
             AppMessage::Speakers(on) => {
                 if matches!(&self.status, Ok(s) if s.speakers_follow != on) {
                     self.tell(format!("set speakers {}", if on { "on" } else { "off" }));
@@ -461,6 +472,7 @@ impl Application for HostApp {
                 files: context.callback(AppMessage::Files),
                 lock_on_leave: context.callback(AppMessage::LockOnLeave),
                 speakers: context.callback(AppMessage::Speakers),
+                second_device: context.callback(AppMessage::SecondDevice),
                 notify: context.callback(AppMessage::Notify),
                 second_factor: context.callback(AppMessage::SecondFactor),
                 second_factor_code: context.callback(AppMessage::SecondFactorCode),

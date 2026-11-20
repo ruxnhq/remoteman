@@ -1311,3 +1311,26 @@ pub unsafe extern "C" fn rm_host_disable_second_factor(host: *const Host) -> i32
 pub unsafe extern "C" fn rm_host_forget_remembered(host: *const Host) -> i32 {
     unsafe { &*host }.forget_remembered().map_or(-1, |_| 0)
 }
+
+/// What happens when a device connects while another is using this computer: 0 it takes over
+/// (the default), 1 it watches, 2 it can control too. Takes effect for the next connection and
+/// is kept with the host's state. Other values do nothing. The host program hears of the first
+/// device only: a device that joined is fanned out to inside the core.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_set_second_device(host: *const Host, mode: u8) {
+    if let Some(mode) = crate::host::SecondDevice::from_u8(mode) {
+        unsafe { &*host }.set_second_device(mode);
+    }
+}
+
+/// The setting of `rm_host_set_second_device`: 0, 1 or 2.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_second_device(host: *const Host) -> u8 {
+    unsafe { &*host }.second_device() as u8
+}
