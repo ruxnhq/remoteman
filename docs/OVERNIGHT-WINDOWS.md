@@ -101,7 +101,7 @@ m	oolsix-screens.ps1` put DISPLAY1 back at 0,0 as
 the main screen. The new host's watch between devices does this by itself.
 
 ## Installing the new host (for the owner)
-`C:\rm\installer-2026-11-20-main\remoteman-host-setup-0.1.1.exe`, built from a9d240e (host 0.1.1,
+`C:\rm\installer-2026-11-20-main\remoteman-host-setup-0.1.1.exe`, built from b01fc1a (host 0.1.1 with the second factor and the Direct3D 12 encoder,
 the display driver 0.1.1.0 that unplugs its monitors between devices, the virtual camera's DLL).
 One UAC prompt.
 1. With all three screens on, run it.
