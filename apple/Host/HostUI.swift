@@ -222,6 +222,18 @@ struct HostSettings: View {
     var pair: () -> Void
     @State private var revoking: MacHost.Device?
 
+    /// "2026-11-19 10:15, 1.2.3.4:5, 12 s, the reason".
+    private static func describe(_ c: [String: Any]) -> String {
+        var parts: [String] = []
+        if let t = c["time"] as? String, let d = ISO8601DateFormatter().date(from: t) {
+            parts.append(d.formatted(date: .abbreviated, time: .shortened))
+        }
+        if let a = c["address"] as? String, !a.isEmpty { parts.append(a) }
+        if let s = c["duration"] as? Int { parts.append(s >= 60 ? "\(s / 60) min \(s % 60) s" : "\(s) s") }
+        if let r = c["reason"] as? String, !r.isEmpty { parts.append(r) }
+        return parts.joined(separator: ", ")
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -339,6 +351,14 @@ struct HostSettings: View {
                         Toggle("Lock this Mac when the device leaves", isOn: Binding(get: { controller.lockOnLeave }, set: { controller.setLockOnLeave($0) }))
                             .labelsHidden().toggleStyle(.switch)
                     }
+                    Row("When a second device connects", caption: "While one device is using this Mac. A change applies to the next connection.") {
+                        Picker("When a second device connects", selection: Binding(get: { controller.secondDevice }, set: { controller.setSecondDevice($0) })) {
+                            Text("It takes over").tag(0)
+                            Text("It watches").tag(1)
+                            Text("It can control too").tag(2)
+                        }
+                        .labelsHidden().fixedSize()
+                    }
                     Row("Notify me when a device connects", caption: controller.notifyNote.isEmpty ? "macOS asks once whether remoteman host may show notifications." : controller.notifyNote) {
                         Toggle("Notify me when a device connects", isOn: Binding(get: { controller.notifyOnConnect }, set: { controller.setNotifyOnConnect($0) }))
                             .labelsHidden().toggleStyle(.switch)
@@ -350,6 +370,7 @@ struct HostSettings: View {
                             title: d.name, caption: d.connected ? "Connected now" : "Key \(d.fingerprint.prefix(8).uppercased())", strong: d.connected,
                             leading: { Image(systemName: HostWording.symbol(d.name)).foregroundStyle(Tokens.tintfg).frame(width: 20) },
                             trailing: { Button("Revoke…") { revoking = d }.foregroundStyle(Tokens.red) })
+                        DevicePermissions(controller: controller, fingerprint: d.fingerprint)
                     }
                     if controller.devices.isEmpty {
                         Row(
@@ -361,6 +382,14 @@ struct HostSettings: View {
                     Row(title: "", caption: "A revoked device has to be paired again before it can connect.", leading: { EmptyView() }) {
                         Button("Pair a Device…", action: pair).disabled(!controller.sharing)
                     }
+                }
+                CardGroup("Recent connections") {
+                    ForEach(Array(controller.connections.enumerated()), id: \.offset) { _, c in
+                        Row(
+                            c["name"] as? String ?? "?",
+                            caption: Self.describe(c), value: c["event"] as? String ?? "")
+                    }
+                    if controller.connections.isEmpty { Row("No connections yet", caption: nil) { EmptyView() }.opacity(0.7) }
                 }
                 CardGroup("Picture") {
                     Row("Bitrate limit", caption: "The most this Mac sends. A device can ask for less, never for more.") {
@@ -390,6 +419,8 @@ struct HostSettings: View {
         }
         .frame(width: 760)
         .background(Tokens.win)
+        .onAppear { controller.refreshDevices() }
+        .onChange(of: controller.devices) { _, _ in controller.refreshDevices() }
         .confirmationDialog(
             "Revoke \(revoking?.name ?? "this device")?", isPresented: Binding(get: { revoking != nil }, set: { if !$0 { revoking = nil } }),
             titleVisibility: .visible, presenting: revoking
@@ -623,5 +654,35 @@ enum QRCode {
         let image = NSImage(size: rep.size)
         image.addRepresentation(rep)
         return image
+    }
+}
+
+/// What one paired device may do: view only, and each of the things it can share.
+private struct DevicePermissions: View {
+    @ObservedObject var controller: HostController
+    let fingerprint: String
+
+    private func binding(_ keyPath: WritableKeyPath<MacHost.Permissions, Bool>, inverted: Bool = false) -> Binding<Bool> {
+        Binding(
+            get: { (controller.permissions[fingerprint] ?? MacHost.Permissions())[keyPath: keyPath] != inverted },
+            set: {
+                var p = controller.permissions[fingerprint] ?? MacHost.Permissions()
+                p[keyPath: keyPath] = $0 != inverted
+                controller.setPermissions(p, for: fingerprint)
+            })
+    }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Toggle("View only", isOn: binding(\.input, inverted: true))
+            Toggle("Clipboard", isOn: binding(\.clipboard))
+            Toggle("Files", isOn: binding(\.files))
+            Toggle("Sound", isOn: binding(\.sound))
+            Toggle("Microphone", isOn: binding(\.mic))
+            Toggle("Camera", isOn: binding(\.camera))
+            Spacer(minLength: 0)
+        }
+        .toggleStyle(.checkbox).font(.system(size: 12))
+        .padding(.horizontal, 12).padding(.bottom, 8).padding(.leading, 32)
     }
 }

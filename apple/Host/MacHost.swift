@@ -5,6 +5,7 @@
 // Adapted from espalier's ScreenController.
 import AppKit
 import CoreMedia
+import CryptoKit
 import Foundation
 import IOKit.pwr_mgt
 import RemotemanCore
@@ -97,6 +98,13 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var testAllow: Double?
         var testDrop: Double?
         var testRevoke: Double?
+        /// What happens when a device connects while another is using this Mac: 0 it takes over, 1 it watches, 2 it can control too.
+        var secondDevice = 0
+        /// For tests: turn the second factor on at start and log its secret.
+        var secondFactorTest = false
+        /// For tests: make the first device that connects view-only, and log the connection log when sharing stops.
+        var testViewOnly = false
+        var logConnections = false
     }
 
     /// The device that is connected, as the interface shows it.
@@ -114,6 +122,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     /// once a second while a picture is going out, the frames and bits sent in that second.
     var onClient: ((Client?) -> Void)?
     var onStats: ((_ fps: Int, _ bitsPerSecond: Int) -> Void)?
+    /// A device was paired, connected or refused (the core's notice, as JSON), on the core's thread.
+    var onNotice: (([String: Any]) -> Void)?
 
     private var options: Options
 
@@ -212,6 +222,68 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         return list.map {
             Device(fingerprint: $0["fingerprint"] as? String ?? "", name: $0["name"] as? String ?? "", connected: $0["connected"] as? Bool ?? false)
         }
+    }
+
+    /// What one device may do (everything, until the owner says otherwise).
+    struct Permissions: Equatable {
+        var input = true
+        var clipboard = true
+        var files = true
+        var sound = true
+        var mic = true
+        var camera = true
+    }
+
+    func permissions(for fingerprint: String) -> Permissions {
+        var p = rm_permissions(input: 1, clipboard: 1, files: 1, sound: 1, mic: 1, camera: 1)
+        if let h = host { _ = rm_host_get_permissions(h, fingerprint, &p) }
+        return Permissions(input: p.input != 0, clipboard: p.clipboard != 0, files: p.files != 0, sound: p.sound != 0, mic: p.mic != 0, camera: p.camera != 0)
+    }
+
+    /// The device is told at once if it is connected. False if it couldn't be saved.
+    @discardableResult
+    func setPermissions(_ p: Permissions, for fingerprint: String) -> Bool {
+        guard let h = host else { return false }
+        var raw = rm_permissions(
+            input: p.input ? 1 : 0, clipboard: p.clipboard ? 1 : 0, files: p.files ? 1 : 0, sound: p.sound ? 1 : 0,
+            mic: p.mic ? 1 : 0, camera: p.camera ? 1 : 0)
+        return rm_host_set_permissions(h, fingerprint, &raw) == 1
+    }
+
+    /// The last `max` lines of the connection log, oldest first: time, event (paired, connected,
+    /// left, refused), name, fingerprint, address, duration, reason.
+    func connections(_ max: Int) -> [[String: Any]] {
+        guard let h = host, let raw = rm_host_connections_json(h, max) else { return [] }
+        defer { rm_string_free(raw) }
+        return (try? JSONSerialization.jsonObject(with: Data(String(cString: raw).utf8))) as? [[String: Any]] ?? []
+    }
+
+    /// RFC 6238 (SHA-1, 30 s, six digits), for the test above only.
+    private static func totp(base32: String, at date: Date) -> String {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+        var bits = 0, value = 0
+        var key = [UInt8]()
+        for ch in base32.uppercased() {
+            guard let i = alphabet.firstIndex(of: ch) else { continue }
+            value = (value << 5) | i
+            bits += 5
+            if bits >= 8 {
+                bits -= 8
+                key.append(UInt8((value >> bits) & 0xff))
+            }
+        }
+        var counter = UInt64(date.timeIntervalSince1970 / 30).bigEndian
+        let mac = withUnsafeBytes(of: &counter) {
+            Array(HMAC<Insecure.SHA1>.authenticationCode(for: Data($0), using: SymmetricKey(data: key)))
+        }
+        let o = Int(mac[19] & 0x0f)
+        let n = (UInt32(mac[o] & 0x7f) << 24) | (UInt32(mac[o + 1]) << 16) | (UInt32(mac[o + 2]) << 8) | UInt32(mac[o + 3])
+        return String(format: "%06d", n % 1_000_000)
+    }
+
+    func setSecondDevice(_ mode: Int) {
+        options.secondDevice = mode
+        if let h = host { rm_host_set_second_device(h, UInt8(clamping: mode)) }
     }
 
     /// Stop trusting a device (it is dropped if connected). 1 done, 0 it wasn't trusted, -1 the list couldn't be saved.
@@ -348,6 +420,26 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         hostLog("host: listening on \(parts.first ?? options.listen), fingerprint \(parts.count > 1 ? parts[1] : "?"), pairing \(rm_host_pairing(h) != 0 ? "on" : "off")")
         listening = (parts.first ?? options.listen, parts.count > 1 ? parts[1] : "")
         if options.confirm { rm_host_set_confirm(h, 1) }
+        rm_host_set_second_device(h, UInt8(clamping: options.secondDevice))
+        hostLog("host: when a second device connects: \(["it takes over", "it watches", "it can control too"][min(max(options.secondDevice, 0), 2)])")
+        rm_host_set_notice_callback(h, { ctx, json in
+            guard let json, let m = (try? JSONSerialization.jsonObject(with: Data(String(cString: json).utf8))) as? [String: Any] else { return }
+            let me = Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue()
+            hostLog("host: notice: \(m["event"] as? String ?? "?") \(m["name"] as? String ?? "?") \((m["fingerprint"] as? String ?? "").prefix(8)) \(m["address"] as? String ?? "")\(m["reason"].map { " (\($0))" } ?? "")")
+            me.onNotice?(m)
+        }, Unmanaged.passUnretained(self).toOpaque())
+        if options.secondFactorTest {
+            _ = rm_host_disable_second_factor(h)  // a new secret each start
+            var out = [CChar](repeating: 0, count: 512)
+            let r = rm_host_enable_second_factor(h, &out, out.count)
+            let parts = String(cString: out).split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            hostLog("host: second factor test: enable \(r), secret \(parts.first ?? "") uri \(parts.count > 2 ? parts[2] : "")")
+            // A secret counts once a right code has been given: do that here, so that devices are asked.
+            if r == 0, let secret = parts.first {
+                let ok = rm_host_confirm_second_factor(h, Self.totp(base32: secret, at: Date()))
+                hostLog("host: second factor test: confirmed \(ok), devices are asked for a code now")
+            }
+        }
         // The core follows loss: it lowers the rate when the device reports losses and raises it
         // again while all is well, up to the device's ceiling or this; the encoder takes it live.
         if options.followLoss {
@@ -404,6 +496,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         teardown()
         // `host` stays set until the core has stopped: its last callbacks (the client leaving) use it.
         if let h = host {
+            if options.logConnections { hostLog("host: connection log: \(connections(20))") }
             rm_host_stop(h)
             host = nil
         }

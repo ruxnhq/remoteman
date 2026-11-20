@@ -73,6 +73,30 @@ final class HostController: ObservableObject {
     /// The most this Mac sends, in megabits a second; 0 lets it choose.
     @Published private(set) var ownMegabits = UserDefaults.standard.integer(forKey: "ownMegabits")
     @Published private(set) var notifyNote = ""
+    /// When a second device connects while one is on: 0 it takes over, 1 it watches, 2 it can control too.
+    @Published private(set) var secondDevice = UserDefaults.standard.integer(forKey: "secondDevice")
+
+    func setSecondDevice(_ mode: Int) {
+        secondDevice = mode
+        UserDefaults.standard.set(mode, forKey: "secondDevice")
+        host.setSecondDevice(mode)
+    }
+
+    /// What a trusted device may do, and the last connections: read when the window opens.
+    @Published private(set) var permissions: [String: MacHost.Permissions] = [:]
+    @Published private(set) var connections: [[String: Any]] = []
+
+    func refreshDevices() {
+        var list: [String: MacHost.Permissions] = [:]
+        for d in host.devices { list[d.fingerprint] = host.permissions(for: d.fingerprint) }
+        permissions = list
+        connections = Array(host.connections(20).reversed())
+    }
+
+    func setPermissions(_ p: MacHost.Permissions, for fingerprint: String) {
+        permissions[fingerprint] = p
+        if !host.setPermissions(p, for: fingerprint) { hostLog("host: permissions for \(fingerprint.prefix(8)) couldn't be saved") }
+    }
     @Published private(set) var tenBit = UserDefaults.standard.object(forKey: "tenBit") as? Bool ?? true
 
     func setTenBit(_ on: Bool) {
@@ -299,6 +323,7 @@ final class HostController: ObservableObject {
         if !unattended { options.silenceSpeakers = !UserDefaults.standard.bool(forKey: Self.speakersKey) }
         if !unattended {
             options.lockOnLeave = UserDefaults.standard.bool(forKey: "lockOnLeave")
+            options.secondDevice = UserDefaults.standard.integer(forKey: "secondDevice")
             options.tenBit = UserDefaults.standard.object(forKey: "tenBit") as? Bool ?? true
             options.allowedPlacements = Set((UserDefaults.standard.array(forKey: "allowedPlacements") as? [Int]) ?? [0, 1, 2])
             options.defaultPlacement = UserDefaults.standard.integer(forKey: "defaultPlacement")
@@ -315,9 +340,13 @@ final class HostController: ObservableObject {
             var c = c
             if let b = before, c != nil { c?.since = b.since }
             self?.client = c
-            if let self, let c, before == nil { self.announce(c.name) }
             if let self, c != nil, before == nil {
                 hostLog("host: trusted devices: \(self.host.devices.map { "\($0.name) \($0.fingerprint.prefix(8))\($0.connected ? " (connected)" : "")" }.joined(separator: ", "))")
+                if options.testViewOnly, let d = self.host.devices.first(where: { $0.connected }) {
+                    var p = self.host.permissions(for: d.fingerprint)
+                    p.input = false
+                    hostLog("host: test: \(d.name) made view-only: \(self.host.setPermissions(p, for: d.fingerprint))")
+                }
                 if let t = options.testAllow {
                     DispatchQueue.main.asyncAfter(deadline: .now() + t) { self.setAllowed(clipboard: true, files: true) }
                     DispatchQueue.main.asyncAfter(deadline: .now() + t + 4) { self.setAllowed(clipboard: false, files: false) }
@@ -334,6 +363,11 @@ final class HostController: ObservableObject {
                 self?.fps = 0
                 self?.bitsPerSecond = 0
             }
+        }
+        // The core's notice of a device connecting is what the owner is told of.
+        host.onNotice = { [weak self] m in
+            guard m["event"] as? String == "connected", let name = m["name"] as? String else { return }
+            DispatchQueue.main.async { self?.announce(name) }
         }
         host.onStats = { [weak self] fps, bits in
             self?.fps = fps
