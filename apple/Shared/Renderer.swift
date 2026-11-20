@@ -127,7 +127,11 @@ final class VideoRenderer {
     /// Each frame is drawn and presented the moment it is handed over, instead of at the next tick of
     /// the display link: it reaches the screen at the screen's next refresh, up to a whole tick
     /// sooner, and frames that come unevenly are shown unevenly as they came. Set before frames come.
-    static var onArrival = true
+    /// Off by default: on the iPad Pro (120 Hz) a frame presented as it came reached the screen no
+    /// sooner (median 15.0 against 14.3 ms) and the slowest 5% a frame later (30 against 20 ms):
+    /// presented at a random moment it often misses the compositor's deadline for the coming
+    /// refresh, where the display link's tick comes just after one. `--present arrival` to compare.
+    static var onArrival = false
     private let presentQueue = DispatchQueue(label: "remoteman.present", qos: .userInteractive)
     /// The size the layer is drawn at, set on the main thread only (CAMetalLayer's own is read off it).
     private var layerSize = CGSize.zero
@@ -205,8 +209,25 @@ final class VideoRenderer {
         if pending != nil { superseded += 1 }
         pending = f
         lock.unlock()
-        if Self.onArrival { presentQueue.async { [weak self] in self?.draw(sized: false) } }
+        // One draw waiting at a time: frames that come while it waits only replace what it will
+        // draw, so that a burst never queues up drawables (newest wins, as at the tick).
+        if Self.onArrival {
+            lock.lock()
+            let start = !drawQueued
+            drawQueued = true
+            lock.unlock()
+            if start {
+                presentQueue.async { [weak self] in
+                    guard let self else { return }
+                    self.lock.lock()
+                    self.drawQueued = false
+                    self.lock.unlock()
+                    self.draw(sized: false)
+                }
+            }
+        }
     }
+    private var drawQueued = false
 
     func clear() {
         lock.lock()
