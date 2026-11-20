@@ -1335,6 +1335,16 @@ impl Screen {
                 self.device = output.device;
                 return Ok(());
             }
+            // A monitor that isn't on the desktop has no modes Windows will list (the driver
+            // unplugs a device's monitor between devices, and plugs it back in off the
+            // desktop): once it is back, go on, and let the arrangement that follows (which
+            // asks for the mode) say whether it is there. Waiting the full 8 s cost every
+            // connection with a new size 8 s (2026-11-20), and the mode was there each time.
+            if self.pc && asked.elapsed() >= Duration::from_millis(1500) && !attached(&output.device) {
+                tracing::info!(after_ms = asked.elapsed().as_millis() as u64, output = %output.device, "the monitor is back, off the desktop (where Windows lists no modes): going on");
+                self.device = output.device;
+                return Ok(());
+            }
         }
         if let Ok((output, _)) = find_output() {
             self.device = output.device;
