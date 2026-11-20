@@ -48,6 +48,11 @@ impl Shared {
     /// `phase`: 0 down, 1 move, 2 up, as the engine counts a finger's.
     fn pointer(&self, info: PointerEventInfo, phase: i32) -> bool {
         let (x, y) = self.pixels(&info);
+        // For tests: REMOTEMAN_DEBUG_POINTER=1 puts each pointer event in the log.
+        static DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DEBUG.get_or_init(|| std::env::var("REMOTEMAN_DEBUG_POINTER").is_ok()) {
+            remoteman_engine::say(&format!("pointer: phase {phase} at {:.1},{:.1} device {:?} buttons {}{}{}", info.x, info.y, info.device, info.is_left_button_pressed as u8, info.is_right_button_pressed as u8, info.is_middle_button_pressed as u8));
+        }
         // A finger: the engine sends it as a touch if that is wanted, otherwise it is the pointer.
         if info.device == PointerDevice::Touch && remoteman_engine::touch(info.pointer_id, phase, x, y) {
             return true;
