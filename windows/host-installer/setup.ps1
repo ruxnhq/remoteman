@@ -1,6 +1,6 @@
 # What the host's installer does once its files are in place, and what its uninstaller undoes.
 # Run by the installer (remoteman-host.iss), elevated, hidden; never by hand except to repair:
-#   powershell -ExecutionPolicy Bypass -File setup.ps1 install|uninstall
+#   powershell -ExecutionPolicy Bypass -File setup.ps1 install|uninstall|steam
 # install:   the display driver (remoteman's own user-mode display driver, windows/display-driver,
 #            signed here with a certificate made on this machine, trusted only on it, its private
 #            key deleted at once), the inbound firewall rule for the host's port, the service
@@ -8,12 +8,16 @@
 #            console's session from boot on (crates/remoteman-host-windows/src/service.rs), the
 #            policy that lets services send Ctrl+Alt+Del, and the service started now. An earlier
 #            install's logon task is removed.
+# steam:     (a step of its own, run after install when the owner chose it) Steam's streaming
+#            sound devices, "Steam Streaming Speakers" and "Steam Streaming Microphone", which the
+#            host uses, installed from the owner's own Steam folder when Steam is there and they
+#            are not: see Install-Steam. It never fails the install; uninstall leaves them.
 # uninstall: all of that taken away again (the policy back as it was), and the host's state
 #            (its identity and the paired devices) deleted.
 # What install made is written to installed.json beside this script, so that uninstall takes
 # away exactly that (a display device that was here before is left, with the driver it had).
 # Exit code 0, or 1 with the reason as the last line of setup.log.
-param([Parameter(Mandatory)][ValidateSet('install', 'uninstall')][string]$Verb)
+param([Parameter(Mandatory)][ValidateSet('install', 'uninstall', 'steam')][string]$Verb)
 $ErrorActionPreference = 'Stop'
 $app = $PSScriptRoot
 $exe = Join-Path $app 'remoteman-host.exe'
@@ -39,10 +43,14 @@ public class RmDev {
   [DllImport("setupapi.dll", SetLastError=true)] public static extern bool SetupDiCallClassInstaller(int f, IntPtr s, ref SP d);
   [DllImport("newdev.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool UpdateDriverForPlugAndPlayDevicesW(IntPtr h, string id, string inf, int flags, out bool reboot);
   public static string Make(string id, string inf) {
-    Guid g = new Guid("4d36e968-e325-11ce-bfc1-08002be10318");
+    return Make(id, inf, "4d36e968-e325-11ce-bfc1-08002be10318", "Display");
+  }
+  // A root-enumerated device with this hardware id, of this setup class, named ROOT/name/nnnn.
+  public static string Make(string id, string inf, string cls, string name) {
+    Guid g = new Guid(cls);
     IntPtr s = SetupDiCreateDeviceInfoList(ref g, IntPtr.Zero);
     SP d = new SP(); d.cbSize = Marshal.SizeOf(d);
-    if (!SetupDiCreateDeviceInfoW(s, "Display", ref g, null, IntPtr.Zero, 1, ref d)) return "create failed " + Marshal.GetLastWin32Error();
+    if (!SetupDiCreateDeviceInfoW(s, name, ref g, null, IntPtr.Zero, 1, ref d)) return "create failed " + Marshal.GetLastWin32Error();
     byte[] b = System.Text.Encoding.Unicode.GetBytes(id + "\0\0");
     if (!SetupDiSetDeviceRegistryPropertyW(s, ref d, 1, b, b.Length)) return "hardware id failed " + Marshal.GetLastWin32Error();
     if (!SetupDiCallClassInstaller(0x19, s, ref d)) return "register failed " + Marshal.GetLastWin32Error();
@@ -74,10 +82,12 @@ function Driver-Packages { (& pnputil.exe /enum-drivers) -join "`n" | Select-Str
 # What install made, kept across installs over an earlier one: written after each step, so that a
 # failure part way still leaves uninstall knowing what to take away.
 function Load-Record {
-  $r = [ordered]@{ driverInfs = @(); deviceMade = $false; settingsMade = $false; sasSet = $false; sasBefore = $null; vcamMade = $false }
+  $r = [ordered]@{ driverInfs = @(); deviceMade = $false; settingsMade = $false; sasSet = $false; sasBefore = $null; vcamMade = $false; steamInfs = @(); steamDevices = @() }
   if (Test-Path $record) {
     $old = Get-Content $record -Raw | ConvertFrom-Json
     if ($old.PSObject.Properties.Name -contains 'vcamMade') { $r.vcamMade = [bool]$old.vcamMade }
+    # What the steam step installed (Steam's sound devices): only recorded, uninstall leaves them.
+    if ($old.PSObject.Properties.Name -contains 'steamInfs') { $r.steamInfs = @($old.steamInfs | Where-Object { $_ }); $r.steamDevices = @($old.steamDevices | Where-Object { $_ }) }
     $r.driverInfs = @($old.driverInfs | Where-Object { $_ })
     $r.deviceMade = [bool]$old.deviceMade
     $r.settingsMade = [bool]$old.settingsMade
@@ -247,6 +257,120 @@ function Install {
   }
 }
 
+# Steam's streaming sound devices, from the owner's own Steam. The host plays a device's
+# microphone into "Steam Streaming Microphone" and makes "Steam Streaming Speakers" the default
+# output while a device listens; both are virtual audio devices of Valve's. remoteman carries
+# none of Valve's files: Steam's bin\drivers.exe (signed by Valve) is a self-extracting program
+# with an ordinary ZIP appended, whose Windows10\x64 folder has the .inf, .sys and .cat of each
+# (the .cat signed by Microsoft's hardware publisher, the .sys by Valve). Each INF's model is
+# ROOT\SteamStreamingSpeakers / ROOT\SteamStreamingMicrophone, class MEDIA, a root device whose
+# INF has an AddDevice line: `pnputil /add-driver X.inf /install` adds the package and makes the
+# device (made by hand as well, each device came twice: tried on a VM, docs/PLAN.md). Only if
+# that leaves no device is it made here as the display device is. drivers.exe is never run.
+$steamDevices = @(
+  @{ Name = 'SteamStreamingSpeakers';   HardwareId = 'ROOT\SteamStreamingSpeakers' },
+  @{ Name = 'SteamStreamingMicrophone'; HardwareId = 'ROOT\SteamStreamingMicrophone' }
+)
+$mediaClass = '{4d36e96c-e325-11ce-bfc1-08002be10318}'
+
+# Steam's folder: HKLM\SOFTWARE\WOW6432Node\Valve\Steam InstallPath (the same the installer reads).
+function Steam-Folder {
+  $p = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam' -Name InstallPath -ErrorAction SilentlyContinue).InstallPath
+  if ($p -and (Test-Path -LiteralPath $p -PathType Container)) { $p }
+}
+
+function Steam-Device([string]$id) {
+  Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {
+    (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_HardwareIds -ErrorAction SilentlyContinue).Data -contains $id
+  } | Select-Object -First 1
+}
+
+function Steam-InStore([string]$inf) { ((& pnputil.exe /enum-drivers) -join "`n") -match "(?im)^\s*Original Name:\s*$([regex]::Escape($inf))\s*$" }
+
+# The wanted entries' files out of the ZIP appended to an exe. .NET's ZipArchive counts offsets
+# from the start of the file, so the stub in front is cut off first (its length is what the end
+# record's directory position falls short by).
+function Extract-Appended-Zip([string]$path, [string[]]$wanted, [string]$into) {
+  Add-Type -AssemblyName System.IO.Compression
+  $bytes = [IO.File]::ReadAllBytes($path)
+  $eocd = -1
+  for ($i = $bytes.Length - 22; $i -ge [Math]::Max(0, $bytes.Length - 22 - 65535); $i--) {
+    if ($bytes[$i] -eq 0x50 -and $bytes[$i+1] -eq 0x4B -and $bytes[$i+2] -eq 5 -and $bytes[$i+3] -eq 6) { $eocd = $i; break }
+  }
+  if ($eocd -lt 0) { throw "$path has no ZIP in it" }
+  $start = $eocd - [BitConverter]::ToUInt32($bytes, $eocd + 12) - [BitConverter]::ToUInt32($bytes, $eocd + 16)
+  if ($start -lt 0) { throw "$path's ZIP offsets do not line up" }
+  $ms = New-Object IO.MemoryStream
+  $ms.Write($bytes, $start, $bytes.Length - $start); $ms.Position = 0
+  $zip = New-Object IO.Compression.ZipArchive($ms, [IO.Compression.ZipArchiveMode]::Read)
+  $got = @()
+  foreach ($e in $zip.Entries) {
+    if ($wanted -contains $e.FullName) {
+      $in = $e.Open(); $f = [IO.File]::Create((Join-Path $into $e.Name))
+      try { $in.CopyTo($f) } finally { $f.Dispose(); $in.Dispose() }
+      $got += $e.Name
+    }
+  }
+  $zip.Dispose()
+  $got
+}
+
+function Install-Steam {
+  $made = Load-Record
+  $steam = Steam-Folder
+  if (-not $steam) { Say "steam: Steam isn't installed here; nothing to do"; return }
+  $drivers = Join-Path $steam 'bin\drivers.exe'
+  if (-not (Test-Path -LiteralPath $drivers)) { Say "steam: no bin\drivers.exe in $steam; nothing to do"; return }
+  $todo = @($steamDevices | Where-Object { -not ((Steam-InStore "$($_.Name).inf") -and (Steam-Device $_.HardwareId)) })
+  if ($todo.Count -eq 0) { Say "steam: Steam's sound devices are installed already"; return }
+  $had = @{}; foreach ($d in $steamDevices) { if (Steam-Device $d.HardwareId) { $had[$d.HardwareId] = $true } }
+  Say "steam: installing $(($todo | ForEach-Object { $_.Name }) -join ', ') from $drivers"
+  # Administrators and SYSTEM only: what is installed is what was extracted.
+  $work = Join-Path $env:ProgramData ('remoteman\steam-drivers-' + [guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Force $work | Out-Null
+  & icacls.exe $work /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null
+  try {
+    $files = foreach ($d in $todo) { foreach ($ext in 'inf', 'sys', 'cat') { "drivers/Windows10/x64/$($d.Name).$ext" } }
+    $got = @(Extract-Appended-Zip $drivers $files $work)
+    Say "steam: extracted $($got -join ', ')"
+    Add-Type $source
+    foreach ($d in $todo) {
+      $inf = Join-Path $work "$($d.Name).inf"
+      try {
+        foreach ($ext in 'inf', 'sys', 'cat') { if (-not (Test-Path (Join-Path $work "$($d.Name).$ext"))) { throw "$($d.Name).$ext isn't in drivers.exe" } }
+        # Only what Windows says is signed goes in.
+        foreach ($f in "$($d.Name).cat", "$($d.Name).sys") {
+          $sig = Get-AuthenticodeSignature (Join-Path $work $f)
+          if ($sig.Status -ne 'Valid') { throw "$f's signature isn't valid ($($sig.Status))" }
+          Say "steam: $f signed by $($sig.SignerCertificate.Subject.Split(',')[0])"
+        }
+        $before = @(Driver-Packages)
+        $added = (& pnputil.exe /add-driver $inf /install) -join "`n"
+        $new = @(Driver-Packages | Where-Object { $before -notcontains $_ })
+        if ($new.Count -eq 0 -and $added -notmatch 'Published Name') { throw "pnputil did not take the driver: $added" }
+        Say "steam: $($d.Name) driver package: $((($added -split "`n") | Select-String 'Published Name') -join '') new: $($new -join ', ')"
+        if ($new.Count -gt 0) { $made.steamInfs = @($made.steamInfs) + $new; Save-Record $made }
+        $device = Steam-Device $d.HardwareId
+        if ($device) {
+          $result = "ok (made by pnputil: $($device.InstanceId), $($device.Status))"
+        } else {
+          Say "steam: pnputil made no $($d.HardwareId) device; making it"
+          $result = [RmDev]::Make($d.HardwareId, $inf, $mediaClass, $d.Name)
+        }
+        # Ours only if it wasn't there before this step (the list at the top said so).
+        if (-not $had.ContainsKey($d.HardwareId)) { $made.steamDevices = @($made.steamDevices) + $d.HardwareId; Save-Record $made }
+        Say "steam: $($d.Name) device: $result"
+        if ($result -notlike 'ok*') { throw $result }
+      } catch {
+        Say "steam: $($d.Name) failed: $($_.Exception.Message)"
+        $script:steamFailed = $true
+      }
+    }
+  } finally {
+    Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+  }
+}
+
 function Uninstall {
   Say "uninstall"
   $made = if (Test-Path $record) { Get-Content $record -Raw | ConvertFrom-Json } else { $null }
@@ -282,6 +406,11 @@ function Uninstall {
     Say "driver package ${inf}: $($out | Select-Object -Last 1)"
   }
   Remove-Certificates
+  # Steam's sound devices, if the install put them there, stay: Steam uses them too (the record
+  # of them goes with installed.json).
+  if ($made -and $made.PSObject.Properties.Name -contains 'steamDevices' -and @($made.steamDevices).Count -gt 0) {
+    Say "Steam's sound devices (installed by this install) are left in place: $(@($made.steamDevices) -join ', ')"
+  }
   if ($made -and $made.settingsMade) { Remove-Item -Recurse -Force $settingsFolder -ErrorAction SilentlyContinue }
   Remove-Item -Recurse -Force $state -ErrorAction SilentlyContinue
   $parent = Split-Path $state
@@ -291,6 +420,13 @@ function Uninstall {
 }
 
 try {
+  if ($Verb -eq 'steam') {
+    # Never fails the install: what went wrong is in the log, and the exit code says so.
+    $script:steamFailed = $false
+    try { Install-Steam } catch { Say "steam: $($_.Exception.Message)"; $script:steamFailed = $true }
+    if ($script:steamFailed) { Say "FAILED: Steam's sound devices weren't installed (see the lines above)"; exit 1 }
+    exit 0
+  }
   if ($Verb -eq 'install') { Install } else { Uninstall }
   exit 0
 } catch {
