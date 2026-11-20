@@ -30,6 +30,8 @@ remoteman-core = { path = "../remoteman-core" }
 # Opus half only, with libopus built from the copy opusic-c carries).
 remoteman-audio = { path = "../remoteman-audio" }
 anyhow = "1"
+# libopus, as the Windows host uses it (built with cmake): decodes the sound and conceals lost packets.
+opusic-c = "1.6"
 png = "0.18"
 serde_json = "1"
 windows-numerics = "0.3"

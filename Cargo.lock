@@ -1878,6 +1878,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ffmpeg-sys-next",
+ "opusic-c",
  "png",
  "remoteman-audio",
  "remoteman-core",
