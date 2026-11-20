@@ -1,28 +1,28 @@
 //! What this build can do. The design has controls for things the product doesn't do yet; they
 //! are in the window where the design puts them, switched off, and this is the one place that
 //! switches them on. Set a field to `true` once the core (and the code behind the control) can
-//! do it. As the Linux viewer's `features.rs`; where the two differ it is because the Linux
-//! viewer has the thing built and this one hasn't yet (sound, the microphone, the clipboard,
-//! files).
+//! do it. As the Linux viewer's `features.rs`; where the two differ it is because one viewer
+//! has the thing built and the other hasn't yet.
 
 use crate::ui::En;
 
 pub struct Features {
-    /// Find computers running remoteman on this network: the list's "Nearby" group, and the
-    /// pairing dialog's.
+    /// Find computers running remoteman on this network (DNS-SD, `nearby.rs`): the list's
+    /// "Nearby" group, and the pairing dialog's.
     pub discovery: bool,
-    /// Know that a computer is online or asleep without connecting to it: the state beside each
-    /// computer in the list, and the "is asleep" page.
+    /// Know that a computer is online without connecting to it: a paired one whose key is
+    /// advertised on this network. (Asleep can't be told from off: a computer that didn't
+    /// answer and can be woken is offered waking instead.)
     pub presence: bool,
-    /// Wake a sleeping computer over the network.
+    /// Wake a sleeping computer over the network (the magic packet to its advertised cards).
     pub wake: bool,
     /// Pairing by comparing a six-digit code that both sides show.
     pub pairing_code: bool,
     /// The computer's sound played here: the button in the session's bar, and the settings.
     pub sound: bool,
-    /// This PC's microphone used by the computer.
+    /// This PC's microphone used by the computer (`mic.rs`, `media.rs`).
     pub microphone: bool,
-    /// This PC's camera used by the computer.
+    /// This PC's camera used by the computer (`camera.rs`, `media.rs`).
     pub camera: bool,
     /// One clipboard for both sides (text): the line in the session's sharing menu, and the
     /// settings.
@@ -33,13 +33,19 @@ pub struct Features {
     pub folder_choice: bool,
     /// HDR pictures.
     pub hdr: bool,
-    /// Each frame shown when it arrives, where the monitor can.
+    /// Each frame shown when it arrives, where the monitor can: in full screen, which is a
+    /// window of the engine's own with the keyboard and an HWND swap chain that may tear
+    /// (`full.rs`, `draw.rs`). Measured on an RTX 5090 with a 240 Hz VRR monitor (`probe.rs`,
+    /// and that window with `--watch-vblank`); the app's `SwapChainPanel` never makes the
+    /// monitor vary its refresh, so in a window it stays at the monitor's rate.
+    #[allow(dead_code)] // (The old program's window doesn't present that way.)
     pub variable_refresh: bool,
     /// A choice of whether the stream follows this monitor's refresh rate (it always does).
     pub refresh_choice: bool,
     /// The other computer's display resized to follow this window.
     pub follow_window: bool,
-    /// Full colour detail (4:4:4): what Direct3D's decoders hand out for it is untried.
+    /// Full colour detail (4:4:4): HEVC 4:4:4 decoded on the processor (FFmpeg has no D3D11VA
+    /// path for it), offered unasked only where the processor keeps up.
     pub sharp_text: bool,
     /// A captured pointer that sends raw movement.
     pub pointer_capture: bool,
@@ -47,7 +53,7 @@ pub struct Features {
     pub ctrl_as_command: bool,
     /// A choice of scroll direction.
     pub scroll_direction: bool,
-    /// Touchscreen touches sent as touches.
+    /// Touchscreen touches sent as touches (`touch.rs`, `engine::touch`).
     pub touch: bool,
     /// Alt+Tab, the Windows key and the like sent to the other computer.
     pub system_shortcuts: bool,
@@ -65,25 +71,25 @@ pub struct Features {
 }
 
 pub const FEATURES: Features = Features {
-    discovery: false,
-    presence: false,
-    wake: false,
+    discovery: true,
+    presence: true,
+    wake: true,
     pairing_code: true,
     sound: true,
-    microphone: false,
-    camera: false,
+    microphone: true,
+    camera: true,
     clipboard: true,
     files: true,
     folder_choice: true,
     hdr: true,
-    variable_refresh: false,
+    variable_refresh: true,
     refresh_choice: true,
     follow_window: true,
     sharp_text: true,
     pointer_capture: true,
     ctrl_as_command: true,
     scroll_direction: true,
-    touch: false,
+    touch: true,
     system_shortcuts: true,
     key_mapping: false,
     release_shortcut: true,

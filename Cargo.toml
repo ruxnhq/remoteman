@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# A [patch] below, not a member: it is Windows-only and would not build elsewhere.
+exclude = ["vendor/windows-reactor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,3 +12,9 @@ publish = false
 
 [profile.release]
 debug = 1
+
+# Remoteman Host for Windows (crates/remoteman-host-app-windows) is WinUI 3 through Microsoft's
+# windows-reactor, pinned to a windows-rs commit, and Reactor is replaced by a patched copy of
+# that commit (vendor/windows-reactor/VENDORED.md says what was changed and why).
+[patch."https://github.com/microsoft/windows-rs"]
+windows-reactor = { path = "vendor/windows-reactor" }

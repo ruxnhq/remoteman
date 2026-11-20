@@ -49,8 +49,8 @@ pub fn fit_lines(width: u32, height: u32, scale: f32, most: u32) -> (u32, u32, f
 pub enum Quality {
     /// The decoders in their usual order.
     Automatic,
-    /// Full colour detail (4:4:4) first. Not offered here yet (`Features::sharp_text`); kept
-    /// so that a file written by the Linux viewer reads back as it was.
+    /// Full colour detail (4:4:4) first, even where it is decoded on the processor and may
+    /// not keep up (it was asked for).
     Sharp,
     Hevc,
     Av1,
@@ -139,13 +139,24 @@ pub struct Computer {
     pub clipboard: bool,
     /// Which side of the computer's other displays a second display here is put on.
     pub second_side: Side,
+    /// The hardware addresses of its network cards (`aa:bb:cc:dd:ee:ff`, comma-separated), as
+    /// it last advertised them on this network: what waking it is sent to. The Linux viewer's
+    /// key, `cards`.
+    pub cards: String,
+    /// "Wake it over the network": it may be sent the waking packet.
+    pub wake: bool,
     /// Lines this viewer doesn't use (the Linux viewer's), kept as they were.
     pub other: Vec<(String, String)>,
 }
 
 impl Computer {
     fn new(name: &str, address: &str, os: &str, now: i64, settings: &Settings) -> Self {
-        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: 0, sound: settings.sound, clipboard: settings.clipboard, second_side: Side::Right, other: Vec::new() }
+        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: 0, sound: settings.sound, clipboard: settings.clipboard, second_side: Side::Right, cards: String::new(), wake: true, other: Vec::new() }
+    }
+
+    /// The network cards it can be woken through.
+    pub fn card_list(&self) -> Vec<String> {
+        self.cards.split(',').map(str::trim).filter(|c| !c.is_empty()).map(str::to_owned).collect()
     }
 }
 
@@ -174,6 +185,20 @@ pub struct Settings {
     pub clipboard: bool,
     /// Where files from a computer go; empty: the Downloads folder.
     pub folder: String,
+    /// Ask for HDR when this monitor is in HDR (and the computer offers it).
+    pub hdr: bool,
+    /// In full screen on a monitor that can vary its refresh, show each frame as it arrives.
+    pub variable_refresh: bool,
+    /// How fast this PC's processor decodes 4:4:4, in millions of pixels a second, as last
+    /// measured in a session (0: never measured).
+    pub cpu_444: u32,
+    /// Touchscreen touches go to the computer as touches, not as the pointer (the Linux
+    /// viewer's key, `touch`).
+    pub touch: bool,
+    /// Computers may be lent this PC's microphone and camera; each is still switched on in a
+    /// session by the person here.
+    pub allow_microphone: bool,
+    pub allow_camera: bool,
     /// Lines this viewer doesn't use, kept as they were.
     pub other: Vec<(String, String)>,
 }
@@ -195,7 +220,10 @@ impl Settings {
     }
 }
 
-const SETTINGS_KEYS: [&str; 13] = ["capture-pointer", "placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder"];
+/// The picture's own keys (this viewer's alone so far).
+const PICTURE_KEYS: [&str; 3] = ["hdr", "variable-refresh", "cpu-444"];
+
+const SETTINGS_KEYS: [&str; 16] = ["capture-pointer", "placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder", "touch", "allow-microphone", "allow-camera"];
 
 pub struct Store {
     dir: PathBuf,
@@ -244,7 +272,13 @@ impl Store {
             sound: yes("sound", false),
             clipboard: yes("clipboard", false),
             folder: get("folder").unwrap_or_default(),
-            other: text.lines().filter_map(|l| l.split_once('=')).filter(|(k, _)| !SETTINGS_KEYS.contains(k)).map(|(k, v)| (k.to_owned(), v.to_owned())).collect(),
+            hdr: yes("hdr", true),
+            variable_refresh: yes("variable-refresh", true),
+            cpu_444: get("cpu-444").and_then(|v| v.parse().ok()).unwrap_or(0),
+            touch: yes("touch", false),
+            allow_microphone: yes("allow-microphone", false),
+            allow_camera: yes("allow-camera", false),
+            other: text.lines().filter_map(|l| l.split_once('=')).filter(|(k, _)| !SETTINGS_KEYS.contains(k) && !PICTURE_KEYS.contains(k)).map(|(k, v)| (k.to_owned(), v.to_owned())).collect(),
         };
         let mut store = Self { dir: dir.to_owned(), computers: Vec::new(), settings, pretend: false };
         if let Ok(text) = std::fs::read_to_string(dir.join("viewer-computers")) {
@@ -267,6 +301,8 @@ impl Store {
                     "sound" => c.sound = value == "yes",
                     "clipboard" => c.clipboard = value == "yes",
                     "second-side" => c.second_side = SIDES.iter().find(|s| s.1 == value).map_or(Side::Right, |s| s.0),
+                    "cards" => c.cards = value.to_owned(),
+                    "wake" => c.wake = value != "no",
                     other => c.other.push((other.to_owned(), value.to_owned())),
                 }
             }
@@ -379,7 +415,7 @@ impl Store {
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         for c in &self.computers {
             out += &format!(
-                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\npicture-lines={}\nsound={}\nclipboard={}\nsecond-side={}\n",
+                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\npicture-lines={}\nsound={}\nclipboard={}\nsecond-side={}\ncards={}\nwake={}\n",
                 clean(&c.name),
                 clean(&c.address),
                 clean(&c.os),
@@ -392,6 +428,8 @@ impl Store {
                 if c.sound { "yes" } else { "no" },
                 if c.clipboard { "yes" } else { "no" },
                 SIDES.iter().find(|s| s.0 == c.second_side).map_or("right", |s| s.1),
+                clean(&c.cards),
+                if c.wake { "yes" } else { "no" },
             );
             for (key, value) in &c.other {
                 out += &format!("{key}={}\n", clean(value));
@@ -408,7 +446,7 @@ impl Store {
         let s = &self.settings;
         let yes = |b: bool| if b { "yes" } else { "no" };
         let mut out = format!(
-            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\ncapture-pointer={}\nsound={}\nclipboard={}\nfolder={}\n",
+            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\ncapture-pointer={}\nsound={}\nclipboard={}\nfolder={}\ntouch={}\nallow-microphone={}\nallow-camera={}\n",
             placement_key(s.placement),
             yes(s.hover_bar),
             yes(s.figures),
@@ -422,7 +460,11 @@ impl Store {
             yes(s.sound),
             yes(s.clipboard),
             s.folder.replace(['\n', '\r'], " "),
+            yes(s.touch),
+            yes(s.allow_microphone),
+            yes(s.allow_camera),
         );
+        out += &format!("hdr={}\nvariable-refresh={}\ncpu-444={}\n", yes(s.hdr), yes(s.variable_refresh), s.cpu_444);
         for (key, value) in &s.other {
             out += &format!("{key}={value}\n");
         }
@@ -498,5 +540,95 @@ pub fn when(unix: i64) -> String {
             let month = MONTHS[(m - 1).clamp(0, 11) as usize];
             if y == this_year { format!("{d} {month}") } else { format!("{d} {month} {y}") }
         }
+    }
+}
+
+/// How fast a processor is taken to decode HEVC 4:4:4 before this PC's has been measured, in
+/// millions of pixels a second: about half of what one of the fastest desktop processors did
+/// (a Ryzen 9 9950X3D: 228 at 1920x1080, 243 at 2560x1440, 330 at 3840x2160, with the upload,
+/// on one core: NVENC's pictures are one slice each, and frame threads would hold pictures
+/// back). Enough for 1280x720 at 60, not for 1920x1080 at 60 until measured.
+pub const CPU_444_GUESS: u32 = 120;
+
+/// What is kept of a new measurement of the processor's 4:4:4 rate: the lowest seen, since a
+/// rate measured on a larger picture (fewer bits a pixel) must not vouch for a smaller one.
+pub fn kept_cpu_444(kept: u32, measured: u32) -> u32 {
+    if kept == 0 { measured } else { kept.min(measured) }
+}
+
+/// Whether 4:4:4 decoded on the processor keeps up with a picture of `width` x `height` at
+/// `refresh` a second, for a processor that decodes `rate` million pixels a second (measured,
+/// or the guess above): with a fifth of each frame's time left over for the rest of the work.
+pub fn cpu_keeps_up(width: u32, height: u32, refresh: u32, rate: u32) -> bool {
+    let wanted = width as f64 * height as f64 * refresh.max(1) as f64;
+    wanted * 1.25 <= rate as f64 * 1e6
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use remoteman_core::Chroma;
+
+    fn modes() -> Vec<Mode> {
+        vec![Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 }, Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 }]
+    }
+
+    #[test]
+    fn the_processor_keeps_up_where_its_rate_allows() {
+        // The guess: 720p60, not 1080p60.
+        assert!(cpu_keeps_up(1280, 720, 60, CPU_444_GUESS));
+        assert!(!cpu_keeps_up(1920, 1080, 60, CPU_444_GUESS));
+        // This PC's processor as measured at 1080p (228): 1080p60, not 1080p120, not 1440p60
+        // with the fifth to spare, never 4K, nor its monitors' 240 Hz.
+        assert!(cpu_keeps_up(1920, 1080, 60, 228));
+        assert!(!cpu_keeps_up(1920, 1080, 120, 228));
+        assert!(!cpu_keeps_up(2560, 1440, 60, 228));
+        assert!(!cpu_keeps_up(3840, 2160, 60, 228));
+        assert!(!cpu_keeps_up(1920, 1080, 240, 228));
+        // No rate: nothing.
+        assert!(!cpu_keeps_up(640, 480, 30, 0));
+    }
+
+    #[test]
+    fn a_rate_measured_on_a_larger_picture_does_not_vouch_for_a_smaller_one() {
+        // 4K measured first (330 a microsecond's worth), then 1080p (228): 228 is kept, and a
+        // 1080p at 120 (which measured about 105 a second) isn't offered.
+        let kept = kept_cpu_444(kept_cpu_444(0, 330), 228);
+        assert_eq!(kept, 228);
+        assert!(!cpu_keeps_up(1920, 1080, 120, kept));
+        assert_eq!(kept_cpu_444(228, 330), 228);
+    }
+
+    #[test]
+    fn sharp_text_puts_four_four_four_first_and_automatic_last() {
+        let sharp = Quality::Sharp.order(&modes());
+        assert_eq!(sharp[0].chroma, Chroma::C444);
+        let auto = Quality::Automatic.order(&modes());
+        assert_eq!(auto.last().unwrap().chroma, Chroma::C444);
+        let hevc = Quality::Hevc.order(&modes());
+        assert_eq!((hevc[0].codec, hevc[0].chroma), (Codec::Hevc, Chroma::C420));
+    }
+
+    #[test]
+    fn the_picture_settings_are_kept_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("remoteman-store-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file from before these keys: HDR and variable refresh start on, the rate unknown,
+        // and a line of the Linux viewer's is kept.
+        std::fs::write(dir.join("viewer-settings"), "figures=yes\npicture-lines=1080\n").unwrap();
+        let mut store = Store::load(&dir);
+        assert!(store.settings.hdr && store.settings.variable_refresh);
+        assert_eq!(store.settings.cpu_444, 0);
+        store.settings.hdr = false;
+        store.settings.variable_refresh = false;
+        store.settings.cpu_444 = 287;
+        store.save_settings();
+        let again = Store::load(&dir);
+        assert!(!again.settings.hdr && !again.settings.variable_refresh);
+        assert_eq!(again.settings.cpu_444, 287);
+        assert!(again.settings.figures);
+        assert_eq!(again.settings.other, vec![("picture-lines".to_owned(), "1080".to_owned())]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,0 +1,46 @@
+[package]
+name = "remoteman-viewer-app-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# remoteman for Windows: the app. WinUI 3 written in Rust with Microsoft's windows-reactor
+# (vendor/windows-reactor), the view only: the engine (crates/remoteman-viewer-windows, linked
+# as a library) holds the product (sessions, decode, presentation, input, sound, the store) and
+# says what is on screen as a JSON state; this crate shows it and hands back what people do.
+# Everything it needs is Windows-only, so on other systems this crate builds to a stub.
+#
+# The program is remoteman-app.exe: not "remoteman", which is the Linux viewer's program, and
+# Cargo refuses two programs of one name in a workspace build. Whatever packages it copies it to
+# remoteman.exe (scripts/win-viewer-app.ps1).
+[[bin]]
+name = "remoteman-app"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+remoteman-viewer-windows = { path = "../remoteman-viewer-windows" }
+serde_json = "1"
+windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25" }
+# Reactor's own windows-core (that commit's), for the IUnknown the panel is given its swap
+# chain as; the engine's `windows` (0.62) hands it over as a raw pointer.
+windows-core = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25" }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Stages the Windows App Runtime beside the exe and embeds the manifest that finds it there, so
+# the app runs on a PC that never installed the runtime (self-contained). Not for the Store's
+# MSIX, which depends on the runtime's framework package instead
+# (REMOTEMAN_FRAMEWORK_DEPENDENT=1 at build time leaves this out).
+windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25" }
+# The exe's name in Windows.
+winresource = "0.1"
