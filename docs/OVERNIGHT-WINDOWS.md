@@ -190,3 +190,10 @@ streaming speakers and microphone from the user's own Steam folder (`drivers.exe
 a 430 KB stub; the x64 INF/SYS/CAT, Microsoft-signed catalogs, installed with pnputil), which
 gives the PC a device's microphone. `C:\rm\installer-2026-11-20-014\remoteman-host-setup-0.1.4.exe`
 (7a75e1c). Not yet seen: the mute from the service, the Steam devices' install.
+Installing 0.1.4 (09:01): the host part went in at once; the Steam step took about 6 minutes and
+looked stuck. Both of Steam's devices did install (speakers 09:03:37, microphone 09:04:21); the
+time went in checking for them, which asked each of the PC's 308 devices for its hardware ids (0.2
+s each, several times over). Now one query of the device list (0.3 s, 4be7f07), and the host is
+restarted after the step so it finds Steam's microphone (it looks only at start; 331dcb5).
+`C:\rm\installer-2026-11-20-015\remoteman-host-setup-0.1.5.exe`. Also removed: two leftover tray
+entries in Settings from test copies of the tray app (a worktree's and `C:\rm\hostapp-rust`'s).
