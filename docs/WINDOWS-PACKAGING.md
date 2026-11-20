@@ -261,6 +261,134 @@ a real PC with a screen, where the driver's first monitor appears as an extra sc
 desktop; Secure Boot with a real monitor; an upgrade over an earlier install; Windows' own
 firewall prompt (the rule exists before the host first listens, so none should appear).
 
+## The host's installer in Rust (WinUI 3), next to the Inno one
+
+Written 2026-11-19, on branch `worktree-agent-a1e78cd8e7a5e995f`. The installer's pages are WinUI 3
+in Rust through windows-reactor, like Remoteman Host: `crates/remoteman-host-installer-windows`,
+one program, `remoteman-host-setup.exe`. The Inno Setup files above stay until this one has
+been through a real install.
+
+**Build on Windows** (one command; Build Tools with C++, Rust, CMake from Build Tools, the driver
+kit's NuGet packages; no Inno Setup):
+
+    powershell -ExecutionPolicy Bypass -File scripts\win-host-setup.ps1 [-Version 0.1.0] [-Out FOLDER] [-Payload FOLDER] [-NoApp]
+
+It builds the host, the driver (`windows\display-driver\build.ps1`) and Remoteman Host
+(`crates\remoteman-host-app-windows\stage.ps1`, when that crate is there), gathers the files to
+install in `OUT\payload` (`remoteman-host.exe`, `setup.ps1`, `driver\pkg\RemotemanDisplay.dll`
+and `.inf`, `driver\vdd_settings.xml` and the two licences, `app\`), builds the installer and
+packs it: `target\installer\remoteman-host-setup-VERSION.exe`. `-Payload FOLDER` packs a folder
+gathered by hand instead of building the host, driver and app. setup.ps1 is the tree's own
+(`windows\host-installer\setup.ps1`): a tree whose setup.ps1 still registers the logon task
+makes an installer that would add that task beside an installed service, so build from a tree
+with the service-based one.
+
+**One file, 19.4 MB** with the app (18.7 MB without `app\`): the program 4.2 MB, the Windows App
+Runtime 2.6.4 its pages need 12.6 MB (205 files, 57.3 MB unpacked), the rest 2.5 MB (the host,
+Remoteman Host's exe, setup.ps1, the driver: 9.9 MB unpacked). The archive is appended to the
+exe (`src/archive.rs`): each file's content once, however many paths have it, so the runtime
+beside Remoteman Host in `app\` is the pages' runtime, carried once; two XZ streams (LZMA2 preset
+9 behind the x86 branch filter, `lzma-rust2`, pure Rust, Apache-2.0), the first with the runtime
+only; a JSON index with each file's SHA-256, checked as each file is written and read back
+after. The uninstaller, `uninstall.exe` in the install folder, is the program and the first
+stream (16.8 MB), so installed the runtime is there twice: unpacked in `app\` (64 MB) and packed
+in `uninstall.exe`. The archive ends 8-byte aligned before a trailer that is found before an
+appended code signature, so the file can still be signed (not tried).
+
+**A run is three processes of the one exe** (`src/main.rs`, `src/launch.rs`): what the user
+opened asks Windows to run the same file elevated (the one UAC prompt, before the first page),
+waits, and stays unelevated, so that it is what starts Remoteman Host afterwards, as the user;
+the elevated one unpacks the runtime and the bare exe into a new folder under `C:\Windows\Temp`
+that only Administrators and SYSTEM can write to (0.6 s) and runs the pages from there, then
+deletes it; the pages (`src/ui.rs`) run the steps (`src/engine.rs`) on a thread of their own.
+Nothing elevated loads a DLL from a folder the user can write to: the pages' folder is
+administrators' only, and the other two load DLLs by name from System32 only
+(`SetDefaultDllDirectories`; their own imports are Windows' known DLLs, and a DLL planted beside
+the exe under the name of the one that isn't, `bcryptprimitives.dll`, was not loaded). Run from
+the install folder (the uninstaller), the first copies itself to %TEMP% and hands over from there.
+
+**Installing** (also over an earlier install, by this installer or by the Inno one):
+
+1. the running host stopped: the service "remoteman host" (SCM, up to 30 s), an older install's
+   logon task (`schtasks /End`), any `remoteman-host.exe` left from the install folder and
+   `app\remoteman-host-app.exe` (which holds its runtime's files) ended by pid, as the Inno
+   installer's PrepareToInstall did;
+2. the first change: the install folder `C:\Program Files\remoteman host`, `uninstall.exe` in it,
+   and the Settings > Apps entry, `HKLM\...\Uninstall\remoteman host` (DisplayName,
+   DisplayVersion, Publisher "remoteman", DisplayIcon, InstallLocation, UninstallString
+   `"...\uninstall.exe" --uninstall`, QuietUninstallString, InstallDate, EstimatedSize, NoModify,
+   NoRepair); the Inno installer's entry (`{6A0F3C2E-...}_is1`) and `unins000.*` deleted (never
+   run: its uninstaller would delete the host's state). This comes before the files and
+   setup.ps1, not after setup.ps1 as first asked, so that an install that fails at any later
+   step can still be uninstalled;
+3. the files, over what is there (files of an earlier `app\` that this one doesn't have are
+   deleted; nothing else is, `installed.json` above all); each file read back and checked;
+4. `setup.ps1 install`, as the Inno installer ran it: hidden PowerShell, `-NoProfile
+   -ExecutionPolicy Bypass -File`, in the install folder; setup.log's new lines are shown as
+   they come; exit code 0, or 1 with the reason as setup.log's last line;
+5. with `app\`: `HKLM\...\Run`, "remoteman host" = `"...\app\remoteman-host-app.exe" --background`,
+   and a shortcut `Remoteman Host.lnk` in the common Start menu (without `app\`, an earlier
+   install's are removed). Done, "Open Remoteman Host" opens its window and Close starts it in
+   the background, both by the unelevated first process, as the user.
+
+**Uninstalling** (Settings > Apps): Remoteman Host ended, `setup.ps1 uninstall`, the folder
+deleted (setup.log kept as `%TEMP%\remoteman-host-setup-removed.log` first; a file in use is
+moved out to Windows' Temp and deleted at restart), then the entry, the Run value and the
+shortcut. A step that fails stops everything after it; the page says which, why, and where the
+log is (`setup.log` in the install folder, which has the installer's lines and setup.ps1's;
+before the folder exists, `%TEMP%\remoteman-host-setup.log`, every process's lines).
+
+**For tests and scripts:** `--dry-run` shows every page and walks every step without elevation
+and changes nothing: what would be done is logged, and the files go to
+`%TEMP%\remoteman-host-setup-dry-run\remoteman host` instead (that folder's `uninstall.exe`
+uninstalls it as the real one would). `--fail-at stop|files|register|setup|app` (uninstalling:
+`stop|setup|files|entries`) makes that step fail, in dry runs only. `--theme light|dark`.
+`--silent` has no pages; exit code 0 done, 1 failed (2: cancelled on the first page or at the
+UAC prompt). It is a windowed program, so a script waits for it with
+`Start-Process -Wait -PassThru`.
+
+**Tested here (dry runs only; nothing was installed, uninstalled, stopped or written to the
+registry on this PC):** `crates/remoteman-host-installer-windows/test/walk.ps1` drives every page
+through UI Automation in light and dark, with screenshots in `C:\rm\shots-setup` (welcome, the
+steps, the close refused while they run, done, failed at setup.ps1 and at the files, the
+uninstaller's confirm, steps, done and failure, and with no `--theme` the theme Windows is set
+to) and each run's exit code; `test/checks.ps1`: a
+silent install whose 213 files all arrived with their sizes and SHA-256, the `would` lines (what
+a real install would have changed on this PC, where the Inno install is: stop the service, the
+entry and the Inno takeover, setup.ps1, the Run value and the shortcut), the uninstaller copying
+itself out of the folder (silent and with its pages) and the folder and the copy gone after; the
+pages' DLLs: all 17 of the runtime's that load come from the pages' own folder, none from the
+Windows App Runtime packages installed on this PC (`WindowsApps`, `SystemApps`), and with
+`Microsoft.ui.xaml.dll` taken out of a copy of that folder the window doesn't open at all
+(`0x8007007E`, no fallback). `cargo test` runs what only a real install runs, in folders of its
+own: setup.ps1 started as above (a stand-in that writes setup.log as the real one does, warns
+and fails: the reason read is its `FAILED` line from this run, its lines shown as they come,
+exit 0 done; and one PowerShell can't parse, beside an earlier install's `FAILED` line: the
+reason is what PowerShell said, not the old line),
+the files written over an install (`installed.json` left, an earlier `app\` file gone), the
+Start menu shortcut, and the archive packed, unpacked, cut down to the uninstaller and found
+damaged. **Never run at all:** a real install, upgrade or uninstall; the UAC prompt; the
+registry writes and deletes; the service stopped and a SYSTEM process ended; the folder under
+`C:\Windows\Temp` with its ACL; delete-at-restart; Settings > Apps running the uninstaller;
+Explorer opening Remoteman Host when the first process is itself elevated; Notepad opened from
+the elevated pages; a second administrator's credentials at the prompt; a PC that never had the
+runtime (the module check is the stand-in); a downloaded file (with its zone mark), whose
+relaunch skips the zone check (`SEE_MASK_NOZONECHECKS`) so that it is not asked about twice:
+the first thing to watch in the real test.
+
+**What Reactor couldn't do, and how it is done instead:** no closing event, so the steps can't
+veto a close: the window's procedure is wrapped (`SetWindowLongPtrW`) and `WM_CLOSE` is refused
+while they run, with a line saying why; `LocalSender` isn't `Send`, so the steps' events come
+back through a chain of `spawn_background` tasks, each waiting for the next event; the window's
+icon is a file path, so the icon is written beside the exe. No change to `vendor/windows-reactor`.
+
+**On Linux** the crate is a stub (`main` says it runs only on Windows; every dependency is under
+`[target.'cfg(windows)']`; `build.rs` does nothing). A Linux build of the workspace still fetches
+the windows-rs git repository (Cargo resolves git sources for every platform: a Linux-target
+`cargo fetch --offline` without it fails, naming Remoteman Host's crate first, which has the same
+dependency) but compiles none of it. Built on Linux for Windows (cargo-xwin), the installer would
+have no runtime to pack and no manifest to find it: build it on Windows.
+
 ## What an unsigned download shows a user
 
 Neither of these was seen here (the VM's files have no "downloaded from the internet" mark, and
