@@ -84,6 +84,9 @@ enum Automation {
             case "--decoders": decoders = value()
             case "--present": VideoRenderer.onArrival = value() != "tick"  // arrival (default) or tick
             case "--hdr": ViewerSession.forcedHeadroom = Float(value())  // as if the screen had this headroom
+            case "--second-factor": ViewerSession.automaticCode = value()
+            case "--gamepad-debug": Gamepads.debug = ["yes", "1", "true"].contains(value())
+            case "--state": ViewerSession.stateOverride = resolve(value()).path
             case "--view-only": session.viewOnly = ["yes", "1", "true"].contains(value())
             case "--script": script = value()
             case "--opus-test":
@@ -243,7 +246,7 @@ enum Automation {
                     let s = shape.map { $0.map { "\($0.image.width)x\($0.image.height) hot \($0.hotX),\($0.hotY)" } ?? "none" } ?? "not sent"
                     print("remoteman: host cursor at \(at.map { String(format: "%.3f, %.3f visible %@", $0.x, $0.y, $0.visible ? "yes" : "no") } ?? "unknown"), shape \(s)")
                 // Features. stats: the figures since the last one (prints the picture's size and rate).
-                case "features": print("remoteman: host features \(DispatchQueue.main.sync { session.features }.sorted().joined(separator: ","))")
+                case "features": print("remoteman: host features \(DispatchQueue.main.sync { session.features }.sorted().joined(separator: ","))\(DispatchQueue.main.sync { session.notice }.map { "; notice: \($0)" } ?? "")")
                 case "soundage": print("remoteman: sound packets' median age on arrival \(session.soundAgeMs().map { String(format: "%.1f ms", $0) } ?? "unknown")")
                 case "stats":
                     let t = DispatchQueue.main.sync { () -> String in

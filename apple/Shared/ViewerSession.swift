@@ -158,6 +158,15 @@ final class ViewerSession: ObservableObject {
     /// The computer is locked and wants its user's password: its words for people. Set as the
     /// session fails; cleared by the next connect.
     @Published private(set) var lockedAsk: String?
+    /// The computer wants a code from an authenticator app: `left` is -1 the first time, after a
+    /// wrong code the tries left. Answer with `answerSecondFactor`, or `disconnect` to give up.
+    struct SecondFactorAsk: Identifiable {
+        let id = UUID()
+        var left: Int
+    }
+    @Published var secondFactor: SecondFactorAsk?
+    /// A code to answer with without asking (--second-factor, for tests).
+    static var automaticCode: String?
     /// Why the host ended the last session (CoreClient.closeCode); -1 when it wasn't the host.
     @Published private(set) var closeCode = -1
     /// The computer took this device off its trust list: it has to be paired again.
@@ -611,6 +620,7 @@ final class ViewerSession: ObservableObject {
     private var lastTick = DispatchTime.now().uptimeNanoseconds
     private var lastPresented = 0
     private var timer: Timer?
+    private var gamepads: Gamepads?
 
     /// The decoders this device has in hardware, most preferred first, as the core wants them.
     static var decoders: String {
@@ -631,7 +641,13 @@ final class ViewerSession: ObservableObject {
         rm_forget_host(stateDir, host.contains(":") ? host : host + ":7791") == 1
     }
 
+    /// A state directory of its own for a test run (--state), so that it keeps its own paired hosts.
+    static var stateOverride: String?
     static var stateDir: String {
+        if let o = stateOverride {
+            try? FileManager.default.createDirectory(atPath: o, withIntermediateDirectories: true)
+            return o
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("remoteman", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -763,6 +779,18 @@ final class ViewerSession: ObservableObject {
                     }
                     self.client = client
                     self.features = features
+                    client.onSecondFactor { [weak self, weak client] left in
+                        DispatchQueue.main.async {
+                            guard let self, let client, self.generation == gen else { return }
+                            if let code = Self.automaticCode {
+                                print("remoteman: second factor asked (\(left) tries left), answering with the given code")
+                                Self.automaticCode = left >= 0 ? nil : code
+                                client.secondFactor(code: code, remember: false)
+                            } else {
+                                self.secondFactor = SecondFactorAsk(left: left)
+                            }
+                        }
+                    }
                     // A computer that lets this device watch only: say so once, since nothing it does will reach it.
                     if !features.contains("input") { self.notice = "View only: this computer shows its screen but takes no input from this device." }
                     self.sharing = shared
@@ -774,6 +802,12 @@ final class ViewerSession: ObservableObject {
                     self.loggingIn = false
                     self.state = .streaming(hostName.isEmpty ? target : hostName)
                     self.startStats()
+                    let pads = Gamepads(wanted: { [weak self] in self?.has("gamepad") ?? false }) { [weak self] pad, flags, buttons, lt, rt, lx, ly, rx, ry in
+                        self?.client?.gamepad(pad: pad, flags: flags, buttons: buttons, lt: lt, rt: rt, lx: lx, ly: ly, rx: rx, ry: ry) ?? false
+                    }
+                    self.gamepads?.stop()
+                    self.gamepads = pads
+                    pads.start()
                     // What was on for this computer last time comes back on. The microphone and
                     // camera only for those who asked for that, and only where the system has
                     // already said yes (so that nothing is asked as a session starts).
@@ -849,8 +883,14 @@ final class ViewerSession: ObservableObject {
         }
     }
 
+    func answerSecondFactor(code: String, remember: Bool) {
+        secondFactor = nil
+        client?.secondFactor(code: code, remember: remember)
+    }
+
     func disconnect() {
         generation += 1
+        secondFactor = nil
         playing = false
         let c = client
         client = nil
@@ -884,6 +924,7 @@ final class ViewerSession: ObservableObject {
         guard gen == generation else { return }
         if comeBack(after: reason, generation: gen) { return }
         closeCode = client?.closeCode ?? -1
+        secondFactor = nil
         // On 3 the computer's key is kept: pairing again still checks it is the same computer.
         let c = client
         client = nil
@@ -894,6 +935,8 @@ final class ViewerSession: ObservableObject {
     }
 
     private func teardown() {
+        gamepads?.stop()
+        gamepads = nil
         pairingCode = nil
         streamHDR = false
         loggingIn = false

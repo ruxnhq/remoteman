@@ -574,6 +574,7 @@ struct RootView: View {
                 }
             }
             .modifier(UnlockPrompt(unlocker: model.unlocker))
+            .modifier(SecondFactorPrompt(session: session))
             .onAppear {
                 guard !started else { return }
                 started = true
