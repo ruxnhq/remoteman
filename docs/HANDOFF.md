@@ -118,7 +118,7 @@ The Mac session fixed its test window not following an in-place display change (
 
 **For the owner in the morning, first:**
 1. The second XG32UCWMG (and, after the display timer, the main one too) went into deep sleep and dropped off the PC: DisplayPort monitors that sleep disconnect themselves, and nothing on the PC can wake them. Press a monitor's power button if it stays dark.
-2. Install `C:\rm\installer-2026-11-20\remoteman-host-setup-*.exe` (one UAC prompt, as on 2026-11-19 19:41). Nothing new is installed yet: the host running is still the old one.
+2. Install `C:\rm\installer-2026-11-20\remoteman-host-setup-0.1.0.exe` (built from 51abd54; one UAC prompt, as on 2026-11-19 19:41). Nothing new is installed yet: the host running is still the old one.
 3. If the screens come back wrong before or after that (one of the driver's 800x600 monitors on the desktop, or the main screen elsewhere): `powershell -ExecutionPolicy Bypass -File C:\rm\tools\fix-screens.ps1`. It takes the driver's monitors off and makes the main XG32UCWMG (UID4353) the main screen at 0,0, keeping the others as Windows has them; Settings > Display does the rest.
 4. **Sharing is switched off** on the host (`remoteman-host ctl sharing off`, kept across restarts), so no device can ask for the main display again before the fix is in: turn it back on from the tray app (Remoteman Host) or with `ctl sharing on`.
 
