@@ -247,9 +247,12 @@ impl Component for Installer {
                 let _ = context.close_window();
             }
             Message::OpenLog => {
+                // In Notepad, named: what a .log opens with may be nothing, or ask (Explorer
+                // showed "Open with" here).
                 if let Some(outcome) = &self.outcome {
                     let notepad = system::windows_dir().join(r"System32\notepad.exe");
-                    let _ = std::process::Command::new(notepad).arg(&outcome.log).spawn();
+                    let opened = system::start(&notepad, &[&outcome.log.to_string_lossy()]);
+                    log::say(&format!("pages: the log opened in Notepad ({}): {opened:?}", outcome.log.display()));
                 }
             }
             Message::CloseRefused => self.close_refused = true,
