@@ -32,7 +32,7 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 | "Getting in" choice (`way_in`, greyed) | **done, unit-tested** (72f7998): per computer, "The computer decides" or "Only a session that is already running" (`attach_only`); only the Linux daemon has more than one way in; not run against it |
 | The host's cursor shape in a window | **done, checked** (6a8c125): worn over the picture through `WM_SETCURSOR` on the app's windows; against the Mac test host, `GetCursorInfo` read the host's 56x80 cursor (hotspot 10,10) over the picture and the system arrow elsewhere. Hiding it (width 0) not seen |
 | HEVC 4:4:4 decoded on the card (Y410 drawn) | **half**: Y410/AYUV drawing is in (6a8c125), matching the planar path to 1 code value (BT.709, PQ on HDR); but FFmpeg 9.0's HEVC decoder never offers D3D11VA for 4:4:4, so 4:4:4 still decodes on the CPU, at 77-103 ms a picture at 1080p (one slice per frame = one thread). Next: the host cuts 4:4:4 into slices (in work); a real fix is NVDEC through CUDA or our own DXVA decoding |
-| Variable refresh in a window | not started (feasibility first) |
+| Variable refresh in a window | **not testable tonight**: the only monitor connected is the ROG, which has no variable refresh (full screen doesn't vary on it either); the XG32UCWMGs are off. To run with one connected: `--play` a 100 fps clip with `--watch-vblank`, full screen first (10.00 ms), then a flip-model child window over the panel |
 | Full screen's menus off the old Direct2D kit | not started |
 
 ### Windows host
@@ -41,10 +41,10 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 | Mirroring the PC's own screens | **done, run unelevated** (2387e21): Desktop Duplication of the PC's main screen when a device asks for `mirror`; a test host (`--test-mirror-only`, port 7795) streamed this PC's 3840x2160 screen to `watch` (278 frames in 25 s, 0 lost, age 4.8 ms) — frame counts only, nothing saved. Not run: HDR (FP16), the lock screen/UAC as SYSTEM, the cursor channel, switching mirror/extend mid-session |
 | HDR mastering and light-level metadata; HEVC 4:4:4 in HDR | **done at the encoder** (11a7e33): ST 2086 + MaxCLL/MaxFALL on keyframes (HEVC SEI; AV1 metadata OBUs written by us, NVENC's own fields gave nothing); HEVC 4:4:4 PQ allowed. ffprobe shows the side data on synthetic streams of all three. Not run in a session |
 | The driver unplugs a device's monitor when it leaves (`DESTROYMONITOR`) | **built, not installed** (59db529): `DESTROYMONITOR n` departs the monitor, new `PLUGMONITOR n` brings it back with the same identity; the host plugs a device's monitor in when it comes and unplugs it when it leaves (PC with screens only); driver 0.1.1.0. Morning test plan in the merge's branch report (below) |
-| A display scale for the device's monitor | in work |
+| A display scale for the device's monitor | **built** (92cb5b2): after the device's monitor is up, its Windows scale is set to the step nearest the device's `scale` (`DisplayConfigSetDeviceInfo`, -4), never on the PC's own screens or when mirroring. The GET was read on this PC (the ROG: 100-350 %, 300 % recommended); the SET needs the driver's monitor (elevated), not run |
 | Steam's sound devices from the user's Steam, speakers switched while a device listens | **built** (7564e3c): the installer looks for Steam's devices and says how to get them (Steam packs the drivers inside `drivers.exe`, nothing to give pnputil); while a device listens the default output becomes Steam Streaming Speakers and is put back after (`speakers.json` survives a crash), switchable. Not run (no Steam devices on this PC; no default device changed) |
 | A camera for the PC (virtual camera) | in work |
-| AMD and Intel encoders with loss recovery | **not testable here** (the Radeon iGPU has no driver; nothing to be installed) |
+| AMD and Intel encoders with loss recovery | in work: a Direct3D 12 video encoder (vendor-neutral, so it can be tested on the RTX 5090) with its own reference list for recovery without a keyframe. AMF/Intel's own SDKs not tested here (the Radeon iGPU has no driver) |
 
 ### Every host (the shared core, `remoteman-core`)
 | Item | State |
