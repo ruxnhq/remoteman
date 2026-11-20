@@ -1,4 +1,10 @@
-//! The PC's own speakers go quiet while a device listens: if Steam's "Steam Streaming Speakers"
+//! The PC's own speakers go quiet while a device listens. Without Steam's speakers they are
+//! muted: the default output's mute switch (`IAudioEndpointVolume`) goes on, and what it was
+//! comes back when the sound stops. WASAPI loopback still records the sound while the output is
+//! muted (measured: the same level muted and not), so the device hears it all the same. What
+//! was muted is kept in `speakers-mute.json` until it is undone, like the state below.
+//!
+//! If Steam's "Steam Streaming Speakers"
 //! exists, it becomes the default output (for the console's user) while the device has sound
 //! on, and the output that was the default comes back when the sound stops, the session ends or
 //! the host starts again after a crash. The desktop's sound is recorded from Steam's speakers
@@ -17,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
+use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{DEVICE_STATE_ACTIVE, ERole, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, eCommunications, eConsole, eMultimedia, eRender};
 use windows::Win32::Security::{ImpersonateLoggedOnUser, RevertToSelf};
 use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, STGM_READ};
@@ -94,6 +101,28 @@ fn plan(outputs: &[(String, String)], defaults: &[Option<String>; 3]) -> Option<
 /// what it was; one the user has moved elsewhere since is left alone.
 fn restore_plan(saved: &Saved, now: &[Option<String>; 3]) -> Vec<(usize, String)> {
     (0..3).filter(|&i| now[i].as_deref() == Some(saved.steam.as_str())).filter_map(|i| saved.previous[i].clone().map(|p| (i, p))).collect()
+}
+
+/// What muting the PC's speakers changed: which output, so it is unmuted again. (An output that
+/// was muted already is left alone and nothing is kept.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MuteSaved {
+    endpoint: String,
+}
+
+impl MuteSaved {
+    fn to_json(&self) -> String {
+        serde_json::json!({ "muted_endpoint": self.endpoint }).to_string()
+    }
+
+    fn from_json(text: &str) -> Option<Self> {
+        let v: serde_json::Value = serde_json::from_str(text).ok()?;
+        Some(Self { endpoint: v.get("muted_endpoint")?.as_str()?.to_string() })
+    }
+}
+
+fn mute_file() -> Option<PathBuf> {
+    STATE.get().map(|s| s.join("speakers-mute.json"))
 }
 
 // ---- Windows. ----
@@ -176,6 +205,50 @@ fn set_default(id: &str, role: usize) -> Result<()> {
     }
 }
 
+fn endpoint_volume(device: &IMMDevice) -> Result<IAudioEndpointVolume> {
+    // SAFETY: plain COM call on a live device.
+    unsafe { device.Activate(CLSCTX_ALL, None) }.context("the sound output's volume")
+}
+
+/// Mute the default output unless it already is; `Some` says which one was muted (to undo).
+fn mute_default() -> Result<Option<MuteSaved>> {
+    // SAFETY: COM calls on this thread's own objects.
+    let device = unsafe { enumerator()?.GetDefaultAudioEndpoint(eRender, eConsole) }.context("this computer has no sound output")?;
+    let id = id_of(&device).context("the sound output has no id")?;
+    let volume = endpoint_volume(&device)?;
+    // SAFETY: plain COM calls on a live endpoint volume.
+    unsafe {
+        if volume.GetMute()?.as_bool() {
+            tracing::info!(output = name_of(&device), "the PC's speakers are muted already");
+            return Ok(None);
+        }
+        let saved = MuteSaved { endpoint: id };
+        // Written first: a host that dies from here on unmutes at its next start.
+        if let Some(f) = mute_file() {
+            std::fs::write(&f, saved.to_json()).with_context(|| format!("writing {}", f.display()))?;
+        }
+        volume.SetMute(true, std::ptr::null()).context("muting the sound output")?;
+        tracing::info!(output = name_of(&device), "a device listens: the PC's speakers are muted (the sound is still recorded)");
+        Ok(Some(saved))
+    }
+}
+
+fn unmute(saved: &MuteSaved, why: &str) {
+    let result = as_console_user(|| {
+        // SAFETY: COM calls on this thread's own objects.
+        let device = unsafe { enumerator()?.GetDevice(&windows::core::HSTRING::from(saved.endpoint.as_str())) }.context("the muted output has gone")?;
+        // SAFETY: plain COM call on a live endpoint volume.
+        unsafe { endpoint_volume(&device)?.SetMute(false, std::ptr::null()) }.context("unmuting the sound output")
+    });
+    match result {
+        Ok(()) => tracing::info!(why, "the PC's speakers are unmuted again"),
+        Err(e) => tracing::warn!("the PC's speakers couldn't be unmuted: {e:#}"),
+    }
+    if let Some(f) = mute_file() {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
 /// The output names on this PC, and whether Steam's speakers are among them (for tests and
 /// the log): no change is made.
 pub fn enumerate() -> (Vec<String>, bool) {
@@ -213,13 +286,27 @@ pub fn init(state: &Path) {
     if let Some(saved) = file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| Saved::from_json(&t)) {
         put_back(&saved, "the host that switched them is gone");
     }
+    if let Some(saved) = mute_file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| MuteSaved::from_json(&t)) {
+        unmute(&saved, "the host that muted them is gone");
+    }
     let (names, steam) = enumerate();
-    tracing::info!(outputs = ?names, steam, "the PC's sound outputs: {}", if steam { "the PC's speakers go quiet while a device listens (if the setting is on)" } else { "no \"Steam Streaming Speakers\", so the PC's speakers stay on while a device listens" });
+    tracing::info!(outputs = ?names, steam, "the PC's sound outputs: the PC's speakers go quiet while a device listens (if the setting is on), {}", if steam { "by Steam's speakers becoming the default output" } else { "by muting the default output" });
 }
 
-/// While this lives, Steam's speakers are the default output. Dropping it puts the others back.
+/// While this lives, the PC's speakers are quiet: Steam's speakers are the default output or,
+/// without them, the default output is muted. Dropping it undoes that.
 pub struct Switched {
-    saved: Saved,
+    how: How,
+}
+
+enum Engaged {
+    Steam(Saved, usize),
+    Muted(MuteSaved),
+}
+
+enum How {
+    Steam(Saved),
+    Muted(MuteSaved),
 }
 
 impl Switched {
@@ -230,7 +317,8 @@ impl Switched {
             let outputs = outputs()?;
             let Some(saved) = plan(&outputs, &defaults()?) else {
                 if !outputs.iter().any(|(_, n)| is_steam_speakers(n)) {
-                    tracing::info!("no \"Steam Streaming Speakers\" here: the PC's own speakers stay on while a device listens");
+                    // No Steam output: the default output is muted instead.
+                    return Ok(mute_default()?.map(Engaged::Muted));
                 }
                 return Ok(None);
             };
@@ -245,15 +333,16 @@ impl Switched {
                     Err(e) => tracing::warn!("{e:#}"),
                 }
             }
-            Ok(Some((saved, switched)))
+            Ok(Some(Engaged::Steam(saved, switched)))
         });
         match made {
-            Ok(Some((saved, switched))) if switched > 0 => {
+            Ok(Some(Engaged::Muted(saved))) => Some(Self { how: How::Muted(saved) }),
+            Ok(Some(Engaged::Steam(saved, switched))) if switched > 0 => {
                 *crate::sound::RECORD_FROM.lock().unwrap_or_else(|e| e.into_inner()) = Some(saved.steam.clone());
                 tracing::info!("a device listens: \"Steam Streaming Speakers\" is the default output, the PC's own speakers are quiet");
-                Some(Self { saved })
+                Some(Self { how: How::Steam(saved) })
             }
-            Ok(Some((saved, _))) => {
+            Ok(Some(Engaged::Steam(saved, _))) => {
                 put_back(&saved, "none could be switched");
                 None
             }
@@ -268,7 +357,10 @@ impl Switched {
 
 impl Drop for Switched {
     fn drop(&mut self) {
-        put_back(&self.saved, "the device stopped listening");
+        match &self.how {
+            How::Steam(saved) => put_back(saved, "the device stopped listening"),
+            How::Muted(saved) => unmute(saved, "the device stopped listening"),
+        }
     }
 }
 
@@ -311,6 +403,13 @@ mod tests {
         // The user picked another output for one role since: that one stays.
         assert_eq!(restore_plan(&saved, &[some("s"), some("z"), some("s")]), vec![(0, "a".into()), (2, "b".into())]);
         assert!(restore_plan(&saved, &[some("a"), some("a"), some("b")]).is_empty());
+    }
+
+    #[test]
+    fn the_muted_output_is_remembered() {
+        let saved = MuteSaved { endpoint: "{0.0.0.00000000}.{abc}".into() };
+        assert_eq!(MuteSaved::from_json(&saved.to_json()), Some(saved));
+        assert_eq!(MuteSaved::from_json("{}"), None);
     }
 
     #[test]

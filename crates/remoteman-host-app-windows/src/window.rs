@@ -293,7 +293,7 @@ impl HostWindow {
         ));
         page.push(row(
             "Silence this PC's speakers while a device listens",
-            Some("Needs Steam's Streaming Speakers: they become the default output meanwhile, and the sound goes to the device"),
+            Some("The PC's output is muted meanwhile; the sound still goes to the device"),
             Some(switch(s.is_some_and(|s| s.speakers_follow), s.is_some(), "Silence this PC's speakers while a device listens", input.on.speakers.clone())),
         ));
 
