@@ -34,6 +34,8 @@ use crate::stream::{pack, pack_scale};
 
 pub(crate) struct Full {
     pub(crate) hwnd: isize,
+    /// The monitor it covers (left, top, width, height), in pixels.
+    pub(crate) rect: (i32, i32, i32, i32),
     /// Where the pointer last was, in pixels; whether Windows says when it leaves.
     mouse: Cell<(i32, i32)>,
     tracking: Cell<bool>,
@@ -136,7 +138,7 @@ pub(crate) fn enter(e: &Engine) -> Result<()> {
     // SAFETY: a plain load.
     let arrow = unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default();
     let presenting = varies(e);
-    *e.full.borrow_mut() = Some(Rc::new(Full { hwnd: hwnd.0 as isize, mouse: Cell::new((-1, -1)), tracking: Cell::new(false), arrow, varies: Cell::new(presenting) }));
+    *e.full.borrow_mut() = Some(Rc::new(Full { hwnd: hwnd.0 as isize, rect: (r.left, r.top, w, h), mouse: Cell::new((-1, -1)), tracking: Cell::new(false), arrow, varies: Cell::new(presenting) }));
     let scale = e.full.borrow().as_ref().map_or(1.0, |f| f.scale());
     {
         let mut app = e.app.borrow_mut();

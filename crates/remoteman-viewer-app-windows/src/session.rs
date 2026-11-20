@@ -31,19 +31,18 @@ pub fn pill(v: &Viewer, context: &ViewContext<Viewer>) -> View {
     let s = st.o("session");
     let f = st.o("features");
     let floating = st.b("fullscreen") || st.o("settings").b("hover_bar");
-    let shown = !floating || v.bar_peek;
+    // (Full screen's bar window is a window of its own, shown or hidden as a whole.)
+    let shown = v.bar_role || !floating || v.bar_peek;
     let format = match s.a("format") {
         [w, h, hz] => format!("{w} × {h} · {hz} Hz"),
         _ => String::new(),
     };
     // The words: where the window is moved from (and maximised, twice).
-    let words = Border::new()
-        .background(Color::transparent())
-        .padding(Thickness::new(10.0, 0.0, 6.0, 0.0))
-        .max_width(340.0)
-        .on_pointer_pressed(context.callback(|_| Msg::Drag))
-        .on_double_tapped(context.message(Msg::Window("maximise")))
-        .content(
+    let mut words = Border::new().background(Color::transparent()).padding(Thickness::new(10.0, 0.0, 6.0, 0.0)).max_width(340.0);
+    if !v.bar_role {
+        words = words.on_pointer_pressed(context.callback(|_| Msg::Drag)).on_double_tapped(context.message(Msg::Window("maximise")));
+    }
+    let words = words.content(
             StackPanel::new().orientation(Orientation::Horizontal).spacing(10.0).vertical_alignment(VerticalAlignment::Center).children((
                 kit::strong(s.s("name")).text_trimming(TextTrimming::CharacterEllipsis).vertical_alignment(VerticalAlignment::Center),
                 caption(&format).vertical_alignment(VerticalAlignment::Center),
@@ -83,7 +82,8 @@ pub fn pill(v: &Viewer, context: &ViewContext<Viewer>) -> View {
     let camera = toggle_button(glyph::CAMERA, "Camera", s.b("camera"), s.b("camera_can") || s.b("camera"), &cam_tip, context.callback(|on: Option<bool>| Msg::Do(cmd("camera", json!({"on": on.unwrap_or(false)})))));
     let share = kit::square(glyph::SHARE, "Clipboard and files", None).is_enabled(offers(st, "clipboard") || offers(st, "files")).menu(Menu::new(share_menu(st), menus.clone()));
     let more = kit::square(glyph::MORE, "More", None).menu(Menu::new(more_menu(st), menus.clone()));
-    let full = kit::square(glyph::FULL_SCREEN, "Full screen (F11)", Some(act(context, "fullscreen", Value::Null))).tooltip("Full screen (F11)");
+    let leave = if v.bar_role { "Leave full screen (F11)" } else { "Full screen (F11)" };
+    let full = kit::square(if v.bar_role { glyph::LEAVE_FULL_SCREEN } else { glyph::FULL_SCREEN }, leave, Some(act(context, "fullscreen", Value::Null))).tooltip(leave);
     let off = kit::button("Disconnect", act(context, "disconnect", Value::Null), false, Some(glyph::CLOSE));
     let keys = drop_down(glyph::KEYBOARD, "Send keys").is_enabled(!s.b("view_only")).menu(Menu::new(keys_menu(st), menus.clone()));
     let display = drop_down(glyph::DISPLAY, "Display").menu(Menu::new(display_menu(st), menus.clone()));
@@ -91,12 +91,13 @@ pub fn pill(v: &Viewer, context: &ViewContext<Viewer>) -> View {
     let window_button = |g: &str, name: &'static str, what: &'static str| -> View {
         kit::square(g, name, Some(context.message(Msg::Window(what)))).background(Color::transparent()).tooltip(name)
     };
-    let maximised = crate::system::maximised(v.hwnd);
-    let window_buttons = StackPanel::new().orientation(Orientation::Horizontal).children((
+    let maximised = !v.bar_role && crate::system::maximised(v.hwnd);
+    // (Full screen's bar has none of the window's own buttons: leaving full screen is its button.)
+    let window_buttons: View = if v.bar_role { Grid::new().into() } else { StackPanel::new().orientation(Orientation::Horizontal).children((
         window_button(glyph::MINIMISE, "Minimise", "minimise"),
         window_button(if maximised { glyph::RESTORE } else { glyph::MAXIMISE }, if maximised { "Restore" } else { "Maximise" }, "maximise"),
         window_button(glyph::WINDOW_CLOSE, "Close", "close"),
-    ));
+    )).into() };
     let tools = StackPanel::new()
         .orientation(Orientation::Horizontal)
         .spacing(4.0)
@@ -104,18 +105,18 @@ pub fn pill(v: &Viewer, context: &ViewContext<Viewer>) -> View {
         .children((off, keys, display, picture, sound, mic, camera, share, more, full, window_buttons));
     let bar = Border::new()
         .vertical_alignment(VerticalAlignment::Top)
-        .horizontal_alignment(HorizontalAlignment::Center)
-        .margin(Thickness::new(0.0, 8.0, 0.0, 0.0))
+        .horizontal_alignment(if v.bar_role { HorizontalAlignment::Stretch } else { HorizontalAlignment::Center })
+        .margin(Thickness::new(0.0, if v.bar_role { 0.0 } else { 8.0 }, 0.0, 0.0))
         .height(44.0)
         .padding(Thickness::new(4.0, 0.0, 6.0, 0.0))
-        .corner_radius(22.0)
+        .corner_radius(if v.bar_role { 8.0 } else { 22.0 })
         .border_thickness(1.0)
-        .background(ThemeBrush::AcrylicInApp)
+        .background(if v.bar_role { Brush::from(Color::transparent()) } else { Brush::from(ThemeBrush::AcrylicInApp) })
         .border_brush(ThemeBrush::CardStroke)
         .automation_name("Session bar")
         .on_pointer_entered(context.callback(|_| Msg::OverBar(true)))
         .on_pointer_exited(context.callback(|_| Msg::OverBar(false)))
-        .content(StackPanel::new().orientation(Orientation::Horizontal).spacing(6.0).children((words, tools)));
+        .content(StackPanel::new().orientation(Orientation::Horizontal).horizontal_alignment(HorizontalAlignment::Center).spacing(6.0).children((words, tools)));
     // Hidden, it stays (a menu of it may be open) but out of sight above the window's top.
     if shown { bar.into() } else { bar.opacity(0.0).translation(0.0, -80.0).into() }
 }

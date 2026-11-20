@@ -398,6 +398,7 @@ fn start_engine(words: Vec<String>, notify: Notify) -> Result<()> {
     let mut app = App::new(args, gpu, scene.clone(), decoders, dark)?;
     app.panel = true;
     app.mica = true;
+    app.native_bar = !app.args.kit_bar;
     // SAFETY: Win32 calls with structures that live through each call.
     let hwnd = unsafe {
         let instance = GetModuleHandleW(None)?;
@@ -1150,8 +1151,12 @@ impl Engine {
                 } else {
                     crate::full::leave(self, true);
                 }
-                out(json!({"do": "fullscreen", "on": self.full.borrow().is_some()}));
+                // Where the engine's window is, for the app's bar (a window of its own at its top edge).
+                let place = self.full.borrow().as_ref().map(|f| (f.hwnd, f.rect));
+                let rect = place.map_or([0; 4], |p| [p.1.0, p.1.1, p.1.2, p.1.3]);
+                out(json!({"do": "fullscreen", "on": place.is_some(), "hwnd": place.map_or(0, |p| p.0), "rect": rect, "bar": self.app.borrow().native_bar}));
             }
+            Effect::BarEdge => out(json!({"do": "bar-edge"})),
             Effect::Title(title) => {
                 crate::full::title(self, &title);
                 out(json!({"do": "title", "text": title}));
@@ -1327,6 +1332,11 @@ impl Engine {
                 return true;
             }
             "bar-mode" => Msg::BarMode(b("hover")),
+            // For tests: the pointer reached full screen's top edge.
+            "bar-edge" => {
+                app.effects.push(crate::app::Effect::BarEdge);
+                return true;
+            }
             "start-fullscreen" => Msg::StartFullscreen,
             "choose" => {
                 let address = s("address");

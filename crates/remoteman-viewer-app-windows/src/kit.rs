@@ -55,6 +55,7 @@ pub mod glyph {
     pub const KEYBOARD: &str = "\u{E765}";
     pub const PICTURE: &str = "\u{EB9F}";
     pub const FULL_SCREEN: &str = "\u{E740}";
+    pub const LEAVE_FULL_SCREEN: &str = "\u{E73F}";
     pub const SEND: &str = "\u{E898}";
     pub const MINIMISE: &str = "\u{E921}";
     pub const MAXIMISE: &str = "\u{E922}";
