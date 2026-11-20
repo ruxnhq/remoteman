@@ -131,7 +131,10 @@ function Tray-Menu([int]$x = 1700, [int]$y = 1000) {
   # "windows-notifyicon" (version 4: the event in lParam's low word, the anchor in wParam).
   $h = [HostUi]::WindowsOf([uint32]$global:UiPid, "windows-notifyicon") | Select-Object -First 1
   if (-not $h) { Ui-Say "no notification icon window"; return }
-  $c = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Menu)
+  # The icon's menu always ends with Quit (the window's own system menu has no such item).
+  $c = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::MenuItem)),
+    (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, "Quit remoteman")))
   # Asked again if it doesn't come (the first one an app shows takes a moment to make).
   for ($try = 0; $try -lt 3; $try++) {
     [HostUi]::PostMessage($h, 0x401, [IntPtr](($y -shl 16) -bor $x), [IntPtr]((1 -shl 16) -bor 0x7B)) | Out-Null
