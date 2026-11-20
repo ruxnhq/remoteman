@@ -170,6 +170,15 @@ void rm_client_text(const rm_client *client, const char *utf8);
 // rm_client_features (send touch or mouse instead), else 1.
 int32_t rm_client_pen(const rm_client *client, uint8_t phase, uint8_t buttons, float x, float y,
                       float pressure, float tilt_x, float tilt_y, float twist);
+// A game controller's whole state (docs/PROTOCOL.md, "Game controllers"): pad 0..3; flags bit 0
+// connected (clear: that pad was unplugged); buttons in XInput's order (DPAD_UP 0x1, DOWN 0x2,
+// LEFT 0x4, RIGHT 0x8, START 0x10, BACK 0x20, LEFT_THUMB 0x40, RIGHT_THUMB 0x80, LEFT_SHOULDER
+// 0x100, RIGHT_SHOULDER 0x200, GUIDE 0x400, A 0x1000, B 0x2000, X 0x4000, Y 0x8000); triggers
+// 0..1; sticks -1..1, up and right positive. Send on every change, and every 100 ms while
+// anything is off neutral. Returns 0 and sends nothing when the host doesn't list "gamepad" in
+// rm_client_features, else 1.
+int32_t rm_client_gamepad(const rm_client *client, uint8_t pad, uint8_t flags, uint16_t buttons,
+                          float lt, float rt, float lx, float ly, float rx, float ry);
 
 // Leave and free the client. `on_closed` is called before this returns or shortly after.
 void rm_client_close(rm_client *client);
@@ -229,6 +238,11 @@ typedef struct rm_input {
     float pressure;           // 0 to 1
     float tilt_x, tilt_y;     // degrees, -90 to 90
     float twist;              // degrees, 0 to 359
+    // Appended for kind 10 (game controller): slot the pad (0..3), down the flags (bit 0
+    // connected), usage the buttons (XInput's mask), x, y the left stick; these the right stick
+    // and the triggers. Zero for the other kinds.
+    float right_x, right_y;
+    float left_trigger, right_trigger;
 } rm_input;
 
 // All called on one thread of the core's, one at a time; they may block.
@@ -282,6 +296,34 @@ void rm_host_set_features(const rm_host *host, const char *features);
 // without a keyframe. The core sends the client `status` itself. Takes effect from the next
 // client. A host that never calls this behaves as before.
 void rm_host_set_bitrate_callback(const rm_host *host, uint32_t default_bps, void (*on_bitrate)(void *ctx, uint32_t bits_per_second), void *ctx);
+
+// What one device may do: 1 allowed, 0 not. `input` 0 is view-only: the device is shown the
+// picture and its input is dropped by the core. Everything is allowed until set otherwise.
+typedef struct rm_permissions {
+    uint8_t input;
+    uint8_t clipboard;
+    uint8_t files;
+    uint8_t sound;
+    uint8_t mic;
+    uint8_t camera;
+} rm_permissions;
+// What the device with this fingerprint may do, written to `out`. 1, or 0 on a null argument.
+int32_t rm_host_get_permissions(const rm_host *host, const char *fingerprint, rm_permissions *out);
+// Change what a device may do. Kept across restarts; the connected device is told at once
+// with a `features` message (the host's features less what it may not have) and, for sound,
+// mic, camera and clipboard taken away, on_message gets the matching `{"t":"...","on":false}`.
+// 1 done, 0 a null argument, -1 not saved.
+int32_t rm_host_set_permissions(const rm_host *host, const char *fingerprint, const rm_permissions *permissions);
+// The last `max` lines of the connection log as a JSON array, oldest first:
+// [{"time":"2026-11-19T10:15:00Z","event":"connected","name":"..","fingerprint":"..",
+//   "address":"1.2.3.4:5","duration":12,"reason":".."}]. `event` is paired, connected, left
+// or refused; `duration` (seconds) only with left; `reason` only when known. Free the result
+// with rm_string_free.
+char *rm_host_connections_json(const rm_host *host, size_t max);
+void rm_string_free(char *s);
+// Called when a device is paired, connected or refused, with that event as JSON (as above),
+// valid only during the call, on the core's handler thread. NULL removes it.
+void rm_host_set_notice_callback(const rm_host *host, void (*on_notice)(void *ctx, const char *json), void *ctx);
 
 // Pairing: let the next unknown device in (it is remembered and pairing turns itself off).
 void rm_host_set_pairing(const rm_host *host, int32_t on);

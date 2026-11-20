@@ -31,9 +31,9 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 | Windows key mapping (`key_mapping`, greyed) | **done, unit-tested** (72f7998): a "Windows key" stand-in (Right Alt, Right Ctrl or Caps Lock act as Super, as in the Linux viewer), before the Mac Ctrl/Command swap; the row seen through UI Automation. No keys sent to a host (the Mac test host is locked) |
 | "Getting in" choice (`way_in`, greyed) | **done, unit-tested** (72f7998): per computer, "The computer decides" or "Only a session that is already running" (`attach_only`); only the Linux daemon has more than one way in; not run against it |
 | The host's cursor shape in a window | **done, checked** (6a8c125): worn over the picture through `WM_SETCURSOR` on the app's windows; against the Mac test host, `GetCursorInfo` read the host's 56x80 cursor (hotspot 10,10) over the picture and the system arrow elsewhere. Hiding it (width 0) not seen |
-| HEVC 4:4:4 decoded on the card (Y410 drawn) | **half**: Y410/AYUV drawing is in (6a8c125), matching the planar path to 1 code value (BT.709, PQ on HDR); but FFmpeg 9.0's HEVC decoder never offers D3D11VA for 4:4:4, so 4:4:4 still decodes on the CPU, at 77-103 ms a picture at 1080p (one slice per frame = one thread). Next: the host cuts 4:4:4 into slices (in work); a real fix is NVDEC through CUDA or our own DXVA decoding |
-| Variable refresh in a window | not started (feasibility first) |
-| Full screen's menus off the old Direct2D kit | not started |
+| HEVC 4:4:4 decoded on the card (Y410 drawn) | **half** (NVDEC through CUDA was in work, 8 files uncommitted in its worktree when the PC restarted): Y410/AYUV drawing is in (6a8c125), matching the planar path to 1 code value (BT.709, PQ on HDR); but FFmpeg 9.0's HEVC decoder never offers D3D11VA for 4:4:4, so 4:4:4 still decodes on the CPU, at 77-103 ms a picture at 1080p (one slice per frame = one thread). Next: the host cuts 4:4:4 into slices (in work); a real fix is NVDEC through CUDA or our own DXVA decoding |
+| Variable refresh in a window | **not testable tonight**: the only monitor connected is the ROG, which has no variable refresh (full screen doesn't vary on it either); the XG32UCWMGs are off. To run with one connected: `--play` a 100 fps clip with `--watch-vblank`, full screen first (10.00 ms), then a flip-model child window over the panel |
+| Full screen's menus off the old Direct2D kit | **not started** (given to an agent minutes before the restart) |
 
 ### Windows host
 | Item | State |
@@ -41,10 +41,10 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 | Mirroring the PC's own screens | **done, run unelevated** (2387e21): Desktop Duplication of the PC's main screen when a device asks for `mirror`; a test host (`--test-mirror-only`, port 7795) streamed this PC's 3840x2160 screen to `watch` (278 frames in 25 s, 0 lost, age 4.8 ms) — frame counts only, nothing saved. Not run: HDR (FP16), the lock screen/UAC as SYSTEM, the cursor channel, switching mirror/extend mid-session |
 | HDR mastering and light-level metadata; HEVC 4:4:4 in HDR | **done at the encoder** (11a7e33): ST 2086 + MaxCLL/MaxFALL on keyframes (HEVC SEI; AV1 metadata OBUs written by us, NVENC's own fields gave nothing); HEVC 4:4:4 PQ allowed. ffprobe shows the side data on synthetic streams of all three. Not run in a session |
 | The driver unplugs a device's monitor when it leaves (`DESTROYMONITOR`) | **built, not installed** (59db529): `DESTROYMONITOR n` departs the monitor, new `PLUGMONITOR n` brings it back with the same identity; the host plugs a device's monitor in when it comes and unplugs it when it leaves (PC with screens only); driver 0.1.1.0. Morning test plan in the merge's branch report (below) |
-| A display scale for the device's monitor | in work |
+| A display scale for the device's monitor | **built** (92cb5b2): after the device's monitor is up, its Windows scale is set to the step nearest the device's `scale` (`DisplayConfigSetDeviceInfo`, -4), never on the PC's own screens or when mirroring. The GET was read on this PC (the ROG: 100-350 %, 300 % recommended); the SET needs the driver's monitor (elevated), not run |
 | Steam's sound devices from the user's Steam, speakers switched while a device listens | **built** (7564e3c): the installer looks for Steam's devices and says how to get them (Steam packs the drivers inside `drivers.exe`, nothing to give pnputil); while a device listens the default output becomes Steam Streaming Speakers and is put back after (`speakers.json` survives a crash), switchable. Not run (no Steam devices on this PC; no default device changed) |
-| A camera for the PC (virtual camera) | in work |
-| AMD and Intel encoders with loss recovery | **not testable here** (the Radeon iGPU has no driver; nothing to be installed) |
+| A camera for the PC (virtual camera) | **partial, not merged**: 3 commits on `worktree-agent-a55cd6d8b120f75f6` (a media source DLL for Windows' Frame Server, the installer registering it); stopped by the restart before its report |
+| AMD and Intel encoders with loss recovery | **partial, not merged**: a Direct3D 12 video encoder was started (one uncommitted file in its worktree) and stopped by the restart. AMF/Intel's own SDKs not testable here (the Radeon iGPU has no driver) |
 
 ### Every host (the shared core, `remoteman-core`)
 | Item | State |
@@ -52,11 +52,11 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 | Bitrate following the network | **done, loopback-tested** (defe4fd): the core's host cuts ×0.8 on a loss report, climbs ~6 %/s after 2 s clean, up to the device's limit; the Windows host applies it live; the Mac host through `rm_host_set_bitrate_callback` (the Mac session wires it once `main` is pushed). Not run with a real host |
 | Parity for lost fragments | **done, loopback-tested** (defe4fd): datagram kind 7, XOR over groups of 10 fragments, asked for in the hello (the core's client always asks); every host built with this core sends it. One datagram in 19 dropped: 30 frames of 20 kB came whole. Not run with a real host |
 | Static refinement of a still picture | **Mac host: done, measured** (Mac session, 6c21c9f on `apple/phase1-client`: after 0.4 s still, the last frame again at 8x the bitrate and quality 1.0; a 4K page of small text from 24.3 to 28.6 dB PSNR; `--refine no`). **Windows host: done at the encoder** (e50a609): after 0.4 s still, the last frame again at constant QP (24/28/32 by picture size) as a P-frame, then the rate back; synthetic text 14.6 → 38.5 dB, the next frame 40 bytes keeping it. Not run in a session |
-| Per-device permissions, view-only | in work |
-| A log of connections, and a notice | in work |
+| Per-device permissions, view-only | **done, loopback-tested** (5d1a537): `input`, `clipboard`, `files`, `sound`, `mic`, `camera` per device (`permissions.json`), enforced in the core for every host (features filtered per device, everything not allowed dropped); `ctl device NAME view-only on`, tray toggles per device; the Windows viewer sends nothing and says "View only". The tray and viewer were compiled, not run |
+| A log of connections, and a notice | **done, loopback-tested** (5d1a537): `connections.log` (JSON lines: paired, connected, left with duration, refused), `ctl connections`, the tray's "Recent connections" and a notification when a device connects ("Tell me when a device connects", on) |
 | Keeping the host awake while connected, locking it on disconnect | Mac host: already there (a display-sleep assertion per session; "Lock this Mac when the device leaves", off by default). **Windows host: built** (7564e3c): a power request (system + display) held per session; "Lock this PC when a device disconnects" (off by default) in `ctl set lock` and the tray. The power request was made and released in a test; the lock not run |
-| A second factor for unattended access | not started (needs a design) |
-| Game controllers | in work |
+| A second factor for unattended access | **not started**: designed (an authenticator-app code, asked after the paired key, remembered 30 days per device) and given to an agent minutes before the restart |
+| Game controllers | **built, host side off** (d5ba32c, ecbbf1a): input event 10 (XInput's buttons, triggers, sticks), the Windows viewer reads XInput controllers while its window is in front. The host's injection (Windows' InputInjector) returned OK but no reader ever saw the virtual pad, so the host doesn't offer `gamepad` unless `REMOTEMAN_GAMEPAD=1`. A working Windows side needs a virtual controller driver |
 | Apple Pencil and Windows pens (input event 9, the Mac session's format) | **built, loopback-tested** (cef3e0c): event 9 in the protocol and core (`rm_client_pen`, `rm_input` grows at its end), the Windows host injects a synthetic pen (made and destroyed in a test, nothing injected). The iPad side and the Mac host's tablet events wait for the push. The Windows viewer doesn't send pen yet |
 | More than one viewer at once | not started |
 
@@ -85,3 +85,9 @@ Asked at 23:35 PST; its share of the budget about 5 points. Its answer:
   until the owner pushes; it builds and wires them (`rm_host_set_bitrate_callback`, the pen) then.
 - The Mac locked itself at 23:28; its test host 7803 shows the lock screen, so nothing was typed
   or clicked into it tonight.
+
+## What stopped the night
+Windows Update restarted the PC at 00:09 PST (`MoUsoCoreWorker`, event 1074), and with it this
+session and its five running agents; nothing ran from then until 07:30. In flight then: the
+virtual camera, the Direct3D 12 encoder, NVDEC for 4:4:4, the second factor and full screen's
+menus. Not reached: more than one viewer at once.

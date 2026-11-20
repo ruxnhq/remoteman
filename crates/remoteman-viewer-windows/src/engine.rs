@@ -83,6 +83,8 @@ pub(crate) struct Engine {
     pointer_on: Cell<u8>,
     own_copy: Cell<u32>,
     hook: Cell<isize>,
+    /// Game controllers, read on a thread of their own (pads.rs).
+    pads: crate::pads::Pads,
     second: RefCell<Option<(isize, JoinHandle<()>, Arc<Shared>)>>,
     /// The host's cursor, made into a Windows one (worn in full screen).
     pub(crate) cursor: Cell<Option<HCURSOR>>,
@@ -428,6 +430,7 @@ fn start_engine(words: Vec<String>, notify: Notify) -> Result<()> {
         pointer_on: Cell::new(0),
         own_copy: Cell::new(0),
         hook: Cell::new(0),
+        pads: crate::pads::Pads::start(),
         second: RefCell::new(None),
         cursor: Cell::new(None),
         got_shape: Cell::new(false),
@@ -749,7 +752,9 @@ impl Engine {
         // Whatever it is, it comes after the pointer's newest place.
         self.pacer.flush();
         let Ok(app) = self.app.try_borrow() else { return };
-        if let Some(client) = app.client().cloned() {
+        if app.view_only() {
+            // The computer shows this device the picture only: nothing is sent to control it.
+        } else if let Some(client) = app.client().cloned() {
             drop(app);
             client.send(event);
         } else if app.args.play.is_some() && app.session.is_some() {
@@ -778,7 +783,7 @@ impl Engine {
         self.point_at(0);
         let (at, client) = {
             let app = self.app.borrow();
-            (app.fraction(x as f32, y as f32), app.client().cloned())
+            (app.fraction(x as f32, y as f32), app.input_client().cloned())
         };
         match (at, client) {
             (Some((x, y)), Some(client)) => self.pacer.put(client, x, y),
@@ -1048,6 +1053,13 @@ impl Engine {
         let front = self.front();
         let want = front && !self.released.get() && self.app.borrow().forwarding() && self.app.borrow().store.settings.capture && self.panel.get().2 > 0;
         self.hold_pointer(want);
+        // Controllers: the computer's while its window is in front (full screen included).
+        let pads_to = {
+            let app = self.app.borrow();
+            let takes = front && FEATURES.gamepad && app.forwarding() && app.store.settings.gamepad && app.session.as_ref().is_some_and(|s| s.offers("gamepad"));
+            app.client().cloned().filter(|_| takes)
+        };
+        self.pads.update(pads_to);
         if self.deadline.get().is_some_and(|d| Instant::now() >= d) {
             self.deadline.set(None);
             self.app.borrow_mut().time_up();
@@ -1501,7 +1513,7 @@ fn state_of(app: &App) -> Value {
         "folder": app.store.receive_folder().display().to_string(),
         "controls": options(app, &Choice::Controls), "default_quality": options(app, &Choice::DefaultQuality),
         "scroll": options(app, &Choice::Scroll), "windows_key": options(app, &Choice::WindowsKey), "pointer": options(app, &Choice::Pointer),
-        "touch": st.touch, "allow_microphone": st.allow_microphone, "allow_camera": st.allow_camera,
+        "touch": st.touch, "gamepad": st.gamepad, "allow_microphone": st.allow_microphone, "allow_camera": st.allow_camera,
     });
     // The drop-downs of one computer: the one whose page is open, or the session's.
     let address = match &app.screen {
@@ -1519,7 +1531,7 @@ fn state_of(app: &App) -> Value {
     let session = app.session.as_ref().map(|s| {
         let f = &app.figures;
         json!({
-            "address": s.target.address, "name": s.target.name, "os": s.os, "features": s.features,
+            "address": s.target.address, "name": s.target.name, "os": s.os, "features": s.features, "view_only": s.view_only(),
             "placement": placement_key(s.display.placement), "quality": s.quality.key(), "bitrate": s.bitrate,
             "bitrate_step": crate::app::BITRATES.iter().position(|b| *b == s.bitrate).unwrap_or(crate::app::BITRATES.len() - 1),
             "sound": s.sound_on, "clipboard": s.clipboard_on, "second": s.second_on,
@@ -1560,7 +1572,7 @@ fn state_of(app: &App) -> Value {
             "files": FEATURES.files, "folder_choice": FEATURES.folder_choice, "hdr": FEATURES.hdr, "variable_refresh": FEATURES.variable_refresh,
             "refresh_choice": FEATURES.refresh_choice, "follow_window": FEATURES.follow_window, "sharp_text": FEATURES.sharp_text,
             "pointer_capture": FEATURES.pointer_capture, "ctrl_as_command": FEATURES.ctrl_as_command, "scroll_direction": FEATURES.scroll_direction,
-            "touch": FEATURES.touch, "system_shortcuts": FEATURES.system_shortcuts, "key_mapping": FEATURES.key_mapping,
+            "touch": FEATURES.touch, "gamepad": FEATURES.gamepad, "system_shortcuts": FEATURES.system_shortcuts, "key_mapping": FEATURES.key_mapping,
             "release_shortcut": FEATURES.release_shortcut, "second_display": FEATURES.second_display, "mirror": FEATURES.mirror, "way_in": FEATURES.way_in,
         },
         "not_yet": crate::features::NOT_YET,

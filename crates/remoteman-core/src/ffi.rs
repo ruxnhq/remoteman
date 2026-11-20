@@ -470,6 +470,26 @@ pub unsafe extern "C" fn rm_client_pen(client: *const Client, phase: u8, buttons
     1
 }
 
+/// A game controller's whole state (docs/PROTOCOL.md, "Game controllers"): pad 0 to 3; lags
+/// bit 0 connected (clear: that pad was unplugged); uttons in XInput's order (DPAD_UP 0x1,
+/// DOWN 0x2, LEFT 0x4, RIGHT 0x8, START 0x10, BACK 0x20, LEFT_THUMB 0x40, RIGHT_THUMB 0x80,
+/// LEFT_SHOULDER 0x100, RIGHT_SHOULDER 0x200, GUIDE 0x400, A 0x1000, B 0x2000, X 0x4000, Y 0x8000);
+/// triggers 0 to 1; sticks -1 to 1, up and right positive. Send it when it changes, and every
+/// 100 ms while anything is off neutral. Returns 0, and sends nothing, when the host doesn't list
+/// `gamepad` in its features (see `rm_client_features`). Otherwise 1.
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_gamepad(client: *const Client, pad: u8, flags: u8, buttons: u16, lt: f32, rt: f32, lx: f32, ly: f32, rx: f32, ry: f32) -> i32 {
+    let client = unsafe { &*client };
+    if !client.host_has_gamepad() {
+        return 0;
+    }
+    client.send(Event::Gamepad { pad, flags, buttons, left_trigger: lt, right_trigger: rt, left_x: lx, left_y: ly, right_x: rx, right_y: ry });
+    1
+}
+
 input!(/// Which display the pointer events after this are on: 0 the first, 1 the second. Send
     /// it when the pointer goes from one picture to the other.
     rm_client_pointer_on(index: u8) => Event::Display(index));
@@ -567,7 +587,7 @@ pub struct RmAccept {
 #[repr(C)]
 pub struct RmInput {
     /// 1 pointer to (x, y as fractions), 2 pointer by (x, y in pixels), 3 button, 4 scroll
-    /// (x, y in pixels), 5 key, 6 touch (x, y as fractions), 7 text, 8 display, 9 pen.
+    /// (x, y in pixels), 5 key, 6 touch (x, y as fractions), 7 text, 8 display, 9 pen, 10 game controller.
     pub kind: u8,
     /// 0 left, 1 right, 2 middle.
     pub button: u8,
@@ -588,6 +608,13 @@ pub struct RmInput {
     pub tilt_x: f32,
     pub tilt_y: f32,
     pub twist: f32,
+    /// Appended for kind 10 (game controller): `slot` the pad (0 to 3), `down` the flags (bit 0
+    /// connected), `usage` the buttons (XInput's mask), `x`, `y` the left stick, and these
+    /// the right stick and the triggers. Zero for every other kind.
+    pub right_x: f32,
+    pub right_y: f32,
+    pub left_trigger: f32,
+    pub right_trigger: f32,
 }
 
 /// The host program's callbacks, all called on one thread of the core's, one at a time. They
@@ -660,7 +687,7 @@ impl HostHandler for RmHostCallbacks {
 
     fn input(&mut self, event: Event) {
         let Some(f) = self.on_input else { return };
-        let mut i = RmInput { kind: 0, button: 0, down: 0, phase: 0, slot: 0, usage: 0, x: 0.0, y: 0.0, text: std::ptr::null(), pressure: 0.0, tilt_x: 0.0, tilt_y: 0.0, twist: 0.0 };
+        let mut i = RmInput { kind: 0, button: 0, down: 0, phase: 0, slot: 0, usage: 0, x: 0.0, y: 0.0, text: std::ptr::null(), pressure: 0.0, tilt_x: 0.0, tilt_y: 0.0, twist: 0.0, right_x: 0.0, right_y: 0.0, left_trigger: 0.0, right_trigger: 0.0 };
         let mut text = None;
         match event {
             Event::PointerTo { x, y } => (i.kind, i.x, i.y) = (1, x, y),
@@ -672,6 +699,10 @@ impl HostHandler for RmHostCallbacks {
             Event::Pen { phase, buttons, x, y, pressure, tilt_x, tilt_y, twist } => {
                 (i.kind, i.phase, i.button, i.x, i.y) = (9, phase as u8, buttons, x, y);
                 (i.pressure, i.tilt_x, i.tilt_y, i.twist) = (pressure, tilt_x, tilt_y, twist);
+            }
+            Event::Gamepad { pad, flags, buttons, left_trigger, right_trigger, left_x, left_y, right_x, right_y } => {
+                (i.kind, i.slot, i.down, i.usage, i.x, i.y) = (10, pad, flags, buttons, left_x, left_y);
+                (i.right_x, i.right_y, i.left_trigger, i.right_trigger) = (right_x, right_y, left_trigger, right_trigger);
             }
             Event::Text(s) => {
                 i.kind = 7;
@@ -952,6 +983,107 @@ pub unsafe extern "C" fn rm_host_set_bitrate_callback(host: *const Host, default
     unsafe { &*host }.set_bitrate_hook(default_bps, move |bps| {
         let ctx = &ctx;
         f(ctx.0, bps);
+    });
+}
+
+/// What one device may do: each field 1 allowed, 0 not (`input` 0 is view-only).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RmPermissions {
+    pub input: u8,
+    pub clipboard: u8,
+    pub files: u8,
+    pub sound: u8,
+    pub mic: u8,
+    pub camera: u8,
+}
+
+/// What the device with this fingerprint may do, written to `out` (everything allowed for a
+/// device nobody restricted). Returns 1, or 0 if `host`, `fingerprint` or `out` is null.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `fingerprint` a valid C string; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_get_permissions(host: *const Host, fingerprint: *const c_char, out: *mut RmPermissions) -> i32 {
+    if host.is_null() || fingerprint.is_null() || out.is_null() {
+        return 0;
+    }
+    let p = unsafe { &*host }.permissions(&unsafe { text(fingerprint) });
+    unsafe {
+        *out = RmPermissions { input: p.input as u8, clipboard: p.clipboard as u8, files: p.files as u8, sound: p.sound as u8, mic: p.mic as u8, camera: p.camera as u8 };
+    }
+    1
+}
+
+/// Change what a device may do; kept across restarts, and applied at once to the connected
+/// device, which is sent a `features` message. Returns 1 done, 0 a null argument, -1 it
+/// couldn't be saved.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `fingerprint` a valid C string; `permissions` readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_set_permissions(host: *const Host, fingerprint: *const c_char, permissions: *const RmPermissions) -> i32 {
+    if host.is_null() || fingerprint.is_null() || permissions.is_null() {
+        return 0;
+    }
+    let p = unsafe { *permissions };
+    let p = crate::permissions::Permissions { input: p.input != 0, clipboard: p.clipboard != 0, files: p.files != 0, sound: p.sound != 0, mic: p.mic != 0, camera: p.camera != 0 };
+    match unsafe { &*host }.set_permissions(&unsafe { text(fingerprint) }, p) {
+        Ok(()) => 1,
+        Err(_) => -1,
+    }
+}
+
+/// The last `max` lines of the connection log as a JSON array, oldest first:
+/// `[{"time":"2026-11-19T10:15:00Z","event":"connected","name":"...","fingerprint":"...",
+/// "address":"1.2.3.4:5","duration":12,"reason":"..."}]` (`event`: `paired`, `connected`,
+/// `left`, `refused`; `duration` only with `left`, `reason` only when known). The caller
+/// frees it with `rm_string_free`.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_connections_json(host: *const Host, max: usize) -> *mut c_char {
+    let json = if host.is_null() { "[]".to_owned() } else { serde_json::to_string(&unsafe { &*host }.connections(max)).unwrap_or_else(|_| "[]".into()) };
+    CString::new(json).unwrap_or_default().into_raw()
+}
+
+/// Free a string returned by `rm_host_connections_json`. Null is fine.
+///
+/// # Safety
+/// `s` must be such a string, not freed before.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_string_free(s: *mut c_char) {
+    if !s.is_null() {
+        drop(unsafe { CString::from_raw(s) });
+    }
+}
+
+/// The host program's own context for [`rm_host_set_notice_callback`].
+struct NoticeCtx(*mut c_void);
+// SAFETY: as `BitrateCtx`.
+unsafe impl Send for NoticeCtx {}
+
+/// Have the core call `on_notice` when a device is `paired`, `connected` or `refused`, with
+/// the event as one line of JSON (as in `rm_host_connections_json`), valid only during the
+/// call. It comes on the core's handler thread, in turn with the other callbacks. A null
+/// `on_notice` removes the callback.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `ctx` is passed back to `on_notice`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_set_notice_callback(host: *const Host, on_notice: Option<extern "C" fn(ctx: *mut c_void, json: *const c_char)>, ctx: *mut c_void) {
+    let host = unsafe { &*host };
+    let Some(f) = on_notice else {
+        host.clear_notice_hook();
+        return;
+    };
+    let ctx = NoticeCtx(ctx);
+    host.set_notice_hook(move |event| {
+        let ctx = &ctx;
+        if let Ok(json) = CString::new(serde_json::to_string(event).unwrap_or_default().replace('\0', " ")) {
+            f(ctx.0, json.as_ptr());
+        }
     });
 }
 

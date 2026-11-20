@@ -402,3 +402,39 @@ impl Decoder {
         }
     }
 }
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// Not a check: decodes the clips in `REMOTEMAN_CLIP_DIR` (length-prefixed frames, as the host's
+    /// `write_clips` test writes them) through the software decoder and says how long a picture takes.
+    #[test]
+    fn software_444_clips() {
+        let Some(dir) = std::env::var_os("REMOTEMAN_CLIP_DIR") else { return };
+        let Ok(gpu) = Gpu::open() else { return eprintln!("no GPU: skipped") };
+        let mut names: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "rm")).collect();
+        names.sort();
+        for path in names {
+            let bytes = std::fs::read(&path).unwrap();
+            let mut frames = Vec::new();
+            let mut i = 0;
+            while i + 4 <= bytes.len() {
+                let n = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+                frames.push(&bytes[i + 4..i + 4 + n]);
+                i += 4 + n;
+            }
+            let mut d = Decoder::software(&gpu, Codec::Hevc).unwrap();
+            let mut times = Vec::new();
+            for f in &frames {
+                let t = std::time::Instant::now();
+                let p = d.decode(f, None).unwrap();
+                times.push((t.elapsed().as_secs_f64() * 1000.0, p.is_some()));
+            }
+            let mut ms: Vec<f64> = times.iter().skip(5).map(|t| t.0).collect();
+            ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let avg = ms.iter().sum::<f64>() / ms.len() as f64;
+            eprintln!("DECODE {}: {} frames, {} pictures, avg {avg:.1} ms, median {:.1} ms, max {:.1} ms", path.file_name().unwrap().to_string_lossy(), frames.len(), times.iter().filter(|t| t.1).count(), ms[ms.len() / 2], ms[ms.len() - 1]);
+        }
+    }
+}

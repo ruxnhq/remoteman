@@ -370,6 +370,7 @@ pub fn settings(v: &Viewer, context: &ViewContext<Viewer>) -> View {
             vec![
                 row("Pointer", "Captured sends raw movement, which games and 3D apps need. Ctrl+Alt+Shift lets it go", Some(choice(s.o("pointer"), "Pointer", chose(context, "pointer", None))), f.b("pointer_capture"), None),
                 row("Scroll direction", "", Some(choice(s.o("scroll"), "Scroll direction", chose(context, "scroll", None))), f.b("scroll_direction"), None),
+                row("Game controllers go to the computer", "A controller held here plays there while this window is in front", Some(toggle(s.b("gamepad"), "Game controllers go to the computer", set("game-controllers"))), f.b("gamepad"), None),
                 row("Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", Some(toggle(s.b("touch"), "Send touchscreen touches as touch", set("touch"))), f.b("touch"), None),
             ],
         ),
