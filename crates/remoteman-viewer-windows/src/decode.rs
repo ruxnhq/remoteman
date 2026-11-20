@@ -2,9 +2,12 @@
 //!
 //! A decoded picture is one slice of the decoder's array texture (P010 for 10-bit 4:2:0) and
 //! stays there: the draw thread samples it where it is, or, where the driver won't let a
-//! decoder texture be sampled, copies it once on the GPU. There is no software fallback: a
-//! picture decoded on the CPU would have to be uploaded, and the host is only offered what the
-//! card decodes (`Gpu::decodes`).
+//! decoder texture be sampled, copies it once on the GPU. What the card doesn't decode is
+//! decoded on the CPU and uploaded into textures of our own (`Decoder::software`): a codec the
+//! card lacks, and HEVC 4:4:4 always, because this FFmpeg's HEVC decoder offers no D3D11VA
+//! path for 4:4:4 even where the driver lists the profile (an RTX 5090 lists HEVC Main 4:4:4
+//! 10 into Y410; FFmpeg picks yuv444p10le on the CPU). 4:4:4 is offered unasked only where the
+//! processor keeps up (`App::withholds_444`).
 
 use std::ffi::CStr;
 use std::ptr;
@@ -114,7 +117,7 @@ pub fn is_software(codec: Codec) -> bool {
 }
 
 /// Whether this mode is decoded on the CPU: what `use_software` said for its codec, and
-/// 4:4:4 always (the card's 4:4:4 pictures aren't drawn yet).
+/// 4:4:4 always (FFmpeg's HEVC decoder has no D3D11VA path for it).
 pub fn mode_in_software(mode: remoteman_core::Mode) -> bool {
     mode.chroma == remoteman_core::Chroma::C444 || is_software(mode.codec)
 }

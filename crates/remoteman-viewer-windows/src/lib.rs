@@ -40,6 +40,8 @@ mod keys;
 #[cfg(windows)]
 mod menus;
 #[cfg(windows)]
+mod monitor;
+#[cfg(windows)]
 mod pages;
 #[cfg(windows)]
 mod session;

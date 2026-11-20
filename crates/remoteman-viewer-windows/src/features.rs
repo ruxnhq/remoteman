@@ -33,13 +33,16 @@ pub struct Features {
     pub folder_choice: bool,
     /// HDR pictures.
     pub hdr: bool,
-    /// Each frame shown when it arrives, where the monitor can.
+    /// Each frame shown when it arrives, where the monitor can (the engine's: the old window
+    /// doesn't present that way).
+    #[allow(dead_code)]
     pub variable_refresh: bool,
     /// A choice of whether the stream follows this monitor's refresh rate (it always does).
     pub refresh_choice: bool,
     /// The other computer's display resized to follow this window.
     pub follow_window: bool,
-    /// Full colour detail (4:4:4): what Direct3D's decoders hand out for it is untried.
+    /// Full colour detail (4:4:4): HEVC 4:4:4 decoded on the processor (FFmpeg has no D3D11VA
+    /// path for it), offered unasked only where the processor keeps up.
     pub sharp_text: bool,
     /// A captured pointer that sends raw movement.
     pub pointer_capture: bool,

@@ -93,6 +93,10 @@ pub enum Flag {
     Shortcuts,
     Sound,
     Clipboard,
+    /// HDR where this monitor is in HDR, and variable refresh in full screen (the engine's).
+    Hdr,
+    #[allow(dead_code)]
+    VariableRefresh,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -532,8 +536,9 @@ impl App {
             (w, h) = self.picture_pixels();
         }
         let refresh = if self.store.settings.match_refresh { self.monitor.2.clamp(30, 240) } else { 60 };
-        // HDR where this screen shows it (or a test says so); the host then may send PQ.
-        let hdr = FEATURES.hdr && self.scene.screen_hdr.load(Ordering::Relaxed);
+        // HDR where this screen shows it (or a test says so) and the switch is on; the host
+        // then may send PQ.
+        let hdr = FEATURES.hdr && self.store.settings.hdr && self.scene.screen_hdr.load(Ordering::Relaxed);
         let headroom = if hdr { f32::from_bits(self.scene.headroom.load(Ordering::Relaxed)) } else { 0.0 };
         Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement, hdr, headroom }
     }
@@ -562,6 +567,64 @@ impl App {
                 client.send_message(Message::Configure { display: Some(display), bitrate: None, decoders: None });
             }
         }
+    }
+
+    /// HDR is asked for while the switch is on and this monitor is in HDR. When that changes in
+    /// a session (the switch, Windows' own HDR switch, the window taken to another monitor),
+    /// the computer is asked again with `configure`, and its picture starts afresh.
+    pub fn follow_hdr(&mut self) {
+        let Some(s) = &self.session else { return };
+        let (address, placement) = (s.target.address.clone(), s.display.placement);
+        let fresh = self.display_for(Some(&address), placement);
+        let s = self.session.as_mut().unwrap();
+        if fresh.hdr == s.display.hdr {
+            return;
+        }
+        (s.display.hdr, s.display.headroom) = (fresh.hdr, fresh.headroom);
+        if !s.offers("hdr") {
+            // It sends SDR either way.
+            return;
+        }
+        let Some(client) = s.client.as_ref().filter(|_| s.offers("configure")) else {
+            say!("HDR {}: from the next session (this computer can't change its picture during one)", if fresh.hdr { "on" } else { "off" });
+            return;
+        };
+        let mut display = s.display;
+        if let Some((w, h)) = s.asked {
+            (display.width, display.height) = (w, h);
+        }
+        say!("HDR {} asked for (headroom {:.1})", if display.hdr { "on" } else { "off" }, display.headroom);
+        client.send_message(Message::Configure { display: Some(display), bitrate: None, decoders: None });
+    }
+
+    /// How fast this PC's processor is taken to decode 4:4:4: as measured, or the guess.
+    pub fn cpu_444_rate(&self) -> (u32, bool) {
+        match self.store.settings.cpu_444 {
+            0 => (crate::store::CPU_444_GUESS, false),
+            measured => (measured, true),
+        }
+    }
+
+    /// Why 4:4:4 is left out of what is offered for `display` with `quality`, if it is: it is
+    /// decoded on the processor here (this FFmpeg has no D3D11VA path for it), and only offered
+    /// unasked where the processor keeps up. "Sharp text" asks for it whatever the speed.
+    pub fn withholds_444(&self, display: &Display, quality: Quality) -> Option<String> {
+        let mode = self.decoders.iter().find(|m| m.chroma == remoteman_core::Chroma::C444)?;
+        if quality == Quality::Sharp || !crate::decode::mode_in_software(*mode) {
+            return None;
+        }
+        let (rate, measured) = self.cpu_444_rate();
+        if crate::store::cpu_keeps_up(display.width, display.height, display.refresh, rate) {
+            return None;
+        }
+        Some(format!(
+            "decoded on the processor here, which manages about {rate} million pixels a second ({}); {} x {} at {} Hz is {:.0}",
+            if measured { "measured" } else { "a guess until measured" },
+            display.width,
+            display.height,
+            display.refresh,
+            display.width as f64 * display.height as f64 * display.refresh as f64 / 1e6
+        ))
     }
 
     /// The usage to send for a key on this keyboard.
@@ -650,6 +713,11 @@ impl App {
         self.give_up();
         let (placement, quality, _) = self.choices(&target.address);
         let display = self.display_for(Some(&target.address), placement);
+        let mut decoders = quality.order(&self.decoders);
+        if let Some(why) = self.withholds_444(&display, quality) {
+            say!("4:4:4 not offered: {why}");
+            decoders.retain(|m| m.chroma != remoteman_core::Chroma::C444);
+        }
         let (shared, feed) = match crate::stream::start(&self.gpu, &self.scene) {
             Ok(started) => started,
             Err(e) => return self.failed(&target, &format!("{e:#}"), pairing),
@@ -660,7 +728,7 @@ impl App {
             name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows".into()),
             pair,
             display,
-            decoders: quality.order(&self.decoders),
+            decoders,
             test_drop_one_in: None,
             test_delay_lost_ms: None,
             cursor: true,
@@ -1323,9 +1391,14 @@ impl App {
                     Flag::Shortcuts => &mut s.shortcuts,
                     Flag::Sound => &mut s.sound,
                     Flag::Clipboard => &mut s.clipboard,
+                    Flag::Hdr => &mut s.hdr,
+                    Flag::VariableRefresh => &mut s.variable_refresh,
                 };
                 *field = !*field;
                 self.store.save_settings();
+                if flag == Flag::Hdr {
+                    self.follow_hdr();
+                }
             }
             Msg::Toggle(flag, Some(address)) => self.store.update(&address, |c| match flag {
                 Flag::Sound => c.sound = !c.sound,
@@ -2035,6 +2108,14 @@ impl App {
             );
         }
         self.figures = figures;
+        // What the processor managed with 4:4:4, kept for what is offered from now on.
+        let rate = self.session.as_ref().map_or(0, |s| s.shared.cpu_444_rate.swap(0, Ordering::Relaxed));
+        let kept = crate::store::kept_cpu_444(self.store.settings.cpu_444, rate);
+        if rate > 0 && kept != self.store.settings.cpu_444 {
+            say!("4:4:4 on the processor: {rate} million pixels a second measured; {kept} kept");
+            self.store.settings.cpu_444 = kept;
+            self.store.save_settings();
+        }
         if self.screen == Screen::Session && (self.store.settings.figures || self.menu.as_ref().is_some_and(|m| m.kind == MenuKind::Picture)) {
             self.dirty = true;
         }

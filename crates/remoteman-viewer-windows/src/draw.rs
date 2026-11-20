@@ -171,6 +171,32 @@ struct Drawer {
     scale: (f32, f32),
     /// The swap chain is in PQ BT.2020 now (else sRGB).
     pq: bool,
+    /// What the picture's swap chain was made with, and so is resized with; whether that
+    /// lets it tear.
+    flags: DXGI_SWAP_CHAIN_FLAG,
+    tears: bool,
+    cadence: Cadence,
+}
+
+/// Whether DXGI lets this device's swap chains present with tearing allowed, which variable
+/// refresh needs: a monitor that varies its refresh can then show a picture the moment it is
+/// presented instead of at its next refresh.
+pub fn tearing_supported(gpu: &Gpu) -> bool {
+    // SAFETY: a DXGI query into a value that lives through the call.
+    unsafe {
+        let Ok(factory) = gpu.device.cast::<IDXGIDevice>().and_then(|d| d.GetAdapter()).and_then(|a| a.GetParent::<IDXGIFactory5>()) else { return false };
+        let mut allowed = windows::core::BOOL(0);
+        factory.CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &mut allowed as *mut _ as *mut _, 4).is_ok() && allowed.as_bool()
+    }
+}
+
+/// The flags the picture's swap chain is made with, and resized with (they must stay the same).
+/// Not allowed to tear: a swap chain for composition (the panel's, the old window's layer) was
+/// measured not to make a monitor vary its refresh even in full screen with tearing allowed
+/// (an RTX 5090 and an ASUS XG32UCWMG at 240 Hz: its vertical blanks stayed 4.17 ms apart for
+/// pictures presented 100 a second, where an HWND swap chain's followed them, 10 ms apart).
+fn chain_flags(_gpu: &Gpu) -> DXGI_SWAP_CHAIN_FLAG {
+    WAITABLE
 }
 
 /// The picture's swap chain as it is made for a window's layer or for a panel.
@@ -188,7 +214,7 @@ fn picture_chain(gpu: &Gpu, width: u32, height: u32) -> Result<IDXGISwapChain1> 
             Scaling: DXGI_SCALING_STRETCH,
             SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
             AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            Flags: WAITABLE.0 as u32,
+            Flags: chain_flags(gpu).0 as u32,
             ..Default::default()
         };
         // The stream is 10-bit, so the picture's buffers are too where that is allowed.
@@ -206,40 +232,89 @@ fn picture_chain(gpu: &Gpu, width: u32, height: u32) -> Result<IDXGISwapChain1> 
 /// A swap chain for a panel of the WinUI 3 app; the app's thread hands it to the panel.
 #[allow(dead_code)]
 pub fn panel_chain(gpu: &Gpu, width: u32, height: u32) -> Result<IDXGISwapChain1> {
-    tearing_probe(gpu);
+    say!("tearing: DXGI {} it", if tearing_supported(gpu) { "allows" } else { "doesn't allow" });
     picture_chain(gpu, width, height)
 }
 
-/// Variable refresh needs presenting with tearing allowed. Say whether DXGI allows it at all
-/// here, and whether a swap chain for composition (what a `SwapChainPanel` takes) can be made
-/// with it.
-fn tearing_probe(gpu: &Gpu) {
-    // SAFETY: DXGI queries with structures that live through each call.
-    unsafe {
-        let Ok(factory) = gpu.device.cast::<IDXGIDevice>().and_then(|d| d.GetAdapter()).and_then(|a| a.GetParent::<IDXGIFactory5>()) else { return };
-        let mut allowed = windows::core::BOOL(0);
-        let feature = factory.CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &mut allowed as *mut _ as *mut _, 4);
-        let desc = DXGI_SWAP_CHAIN_DESC1 {
-            Width: 64,
-            Height: 64,
-            Format: DXGI_FORMAT_R10G10B10A2_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            BufferCount: 2,
-            Scaling: DXGI_SCALING_STRETCH,
-            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            Flags: DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 as u32,
-            ..Default::default()
+/// How the pictures presented lately reached the screen: whether the desktop's compositor drew
+/// them or they were shown by themselves (independent flip or an overlay, which variable
+/// refresh needs), and when each was shown, from the swap chain's own figures. A monitor that
+/// varies its refresh shows pictures sent at an odd rate when they come; one at a fixed rate
+/// only on its refreshes, so the gaps between them are whole refreshes.
+#[derive(Default)]
+struct Cadence {
+    /// The present count and the time it was shown (QPC ticks), for each picture shown.
+    shown: Vec<(u32, i64)>,
+    presents: u32,
+    since: Option<Instant>,
+    failed: bool,
+}
+
+impl Cadence {
+    /// After a present: note what the swap chain says was last shown.
+    fn note(&mut self, swap: &IDXGISwapChain1) {
+        self.presents += 1;
+        self.since.get_or_insert_with(Instant::now);
+        let mut stats = DXGI_FRAME_STATISTICS::default();
+        // SAFETY: a call on the swap chain into a structure that lives through it.
+        match unsafe { swap.GetFrameStatistics(&mut stats) } {
+            Ok(()) if stats.SyncQPCTime != 0 => {
+                if self.shown.last().is_none_or(|l| l.0 != stats.PresentCount) {
+                    self.shown.push((stats.PresentCount, stats.SyncQPCTime));
+                }
+            }
+            Ok(()) => {}
+            // The figures start again (the first present, a mode change): no gap across it.
+            Err(e) if e.code() == DXGI_ERROR_FRAME_STATISTICS_DISJOINT => self.shown.clear(),
+            Err(e) => {
+                if !self.failed {
+                    say!("presenting: no frame statistics from the swap chain ({e})");
+                    self.failed = true;
+                }
+            }
+        }
+    }
+
+    /// Every few seconds: a line for the log, and how the pictures reach the screen for the
+    /// app (the gaps are the log's only: for a picture drawn by the compositor they are the
+    /// times of presenting, not of showing), and start again.
+    fn report(&mut self, swap: &IDXGISwapChain1, refresh_hz: u32, tearing: bool) -> Option<(String, String)> {
+        if self.since.is_none_or(|s| s.elapsed() < Duration::from_secs(5)) {
+            return None;
+        }
+        let seconds = self.since.take().unwrap().elapsed().as_secs_f64();
+        // SAFETY: plain queries.
+        let (mode, frequency) = unsafe {
+            let mut media = DXGI_FRAME_STATISTICS_MEDIA::default();
+            let mode = match swap.cast::<IDXGISwapChainMedia>().and_then(|m| m.GetFrameStatisticsMedia(&mut media)) {
+                Ok(()) => match media.CompositionMode {
+                    DXGI_FRAME_PRESENTATION_MODE_COMPOSED => "drawn by the desktop's compositor".to_owned(),
+                    DXGI_FRAME_PRESENTATION_MODE_OVERLAY => "shown by itself (independent flip or an overlay)".to_owned(),
+                    DXGI_FRAME_PRESENTATION_MODE_NONE => "not shown".to_owned(),
+                    other => format!("composition failed ({})", other.0),
+                },
+                Err(e) => format!("composition not known ({e})"),
+            };
+            let mut f = 0i64;
+            let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(&mut f);
+            (mode, f.max(1) as f64)
         };
-        let made = factory.CreateSwapChainForComposition(&gpu.device, &desc, None);
-        let presented = made.as_ref().ok().map(|s| s.Present(0, DXGI_PRESENT_ALLOW_TEARING));
-        say!(
-            "tearing: DXGI {} it ({feature:?}); a composition swap chain with ALLOW_TEARING: {}; presenting with it: {}",
-            if allowed.as_bool() { "allows" } else { "doesn't allow" },
-            made.as_ref().map_or_else(|e| format!("refused ({e})"), |_| "made".into()),
-            presented.map_or("not tried".into(), |p| format!("{p:?}"))
+        // The gaps between pictures shown one after another, and how many of them are whole
+        // refreshes of the display (within half a millisecond).
+        let gaps: Vec<f64> = self.shown.windows(2).filter(|w| w[1].0 == w[0].0 + 1).map(|w| (w[1].1 - w[0].1) as f64 / frequency * 1000.0).collect();
+        let period = if refresh_hz > 0 { 1000.0 / refresh_hz as f64 } else { 0.0 };
+        let whole = gaps.iter().filter(|g| period > 0.0 && ((**g / period).round() * period - **g).abs() < 0.5).count();
+        let mean = if gaps.is_empty() { 0.0 } else { gaps.iter().sum::<f64>() / gaps.len() as f64 };
+        let line = format!(
+            "{} presented in {seconds:.1} s{}, {mode}; {} gaps between pictures shown, {mean:.2} ms on average, {} of them whole refreshes of {period:.2} ms",
+            self.presents,
+            if tearing { " with tearing allowed" } else { " at the display's refresh" },
+            gaps.len(),
+            whole
         );
+        self.shown.clear();
+        self.presents = 0;
+        Some((line, mode))
     }
 }
 
@@ -314,7 +389,16 @@ impl Drawer {
             gpu.device.CreateSamplerState(&s, Some(&mut sampler))?;
             let c = D3D11_BUFFER_DESC { ByteWidth: 48, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
             gpu.device.CreateBuffer(&c, None, Some(&mut constants))?;
-            say!("swap chain: {}x{}, {}, flip model{}", now.Width, now.Height, if now.Format == DXGI_FORMAT_R10G10B10A2_UNORM { "10 bits a channel" } else { "8 bits a channel" }, if layers.is_none() { ", in the app's panel" } else { "" });
+            let flags = DXGI_SWAP_CHAIN_FLAG(now.Flags as i32);
+            let tears = flags.0 & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 != 0;
+            say!(
+                "swap chain: {}x{}, {}, flip model{}{}",
+                now.Width,
+                now.Height,
+                if now.Format == DXGI_FORMAT_R10G10B10A2_UNORM { "10 bits a channel" } else { "8 bits a channel" },
+                if layers.is_none() { ", in the app's panel" } else { "" },
+                if tears { ", may tear" } else { "" }
+            );
             Ok(Self {
                 gpu,
                 swap,
@@ -333,6 +417,9 @@ impl Drawer {
                 clip: None,
                 scale: (1.0, 1.0),
                 pq: false,
+                flags,
+                tears,
+                cadence: Cadence::default(),
             })
         }
     }
@@ -438,7 +525,7 @@ impl Drawer {
         // SAFETY: calls on interfaces we hold.
         unsafe {
             self.gpu.context.OMSetRenderTargets(None, None);
-            self.swap.ResizeBuffers(0, to.0, to.1, DXGI_FORMAT_UNKNOWN, WAITABLE).context("resize the swap chain")?;
+            self.swap.ResizeBuffers(0, to.0, to.1, DXGI_FORMAT_UNKNOWN, self.flags).context("resize the swap chain")?;
             if let Some(layers) = &self.layers {
                 layers.ui_swap.ResizeBuffers(0, to.0, to.1, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)).context("resize the interface's swap chain")?;
             }
@@ -679,6 +766,7 @@ pub fn start_on(gpu: Gpu, scene: Arc<Scene>, surface: impl FnOnce() -> Surface +
 
 fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> Result<()> {
     let mut drawer = Drawer::new(gpu, surface)?;
+    scene.tearing_allowed.store(tearing_supported(&drawer.gpu), Ordering::Relaxed);
     let mut first = None::<Instant>;
     let mut occluded = false;
     // Whether the swap chain has said it has room and nothing has been presented since.
@@ -744,6 +832,7 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
         // An HDR stream: passed through where the screen is HDR, tone-mapped where it isn't.
         let colour = session.as_ref().map_or((false, 203.0, 1000.0), |s| (s.hdr.load(Ordering::Relaxed), s.sdr_white.load(Ordering::Relaxed) as f32, s.peak.load(Ordering::Relaxed) as f32));
         drawer.set_pq(colour.0 && scene.screen_hdr.load(Ordering::Relaxed));
+        scene.hdr_shown.store(if !colour.0 || session.is_none() { 0 } else if drawer.pq { 1 } else { 2 }, Ordering::Relaxed);
         if draws {
             let _alone = DRAWING.lock().unwrap();
             drawer.draw(picture.as_ref(), video, colour)?;
@@ -770,11 +859,24 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
             }
         }
         if draws {
-            // For the next refresh of the display. There is room, so this doesn't wait.
+            // For the next refresh of the display (there is room, so this doesn't wait); or,
+            // with variable refresh, at once with tearing allowed: a monitor that varies its
+            // refresh then shows the picture now, and the next when it comes.
+            let tear = drawer.tears && scene.variable_refresh.load(Ordering::Relaxed);
+            if scene.tearing.swap(tear, Ordering::Relaxed) != tear {
+                say!("presenting: {}", if tear { "each picture as it arrives, tearing allowed (variable refresh)" } else { "at the display's refresh" });
+            }
             // SAFETY: a call on the swap chain.
-            let presented = unsafe { drawer.swap.Present(1, DXGI_PRESENT(0)) };
+            let presented = unsafe { if tear { drawer.swap.Present(0, DXGI_PRESENT_ALLOW_TEARING) } else { drawer.swap.Present(1, DXGI_PRESENT(0)) } };
             room = false;
             presented.ok().context("present")?;
+            if new {
+                drawer.cadence.note(&drawer.swap);
+            }
+            if let Some((line, mode)) = drawer.cadence.report(&drawer.swap, scene.refresh_hz.load(Ordering::Relaxed), tear) {
+                say!("presenting: {line}");
+                *scene.presenting.lock().unwrap() = mode;
+            }
             if (presented == DXGI_STATUS_OCCLUDED) != occluded {
                 occluded = !occluded;
                 say!("the window is {}", if occluded { "covered or has no desktop to be on: presenting isn't paced by a display" } else { "visible again" });
