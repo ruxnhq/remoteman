@@ -263,6 +263,15 @@ void rm_host_info(const rm_host *host, char *out, size_t len);
 // for a feature that is off are the host's to ignore.
 void rm_host_set_features(const rm_host *host, const char *features);
 
+// Optional: have the core follow the network with the picture's bitrate. When the client reports
+// lost frames the core calls on_bitrate(ctx, bits_per_second) with a lower target, and with
+// higher ones after a clean stretch, never above the client's ceiling (its configure message)
+// or default_bps, what the host encodes at when the client set none (0: nothing is followed until
+// it sets one). It is called on the core's handler thread; change the encoder's rate live,
+// without a keyframe. The core sends the client `status` itself. Takes effect from the next
+// client. A host that never calls this behaves as before.
+void rm_host_set_bitrate_callback(const rm_host *host, uint32_t default_bps, void (*on_bitrate)(void *ctx, uint32_t bits_per_second), void *ctx);
+
 // Pairing: let the next unknown device in (it is remembered and pairing turns itself off).
 void rm_host_set_pairing(const rm_host *host, int32_t on);
 int32_t rm_host_pairing(const rm_host *host);

@@ -8,6 +8,7 @@
 pub mod blob;
 pub mod ffi;
 pub mod host;
+pub mod rate;
 pub mod receive;
 // The relay talks over a Unix socket.
 #[cfg(unix)]
@@ -175,6 +176,8 @@ pub struct Stats {
     pub keyframe_requests: u32,
     /// The shortest round trip seen, in microseconds (0: none yet).
     pub round_trip_us: u32,
+    /// Fragments rebuilt from the host's parity datagrams: each would have cost a frame.
+    pub repaired: u32,
 }
 
 #[derive(Default)]
@@ -182,6 +185,7 @@ struct Counters {
     lost: AtomicU32,
     requests: AtomicU32,
     rtt: AtomicU32,
+    repaired: AtomicU32,
 }
 
 /// Sends microphone packets on a client's connection, from any thread: as
@@ -283,7 +287,7 @@ impl Client {
         let now_us = move || clock.elapsed().as_micros() as u64;
         handler.stage(Stage::Hello);
         let (mut send, mut recv) = conn.open_bi().await?;
-        write_message(&mut send, &Message::ClientHello { proto: remoteman_proto::PROTO, name: o.name, display: o.display, decoders: o.decoders, cursor: o.cursor, unlock: o.unlock, way_in: o.attach_only.then(|| "attach".to_owned()) }).await?;
+        write_message(&mut send, &Message::ClientHello { proto: remoteman_proto::PROTO, name: o.name, display: o.display, decoders: o.decoders, cursor: o.cursor, unlock: o.unlock, way_in: o.attach_only.then(|| "attach".to_owned()), parity: true }).await?;
         let (host_name, host_os, host_features) = loop {
             match read_message(&mut recv).await?.context("the host closed the connection")? {
                 Message::HostHello { name, os, features, .. } => break (name, os, features),
@@ -467,7 +471,7 @@ impl Client {
                     {
                         // A picture's datagram for a stream this side hasn't heard of yet (none
                         // at all, or a newer one than the one it knows): kept for when it has.
-                        let ahead = d.first() == Some(&KIND_VIDEO) && (!started || d.get(2..4).is_some_and(|e| { let e = u16::from_le_bytes([e[0], e[1]]); e != r.epoch() && e.wrapping_sub(r.epoch()) < 0x8000 }));
+                        let ahead = matches!(d.first(), Some(&KIND_VIDEO | &remoteman_proto::video::KIND_PARITY)) && (!started || d.get(2..4).is_some_and(|e| { let e = u16::from_le_bytes([e[0], e[1]]); e != r.epoch() && e.wrapping_sub(r.epoch()) < 0x8000 }));
                         if ahead {
                             // (A few megabytes at most: older ones give way.)
                             if early.len() >= 4096 {
@@ -488,7 +492,7 @@ impl Client {
                             continue;
                         }
                         match d.first() {
-                            Some(&KIND_VIDEO) => {}
+                            Some(&KIND_VIDEO | &remoteman_proto::video::KIND_PARITY) => {}
                             Some(&remoteman_proto::video::KIND_VIDEO2) => {
                                 if !started2 {
                                     continue;
@@ -540,6 +544,7 @@ impl Client {
                             Ok(None) => continue,
                             Err(e) => break format!("bad video datagram: {e}"),
                         };
+                        c.repaired.store(r.repaired() as u32, Ordering::Relaxed);
                         if let Some((first, last)) = r.take_lost() {
                             c.lost.fetch_add(last - first + 1, Ordering::Relaxed);
                             // Keep the earliest loss not yet recovered from.
@@ -658,6 +663,7 @@ impl Client {
             lost: self.counters.lost.load(Ordering::Relaxed),
             keyframe_requests: self.counters.requests.load(Ordering::Relaxed),
             round_trip_us: self.counters.rtt.load(Ordering::Relaxed),
+            repaired: self.counters.repaired.load(Ordering::Relaxed),
         }
     }
 

@@ -466,6 +466,18 @@ impl Host {
 }
 
 impl HostHandler for Host {
+    fn default_bitrate(&mut self) -> u32 {
+        self.bitrate
+    }
+
+    /// The core follows the network below the client's ceiling: the running encoder takes the
+    /// new rate at its next turn, with no keyframe (the pipeline tells the client with `status`).
+    fn bitrate(&mut self, bits_per_second: u32) {
+        if let Some(l) = self.live.as_ref() {
+            l.pipeline.set_bitrate(bits_per_second.clamp(*BITRATE.start(), *BITRATE.end()));
+        }
+    }
+
     fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
         self.left();
         if self.allowed.paused.load(Ordering::Relaxed) {

@@ -125,6 +125,10 @@ pub enum Message {
         /// screen). A host with one way in takes no notice.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         way_in: Option<String>,
+        /// The client puts fragments back together with the help of parity datagrams (kind 7):
+        /// a host that lists `parity` in its features then sends them.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        parity: bool,
     },
     HostHello {
         proto: u32,

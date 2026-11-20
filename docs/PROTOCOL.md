@@ -93,7 +93,7 @@ Each message is a `u32` length followed by that many bytes of UTF-8 JSON, an obj
 **Client → host**
 
 - `{"t":"client_hello","proto":0,"name":"Anna's iPad","display":{"width":2752,"height":2064,"scale":2.0,"refresh":120},"decoders":[{"codec":"av1","chroma":"420","depth":10},{"codec":"hevc","chroma":"444","depth":10},{"codec":"hevc","chroma":"420","depth":10}]}`
-  The first message. `display` is the client's screen in pixels, with the scale it wants the desktop drawn at and its refresh rate in Hz. `decoders` lists what it decodes in hardware, most preferred first. An optional `"cursor":true` says the client draws the cursor itself (see Cursor). An optional `"placement"` inside `display` says where the display sits among the host's own screens: `"extend"` (the default: an extra display beside them), `"main"` (the main display, the host's own screens kept on beside it) or `"only"` (the host's own screens off while the client is connected). A host that can do this lists `placement` in its features; one that can't gives an extra display whatever is asked. The host's own layout comes back when the client leaves. A fourth value, `"mirror"`, asks for no display of the client's own: the client is shown the host's main monitor as it is, and its input lands there. The `stream` message then carries that monitor's size (not the one the client asked for) and a refresh rate no higher than either side's. A host that can do it lists `mirror` in its features; one that doesn't know the value gives an extra display.
+  The first message. `display` is the client's screen in pixels, with the scale it wants the desktop drawn at and its refresh rate in Hz. `decoders` lists what it decodes in hardware, most preferred first. An optional `"cursor":true` says the client draws the cursor itself (see Cursor). An optional `"parity":true` says it can use parity datagrams (see Parity). An optional `"placement"` inside `display` says where the display sits among the host's own screens: `"extend"` (the default: an extra display beside them), `"main"` (the main display, the host's own screens kept on beside it) or `"only"` (the host's own screens off while the client is connected). A host that can do this lists `placement` in its features; one that can't gives an extra display whatever is asked. The host's own layout comes back when the client leaves. A fourth value, `"mirror"`, asks for no display of the client's own: the client is shown the host's main monitor as it is, and its input lands there. The `stream` message then carries that monitor's size (not the one the client asked for) and a refresh rate no higher than either side's. A host that can do it lists `mirror` in its features; one that doesn't know the value gives an extra display.
 - `{"t":"lost","first":812,"last":813,"epoch":1}`: frames 812 to 813 never arrived whole (`last` is the newest frame number the client has seen; `epoch` is the stream epoch the numbers belong to, and a host drops a report about an epoch that is over). See Video, "Loss".
 - `{"t":"keyframe"}`: the client needs a keyframe, with no way round it (at the start of a stream).
 - `{"t":"ping","id":7,"client_us":123456}`: answered at once with `pong`. `client_us` is the client's clock in microseconds.
@@ -156,7 +156,7 @@ The host reports every move, the client's own included, a pipeline's delay later
 
 Everything beside the picture and input. Three rules hold for all of it:
 
-- **A host lists what it has** in its hello's `features`: `sound`, `mic`, `camera`, `configure`, `clipboard`, `files`. A client offers only those.
+- **A host lists what it has** in its hello's `features`: `sound`, `mic`, `camera`, `configure`, `clipboard`, `files`, `parity`. A client offers only those.
 - **Nothing of a feature is sent to a side that hasn't asked for it.** Each starts with a message from the client, so a client or host that knows nothing of a feature is never handed a datagram or a stream it can't read. (A client must still ignore datagram kinds it doesn't know.)
 - **When the desktop behind the connection changes** (a new stream epoch because the login screen gave way to the session), what the client had switched on stays on: the host side carries it over, and the client hears `sound_format` again.
 
@@ -206,6 +206,29 @@ A blob is a stream that begins with a kind byte, then a `u32` length and that ma
 
 - Client → host: `{"t":"configure","display":{...},"bitrate":25000000,"decoders":[...]}`. Every field is optional and what is left out stays as it is. `display` is as in the hello (size, scale, refresh, placement); a new one, or other `decoders`, starts a new stream epoch. `bitrate` is the most the picture may use, in bits a second; 0 gives the choice back to the host.
 - Host → client, now and then: `{"t":"status","bitrate":25000000}`: what the picture is being encoded at, for the device to show.
+- **Bitrate following the network.** `bitrate` in `configure` (or the host's own default when there is none or 0) is a *ceiling*; what the picture is encoded at is a target at or below it. On a loss report the host multiplies the target by 0.8 (reports within 500 ms of the last cut count as one), down to the larger of 2 Mbit/s and 15% of the ceiling. After 2 s without a report the target climbs 3% every 500 ms (about 6% a second) until it is back at the ceiling. Every change is sent as `status`. A new `configure` starts from the ceiling again. The encoder's rate changes live, with no keyframe. Hosts whose encoder can't do that (or that haven't implemented it) keep the rate they chose; the client sends nothing new for this, loss reports are the only signal.
+
+### Parity (`parity`)
+
+A host that lists `parity` in its features may send, to a client that said `"parity":true` in its `client_hello`, one parity datagram (kind 7) after each group of up to 10 data fragments of the first picture's frames (and after the last, shorter group). Nothing of it goes to any other client, and a client that doesn't know it ignores the kind. The datagram:
+
+```
+u8   kind        7 = parity
+u8   flags       as the video datagram's (bit 0 key, bit 1 recovery) for the frame
+u16  epoch
+u32  frame
+u16  first       the index of the group's first data fragment
+u16  count       how many fragments the frame has
+u8   n           how many data fragments the group has (1 to 255; the host uses 10)
+u8   0
+u16  last_len    the payload length of the frame's last fragment
+u64  capture_us  the frame's
+...  payload     the XOR of the group's fragment payloads, shorter ones padded with zeros
+```
+
+The header is 24 bytes; to keep every datagram within the connection's limit the host cuts the frame's data fragments 4 bytes smaller than it would without parity (so a frame sent with parity is not cut as it would be without). The group size is fixed at 10 (about 10% more bytes, outside the bitrate); `first` and `n` are in each datagram, so a host may change it without the client noticing.
+
+A client that holds all but one of a group's fragments and has the group's parity rebuilds the missing one: the XOR of the parity and the others, as long as the parity is, or `last_len` long if it is the frame's last fragment. With two missing in a group nothing is rebuilt (the frame is given up as in "Loss"). Parity may come before or after its data; a parity datagram of another epoch, an earlier frame, or one that does not agree with the frame's `count` is ignored. Second displays and the camera have no parity.
 
 ### Clipboard (`clipboard`)
 
@@ -241,4 +264,4 @@ The client sends `ping` now and then and takes the answer with the shortest roun
 
 ## Not in version 0
 
-Re-requesting lost fragments, parity, bitrate following the network, resume tokens, QR pairing, more than one display, HDR, a camera or microphone switched on from the host's side (when a program there opens it).
+Re-requesting lost fragments, resume tokens, QR pairing, more than one display, HDR, a camera or microphone switched on from the host's side (when a program there opens it).

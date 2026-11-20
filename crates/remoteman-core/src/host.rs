@@ -18,6 +18,7 @@ use remoteman_proto::video::{CursorAt, Reassembler, fragment};
 use remoteman_transport::{Connection, Identity, RecvStream, Trust, listen, peer_fingerprint, read_message, write_message};
 
 use crate::blob::{self, BlobEvent, BlobSender, Chunk};
+use crate::rate::RateController;
 use crate::{CursorShape, Display, Mode};
 
 pub struct HostOptions {
@@ -87,6 +88,21 @@ pub trait HostHandler: Send + 'static {
     fn lost(&mut self, first: u32, last: u32) {
         let _ = (first, last);
         self.keyframe();
+    }
+    /// What the host encodes at when the client has set no ceiling, in bits a second. A host that
+    /// follows the network (see [`Self::bitrate`]) says it here; 0 (the default) means it
+    /// doesn't, and nothing below is ever called.
+    fn default_bitrate(&mut self) -> u32 {
+        0
+    }
+    /// The picture should be encoded at this many bits a second from now on: the core lowers it
+    /// when the client reports loss and raises it again after a clean stretch, never above the
+    /// ceiling (what the client set with `configure`, or [`Self::default_bitrate`]); see
+    /// docs/PROTOCOL.md, "Settings". Change the encoder's rate live, with no keyframe. A ceiling
+    /// the client sets is applied by the host itself through [`Self::message`], as before; this
+    /// is called only for the steps below it. The core tells the client with `status`.
+    fn bitrate(&mut self, bits_per_second: u32) {
+        let _ = bits_per_second;
     }
     /// The client's input, in order.
     fn input(&mut self, event: Event);
@@ -254,6 +270,72 @@ enum Call {
     Left,
 }
 
+/// What a host program that isn't a [`HostHandler`] with its own `bitrate` gives the core to
+/// follow the network with instead (see [`Host::set_bitrate_hook`]): its default rate, and what
+/// to call with each new target.
+struct BitrateHook {
+    default: u32,
+    apply: Box<dyn FnMut(u32) + Send>,
+}
+
+/// Every host the core runs lists `parity` (docs/PROTOCOL.md, "Parity"): the core cuts the
+/// datagrams, and sends parity only to a client that asked for it.
+fn with_parity(mut features: Vec<String>) -> Vec<String> {
+    if !features.iter().any(|f| f == "parity") {
+        features.push("parity".into());
+    }
+    features
+}
+
+/// The bitrate following the network, for the connected client, on the handler's thread.
+#[derive(Default)]
+struct Follow {
+    /// Whether anything takes the new targets.
+    follows: bool,
+    /// What the host encodes at when the client set no ceiling.
+    default: u32,
+    /// The ceiling the client set (0: none).
+    asked: u32,
+    control: Option<RateController>,
+}
+
+impl Follow {
+    fn start(handler: &mut dyn HostHandler, hook: &Mutex<Option<BitrateHook>>) -> Self {
+        let own = handler.default_bitrate();
+        let hooked = hook.lock().unwrap().as_ref().map(|h| h.default);
+        let default = if own > 0 { own } else { hooked.unwrap_or(0) };
+        let mut f = Self { follows: own > 0 || hooked.is_some(), default, asked: 0, control: None };
+        f.rebuild();
+        f
+    }
+
+    fn rebuild(&mut self) {
+        let ceiling = if self.asked > 0 { self.asked } else { self.default };
+        self.control = (self.follows && ceiling > 0).then(|| RateController::new(ceiling));
+    }
+
+    /// The client's `configure`: the host applied its ceiling itself, and the picture may have
+    /// started afresh at it, so the target starts again from there.
+    fn configured(&mut self, bitrate: Option<u32>) {
+        if let Some(b) = bitrate {
+            self.asked = b;
+        }
+        self.rebuild();
+    }
+
+    /// Put a new target into effect: the host's encoder, and the client's `status`.
+    fn apply(&self, step: Option<u32>, handler: &mut dyn HostHandler, hook: &Mutex<Option<BitrateHook>>, link: &Mutex<Option<Link>>) {
+        let Some(target) = step else { return };
+        match hook.lock().unwrap().as_mut() {
+            Some(h) if handler.default_bitrate() == 0 => (h.apply)(target),
+            _ => handler.bitrate(target),
+        }
+        if let Some(link) = link.lock().unwrap().as_ref() {
+            link.send_message(Message::Status { bitrate: Some(target) });
+        }
+    }
+}
+
 /// A device this host trusts.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Device {
@@ -299,6 +381,7 @@ pub struct Host {
     endpoint: remoteman_transport::Endpoint,
     trust: Arc<Trust>,
     link: Arc<Mutex<Option<Link>>>,
+    hook: Arc<Mutex<Option<BitrateHook>>>,
     who: Who,
     /// What this host can do, as the next hello will say it.
     features: Arc<Mutex<Vec<String>>>,
@@ -328,24 +411,58 @@ impl Host {
         let (calls, call_rx) = mpsc::channel::<Call>();
         let mut handler: Box<dyn HostHandler> = Box::new(handler);
         let (done, handler_done) = mpsc::channel::<()>();
+        let link: Arc<Mutex<Option<Link>>> = Arc::default();
+        let hook: Arc<Mutex<Option<BitrateHook>>> = Arc::default();
+        let (thread_link, thread_hook) = (link.clone(), hook.clone());
         std::thread::Builder::new().name("remoteman host".into()).spawn(move || {
-            while let Ok(call) = call_rx.recv() {
+            let (link, hook) = (thread_link, thread_hook);
+            let clock = Instant::now();
+            let mut follow = Follow::default();
+            loop {
+                let call = match call_rx.recv_timeout(Duration::from_millis(250)) {
+                    Ok(call) => Some(call),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                let now = clock.elapsed().as_millis() as u64;
+                // The bitrate following the network: a step up after a clean stretch.
+                let mut step = follow.control.as_mut().and_then(|c| c.tick(now));
+                let Some(call) = call else {
+                    follow.apply(step, &mut *handler, &hook, &link);
+                    continue;
+                };
                 match call {
-                    Call::Connected(client, link, reply) => {
-                        let _ = reply.send(handler.connected(&client, link));
+                    Call::Connected(client, link_to_client, reply) => {
+                        let answer = handler.connected(&client, link_to_client);
+                        follow = if answer.is_ok() { Follow::start(&mut *handler, &hook) } else { Follow::default() };
+                        step = None;
+                        let _ = reply.send(answer);
                     }
                     Call::Keyframe => handler.keyframe(),
-                    Call::Lost(first, last) => handler.lost(first, last),
+                    Call::Lost(first, last) => {
+                        handler.lost(first, last);
+                        step = follow.control.as_mut().and_then(|c| c.loss(now)).or(step);
+                    }
                     Call::Input(event) => handler.input(event),
-                    Call::Message(message) => handler.message(&message),
+                    Call::Message(message) => {
+                        handler.message(&message);
+                        if let Message::Configure { bitrate, .. } = &message {
+                            follow.configured(*bitrate);
+                        }
+                    }
                     Call::Mic(packet) => handler.mic(&packet),
                     Call::Camera(frame) => handler.camera(&frame),
                     Call::Blob(event, held) => {
                         handler.blob(&event);
                         drop(held);
                     }
-                    Call::Left => handler.left(),
+                    Call::Left => {
+                        handler.left();
+                        follow = Follow::default();
+                        step = None;
+                    }
                 }
+                follow.apply(step, &mut *handler, &hook, &link);
             }
             // Nothing more will come: whatever the handler still holds is let go of here,
             // and whoever is stopping the host is told when that is done.
@@ -353,12 +470,11 @@ impl Host {
             let _ = done.send(());
         })?;
 
-        let link: Arc<Mutex<Option<Link>>> = Arc::default();
         let who = Who::default();
-        let features = Arc::new(Mutex::new(options.features.clone()));
+        let features = Arc::new(Mutex::new(with_parity(options.features.clone())));
         let confirm = Arc::new(Confirm { own: identity.fingerprint.clone(), ..Confirm::default() });
         runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone(), confirm.clone()));
-        Ok(Self { confirm, runtime: Some(runtime), endpoint, trust, link, who, features, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
+        Ok(Self { confirm, runtime: Some(runtime), endpoint, trust, link, hook, who, features, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
     }
 
     /// Let the next unknown device in (it is remembered and pairing turns itself off), or stop
@@ -397,10 +513,20 @@ impl Host {
     /// message; nothing is restarted. Messages for a feature that is off are the handler's
     /// to ignore.
     pub fn set_features(&self, features: Vec<String>) {
+        let features = with_parity(features);
         *self.features.lock().unwrap() = features.clone();
         if let Some(link) = self.link() {
             link.send_message(Message::Features { features });
         }
+    }
+
+    /// Make the core lower and raise the picture's bitrate with the network for a host program
+    /// whose handler doesn't implement [`HostHandler::bitrate`] (the C interface): `apply` is
+    /// called, on the handler's thread, with each new target in bits a second, never above the
+    /// client's ceiling or `default` (what the host encodes at when the client set none; 0:
+    /// nothing is followed until the client sets one). Takes effect for the next client.
+    pub fn set_bitrate_hook(&self, default: u32, apply: impl FnMut(u32) + Send + 'static) {
+        *self.hook.lock().unwrap() = Some(BitrateHook { default, apply: Box::new(apply) });
     }
 
     /// Hand the handler a message as if the client had sent it, on the handler's own thread
@@ -563,7 +689,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     let no = |e: anyhow::Error| (false, e);
     let clock = Instant::now();
     let (mut send, mut recv) = conn.accept_bi().await.context("control stream").map_err(no)?;
-    let Some(Message::ClientHello { proto, name, display, decoders, cursor, unlock, way_in }) = read_message(&mut recv).await.map_err(no)? else {
+    let Some(Message::ClientHello { proto, name, display, decoders, cursor, unlock, way_in, parity }) = read_message(&mut recv).await.map_err(no)? else {
         return Err(no(anyhow::anyhow!("the first message wasn't client_hello")));
     };
     // A new device, held for the owner's word: it is told to wait (and can show the code),
@@ -597,6 +723,8 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             }
         }
     }
+    // Parity only where both sides said so.
+    let parity = parity && features.iter().any(|f| f == "parity");
     write_message(&mut send, &Message::HostHello { proto: remoteman_proto::PROTO, name: options.name.clone(), os: options.os.clone(), features }).await.map_err(no)?;
     // The list of trusted devices shows the name the device gives itself.
     if !name.trim().is_empty() {
@@ -722,7 +850,13 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                 }
             };
             let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
-            for d in fragment(&f.data, f.key, f.recovery, now(), number, f.capture_us, max) {
+            // With parity the data is cut a little smaller, and a copy sent later is cut so too.
+            let (datagrams, cut) = if parity {
+                (remoteman_proto::video::fragment_with_parity(&f.data, f.key, f.recovery, now(), number, f.capture_us, max, remoteman_proto::video::PARITY_GROUP), remoteman_proto::video::parity_cut(max))
+            } else {
+                (fragment(&f.data, f.key, f.recovery, now(), number, f.capture_us, max), max)
+            };
+            for d in datagrams {
                 sent = sent.wrapping_add(1);
                 if drop_one_in.is_some_and(|n| sent % n == 0) {
                     continue;
@@ -732,7 +866,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             if f.key || f.recovery {
                 answer.store(number.wrapping_add(1), std::sync::atomic::Ordering::Relaxed);
             }
-            last[0] = Some((f, now(), number, tokio::time::Instant::now() + REPEAT_AFTER, max));
+            last[0] = Some((f, now(), number, tokio::time::Instant::now() + REPEAT_AFTER, cut));
             number = number.wrapping_add(1);
         }
         // The handler dropped its link without the client leaving: nothing more to send.

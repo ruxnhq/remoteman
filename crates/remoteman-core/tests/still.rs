@@ -177,3 +177,33 @@ fn a_large_last_frame_is_completed_by_its_copy() {
     assert!(last.is_some_and(|data| data == large), "the last frame never arrived whole, or not as it was sent");
     p.end();
 }
+
+/// With parity (the core's client always asks for it) one datagram lost in a group costs
+/// nothing: every frame arrives whole, in order, and the host is asked for nothing.
+#[test]
+fn a_fragment_lost_from_each_frame_is_rebuilt_from_parity() {
+    // Frames of 20,000 bytes are some 17 data datagrams and 2 of parity; every 19th is thrown away.
+    let p = pair("parity", Some(19));
+    let frames: Vec<Vec<u8>> = (0..30u32).map(|n| (0..20_000u32).map(|i| ((i + n * 7) % 251) as u8).collect()).collect();
+    for (n, f) in frames.iter().enumerate() {
+        assert!(p.link.send_frame(f, n == 0, n as u64));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut got = Vec::new();
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while got.len() < frames.len() {
+        match p.seen.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+            Ok(Seen::Frame(n, data)) => got.push((n, data)),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert_eq!(got.len(), frames.len(), "frames went missing");
+    for (n, data) in got {
+        assert_eq!(data, frames[n as usize], "frame {n} came out wrong");
+    }
+    assert!(p.client.stats().repaired > 10, "parity rebuilt only {}", p.client.stats().repaired);
+    assert_eq!(p.client.stats().lost, 0);
+    assert!(p.asked.try_recv().is_err(), "the host was asked for a recovery frame");
+    p.end();
+}
