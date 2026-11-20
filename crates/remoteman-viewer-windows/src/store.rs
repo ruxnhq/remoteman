@@ -139,13 +139,24 @@ pub struct Computer {
     pub clipboard: bool,
     /// Which side of the computer's other displays a second display here is put on.
     pub second_side: Side,
+    /// The hardware addresses of its network cards (`aa:bb:cc:dd:ee:ff`, comma-separated), as
+    /// it last advertised them on this network: what waking it is sent to. The Linux viewer's
+    /// key, `cards`.
+    pub cards: String,
+    /// "Wake it over the network": it may be sent the waking packet.
+    pub wake: bool,
     /// Lines this viewer doesn't use (the Linux viewer's), kept as they were.
     pub other: Vec<(String, String)>,
 }
 
 impl Computer {
     fn new(name: &str, address: &str, os: &str, now: i64, settings: &Settings) -> Self {
-        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: 0, sound: settings.sound, clipboard: settings.clipboard, second_side: Side::Right, other: Vec::new() }
+        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: 0, sound: settings.sound, clipboard: settings.clipboard, second_side: Side::Right, cards: String::new(), wake: true, other: Vec::new() }
+    }
+
+    /// The network cards it can be woken through.
+    pub fn card_list(&self) -> Vec<String> {
+        self.cards.split(',').map(str::trim).filter(|c| !c.is_empty()).map(str::to_owned).collect()
     }
 }
 
@@ -174,6 +185,13 @@ pub struct Settings {
     pub clipboard: bool,
     /// Where files from a computer go; empty: the Downloads folder.
     pub folder: String,
+    /// Touchscreen touches go to the computer as touches, not as the pointer (the Linux
+    /// viewer's key, `touch`).
+    pub touch: bool,
+    /// Computers may be lent this PC's microphone and camera; each is still switched on in a
+    /// session by the person here.
+    pub allow_microphone: bool,
+    pub allow_camera: bool,
     /// Lines this viewer doesn't use, kept as they were.
     pub other: Vec<(String, String)>,
 }
@@ -195,7 +213,7 @@ impl Settings {
     }
 }
 
-const SETTINGS_KEYS: [&str; 13] = ["capture-pointer", "placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder"];
+const SETTINGS_KEYS: [&str; 16] = ["capture-pointer", "placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder", "touch", "allow-microphone", "allow-camera"];
 
 pub struct Store {
     dir: PathBuf,
@@ -244,6 +262,9 @@ impl Store {
             sound: yes("sound", false),
             clipboard: yes("clipboard", false),
             folder: get("folder").unwrap_or_default(),
+            touch: yes("touch", false),
+            allow_microphone: yes("allow-microphone", false),
+            allow_camera: yes("allow-camera", false),
             other: text.lines().filter_map(|l| l.split_once('=')).filter(|(k, _)| !SETTINGS_KEYS.contains(k)).map(|(k, v)| (k.to_owned(), v.to_owned())).collect(),
         };
         let mut store = Self { dir: dir.to_owned(), computers: Vec::new(), settings, pretend: false };
@@ -267,6 +288,8 @@ impl Store {
                     "sound" => c.sound = value == "yes",
                     "clipboard" => c.clipboard = value == "yes",
                     "second-side" => c.second_side = SIDES.iter().find(|s| s.1 == value).map_or(Side::Right, |s| s.0),
+                    "cards" => c.cards = value.to_owned(),
+                    "wake" => c.wake = value != "no",
                     other => c.other.push((other.to_owned(), value.to_owned())),
                 }
             }
@@ -379,7 +402,7 @@ impl Store {
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         for c in &self.computers {
             out += &format!(
-                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\npicture-lines={}\nsound={}\nclipboard={}\nsecond-side={}\n",
+                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\npicture-lines={}\nsound={}\nclipboard={}\nsecond-side={}\ncards={}\nwake={}\n",
                 clean(&c.name),
                 clean(&c.address),
                 clean(&c.os),
@@ -392,6 +415,8 @@ impl Store {
                 if c.sound { "yes" } else { "no" },
                 if c.clipboard { "yes" } else { "no" },
                 SIDES.iter().find(|s| s.0 == c.second_side).map_or("right", |s| s.1),
+                clean(&c.cards),
+                if c.wake { "yes" } else { "no" },
             );
             for (key, value) in &c.other {
                 out += &format!("{key}={}\n", clean(value));
@@ -408,7 +433,7 @@ impl Store {
         let s = &self.settings;
         let yes = |b: bool| if b { "yes" } else { "no" };
         let mut out = format!(
-            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\ncapture-pointer={}\nsound={}\nclipboard={}\nfolder={}\n",
+            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\ncapture-pointer={}\nsound={}\nclipboard={}\nfolder={}\ntouch={}\nallow-microphone={}\nallow-camera={}\n",
             placement_key(s.placement),
             yes(s.hover_bar),
             yes(s.figures),
@@ -422,6 +447,9 @@ impl Store {
             yes(s.sound),
             yes(s.clipboard),
             s.folder.replace(['\n', '\r'], " "),
+            yes(s.touch),
+            yes(s.allow_microphone),
+            yes(s.allow_camera),
         );
         for (key, value) in &s.other {
             out += &format!("{key}={value}\n");

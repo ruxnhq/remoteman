@@ -79,6 +79,8 @@ struct Engine {
     /// The host's cursor, made into a Windows one, for the app to wear over the picture.
     cursor: Cell<Option<HCURSOR>>,
     cursor_serial: Cell<u32>,
+    /// Fingers on the touchscreen that the computer knows of (`touch.rs`).
+    fingers: RefCell<crate::touch::Fingers>,
 }
 
 thread_local! {
@@ -267,6 +269,16 @@ pub extern "system" fn remoteman_key(scancode: u32, extended: bool, down: bool, 
     true
 }
 
+/// A finger on the touchscreen over the panel: `id` is Windows' pointer id for the contact,
+/// `phase` 0 down, 1 move, 2 up (also for a cancelled contact or a lost capture), at this place
+/// in the panel in pixels. Returns whether it went to the computer as a touch; if not, the app
+/// treats it as the pointer, as before.
+#[unsafe(no_mangle)]
+pub extern "system" fn remoteman_touch(id: u32, phase: i32, x: i32, y: i32) -> bool {
+    let Some(e) = engine() else { return false };
+    e.touch(id, crate::touch::phase(phase), x, y)
+}
+
 /// The panel got the keyboard, or lost it.
 #[unsafe(no_mangle)]
 pub extern "system" fn remoteman_focus(focused: bool) {
@@ -420,6 +432,7 @@ fn start(words: Vec<String>, notify: Notify) -> Result<()> {
         second: RefCell::new(None),
         cursor: Cell::new(None),
         cursor_serial: Cell::new(0),
+        fingers: RefCell::new(crate::touch::Fingers::default()),
     });
     ENGINE.with(|x| *x.borrow_mut() = Some(e.clone()));
     // The Windows key, Alt+Tab and the like, while a session has the keyboard.
@@ -615,7 +628,39 @@ impl Engine {
                 self.send(Event::Button { button, down: false });
             }
         }
+        // And every finger the computer thinks is down.
+        let fingers = self.fingers.borrow_mut().lift_all();
+        for (slot, x, y) in fingers {
+            say!("touch: up, slot {slot}, at {x:.3},{y:.3} (the picture lost the input)");
+            self.send(Event::Touch { phase: remoteman_core::TouchPhase::Up, slot, x, y });
+        }
         self.chord.set(false);
+    }
+
+    /// A finger on the panel: sent as a touch if that is wanted and the picture is the
+    /// computer's, and whether it was.
+    fn touch(&self, id: u32, phase: remoteman_core::TouchPhase, x: i32, y: i32) -> bool {
+        use remoteman_core::TouchPhase;
+        let wanted = FEATURES.touch && self.forwarding() && self.app.try_borrow().is_ok_and(|a| a.store.settings.touch);
+        // A finger that went down as a touch is lifted as one, whatever has changed since.
+        if !wanted && !(phase == TouchPhase::Up && self.fingers.borrow().has(id)) {
+            return false;
+        }
+        let Some(slot) = self.fingers.borrow_mut().slot(id, phase) else { return true };
+        let at = self.app.try_borrow().ok().and_then(|a| a.fraction(x as f32, y as f32));
+        if at.is_none() && phase != TouchPhase::Up {
+            return true;
+        }
+        let (fx, fy) = at.unwrap_or_else(|| self.fingers.borrow().last(slot));
+        self.fingers.borrow_mut().place(slot, fx, fy);
+        self.point_at(0);
+        self.send(Event::Touch { phase, slot, x: fx, y: fy });
+        match phase {
+            TouchPhase::Down => say!("touch: down, slot {slot}, at {fx:.3},{fy:.3} (pointer {id})"),
+            TouchPhase::Up => say!("touch: up, slot {slot}, at {fx:.3},{fy:.3} after {} moves", self.fingers.borrow().moves(slot)),
+            TouchPhase::Move => {}
+        }
+        true
     }
 
     /// A key seen before Windows acts on it: whether it is the computer's (as the old window).
@@ -977,6 +1022,26 @@ impl Engine {
                 app.set_dark(b("on"));
                 return true;
             }
+            // Finding, waking, the microphone, the camera and touch (`nearby.rs`, `media.rs`).
+            // `on` is what the switch is to be; without it the switch flips.
+            "wake" => {
+                app.wake(&s("address"));
+                return true;
+            }
+            "set" => {
+                let on = v.get("on").and_then(Value::as_bool);
+                return app.set_option(&s("what"), on, v.get("address").and_then(Value::as_str));
+            }
+            "mic" => {
+                let on = v.get("on").and_then(Value::as_bool).unwrap_or_else(|| !app.session.as_ref().is_some_and(|x| x.mic_on));
+                app.set_microphone(on);
+                return true;
+            }
+            "camera" => {
+                let on = v.get("on").and_then(Value::as_bool).unwrap_or_else(|| !app.session.as_ref().is_some_and(|x| x.camera_on));
+                app.set_camera(on);
+                return true;
+            }
             other => {
                 say!("a command nobody knows: {other}");
                 return false;
@@ -1069,9 +1134,14 @@ fn state(app: &App) -> Value {
                 "key": app.store.key(&c.address).map(|k| key_words(&k, 4)).unwrap_or_default(),
                 "placement": placement_key(c.placement), "sound": c.sound, "clipboard": c.clipboard,
                 "connected": app.session.as_ref().is_some_and(|s| s.target.address == c.address),
+                // Seen on this network now; may be sent the waking packet; "Wake it over the
+                // network" in its settings; the network cards it is woken through.
+                "seen": app.seen(&c.address).is_some(), "wakeable": app.wakeable(&c.address), "wake": c.wake, "cards": c.cards,
             })
         })
         .collect();
+    // Computers running remoteman on this network that this PC isn't paired with.
+    let nearby: Vec<Value> = app.sightings.unpaired.iter().map(|f| json!({"name": f.name, "address": f.address, "short": crate::store::short(&f.address), "os": f.os, "os_name": os_name(&f.os)})).collect();
     let st = &app.store.settings;
     let settings = json!({
         "match_refresh": st.match_refresh, "ctrl_as_command": st.ctrl_as_command, "shortcuts": st.shortcuts,
@@ -1080,6 +1150,7 @@ fn state(app: &App) -> Value {
         "folder": app.store.receive_folder().display().to_string(),
         "controls": options(app, &Choice::Controls), "default_quality": options(app, &Choice::DefaultQuality),
         "scroll": options(app, &Choice::Scroll), "pointer": options(app, &Choice::Pointer),
+        "touch": st.touch, "allow_microphone": st.allow_microphone, "allow_camera": st.allow_camera,
     });
     // The drop-downs of one computer: the one whose page is open, or the session's.
     let address = match &app.screen {
@@ -1106,11 +1177,20 @@ fn state(app: &App) -> Value {
             "figures": {"shown": f.shown, "decoded": f.decoded, "decode_ms": f.decode_ms, "age_ms": f.age_ms, "round_trip_ms": f.round_trip_ms, "megabits": f.megabits, "lost": f.lost, "replaced": f.replaced, "decoder": f.decoder},
         })
     });
+    // With this PC's microphone and camera as lent to the computer (`media.rs`): `mic`,
+    // `mic_can`, `mic_why`, `mic_device`, `camera`, `camera_can`, `camera_why`.
+    let session = session.map(|mut v| {
+        if let (Some(o), serde_json::Value::Object(m)) = (v.as_object_mut(), crate::media::session_state(app)) {
+            o.extend(m);
+        }
+        v
+    });
     let decodes = |word: &str| app.decoders.iter().any(|m| format!("{:?}", m.codec).eq_ignore_ascii_case(word) && m.chroma == remoteman_core::Chroma::C420);
     json!({
         "screen": screen,
         "dialog": dialog,
         "computers": computers,
+        "nearby": nearby,
         "settings": settings,
         "computer": computer,
         "session": session,
