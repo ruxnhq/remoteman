@@ -1,6 +1,6 @@
 # windows-reactor from windows-rs 63a5e3d, patched (see VENDORED.md): Mica and Acrylic stay in
 # their active look while the window is not in front, more theme brushes, and notifications from a
-# notification icon. Used through the workspace's [patch] of the windows-rs git source.
+# notification icon. Used by path from the Windows crates; its windows-rs dependencies are vendored beside it in ../windows-rs.
 [package]
 name = "windows-reactor"
 version = "0.101.0"
@@ -12,13 +12,13 @@ repository = "https://github.com/microsoft/windows-rs"
 publish = false
 
 [dependencies]
-windows-collections = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25", default-features = false, features = ["std"] }
-windows-core = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25", default-features = false }
-windows-future = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25", default-features = false }
-windows-reference = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25", default-features = false, features = ["std"] }
-windows-threading = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25", default-features = false }
-windows-time = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25", default-features = false }
-windows-window = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25", default-features = false }
+windows-collections = { path = "../windows-rs/collections", default-features = false, features = ["std"] }
+windows-core = { path = "../windows-rs/core", default-features = false }
+windows-future = { path = "../windows-rs/future", default-features = false }
+windows-reference = { path = "../windows-rs/reference", default-features = false, features = ["std"] }
+windows-threading = { path = "../windows-rs/threading", default-features = false }
+windows-time = { path = "../windows-rs/time", default-features = false }
+windows-window = { path = "../windows-rs/window", default-features = false }
 
 # Upstream takes its lints from the windows-rs workspace. `dead_code`: the first patch leaves
 # WinUI's own backdrop bindings unused.

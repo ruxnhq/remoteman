@@ -1,0 +1,25 @@
+[package]
+name = "windows-reference"
+version = "0.101.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "Windows reference type"
+repository = "https://github.com/microsoft/windows-rs"
+categories = ["os::windows-apis"]
+readme = "readme.md"
+
+[target.'cfg(windows)'.dependencies]
+windows-core = { version = "0.101.0", path = "../core", default-features = false, optional = true }
+windows-time = { version = "0.101.0", path = "../time", default-features = false, optional = true }
+
+[features]
+default = ["std"]
+std = ["dep:windows-core", "windows-core/std", "dep:windows-time", "windows-time/std"]
+
+
+[package.metadata.docs.rs]
+targets = []
+
+[lints.rust]
+unexpected_cfgs = { level = 'warn', check-cfg = ['cfg(windows_slim_errors, windows_cast_diagnostics)'] }

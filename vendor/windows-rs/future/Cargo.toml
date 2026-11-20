@@ -1,0 +1,26 @@
+[package]
+name = "windows-future"
+version = "0.101.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "Windows async types"
+repository = "https://github.com/microsoft/windows-rs"
+categories = ["os::windows-apis"]
+readme = "readme.md"
+
+[dependencies]
+windows-core = { version = "0.101.0", path = "../core", default-features = false }
+windows-link = { version = "0.100.1", path = "../link", default-features = false }
+windows-threading = { version = "0.100.1", path = "../threading", default-features = false, optional = true }
+
+[features]
+default = ["std"]
+std = ["windows-core/std", "dep:windows-threading"]
+
+
+[package.metadata.docs.rs]
+targets = []
+
+[lints.rust]
+unexpected_cfgs = { level = 'warn', check-cfg = ['cfg(windows_slim_errors, windows_cast_diagnostics)'] }

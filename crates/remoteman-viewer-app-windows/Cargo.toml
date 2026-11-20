@@ -21,10 +21,10 @@ path = "src/main.rs"
 [target.'cfg(windows)'.dependencies]
 remoteman-viewer-windows = { path = "../remoteman-viewer-windows" }
 serde_json = "1"
-windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25" }
+windows-reactor = { path = "../../vendor/windows-reactor" }
 # Reactor's own windows-core (that commit's), for the IUnknown the panel is given its swap
 # chain as; the engine's `windows` (0.62) hands it over as a raw pointer.
-windows-core = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25" }
+windows-core = { path = "../../vendor/windows-rs/core" }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
@@ -41,6 +41,6 @@ windows = { version = "0.62", features = [
 # the app runs on a PC that never installed the runtime (self-contained). Not for the Store's
 # MSIX, which depends on the runtime's framework package instead
 # (REMOTEMAN_FRAMEWORK_DEPENDENT=1 at build time leaves this out).
-windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25" }
+windows-reactor-setup = { path = "../../vendor/windows-rs/reactor-setup" }
 # The exe's name in Windows.
 winresource = "0.1"

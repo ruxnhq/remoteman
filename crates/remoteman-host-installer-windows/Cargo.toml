@@ -17,7 +17,7 @@ name = "remoteman-host-setup"
 path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
-windows-reactor = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25" }
+windows-reactor = { path = "../../vendor/windows-reactor" }
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -43,6 +43,6 @@ serde_json = "1"
 [target.'cfg(windows)'.build-dependencies]
 # Stages the Windows App Runtime beside the exe and embeds the manifest that finds it there; the
 # installer packs those files into itself (scripts/win-host-setup.ps1).
-windows-reactor-setup = { git = "https://github.com/microsoft/windows-rs", rev = "63a5e3d9b9afbd57c382d0a4f5a367f134e9dc25" }
+windows-reactor-setup = { path = "../../vendor/windows-rs/reactor-setup" }
 # The exe's icon and its name in Windows (the UAC prompt shows it).
 winresource = "0.1"

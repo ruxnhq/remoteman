@@ -1,0 +1,28 @@
+[package]
+name = "windows-implement"
+version = "0.101.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "The implement macro for the Windows crates"
+repository = "https://github.com/microsoft/windows-rs"
+categories = ["os::windows-apis"]
+readme = "readme.md"
+
+[dependencies]
+proc-macro2 = { version = "1.0", default-features = false }
+quote = { version = "1.0", default-features = false }
+syn = { version = "2.0", default-features = false, features = ["parsing", "proc-macro", "printing", "full", "clone-impls", "derive"] }
+
+[dev-dependencies]
+windows-core = { path = "../core" }
+
+
+[package.metadata.docs.rs]
+targets = []
+
+[lib]
+proc-macro = true
+
+[lints.rust]
+unexpected_cfgs = { level = 'warn', check-cfg = ['cfg(windows_slim_errors, windows_cast_diagnostics)'] }

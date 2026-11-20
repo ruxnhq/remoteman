@@ -167,7 +167,7 @@ impl HostWindow {
         let Some(s) = s else {
             page.push(match input.status {
                 Err(Unreached::Refused) => row("Sharing couldn't be read", Some("The host (remoteman-host.exe) is running but didn't let this app ask it how it stands, so nothing here can be shown or changed."), None),
-                _ => row("Sharing couldn't start", Some("The host (remoteman-host.exe) isn't running, so devices can't connect. It runs elevated in your desktop session; start it, and this page follows."), None),
+                _ => row("Sharing couldn't start", Some("The host (remoteman-host.exe) isn't running, so devices can't connect. It runs as the service \"remoteman host\", which starts with Windows; start it in Services, or restart the PC, and this page follows."), None),
             });
             return;
         };
@@ -193,9 +193,9 @@ impl HostWindow {
         }
         page.push(heading("Getting in"));
         page.push(row(
-            "Before anyone has signed in",
-            Some("The device would show Windows' sign-in screen and sign in there. Needs the background service, which isn't built yet."),
-            Some(TextBlock::new().text("Not available yet").foreground(ThemeBrush::TertiaryText).into()),
+            "Locked, or nobody signed in",
+            Some("The host runs from the moment Windows starts. A paired device that comes while this PC is locked, or before anyone has signed in, is asked for the password or PIN, which the host types into Windows' own screen; it locks again when the device leaves."),
+            Some(TextBlock::new().text("On").into()),
         ));
         page.push(heading("Picture"));
         page.push(row("Encoder", Some("On the graphics card: AV1 10-bit and HEVC 10-bit; HEVC 4:4:4 and HDR where the card's NVENC has them"), Some(TextBlock::new().text("Automatic").into())));
