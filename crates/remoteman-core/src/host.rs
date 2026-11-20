@@ -441,6 +441,11 @@ struct Confirm {
     /// trusted as soon as it connects while pairing is open.
     wanted: std::sync::atomic::AtomicBool,
     waiting: Mutex<Option<(PendingDevice, Instant, tokio::sync::oneshot::Sender<bool>)>>,
+    /// When [`Host::pending`] was last asked: the sign that somebody (the owner's app) is there to
+    /// answer. With `approver_wait` (ms, 0: off) a device that waits that long with nobody having
+    /// asked is turned away at once instead of after the full minute.
+    last_look: Mutex<Option<Instant>>,
+    approver_wait: std::sync::atomic::AtomicU64,
 }
 
 pub struct Host {
@@ -569,8 +574,17 @@ impl Host {
         self.confirm.wanted.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// For a host that runs where nobody may be there to answer (a Windows service at the sign-in
+    /// screen): a new device that has waited this long without anybody having called [`Host::pending`]
+    /// since it came is refused, with "Nobody is signed in on this PC to accept the device", rather
+    /// than left waiting out the minute. The owner's app asks about once a second, so it is "there".
+    pub fn set_approver_wait(&self, wait: Option<Duration>) {
+        self.confirm.approver_wait.store(wait.map_or(0, |w| w.as_millis() as u64), std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// The device waiting to be confirmed, if there is one.
     pub fn pending(&self) -> Option<PendingDevice> {
+        *self.confirm.last_look.lock().unwrap() = Some(Instant::now());
         let waiting = self.confirm.waiting.lock().unwrap();
         let (device, since, _) = waiting.as_ref()?;
         Some(PendingDevice { seconds: CONFIRM_SECONDS.saturating_sub(since.elapsed().as_secs() as u32), ..device.clone() })
@@ -848,6 +862,25 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
     }
 }
 
+/// Ends when a device that began waiting at `since` has waited the host's `approver_wait` with
+/// nobody having asked [`Host::pending`] since; never, when that is off or somebody did.
+async fn nobody_asks(confirm: &Confirm, since: Instant) {
+    let wait = Duration::from_millis(confirm.approver_wait.load(std::sync::atomic::Ordering::Relaxed));
+    if wait.is_zero() {
+        return std::future::pending().await;
+    }
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let looked = confirm.last_look.lock().unwrap().is_some_and(|l| l >= since);
+        if looked {
+            return std::future::pending().await;
+        }
+        if since.elapsed() >= wait {
+            return;
+        }
+    }
+}
+
 /// The second factor's turn at admission: wait for `second_factor` messages from the client until
 /// one is right (and then go on), or too many are wrong (error `second_factor`, the device refused
 /// for 10 minutes), or the time is up (a client that doesn't know the message never answers).
@@ -943,9 +976,11 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         let (answer, answered) = tokio::sync::oneshot::channel::<bool>();
         *confirm.waiting.lock().unwrap() = Some((device, Instant::now(), answer));
         write_message(&mut send, &Message::Pairing { seconds: CONFIRM_SECONDS }).await.map_err(no)?;
+        let mut nobody = false;
         let decision = tokio::select! {
             said = tokio::time::timeout(Duration::from_secs(CONFIRM_SECONDS as u64), answered) => said.ok().and_then(|s| s.ok()),
             _ = conn.closed() => Some(false),
+            _ = nobody_asks(&confirm, Instant::now()) => { nobody = true; None }
         };
         // Whatever came of it, nobody is waiting any more (unless a newer device already is).
         {
@@ -960,7 +995,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                 record(ConnectionEvent::new("paired", name.trim(), &fingerprint, &address));
             }
             other => {
-                let message = if other.is_some() { "pairing was declined on the computer" } else { "nobody confirmed the pairing on the computer in time" };
+                let message = if other.is_some() { "pairing was declined on the computer" } else if nobody { "Nobody is signed in on this PC to accept the device" } else { "nobody confirmed the pairing on the computer in time" };
                 let mut event = ConnectionEvent::new("refused", name.trim(), &fingerprint, &address);
                 event.reason = message.into();
                 record(event);

@@ -458,6 +458,11 @@ mod windows_main {
         if pair {
             tracing::info!("pairing: the next unknown device to connect will be trusted");
         }
+        // Without the owner's app (nobody signed in, at the sign-in screen) a new device is
+        // refused after 30 s instead of 60: the app asks about waiting devices every second.
+        if !ask {
+            host.set_approver_wait(Some(Duration::from_secs(30)));
+        }
         if ask {
             tracing::info!("pairing: each new device is asked about on the desktop");
             ask_owner(std::sync::Arc::downgrade(&host));

@@ -171,6 +171,9 @@ pub struct Status {
     pub microphone: bool,
     /// Tell the owner when a device connects (on unless the host says otherwise).
     pub notify: bool,
+    /// A code from an authenticator app is asked for on top of a device's key: `Some`, with how
+    /// many devices were told "don't ask again" and not yet expired.
+    pub second_factor: Option<usize>,
     pub devices: Vec<Device>,
     /// What the host reported since it started, oldest first, for notifications.
     pub notices: Vec<Connection>,
@@ -237,6 +240,7 @@ impl Status {
             speakers_follow: b(&o, "speakers_follow"),
             microphone: b(&o, "microphone"),
             notify: yes(&o, "notify"),
+            second_factor: o.get("second_factor").filter(|v| v.is_object()).map(|v| n(v, "remembered") as usize),
             notices: events("notices"),
             connections: events("connections"),
             devices,
