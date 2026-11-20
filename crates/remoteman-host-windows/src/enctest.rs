@@ -181,3 +181,119 @@ fn hdr_streams() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Dense small black-on-white detail like text: 6x10 pixel cells of one-pixel strokes picked by a
+/// hash, the whole thing shifted `dy` rows (a scroll).
+fn text_like(x: u32, y: u32, dy: u32) -> bool {
+    let y = y + dy;
+    let (cx, cy, px, py) = (x / 6, y / 10, x % 6, y % 10);
+    // A text line has a gap between lines and a margin at the cell's right.
+    if px == 5 || py >= 8 {
+        return false;
+    }
+    let mut h = (cx.wrapping_mul(0x9E37_79B1) ^ cy.wrapping_mul(0x85EB_CA77)).wrapping_add(0x1234_5678);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    // A glyph: some of its rows and columns drawn.
+    let row = (h >> py) & 1 == 1 && (h >> 20) & 3 != 0;
+    let col = (h >> (8 + px)) & 1 == 1;
+    row || col && py % 2 == 0
+}
+
+fn text_source(gpu: &Gpu, dy: u32) -> Result<ID3D11ShaderResourceView> {
+    let on = (pq(WHITE) * 1023.0 + 0.5) as u32;
+    let mut data = vec![0u32; (W * H) as usize];
+    for y in 0..H {
+        for x in 0..W {
+            // Black text on white.
+            let v = if text_like(x, y, dy) { 0 } else { on };
+            data[(y * W + x) as usize] = v | v << 10 | v << 20 | 3 << 30;
+        }
+    }
+    let desc = D3D11_TEXTURE2D_DESC { Width: W, Height: H, MipLevels: 1, ArraySize: 1, Format: DXGI_FORMAT_R10G10B10A2_UNORM, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 }, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32, ..Default::default() };
+    let init = D3D11_SUBRESOURCE_DATA { pSysMem: data.as_ptr() as *const _, SysMemPitch: W * 4, SysMemSlicePitch: 0 };
+    // SAFETY: the pixels live through the call.
+    unsafe {
+        let mut texture = None;
+        gpu.device.CreateTexture2D(&desc, Some(&init), Some(&mut texture))?;
+        let mut view = None;
+        gpu.device.CreateShaderResourceView(&texture.context("no texture")?, None, Some(&mut view))?;
+        view.context("no view")
+    }
+}
+
+/// Static refinement on NVENC: some frames of a scroll, the picture still for a few frames, the
+/// refining frame, and one ordinary frame after; each decoded by ffmpeg (if `REMOTEMAN_FFMPEG` or
+/// C:\ffmpeg\bin\ffmpeg.exe is there) and its luma compared with the still picture's. The
+/// refining frame must be a P-frame and bigger than the ordinary ones, and the rate must be back
+/// for the frame after it.
+#[test]
+fn refine_still_picture() {
+    let Some(gpu) = nvidia() else {
+        eprintln!("no NVIDIA GPU with NVENC here: skipped");
+        return;
+    };
+    let mode = Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 };
+    let converter = Converter::new(&gpu, W, H, Input::Pq { white: WHITE }, Output::Sdr, false).unwrap();
+    let mut encoder = encode::open(&gpu, &converter.output, &Settings { mode, width: W, height: H, fps: 60, bitrate: 3_000_000, hdr: false, light: None }).unwrap();
+    // Three rows of scroll per frame for six frames, then the still picture (dy = 18).
+    let frames: Vec<u32> = vec![0, 3, 6, 9, 12, 15, 18, 18, 18, 18];
+    let refine_at = 9;
+    let mut out = Vec::new();
+    let mut sizes = Vec::new();
+    let mut last_view = None;
+    for (n, dy) in frames.iter().enumerate() {
+        let view = text_source(&gpu, *dy).unwrap();
+        converter.convert(&gpu, &view);
+        let how = How::default();
+        let made = if n == refine_at { encoder.encode_refined(0, n as u64, how, 8) } else { encoder.encode_how(0, n as u64, how) }.unwrap();
+        assert_eq!(made.key, n == 0, "frame {n}: keyframe {}", made.key);
+        sizes.push((made.data.len(), made.qp));
+        out.extend_from_slice(made.data);
+        last_view = Some(view);
+    }
+    // One ordinary frame after the refining one.
+    converter.convert(&gpu, last_view.as_ref().unwrap());
+    let made = encoder.encode_how(0, frames.len() as u64, How::default()).unwrap();
+    sizes.push((made.data.len(), made.qp));
+    out.extend_from_slice(made.data);
+    eprintln!("frame sizes (bytes, qp): {sizes:?}");
+
+    let ffmpeg = std::env::var_os("REMOTEMAN_FFMPEG").map(std::path::PathBuf::from).unwrap_or_else(|| "C:\\ffmpeg\\bin\\ffmpeg.exe".into());
+    if !ffmpeg.is_file() {
+        eprintln!("no ffmpeg: decoding skipped");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("remoteman-refine-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (stream, raw) = (dir.join("s.h265"), dir.join("s.yuv"));
+    std::fs::write(&stream, &out).unwrap();
+    let ok = std::process::Command::new(&ffmpeg).args(["-v", "error", "-y", "-i"]).arg(&stream).args(["-pix_fmt", "yuv420p10le", "-f", "rawvideo"]).arg(&raw).status().unwrap().success();
+    assert!(ok, "ffmpeg failed");
+    let yuv = std::fs::read(&raw).unwrap();
+    let frame_bytes = (W * H * 3) as usize; // 4:2:0 at two bytes a sample
+    assert_eq!(yuv.len(), frame_bytes * sizes.len(), "decoded frame count");
+    let psnr = |n: usize| {
+        let mut se = 0f64;
+        for y in 0..H {
+            for x in 0..W {
+                let i = n * frame_bytes + 2 * (y * W + x) as usize;
+                let v = u16::from_le_bytes([yuv[i], yuv[i + 1]]) as f64;
+                let got = ((v - 64.0) / 876.0).clamp(0.0, 1.0);
+                // White is 1.0, text black 0.0.
+                let want = if text_like(x, y, 18) { 0.0 } else { 1.0 };
+                se += (got - want) * (got - want);
+            }
+        }
+        10.0 * (1.0 / (se / (W * H) as f64).max(1e-12)).log10()
+    };
+    let p: Vec<f64> = (6..sizes.len()).map(psnr).collect();
+    eprintln!("PSNR of the still picture, frames 6..: {:?}", p.iter().map(|v| format!("{v:.2}")).collect::<Vec<_>>());
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(sizes[refine_at].0 > sizes[refine_at - 1].0 * 2, "the refining frame is not bigger");
+    assert!(p[refine_at - 6] > p[refine_at - 6 - 1] + 1.0, "the refining frame is not finer");
+    // The ordinary frame after it keeps the quality and is small again.
+    assert!(p[refine_at - 6 + 1] >= p[refine_at - 6 - 1], "the frame after lost the quality");
+    assert!(sizes[refine_at + 1].0 < sizes[refine_at].0, "the rate did not come back");
+}

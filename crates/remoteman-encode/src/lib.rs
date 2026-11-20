@@ -80,6 +80,8 @@ unsafe extern "C" {
     fn rm_nvenc_long_term(e: *mut c_void) -> u32;
     fn rm_nvenc_set_bitrate(e: *mut c_void, bitrate: u32) -> c_int;
     fn rm_nvenc_invalidate(e: *mut c_void, ts: u64) -> c_int;
+    fn rm_nvenc_boost_begin(e: *mut c_void, factor: u32) -> c_int;
+    fn rm_nvenc_boost_end(e: *mut c_void) -> c_int;
     fn rm_nvenc_close(e: *mut c_void);
 }
 
@@ -144,6 +146,15 @@ pub trait FrameEncoder {
     fn encode_how(&mut self, idx: usize, timestamp: u64, how: How) -> Result<Made<'_>>;
     /// Encode at this many bits a second from the next frame on, with no keyframe.
     fn set_bitrate(&mut self, bitrate: u32) -> Result<()>;
+    /// Whether [`Self::encode_refined`] does anything (NVENC only).
+    fn can_refine(&self) -> bool {
+        false
+    }
+    /// Like [`Self::encode_how`], with room for `factor` times the bits the rate allows one
+    /// frame, and the rate back as it was straight after. For static refinement.
+    fn encode_refined(&mut self, _idx: usize, _timestamp: u64, _how: How, _factor: u32) -> Result<Made<'_>> {
+        bail!("this encoder cannot refine a still picture")
+    }
     /// The frame with this timestamp was lost on the way: stop referring to it.
     fn invalidate(&mut self, timestamp: u64) -> Result<()>;
 }
@@ -332,6 +343,26 @@ impl Encoder {
         Ok(())
     }
 
+    /// [`FrameEncoder::encode_refined`].
+    pub fn encode_refined(&mut self, idx: usize, timestamp: u64, how: How, factor: u32) -> Result<Made<'_>> {
+        // SAFETY: a live encoder.
+        if unsafe { rm_nvenc_boost_begin(self.enc, factor) } != 0 {
+            bail!("{}", self.last_error());
+        }
+        let made = self.encode_how(idx, timestamp, how).map(|m| (m.data.as_ptr(), m.data.len(), m.key, m.marked, m.referred, m.qp));
+        // Whatever came of the frame, the rate goes back.
+        // SAFETY: as above.
+        let back = unsafe { rm_nvenc_boost_end(self.enc) };
+        let (ptr, len, key, marked, referred, qp) = made?;
+        if back != 0 {
+            bail!("{}", self.last_error());
+        }
+        // SAFETY: still the encoder's own bitstream copy, which a reconfigure doesn't touch and
+        // which stays valid until the next encode (the borrow of `self` sees to that).
+        let data = unsafe { std::slice::from_raw_parts(ptr, len) };
+        Ok(Made { data, key, marked, referred, qp })
+    }
+
     /// The frame with this timestamp was lost on the way: stop referring to it.
     pub fn invalidate(&mut self, timestamp: u64) -> Result<()> {
         // SAFETY: a live encoder.
@@ -361,6 +392,14 @@ impl FrameEncoder for Encoder {
 
     fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
         Encoder::set_bitrate(self, bitrate)
+    }
+
+    fn can_refine(&self) -> bool {
+        true
+    }
+
+    fn encode_refined(&mut self, idx: usize, timestamp: u64, how: How, factor: u32) -> Result<Made<'_>> {
+        Encoder::encode_refined(self, idx, timestamp, how, factor)
     }
 
     fn invalidate(&mut self, timestamp: u64) -> Result<()> {

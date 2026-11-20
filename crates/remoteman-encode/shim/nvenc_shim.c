@@ -57,6 +57,7 @@ typedef struct rm_nvenc {
     uint8_t *out;
     size_t out_cap;
     uint32_t last_qp;     // the last frame's average quantiser, as the encoder reported it
+    uint32_t boost_from;  // the rate to go back to after a refining frame (0: none under way)
     MASTERING_DISPLAY_INFO mastering;  // HDR metadata, handed to the encoder with each keyframe
     CONTENT_LIGHT_LEVEL light;
     uint8_t av1_mdcv[25], av1_cll[5];  // the same as AV1 metadata OBU payloads
@@ -486,6 +487,24 @@ int rm_nvenc_set_bitrate(rm_nvenc *e, uint32_t bitrate) {
     r.forceIDR = 0;
     if ((s = e->f.nvEncReconfigureEncoder(e->enc, &r))) return nv_fail(e, s, "reconfigure");
     return 0;
+}
+
+// Static refinement: the next frame may take `factor` times the usual bits. begin raises the
+// rate (and the rate buffer with it, one frame's worth) without a keyframe; end puts back what
+// was there. The caller does both around one frame.
+int rm_nvenc_boost_begin(rm_nvenc *e, uint32_t factor) {
+    uint64_t up;
+    if (e->boost_from) return 0;
+    e->boost_from = e->config.rcParams.averageBitRate;
+    up = (uint64_t)e->boost_from * factor;
+    return rm_nvenc_set_bitrate(e, up > 0xffffffffu ? 0xffffffffu : (uint32_t)up);
+}
+
+int rm_nvenc_boost_end(rm_nvenc *e) {
+    uint32_t back = e->boost_from;
+    if (!back) return 0;
+    e->boost_from = 0;
+    return rm_nvenc_set_bitrate(e, back);
 }
 
 // Tell the encoder the frame with this timestamp never arrived: later frames must not refer to it.
