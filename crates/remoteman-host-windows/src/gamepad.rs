@@ -42,6 +42,13 @@ fn buttons(mask: u16) -> GamepadButtons {
 /// asked once: the answer is the same for the whole run.
 pub fn available() -> bool {
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // Not offered unless asked for: on 2026-11-20 InputInjector's calls all succeeded from a
+    // normal user's process but no reader (XInput, Windows.Gaming.Input, raw controllers) ever
+    // saw the virtual controller, so a device's controller would go nowhere. To try it:
+    // REMOTEMAN_GAMEPAD=1.
+    if std::env::var("REMOTEMAN_GAMEPAD").as_deref() != Ok("1") {
+        return false;
+    }
     *AVAILABLE.get_or_init(|| match Pad::start() {
         Ok(_) => true,
         Err(e) => {
