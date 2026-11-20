@@ -1324,7 +1324,8 @@ impl Screen {
         tracing::info!(modes = list.len(), "asking the driver to add {}x{} at {} Hz (it re-creates the monitor)", want.width, want.height, want.refresh);
         self.driver.set_modes(&list)?;
         let asked = Instant::now();
-        while asked.elapsed() < Duration::from_secs(8) {
+        // Windows takes its time listing a new mode, and on a PC whose device monitors are plugged in for each device it never did within 8 s, though the arrangement that followed always got the mode at once (2026-11-20): wait 3 s at most, then go on and let the arrangement ask for it.
+        while asked.elapsed() < Duration::from_secs(3) {
             std::thread::sleep(Duration::from_millis(200));
             // The monitors come back as new outputs, perhaps under other names. With several,
             // the first is found by its number; any of them listing the mode means all do.
@@ -1349,7 +1350,8 @@ impl Screen {
         if let Ok((output, _)) = find_output() {
             self.device = output.device;
         }
-        bail!("the driver was asked, but 8 s later Windows doesn't list the mode");
+        tracing::info!("the driver was given the mode; 3 s later Windows doesn't list it yet: going on (the arrangement asks for it)");
+        Ok(())
     }
 
     /// The client is gone: put the monitor back as it was.
