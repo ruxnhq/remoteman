@@ -67,22 +67,43 @@ SamplerState smooth : register(s0);
 // and `last`, the last place to sample so that nothing beyond the edge is blended in.
 // `scale` turns a normalised sample into a code value at the picture's bit depth; `black`,
 // `yrange`, `mid` and `crange` are the code values of the range's ends.
-// `mode`: 0 BT.709 (SDR, as before); 1 BT.2020 with PQ, passed through to a swap chain that is
-// itself PQ BT.2020 (an HDR screen); 2 the same tone-mapped to SDR (a screen that isn't HDR).
+// `mode`: 0 BT.709 (SDR, as before); 1 BT.2020 with PQ, to a swap chain that is itself PQ
+// BT.2020 (an HDR screen); 2 the same tone-mapped to SDR (a screen that isn't HDR).
 // `white` and `peak`: where the stream's SDR white and brightest sit, in nits. `planar`: Cr
-// is in a texture of its own.
+// is in a texture of its own. `here_white` and `here_peak`: this screen's SDR white (Windows'
+// SDR content brightness) and brightest, in nits, for mode 1.
 cbuffer Picture : register(b0) {
     float2 visible;
     float2 last;
     float scale, black, yrange, mid;
     float crange;
     float mode, white, peak;
-    float planar, unused1, unused2, unused3;
+    float planar, here_white, here_peak, unused3;
 };
 
 float3 pq_nits(float3 e) {
     float3 p = pow(saturate(e), 1.0 / 78.84375);
     return 10000.0 * pow(max(p - 0.8359375, 0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125);
+}
+
+float3 nits_pq(float3 n) {
+    float3 y = pow(saturate(n / 10000.0), 0.1593017578125);
+    return pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), 78.84375);
+}
+
+// Light with SDR white at 1, whose brightest is `top`, fitted under `room`: unchanged up to a
+// knee (never below white, so everything up to white stays exactly as bright as it was), and
+// above it brought down along a curve that leaves the knee smoothly and puts `top` on `room`
+// (extended Reinhard, on the largest channel, which keeps hues).
+float3 fit(float3 lin, float top, float room) {
+    float m = max(max(lin.r, lin.g), lin.b);
+    float knee = max(1.0, 0.75 * room);
+    if (top <= room || m <= knee) return min(lin, room);
+    if (room - knee < 1e-3) return lin * (room / m);
+    float x = (m - knee) / (room - knee);
+    float xmax = (top - knee) / (room - knee);
+    float y = x * (1.0 + x / (xmax * xmax)) / (1.0 + x);
+    return lin * ((knee + (room - knee) * min(y, 1.0)) / m);
 }
 
 float4 ps(Corner c) : SV_Target {
@@ -96,7 +117,13 @@ float4 ps(Corner c) : SV_Target {
     }
     // The BT.2020 (non-constant luminance) matrix: R'G'B' in PQ.
     float3 e = saturate(float3(y + 1.4746 * cc.y, y - 0.16455 * cc.x - 0.57135 * cc.y, y + 1.8814 * cc.x));
-    if (mode < 1.5) return float4(e, 1);
+    if (mode < 1.5) {
+        // To this HDR screen: the stream's SDR white onto this screen's (a Mac puts its desktop
+        // at 100 nits; Windows' white here may be 240), its highlights fitted under this
+        // screen's brightest. Primaries stay BT.2020, as the swap chain is.
+        float3 rel = fit(pq_nits(e) / white, peak / white, max(here_peak / here_white, 1.0));
+        return float4(nits_pq(rel * here_white), 1);
+    }
     // To SDR: linear light with SDR white at 1, BT.2020 to BT.709 primaries, the highlights
     // brought down so that the stream's peak lands at white (extended Reinhard on the largest
     // channel, which keeps hues), then the screen's gamma.
@@ -325,12 +352,35 @@ pub fn panel_chain(gpu: &Gpu, width: u32, height: u32) -> Result<IDXGISwapChain1
 struct Cadence {
     /// The present count and the time it was shown (QPC ticks), for each picture shown.
     shown: Vec<(u32, i64)>,
+    /// The present count and the time its picture began to be drawn (QPC ticks), for the latest
+    /// pictures presented; and how long each picture shown took from there to the screen, in ms.
+    sent: std::collections::VecDeque<(u32, i64)>,
+    to_screen: Vec<f64>,
     presents: u32,
     since: Option<Instant>,
     failed: bool,
 }
 
+/// Now, in QPC ticks.
+fn qpc() -> i64 {
+    let mut now = 0i64;
+    // SAFETY: a plain query into a value that lives through it.
+    let _ = unsafe { windows::Win32::System::Performance::QueryPerformanceCounter(&mut now) };
+    now
+}
+
 impl Cadence {
+    /// Just after a present of a picture that began to be drawn at `called` (QPC ticks).
+    fn sent(&mut self, swap: &IDXGISwapChain1, called: i64) {
+        // SAFETY: a plain query.
+        if let Ok(count) = unsafe { swap.GetLastPresentCount() } {
+            self.sent.push_back((count, called));
+            while self.sent.len() > 64 {
+                self.sent.pop_front();
+            }
+        }
+    }
+
     /// After a present: note what the swap chain says was last shown.
     fn note(&mut self, swap: &IDXGISwapChain1) {
         self.presents += 1;
@@ -341,6 +391,12 @@ impl Cadence {
             Ok(()) if stats.SyncQPCTime != 0 => {
                 if self.shown.last().is_none_or(|l| l.0 != stats.PresentCount) {
                     self.shown.push((stats.PresentCount, stats.SyncQPCTime));
+                    if let Some((_, called)) = self.sent.iter().find(|(count, _)| *count == stats.PresentCount) {
+                        let mut f = 0i64;
+                        // SAFETY: a plain query.
+                        let _ = unsafe { windows::Win32::System::Performance::QueryPerformanceFrequency(&mut f) };
+                        self.to_screen.push((stats.SyncQPCTime - called) as f64 * 1000.0 / f.max(1) as f64);
+                    }
                 }
             }
             Ok(()) => {}
@@ -385,16 +441,64 @@ impl Cadence {
         let period = if refresh_hz > 0 { 1000.0 / refresh_hz as f64 } else { 0.0 };
         let whole = gaps.iter().filter(|g| period > 0.0 && ((**g / period).round() * period - **g).abs() < 0.5).count();
         let mean = if gaps.is_empty() { 0.0 } else { gaps.iter().sum::<f64>() / gaps.len() as f64 };
+        // From beginning to draw the picture to its being on the screen (meaningful for a picture
+        // shown by itself, as the gaps are).
+        let mut to_screen = std::mem::take(&mut self.to_screen);
+        to_screen.sort_by(f64::total_cmp);
+        let at = |q: f64| to_screen.get(((to_screen.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or(0.0);
+        // (Not with tearing: a picture flipped in the middle of a refresh is timed from the
+        // refresh before it, so the figure comes out below nothing.)
+        let to_screen = if tearing || to_screen.is_empty() {
+            String::new()
+        } else {
+            format!("; from drawing to the screen {:.2} ms median, {:.2} at the 95th percentile, {:.2} at most ({} pictures)", at(0.5), at(0.95), at(1.0), to_screen.len())
+        };
         let line = format!(
-            "{} presented in {seconds:.1} s{}, {mode}; {} gaps between pictures shown, {mean:.2} ms on average, {} of them whole refreshes of {period:.2} ms",
+            "{} presented in {seconds:.1} s{}, {mode}; {} gaps between pictures shown, {mean:.2} ms on average, {} of them whole refreshes of {period:.2} ms{to_screen}",
             self.presents,
             if tearing { " with tearing allowed" } else { " at the display's refresh" },
             gaps.len(),
-            whole
+            whole,
         );
         self.shown.clear();
         self.presents = 0;
         Some(line)
+    }
+}
+
+/// The light of the picture and of the screen: whether the stream is HDR, where its SDR white
+/// and brightest sit, and this screen's (what an HDR screen fits it to), in nits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colour {
+    hdr: bool,
+    white: f32,
+    peak: f32,
+    here_white: f32,
+    here_peak: f32,
+}
+
+impl Default for Colour {
+    fn default() -> Self {
+        Self { hdr: false, white: 203.0, peak: 1000.0, here_white: crate::gpu::USUAL_SDR_WHITE, here_peak: 1000.0 }
+    }
+}
+
+impl Colour {
+    fn of(session: Option<&crate::stream::Shared>, scene: &Scene) -> Self {
+        let mut c = Self::default();
+        let bits = |b: u32| (b != 0).then(|| f32::from_bits(b));
+        if let Some(w) = bits(scene.screen_white.load(Ordering::Relaxed)) {
+            c.here_white = w.max(1.0);
+        }
+        if let Some(p) = bits(scene.screen_peak.load(Ordering::Relaxed)) {
+            c.here_peak = p.max(c.here_white);
+        }
+        if let Some(s) = session {
+            c.hdr = s.hdr.load(Ordering::Relaxed);
+            c.white = s.sdr_white.load(Ordering::Relaxed).max(1) as f32;
+            c.peak = (s.peak.load(Ordering::Relaxed) as f32).max(c.white);
+        }
+        c
     }
 }
 
@@ -781,7 +885,7 @@ impl Drawer {
 
     /// Draw the picture's back buffer: black, and the picture (if there is one and somewhere
     /// for it to go) as large as fits `video` with its shape kept.
-    fn draw(&mut self, picture: Option<&Picture>, video: Option<(i32, i32, i32, i32)>, colour: (bool, f32, f32)) -> Result<()> {
+    fn draw(&mut self, picture: Option<&Picture>, video: Option<(i32, i32, i32, i32)>, colour: Colour) -> Result<()> {
         let planes = match (picture, video) {
             (Some(picture), Some(_)) => Some((self.planes(picture)?, picture)),
             _ => None,
@@ -828,10 +932,10 @@ impl Drawer {
                 };
                 let (tw, th) = (desc.Width as f32, desc.Height as f32);
                 let (vw, vh) = (picture.width as f32, picture.height as f32);
-                let (hdr, white, peak) = colour;
+                let Colour { hdr, white, peak, here_white, here_peak } = colour;
                 let mode = if !hdr { 0.0 } else if self.pq { 1.0 } else { 2.0 };
                 let planar = if planes.cr.is_some() { 1.0 } else { 0.0 };
-                let constants: [f32; 16] = [vw / tw, vh / th, (vw - 0.5) / tw, (vh - 0.5) / th, scale, black, yrange, mid, crange, mode, white, peak, planar, 0.0, 0.0, 0.0];
+                let constants: [f32; 16] = [vw / tw, vh / th, (vw - 0.5) / tw, (vh - 0.5) / th, scale, black, yrange, mid, crange, mode, white, peak, planar, here_white, here_peak, 0.0];
                 ctx.UpdateSubresource(&self.constants, 0, None, constants.as_ptr() as *const _, 0, 0);
                 let (ax, ay, aw, ah) = (area.0 as f32, area.1 as f32, area.2 as f32, area.3 as f32);
                 let fit = (aw / vw).min(ah / vh);
@@ -988,11 +1092,20 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
     // The interface that is in the sheet now, and the session whose picture is kept.
     let mut drawn = None::<Arc<crate::ui::Frame>>;
     let mut of = 0usize;
+    let (mut drawn_colour, mut fitted) = (Colour::default(), None::<Colour>);
+    // For tests: where this thread's time goes, in microseconds: waiting for room, painting the
+    // interface, drawing the picture, copying it to full screen's swap chain, presenting.
+    let mut phases = [0u64; 5];
+    // When the picture being presented began to be drawn (QPC ticks), for the cadence's line.
+    let mut drawing_at = 0i64;
+    let timed = |phase: &mut u64, began: Instant| *phase += began.elapsed().as_micros() as u64;
     while !scene.quit.load(Ordering::Relaxed) && !scene.stop_draw.load(Ordering::Relaxed) {
         if !room {
             // Not for ever: a window that is covered may never be given room.
+            let began = Instant::now();
             // SAFETY: the handle is the swap chain's and lives as long as it.
             let _ = unsafe { WaitForSingleObject(drawer.room, 100) };
+            timed(&mut phases[0], began);
             room = true;
         }
         // Wait for a picture or a change to the interface, but not for ever: the window may
@@ -1017,7 +1130,9 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
             let unpainted = drawer.layers.as_ref().is_some_and(|l| l.ui_target.is_none());
             if drawer.layers.is_some() && (unpainted || drawn.as_ref().is_none_or(|d| d.serial != frame.serial)) {
                 let _alone = DRAWING.lock().unwrap();
+                let began = Instant::now();
                 drawer.paint(frame)?;
+                timed(&mut phases[1], began);
                 drawn = Some(frame.clone());
                 painted = true;
             }
@@ -1029,6 +1144,10 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
         let before = drawer.clip;
         drawer.place_video(if session.is_some() { video } else { None })?;
         changed |= drawer.clip != before;
+        // How the picture's light is fitted to this screen: a change redraws it.
+        let colour = Colour::of(session.as_deref(), scene);
+        changed |= session.is_some() && colour != drawn_colour;
+        drawn_colour = colour;
         let new = fresh.is_some();
         if let Some(picture) = fresh {
             drawer.shown = Some(picture);
@@ -1043,13 +1162,25 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
             continue;
         }
         let picture = drawer.shown.take();
-        // An HDR stream: passed through where the screen is HDR, tone-mapped where it isn't.
-        let colour = session.as_ref().map_or((false, 203.0, 1000.0), |s| (s.hdr.load(Ordering::Relaxed), s.sdr_white.load(Ordering::Relaxed) as f32, s.peak.load(Ordering::Relaxed) as f32));
-        drawer.set_pq(colour.0 && scene.screen_hdr.load(Ordering::Relaxed));
-        scene.hdr_shown.store(if !colour.0 || session.is_none() { 0 } else if drawer.pq { 1 } else { 2 }, Ordering::Relaxed);
+        // An HDR stream: fitted to the screen where it is HDR, tone-mapped where it isn't.
+        drawer.set_pq(colour.hdr && scene.screen_hdr.load(Ordering::Relaxed));
+        scene.hdr_shown.store(if !colour.hdr || session.is_none() { 0 } else if drawer.pq { 1 } else { 2 }, Ordering::Relaxed);
+        if colour.hdr && drawer.pq && fitted != Some(colour) {
+            fitted = Some(colour);
+            say!(
+                "HDR: the computer's SDR white ({:.0} nits) shown at this screen's ({:.0}); its brightest ({:.0}) {}",
+                colour.white,
+                colour.here_white,
+                colour.peak,
+                if colour.peak / colour.white > colour.here_peak / colour.here_white { format!("rolled off to fit under this screen's ({:.0})", colour.here_peak) } else { "fits on this screen".to_owned() }
+            );
+        }
         if draws {
             let _alone = DRAWING.lock().unwrap();
+            let began = Instant::now();
+            drawing_at = qpc();
             drawer.draw(picture.as_ref(), video, colour)?;
+            timed(&mut phases[2], began);
         }
         let backdrop = frame.as_ref().map_or(crate::ui::Color(0.0, 0.0, 0.0, 1.0), |f| f.backdrop);
         if early {
@@ -1085,16 +1216,32 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
             }
             // SAFETY: a call on the swap chain.
             if let Some(p) = &drawer.presenter {
+                let began = Instant::now();
                 p.copy(&drawer.swap)?;
+                timed(&mut phases[3], began);
             }
+            let began = Instant::now();
             let presented = unsafe { if tear { drawer.swap.Present(0, DXGI_PRESENT_ALLOW_TEARING) } else { drawer.swap.Present(1, DXGI_PRESENT(0)) } };
+            timed(&mut phases[4], began);
+            if new && scene.measure.load(Ordering::Relaxed) {
+                drawer.cadence.sent(&drawer.swap, drawing_at);
+            }
             room = false;
             presented.ok().context("present")?;
             // For tests: how the pictures reach the screen, in the log every few seconds.
             if new && scene.measure.load(Ordering::Relaxed) {
                 drawer.cadence.note(&drawer.swap);
                 if let Some(line) = drawer.cadence.report(&drawer.swap, scene.refresh_hz.load(Ordering::Relaxed), tear) {
-                    say!("presenting: {line}");
+                    let ms = |us: u64| us as f64 / 1000.0;
+                    say!(
+                        "presenting: {line}; this thread's time: {:.0} ms waiting for room, {:.0} painting the interface, {:.0} drawing, {:.0} copying to full screen's swap chain, {:.0} presenting",
+                        ms(phases[0]),
+                        ms(phases[1]),
+                        ms(phases[2]),
+                        ms(phases[3]),
+                        ms(phases[4])
+                    );
+                    phases = [0; 5];
                 }
             }
             if (presented == DXGI_STATUS_OCCLUDED) != occluded {

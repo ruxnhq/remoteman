@@ -174,10 +174,12 @@ fn display_menu(st: &Value) -> Vec<MenuItem> {
             .enabled(f.b("hdr") && offers(st, "hdr") && pic.o("hdr").b("screen"))
             .tooltip(format!("When the computer offers it and this monitor is in HDR. Now: {}", pic.o("hdr").s("why"))),
     );
+    // Switchable whatever this monitor and window can do now: the setting is kept, and takes
+    // effect in full screen on a monitor that varies its refresh (the tip says what it does now).
     let vrr = pic.o("variable_refresh");
     items.push(
         MenuItem::check(key("toggle", json!({"flag": "variable-refresh"})), if f.b("variable_refresh") { "Variable refresh rate" } else { "Variable refresh rate (not available yet)" }, f.b("variable_refresh") && st.o("settings").b("variable_refresh"))
-            .enabled(f.b("variable_refresh") && vrr.get("range").is_some_and(Value::is_array) && vrr.b("tearing_allowed"))
+            .enabled(f.b("variable_refresh"))
             .tooltip(format!("Shows each frame when it arrives, in full screen. Now: {}", vrr.s("why"))),
     );
     items.push(MenuItem::separator("sep2"));

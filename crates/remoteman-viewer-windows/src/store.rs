@@ -151,7 +151,9 @@ pub struct Computer {
 
 impl Computer {
     fn new(name: &str, address: &str, os: &str, now: i64, settings: &Settings) -> Self {
-        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: 0, sound: settings.sound, clipboard: settings.clipboard, second_side: Side::Right, cards: String::new(), wake: true, other: Vec::new() }
+        // A new computer's display follows the window: as large as the picture's place, and
+        // asked for again when the window changes size (full screen included).
+        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: WINDOW, sound: settings.sound, clipboard: settings.clipboard, second_side: Side::Right, cards: String::new(), wake: true, other: Vec::new() }
     }
 
     /// The network cards it can be woken through.

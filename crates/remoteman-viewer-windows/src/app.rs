@@ -95,7 +95,6 @@ pub enum Flag {
     Clipboard,
     /// HDR where this monitor is in HDR, and variable refresh in full screen (the engine's).
     Hdr,
-    #[allow(dead_code)]
     VariableRefresh,
 }
 
@@ -547,7 +546,8 @@ impl App {
             // A size from the command line is a test's: pixels as they are.
             (w, h, scale) = (size.0, size.1, 1.0);
         }
-        let most = address.and_then(|a| self.store.find(a)).map_or(0, |c| c.max_height);
+        // (A computer not paired yet gets what a new one is given: the window's size.)
+        let most = address.and_then(|a| self.store.find(a)).map_or(WINDOW, |c| c.max_height);
         let (mut w, mut h, scale) = fit_lines(w, h, scale, most);
         // (A mirrored display is the computer's own size whatever is asked.)
         if most == WINDOW && self.args.size.is_none() && placement != Placement::Mirror {

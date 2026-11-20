@@ -90,6 +90,23 @@ pub(crate) struct Engine {
     watched: Cell<Option<Instant>>,
     /// Fingers on the touchscreen that the computer knows of (`touch.rs`).
     fingers: RefCell<crate::touch::Fingers>,
+    /// How busy this thread is with input and the state (`Busy`).
+    pub(crate) busy: RefCell<Busy>,
+}
+
+/// For finding what holds this thread up during a session (with `--stats` or `--watch-vblank`),
+/// in the log every five seconds while the pointer moves: how many pointer moves went to the
+/// computer, how often the state was looked at and how long that took, and how often the app
+/// was told. (Measured on this PC: about 0.16 ms a look; 500 moves a second in full screen
+/// cost the thread about 8 % and told the app nothing more.)
+#[derive(Default)]
+pub(crate) struct Busy {
+    since: Option<Instant>,
+    pointers: u32,
+    publishes: u32,
+    publish_us: u64,
+    longest_us: u64,
+    told: u32,
 }
 
 thread_local! {
@@ -333,6 +350,7 @@ fn start_engine(words: Vec<String>, notify: Notify) -> Result<()> {
         got_shape: Cell::new(false),
         watched: Cell::new(None),
         fingers: RefCell::new(crate::touch::Fingers::default()),
+        busy: RefCell::new(Busy::default()),
     });
     ENGINE.with(|x| *x.borrow_mut() = Some(e.clone()));
     // The Windows key, Alt+Tab and the like, while a session has the keyboard.
@@ -576,14 +594,24 @@ impl Engine {
         self.watched.set(Some(Instant::now()));
         let Ok(mut app) = self.app.try_borrow_mut() else { return };
         // (A test may say it for it.)
-        let (found, headroom) = crate::gpu::screen_hdr(host);
+        let light = crate::gpu::screen_light(host);
+        let found = light.hdr;
         let (hdr, headroom) = match app.args.screen_hdr {
-            Some(forced) => (forced, if forced { headroom.max(1000.0 / 203.0) } else { 0.0 }),
-            None => (found, headroom),
+            Some(forced) => (forced, if forced { light.headroom().max(1000.0 / 203.0) } else { 0.0 }),
+            None => (found, light.headroom()),
         };
         let changed = app.scene.screen_hdr.swap(hdr, Ordering::Relaxed) != hdr;
-        if changed || app.scene.headroom.load(Ordering::Relaxed) == 0 {
-            say!("screen: {} (Windows says {}){}", if hdr { "HDR" } else { "SDR" }, if found { "HDR" } else { "SDR" }, if hdr { format!(", headroom {headroom:.1}") } else { String::new() });
+        let (white, peak) = (light.white.to_bits(), light.peak.to_bits());
+        let lighter = app.scene.screen_white.swap(white, Ordering::Relaxed) != white || app.scene.screen_peak.swap(peak, Ordering::Relaxed) != peak;
+        if changed || lighter || app.scene.headroom.load(Ordering::Relaxed) == 0 {
+            say!(
+                "screen: {} (Windows says {}){}",
+                if hdr { "HDR" } else { "SDR" },
+                if found { "HDR" } else { "SDR" },
+                if found { format!(", SDR white {:.0} nits, brightest {:.0}, headroom {headroom:.2}", light.white, light.peak) } else { String::new() }
+            );
+            // The draw thread fits an HDR picture to them anew.
+            app.scene.poke();
         }
         app.scene.headroom.store(headroom.to_bits().max(1), Ordering::Relaxed);
         let (mw, mh, hz, _, _) = crate::window::monitor_of(host);
@@ -617,6 +645,9 @@ impl Engine {
             say!("variable refresh: {}", if on { "on: each picture is presented as it arrives" } else { why });
             scene.poke();
         }
+        drop(app);
+        // Full screen presents one way or the other (`full::varies`).
+        crate::full::follow_refresh(self);
     }
 
     pub(crate) fn forwarding(&self) -> bool {
@@ -650,6 +681,7 @@ impl Engine {
     }
 
     pub(crate) fn pointer(&self, x: i32, y: i32) {
+        self.busy.borrow_mut().pointers += 1;
         self.point_at(0);
         let at = self.app.borrow().fraction(x as f32, y as f32);
         if let Some((x, y)) = at {
@@ -864,14 +896,50 @@ impl Engine {
             self.app.borrow_mut().time_up();
         }
         self.publish();
+        self.report_busy();
     }
 
     /// Do what the app's state asks of the engine itself, keep what is the app's, and tell the
     /// app if what it shows has changed.
     pub(crate) fn publish(&self) {
+        let began = Instant::now();
+        let told = self.publish_now();
+        let took = began.elapsed().as_micros() as u64;
+        let mut busy = self.busy.borrow_mut();
+        busy.publishes += 1;
+        busy.publish_us += took;
+        busy.longest_us = busy.longest_us.max(took);
+        busy.told += told as u32;
+    }
+
+    /// Every five seconds in a session while the pointer has moved: what `Busy` counted.
+    fn report_busy(&self) {
+        let mut busy = self.busy.borrow_mut();
+        let since = *busy.since.get_or_insert_with(Instant::now);
+        if since.elapsed() < Duration::from_secs(5) {
+            return;
+        }
+        let wanted = self.app.try_borrow().is_ok_and(|a| a.session.is_some() && (a.args.stats || a.scene.measure.load(Ordering::Relaxed)));
+        if wanted && busy.pointers > 0 {
+            say!(
+                "input: {} pointer moves sent in {:.1} s ({}); the state looked at {} times, {:.1} ms in all, {:.2} at most; the app told {} times",
+                busy.pointers,
+                since.elapsed().as_secs_f64(),
+                if self.full.borrow().is_some() { "full screen" } else { "in the window" },
+                busy.publishes,
+                busy.publish_us as f64 / 1000.0,
+                busy.longest_us as f64 / 1000.0,
+                busy.told
+            );
+        }
+        *busy = Busy { since: Some(Instant::now()), ..Busy::default() };
+    }
+
+    /// `publish`'s work; whether the app was told.
+    fn publish_now(&self) -> bool {
         let full = self.full.borrow().is_some();
         let effects = {
-            let Ok(mut app) = self.app.try_borrow_mut() else { return };
+            let Ok(mut app) = self.app.try_borrow_mut() else { return false };
             if full {
                 // In full screen the engine's own window shows the kit's bar, menus and news.
                 app.finish()
@@ -885,9 +953,11 @@ impl Engine {
             self.apply(effect);
         }
         let changed = self.state_value().is_some_and(|v| *self.told.borrow() != v.to_string());
-        if changed || !self.effects.borrow().is_empty() {
+        let tell = changed || !self.effects.borrow().is_empty();
+        if tell {
             (self.notify)();
         }
+        tell
     }
 
     pub(crate) fn apply(&self, effect: Effect) {

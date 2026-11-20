@@ -255,9 +255,26 @@ pub fn view(app: &App, ui: &mut Ui, menu: &Menu) {
                 Line::Heading("Size and rate"),
                 picture_size.line(),
                 rate.line(),
-                item("display.hdr", "HDR", Msg::CloseMenu).caption("When the computer offers it and this monitor is in HDR").toggle(false).en(gate(FEATURES.hdr)).line(),
-                // (The engine's, for the WinUI 3 app; this window never presents that way.)
-                item("display.vrr", "Variable refresh rate", Msg::CloseMenu).caption("Shows each frame when it arrives, in full screen").toggle(false).en(gate(false)).line(),
+                // The same switches as the app's Display menu (the engine's full screen draws this
+                // one), on the same settings.
+                item("display.hdr", "HDR", Msg::Toggle(Flag::Hdr, None))
+                    .caption("When the computer offers it and this monitor is in HDR")
+                    .toggle(FEATURES.hdr && app.store.settings.hdr)
+                    .en(if !FEATURES.hdr {
+                        gate(false)
+                    } else if !app.scene.screen_hdr.load(std::sync::atomic::Ordering::Relaxed) {
+                        off("This monitor isn't in HDR")
+                    } else if s.is_some_and(|s| !s.offers("hdr")) {
+                        off("This computer doesn't send HDR")
+                    } else {
+                        ON
+                    })
+                    .line(),
+                item("display.vrr", "Variable refresh rate", Msg::Toggle(Flag::VariableRefresh, None))
+                    .caption("Shows each frame when it arrives, in full screen")
+                    .toggle(FEATURES.variable_refresh && app.store.settings.variable_refresh)
+                    .en(gate(FEATURES.variable_refresh))
+                    .line(),
                 Line::Rule,
                 item("display.second", if s.is_some_and(|s| s.second_on) { "Remove the second display" } else { "Add a second display" }, Msg::ToggleSecond)
                     .caption("In a window of its own")

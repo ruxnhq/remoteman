@@ -6,10 +6,12 @@
 //! composed by the desktop and never makes a monitor vary its refresh. What does is an
 //! activated top-level window presenting into an HWND flip swap chain with tearing allowed
 //! (measured on an RTX 5090 with an ASUS XG32UCWMG at 240 Hz: `probe.rs`, and this window
-//! with `--watch-vblank`). The draw thread presents into such a swap chain here
-//! (`draw::Surface::Full`), on a Direct3D device that does nothing else (on the engine's,
-//! which decodes, the desktop composed it at the monitor's fixed rate); the bar is a
-//! DirectComposition layer over it, hung there only while something of the app's is shown.
+//! with `--watch-vblank`). With the "Variable refresh rate" switch on, the draw thread presents
+//! into such a swap chain here (`draw::Surface::Full`), on a Direct3D device that does nothing
+//! else (on the engine's, which decodes, the desktop composed it at the monitor's fixed rate);
+//! the bar is a DirectComposition layer over it, hung there only while something of the app's
+//! is shown. With it off, the picture is a layer for the compositor under the bar's, and the
+//! monitor keeps its own refresh (`varies`).
 //!
 //! Input here is the old window's: what isn't the bar's or its menus' goes to the computer.
 
@@ -36,6 +38,56 @@ pub(crate) struct Full {
     mouse: Cell<(i32, i32)>,
     tracking: Cell<bool>,
     arrow: HCURSOR,
+    /// The picture is presented so that the monitor follows the frames (`varies`).
+    varies: Cell<bool>,
+}
+
+/// Whether full screen presents so that a monitor that varies its refresh follows the frames:
+/// the "Variable refresh rate" switch, on such a monitor, where DXGI allows tearing. Then the
+/// picture is in the window's own swap chain (`draw::Surface::Full`); otherwise it is in a swap
+/// chain for composition under the bar's layer, as in the old window (`draw::Surface::Window`),
+/// which keeps the monitor at its own refresh. (Measured on this PC's 240 Hz monitor: the
+/// window's own swap chain makes the driver's G-SYNC/FreeSync follow the frames, about 107 a
+/// second from a Mac at 4K, whether or not each is presented with tearing allowed; a swap chain
+/// for composition left it at 240 Hz.)
+pub(crate) fn varies(e: &Engine) -> bool {
+    let Ok(app) = e.app.try_borrow() else { return false };
+    let range = *app.scene.vrr_range.lock().unwrap();
+    let on = crate::features::FEATURES.variable_refresh && app.store.settings.variable_refresh;
+    crate::monitor::variable_refresh(on, true, range, app.scene.tearing_allowed.load(Ordering::Relaxed)).0
+}
+
+/// The draw thread for the full-screen window `hwnd`, presenting as `varies` says.
+fn draw_into(e: &Engine, hwnd: isize, varies: bool) -> Result<std::thread::JoinHandle<()>> {
+    let (gpu, scene, shot) = {
+        let app = e.app.borrow();
+        (app.gpu.clone(), app.scene.clone(), app.args.shot.clone())
+    };
+    struct SendHwnd(isize);
+    let handle = SendHwnd(hwnd);
+    say!("full screen: {}", if varies { "presenting in the window's own swap chain: a monitor that varies its refresh follows the frames" } else { "presenting through the desktop's compositor: the monitor keeps its own refresh" });
+    crate::draw::start_on(gpu, scene, move || {
+        let handle = handle;
+        let hwnd = HWND(handle.0 as *mut _);
+        if varies { crate::draw::Surface::Full(hwnd) } else { crate::draw::Surface::Window(hwnd) }
+    }, shot)
+}
+
+/// In full screen, when the switch (or the monitor) changes how the picture should be
+/// presented: the draw thread starts again the other way.
+pub(crate) fn follow_refresh(e: &Engine) {
+    let Some(full) = e.full.borrow().clone() else { return };
+    let now = varies(e);
+    if full.varies.get() == now {
+        return;
+    }
+    let scene = e.app.borrow().scene.clone();
+    e.stop_drawing(&scene);
+    full.varies.set(now);
+    match draw_into(e, full.hwnd, now) {
+        Ok(drawing) => *e.drawing.borrow_mut() = Some(drawing),
+        Err(err) => say!("full screen: can't present the picture again: {err:#}"),
+    }
 }
 
 impl Full {
@@ -57,9 +109,9 @@ pub(crate) fn enter(e: &Engine) -> Result<()> {
     let host = HWND(e.host.get() as *mut _);
     let (.., r, _) = crate::window::monitor_of(host);
     let (w, h) = (r.right - r.left, r.bottom - r.top);
-    let (gpu, scene, shot, title) = {
+    let (scene, title) = {
         let app = e.app.borrow();
-        (app.gpu.clone(), app.scene.clone(), app.args.shot.clone(), app.session.as_ref().map(|s| format!("{} - remoteman", s.target.name)).unwrap_or_else(|| "remoteman".into()))
+        (app.scene.clone(), app.session.as_ref().map(|s| format!("{} - remoteman", s.target.name)).unwrap_or_else(|| "remoteman".into()))
     };
     // Whatever the computer was told is down is let go before the keyboard moves, and the one
     // draw thread that presents the session's pictures moves from the panel to this window.
@@ -83,7 +135,8 @@ pub(crate) fn enter(e: &Engine) -> Result<()> {
     };
     // SAFETY: a plain load.
     let arrow = unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or_default();
-    *e.full.borrow_mut() = Some(Rc::new(Full { hwnd: hwnd.0 as isize, mouse: Cell::new((-1, -1)), tracking: Cell::new(false), arrow }));
+    let presenting = varies(e);
+    *e.full.borrow_mut() = Some(Rc::new(Full { hwnd: hwnd.0 as isize, mouse: Cell::new((-1, -1)), tracking: Cell::new(false), arrow, varies: Cell::new(presenting) }));
     let scale = e.full.borrow().as_ref().map_or(1.0, |f| f.scale());
     {
         let mut app = e.app.borrow_mut();
@@ -93,13 +146,7 @@ pub(crate) fn enter(e: &Engine) -> Result<()> {
         app.scene.panel_scale.store(pack_scale(1.0, 1.0), Ordering::Relaxed);
         app.resized(w as f32 / scale, h as f32 / scale, scale, false);
     }
-    struct SendHwnd(isize);
-    let handle = SendHwnd(hwnd.0 as isize);
-    match crate::draw::start_on(gpu, scene.clone(), move || {
-        let handle = handle;
-        crate::draw::Surface::Full(HWND(handle.0 as *mut _))
-    }, shot)
-    {
+    match draw_into(e, hwnd.0 as isize, presenting) {
         Ok(drawing) => *e.drawing.borrow_mut() = Some(drawing),
         Err(err) => {
             leave(e, true);

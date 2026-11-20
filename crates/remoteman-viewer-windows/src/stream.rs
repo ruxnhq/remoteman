@@ -31,6 +31,10 @@ pub struct Scene {
     /// SDR white it can go; set by whoever owns the window.
     pub screen_hdr: AtomicBool,
     pub headroom: AtomicU32,
+    /// Where this screen puts SDR white and the brightest it goes, in nits, each an f32's bits
+    /// (0: not known yet): what an HDR picture is fitted to (`gpu::Light`).
+    pub screen_white: AtomicU32,
+    pub screen_peak: AtomicU32,
     /// Present each picture as it arrives, with tearing allowed, for a monitor that varies its
     /// refresh to follow (the "Variable refresh rate" switch, in full screen); set by whoever
     /// owns the window. Otherwise at the display's next refresh.
@@ -264,7 +268,8 @@ impl Feed {
 
 impl Handler for Feed {
     fn stream(&mut self, info: &StreamInfo) {
-        say!("stream: {:?} {}x{} at {} Hz, {}", info.mode, info.width, info.height, info.refresh, info.colour);
+        let light = if info.colour == "bt2020-pq" { format!(", SDR white at {} nits, brightest {}", info.sdr_white, info.peak) } else { String::new() };
+        say!("stream: {:?} {}x{} at {} Hz, {}{light}", info.mode, info.width, info.height, info.refresh, info.colour);
         self.shared.stream_size.store(pack(info.width, info.height), Ordering::Relaxed);
         self.shared.refresh.store(info.refresh, Ordering::Relaxed);
         self.shared.hdr.store(info.colour == "bt2020-pq", Ordering::Relaxed);

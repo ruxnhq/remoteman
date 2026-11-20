@@ -119,16 +119,38 @@ impl Gpu {
     }
 }
 
-#[allow(dead_code)]
-/// Whether the screen showing `hwnd` is in HDR mode, and its headroom (its brightest over SDR
-/// white, taken as 203 nits as the protocol does).
-pub fn screen_hdr(hwnd: windows::Win32::Foundation::HWND) -> (bool, f32) {
+/// Windows' white for SDR content on an HDR monitor when it can't be asked: where it puts it
+/// until the person moves the "SDR content brightness" slider.
+pub const USUAL_SDR_WHITE: f32 = 200.0;
+
+/// How the screen showing a window shows light: whether it is in HDR mode, where Windows puts
+/// SDR white on it (the "SDR content brightness" slider), and the brightest it says it goes,
+/// in nits. An HDR picture is shown so that the computer's SDR white lands on `white` and its
+/// brightest within `peak` (`draw.rs`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Light {
+    pub hdr: bool,
+    pub white: f32,
+    pub peak: f32,
+}
+
+impl Light {
+    /// How many times brighter than its SDR white the screen goes: the protocol's `headroom`
+    /// ("how many times brighter than its SDR white the screen can go"). 0 for an SDR screen.
+    pub fn headroom(&self) -> f32 {
+        if self.hdr { (self.peak / self.white.max(1.0)).max(1.0) } else { 0.0 }
+    }
+}
+
+/// The screen showing `hwnd`, as [`Light`] says.
+pub fn screen_light(hwnd: windows::Win32::Foundation::HWND) -> Light {
     use windows::Win32::Graphics::Dxgi::*;
     use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+    let sdr = Light { hdr: false, white: 80.0, peak: 80.0 };
     // SAFETY: DXGI queries with structures that live through each call.
     unsafe {
         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return (false, 0.0) };
+        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else { return sdr };
         let mut a = 0;
         while let Ok(adapter) = factory.EnumAdapters1(a) {
             let mut o = 0;
@@ -137,7 +159,12 @@ pub fn screen_hdr(hwnd: windows::Win32::Foundation::HWND) -> (bool, f32) {
                     if desc.Monitor == monitor {
                         if let Ok(desc) = output.cast::<IDXGIOutput6>().and_then(|o6| o6.GetDesc1()) {
                             let hdr = desc.ColorSpace == windows::Win32::Graphics::Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-                            return (hdr, if hdr { (desc.MaxLuminance / 203.0).max(1.0) } else { 0.0 });
+                            if !hdr {
+                                return sdr;
+                            }
+                            let len = desc.DeviceName.iter().position(|c| *c == 0).unwrap_or(desc.DeviceName.len());
+                            let white = sdr_white(&String::from_utf16_lossy(&desc.DeviceName[..len])).unwrap_or(USUAL_SDR_WHITE);
+                            return Light { hdr, white, peak: desc.MaxLuminance.max(white) };
                         }
                     }
                 }
@@ -145,7 +172,49 @@ pub fn screen_hdr(hwnd: windows::Win32::Foundation::HWND) -> (bool, f32) {
             }
             a += 1;
         }
-        (false, 0.0)
+        sdr
+    }
+}
+
+/// Where Windows puts SDR white on the monitor whose GDI name is `device` (`\\.\DISPLAY1`), in
+/// nits: the "SDR content brightness" slider, through the display configuration interface (as
+/// the Windows host's `hdr.rs` reads it). `None`: it isn't part of the desktop or won't say.
+fn sdr_white(device: &str) -> Option<f32> {
+    use windows::Win32::Devices::Display::{
+        DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+        DISPLAYCONFIG_SDR_WHITE_LEVEL, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
+    };
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    // SAFETY: the arrays are as long as Windows said, and each request says its own size.
+    unsafe {
+        let (mut paths, mut modes) = (0u32, 0u32);
+        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut paths, &mut modes) != ERROR_SUCCESS {
+            return None;
+        }
+        let mut path = vec![DISPLAYCONFIG_PATH_INFO::default(); paths as usize];
+        let mut mode = vec![DISPLAYCONFIG_MODE_INFO::default(); modes as usize];
+        if QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut paths, path.as_mut_ptr(), &mut modes, mode.as_mut_ptr(), None) != ERROR_SUCCESS {
+            return None;
+        }
+        path.truncate(paths as usize);
+        for p in path {
+            let header = |kind, size: usize, adapter, id| DISPLAYCONFIG_DEVICE_INFO_HEADER { r#type: kind, size: size as u32, adapterId: adapter, id };
+            let mut name = DISPLAYCONFIG_SOURCE_DEVICE_NAME { header: header(DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>(), p.sourceInfo.adapterId, p.sourceInfo.id), ..Default::default() };
+            if DisplayConfigGetDeviceInfo(&mut name.header) != 0 {
+                continue;
+            }
+            let gdi = &name.viewGdiDeviceName;
+            if !String::from_utf16_lossy(&gdi[..gdi.iter().position(|&c| c == 0).unwrap_or(gdi.len())]).eq_ignore_ascii_case(device) {
+                continue;
+            }
+            let mut level = DISPLAYCONFIG_SDR_WHITE_LEVEL { header: header(DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL, size_of::<DISPLAYCONFIG_SDR_WHITE_LEVEL>(), p.targetInfo.adapterId, p.targetInfo.id), SDRWhiteLevel: 0 };
+            if DisplayConfigGetDeviceInfo(&mut level.header) != 0 || level.SDRWhiteLevel == 0 {
+                return None;
+            }
+            // In thousandths of 80 nits.
+            return Some(level.SDRWhiteLevel as f32 * 80.0 / 1000.0);
+        }
+        None
     }
 }
 
