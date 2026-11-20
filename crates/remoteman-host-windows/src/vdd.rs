@@ -164,6 +164,12 @@ unsafe impl Send for Driver {}
 unsafe impl Sync for Driver {}
 
 impl Driver {
+    /// No driver: a handle that opens nothing, for a host that doesn't use it (every call on
+    /// it fails).
+    pub fn absent() -> Self {
+        Self { handle: windows::Win32::Foundation::INVALID_HANDLE_VALUE, path: String::new() }
+    }
+
     /// Find the driver's control interface and open it. Opening it also wakes the driver.
     pub fn open() -> Result<Self> {
         let path = interface_path().context("looking for the display driver's control interface")?;

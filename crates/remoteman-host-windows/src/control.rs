@@ -62,8 +62,7 @@ pub struct Allowed {
     pub hdr: Arc<AtomicBool>,
     /// Sharing is switched off: no device may connect.
     pub paused: Arc<AtomicBool>,
-    /// The PC has screens of its own, which this host can't capture (only the driver's
-    /// monitors): no `mirror`.
+    /// The PC has screens of its own: `mirror` shows a device its main screen as it is.
     pub real_screens: Arc<AtomicBool>,
     pub now: Arc<Mutex<Option<Now>>>,
     /// What the device said of files sent to it: how many it answered for, and the last
@@ -75,18 +74,15 @@ pub struct Allowed {
 /// it is. `placement`: a device gets a monitor of its own, placed as it asks. `displays`: and a
 /// second one, where the driver has a third monitor.
 pub fn features(allowed: &Allowed) -> Vec<String> {
-    let mut features: Vec<String> = ["video", "input", "cursor", "configure", "sound"].map(String::from).to_vec();
-    if !allowed.real_screens.load(Ordering::Relaxed) {
-        features.push("mirror".into());
-    }
+    let mut features: Vec<String> = ["video", "input", "cursor", "configure", "mirror", "sound"].map(String::from).to_vec();
     if allowed.own_monitor.load(Ordering::Relaxed) {
         features.push("placement".into());
         if allowed.second.load(Ordering::Relaxed) {
             features.push("displays".into());
         }
-        if allowed.hdr.load(Ordering::Relaxed) {
-            features.push("hdr".into());
-        }
+    }
+    if allowed.hdr.load(Ordering::Relaxed) {
+        features.push("hdr".into());
     }
     if allowed.microphone.load(Ordering::Relaxed) {
         features.push("mic".into());

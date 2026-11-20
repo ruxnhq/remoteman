@@ -362,3 +362,28 @@ impl Drop for Injector {
         self.release_all();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A device's fractions land in the rectangle of the screen it is shown (a mirrored screen
+    /// that isn't at the desktop's origin included), and never outside it.
+    #[test]
+    fn fractions_map_into_the_screens_rectangle() {
+        let area = Arc::new(Mutex::new(Area { left: -2560, top: 300, width: 2560, height: 1440 }));
+        let injector = Injector::new(area.clone());
+        let p = injector.pixel(0.0, 0.0);
+        assert_eq!((p.x, p.y), (-2560, 300));
+        let p = injector.pixel(0.5, 0.5);
+        assert_eq!((p.x, p.y), (-1280, 1020));
+        let p = injector.pixel(1.0, 1.0);
+        assert_eq!((p.x, p.y), (-1, 1739));
+        let p = injector.pixel(7.0, -3.0);
+        assert_eq!((p.x, p.y), (-1, 300));
+        // The screen changing size under the stream: the next event follows it.
+        *area.lock().unwrap() = Area { left: 0, top: 0, width: 1920, height: 1080 };
+        let p = injector.pixel(0.5, 0.5);
+        assert_eq!((p.x, p.y), (960, 540));
+    }
+}

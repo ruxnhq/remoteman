@@ -74,6 +74,8 @@ mod input;
 #[cfg(windows)]
 mod mf;
 #[cfg(windows)]
+mod mirror;
+#[cfg(windows)]
 mod pipeline;
 #[cfg(windows)]
 mod probe;
@@ -114,6 +116,9 @@ mod windows_main {
 
     /// Ctrl-C, the console closing, or the user signing out.
     static STOP: AtomicBool = AtomicBool::new(false);
+
+    /// `--test-mirror-only`: no driver, and nothing done to the desktop.
+    static MIRROR_ONLY: AtomicBool = AtomicBool::new(false);
 
     unsafe extern "system" fn on_console(_event: u32) -> BOOL {
         STOP.store(true, Ordering::Relaxed);
@@ -259,6 +264,10 @@ mod windows_main {
                         other => anyhow::bail!("--mode {other}: keep, listed, any"),
                     }
                 }
+                // For tests, as a user who may not open the driver: serves the PC's own main screen
+                // to a device that asks to mirror and nothing else; the driver isn't opened, the
+                // desktop isn't arranged, and the host isn't announced on the network.
+                "--test-mirror-only" => MIRROR_ONLY.store(true, Ordering::Relaxed),
                 // For tests: lose one video packet in this many.
                 "--test-drop-one-in" => drop_one_in = Some(value()?.parse().context("--test-drop-one-in N")?),
                 other => anyhow::bail!("unknown option {other}"),
@@ -379,7 +388,8 @@ mod windows_main {
         }
 
         std::fs::create_dir_all(&state).with_context(|| format!("making {}", state.display()))?;
-        let screen = Screen::open(&state)?;
+        let mirror_only = MIRROR_ONLY.load(Ordering::Relaxed);
+        let screen = if mirror_only { Screen::mirror_only() } else { Screen::open(&state)? };
         let name = name.or_else(|| std::env::var("COMPUTERNAME").ok()).unwrap_or_else(|| "windows".into());
         // What the owner switched on earlier holds until switched off; `--allow` adds to it
         // for this run.
@@ -401,13 +411,15 @@ mod windows_main {
             None => tracing::info!(?outputs, "no virtual microphone here (Steam's \"Steam Streaming Microphone\" or VB-CABLE): a device's microphone can't be taken"),
         }
         let mut screen = screen;
-        let own = fit != Fit::Keep && screen.has_own();
+        let own = !mirror_only && fit != Fit::Keep && screen.has_own();
         allowed.own_monitor.store(own, Ordering::Relaxed);
         allowed.second.store(own && screen.has_second(), Ordering::Relaxed);
         // HDR for a device's own monitor: the driver's monitors take it, and NVENC says it.
-        let hdr = own && crate::encode::WHICH.load(Ordering::Relaxed) != crate::encode::ANY_MAKERS && crate::encode::library().is_ok();
+        let hdr = (own || mirror_only) && crate::encode::WHICH.load(Ordering::Relaxed) != crate::encode::ANY_MAKERS && crate::encode::library().is_ok();
         allowed.hdr.store(hdr, Ordering::Relaxed);
-        if !own {
+        if mirror_only {
+            tracing::info!("test host: the driver isn't used and the desktop isn't touched; a device may mirror the PC's main screen and nothing else");
+        } else if !own {
             tracing::info!("the display driver has no second monitor to give (its settings say one monitor, or `--mode keep`): a device gets the one monitor at its own size");
         }
         let features = crate::control::features(&allowed);
@@ -418,7 +430,7 @@ mod windows_main {
         tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
         watch_lock(std::sync::Arc::downgrade(&host));
         // On the network for viewers to find, until the host stops (dropped at the end of this function).
-        let _advert = crate::advertise::start(crate::control::NAME.get().map_or("windows", String::as_str), host.address.port(), &host.fingerprint);
+        let _advert = (!mirror_only).then(|| crate::advertise::start(crate::control::NAME.get().map_or("windows", String::as_str), host.address.port(), &host.fingerprint));
         if pair {
             tracing::info!("pairing: the next unknown device to connect will be trusted");
         }

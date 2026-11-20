@@ -2,7 +2,8 @@
 //! the stream as it came. It builds wherever the core does, so it is the first thing to run on
 //! a new platform.
 //!   watch HOST:PORT [--pair] [--state DIR] [--seconds N] [--size WxH] [--refresh HZ]
-//!         [--decoders av1,hevc,hevc444] [--record FILE] [--type TEXT]
+//!         [--decoders av1,hevc,hevc444] [--placement extend|main|only|mirror] [--hdr]
+//!         [--record FILE] [--type TEXT]
 //! `--type`: eight seconds in, a click at the middle of the display, then TEXT as one text
 //! event (input kind 7), as a viewer sends what its user typed.
 
@@ -68,6 +69,7 @@ fn main() -> anyhow::Result<()> {
     let mut decoders = vec![mode("av1").unwrap(), mode("hevc").unwrap()];
     let mut record = None;
     let mut typed = None::<String>;
+    let (mut placement, mut hdr) = (Placement::default(), false);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| anyhow::anyhow!("{arg} needs a value"));
         match arg.as_str() {
@@ -85,6 +87,16 @@ fn main() -> anyhow::Result<()> {
                 decoders = v.split(',').map(|w| mode(w).ok_or_else(|| anyhow::anyhow!("unknown decoder {w}"))).collect::<Result<_, _>>()?;
             }
             "--record" => record = Some(std::fs::File::create(value()?)?),
+            "--placement" => {
+                placement = match value()?.as_str() {
+                    "extend" => Placement::Extend,
+                    "main" => Placement::Main,
+                    "only" => Placement::Only,
+                    "mirror" => Placement::Mirror,
+                    other => anyhow::bail!("unknown placement {other}"),
+                }
+            }
+            "--hdr" => hdr = true,
             "--type" => typed = Some(value()?),
             other => anyhow::bail!("unknown option {other}"),
         }
@@ -96,7 +108,7 @@ fn main() -> anyhow::Result<()> {
         state,
         name: "watch".into(),
         pair,
-        display: Display { width: size.0, height: size.1, scale: 1.0, refresh, placement: Placement::default(), hdr: false, headroom: 0.0 },
+        display: Display { width: size.0, height: size.1, scale: 1.0, refresh, placement, hdr, headroom: if hdr { 4.0 } else { 0.0 } },
         decoders,
         test_drop_one_in: None,
         test_delay_lost_ms: None,

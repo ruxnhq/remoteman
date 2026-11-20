@@ -160,7 +160,13 @@ impl Host {
         // A device that asks to mirror is shown the monitor as it is, no faster than it asked.
         // Not on a PC with screens of its own: the driver's monitor isn't one of them, so there
         // is nothing there to mirror yet, and the device gets an extra display instead.
-        let mirror = screen.placement == Placement::Mirror && !self.screen.pc();
+        let mirror = screen.placement == Placement::Mirror;
+        // On a PC with screens of its own that is its main screen as it is, taken as the desktop
+        // shows it (`mirror.rs`); nothing is added to the desktop, moved on it or switched.
+        let real = mirror && self.screen.pc();
+        if self.screen.only_mirrors() && !real {
+            return Err("this host only mirrors the PC's screen".into());
+        }
         // Otherwise a monitor of its own where the driver has one to give, else the driver's
         // one monitor at the device's size.
         let place = match screen.placement {
@@ -169,11 +175,29 @@ impl Host {
             _ => Place::Beside,
         };
         let own = if mirror || self.fit == Fit::Keep { None } else { self.screen.give(want, place).inspect_err(|e| tracing::warn!("couldn't give the device a monitor of its own: {e:#}")).ok().flatten() };
-        let got = match own {
-            Some(mode) => mode,
-            None => self.screen.fit(want, if mirror { Fit::Keep } else { self.fit }).map_err(|e| format!("{e:#}"))?,
+        // The PC's screen that is mirrored: its Windows name, mode and place. (A device's monitor
+        // from an earlier picture is given back first; on a first connect there is none.)
+        let mirrored = if real {
+            self.screen.release_given();
+            let found = self.screen.mirror_output().map_err(|e| format!("{e:#}"))?;
+            tracing::info!(screen = found.0, width = found.1.width, height = found.1.height, refresh = found.1.refresh, left = found.2.left, top = found.2.top, "the device mirrors the PC's main screen as it is");
+            Some(found)
+        } else {
+            None
         };
-        let (_, at) = self.screen.now().map_err(|e| format!("{e:#}"))?;
+        self.screen.set_mirrored(real);
+        let (got, at) = match &mirrored {
+            Some((_, mode, at)) => (*mode, *at),
+            None => {
+                let got = match own {
+                    Some(mode) => mode,
+                    None => self.screen.fit(want, if mirror { Fit::Keep } else { self.fit }).map_err(|e| format!("{e:#}"))?,
+                };
+                (got, self.screen.now().map_err(|e| format!("{e:#}"))?.1)
+            }
+        };
+        // The output the picture, the pointer and the input are of.
+        let output = mirrored.as_ref().map_or_else(|| self.screen.device().to_owned(), |m| m.0.clone());
         // A display that asked for HDR: the monitor shows it (if the encoder can say so), and
         // its picture is BT.2020 PQ. A mirrored monitor is left as its owner has it.
         let hdr_wanted = screen.hdr && self.allowed.hdr.load(Ordering::Relaxed);
@@ -191,14 +215,15 @@ impl Host {
             // Windows takes a moment to give the monitor its wide surface.
             std::thread::sleep(std::time::Duration::from_millis(700));
         }
-        let sdr_white = crate::hdr::sdr_white(self.screen.device());
+        let sdr_white = crate::hdr::sdr_white(&output);
         let area = Arc::new(Mutex::new(at));
         // A client that doesn't draw the pointer gets it drawn into the picture.
         let drawn = Arc::new(crate::cursor::Drawn::default());
         let refresh = if mirror { got.refresh.min(want.refresh) } else { got.refresh }.clamp(1, 240);
-        let (device, shared) = (self.screen.device().to_owned(), area.clone());
+        let (device, shared) = (output.clone(), area.clone());
         let settings = pipeline::Settings {
             driver: self.screen.driver(),
+            duplicate: mirrored.as_ref().map(|m| m.0.clone()),
             monitor: self.screen.monitor(),
             modes: modes.clone(),
             fps: refresh,
@@ -293,6 +318,9 @@ impl Host {
             tracing::warn!("no second display for the device: {why}");
             link.send_message(Message::Display { index: 1, on: false, display: None, side: Default::default(), message: why })
         };
+        if self.screen.mirrored() {
+            return gone("no second display while the device mirrors the PC's screen".into());
+        }
         if screen.width % 2 != 0 || screen.height % 2 != 0 || screen.width < 64 || screen.height < 64 || screen.width > 8192 || screen.height > 8192 {
             return gone("display sizes must be even, from 64 to 8192".into());
         }
@@ -310,6 +338,7 @@ impl Host {
         let settings = pipeline::Settings {
             driver: self.screen.driver(),
             monitor,
+            duplicate: None,
             modes: vec![l.mode],
             fps: refresh,
             bitrate: self.bitrate.min(40_000_000),

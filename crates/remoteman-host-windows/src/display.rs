@@ -638,6 +638,12 @@ pub struct Screen {
     /// A device has a monitor on the desktop (on a PC with screens of its own): the watch
     /// between devices leaves the desktop alone meanwhile.
     busy: Arc<std::sync::atomic::AtomicBool>,
+    /// The device is shown one of the PC's own screens as it is ([`Screen::mirror_output`]):
+    /// nothing was arranged for it, so nothing is put back.
+    mirrored: bool,
+    /// Only mirrors: the driver isn't used at all, and nothing here touches the desktop (a test
+    /// host that isn't elevated).
+    mirror_only: bool,
 }
 
 /// On a PC with screens of its own, between devices: every few seconds, take the driver's
@@ -717,16 +723,67 @@ impl Screen {
             watch_between_devices(layout.clone(), busy.clone());
             let first = driver_output(0).context("the display driver lists no monitor")?;
             tracing::info!(driver = %driver.path, first = %first.device, "display driver; this PC has screens of its own, so the driver's monitors join the desktop only while a device is here");
-            return Ok(Self { driver: Arc::new(driver), pc, layout, device: first.device, switched: false, own: None, first_was: None, second: None, busy });
+            return Ok(Self { driver: Arc::new(driver), pc, layout, device: first.device, switched: false, own: None, first_was: None, second: None, busy, mirrored: false, mirror_only: false });
         }
         let (output, sure) = find_output()?;
         tracing::info!(driver = %driver.path, output = %output.device, adapter = %output.description, recognised = sure, "display driver");
-        Ok(Self { driver: Arc::new(driver), pc, layout, device: output.device, switched: false, own: None, first_was: None, second: None, busy })
+        Ok(Self { driver: Arc::new(driver), pc, layout, device: output.device, switched: false, own: None, first_was: None, second: None, busy, mirrored: false, mirror_only: false })
     }
 
     /// Has this PC screens of its own, so that the driver's monitors are there only for devices?
     pub fn pc(&self) -> bool {
         self.pc
+    }
+
+    /// A host that does nothing but mirror the PC's own screens, with no driver and no change to
+    /// the desktop (for testing it as a user who may not open the driver).
+    pub fn mirror_only() -> Self {
+        Self {
+            driver: Arc::new(Driver::absent()),
+            pc: true,
+            layout: std::path::PathBuf::new(),
+            device: String::new(),
+            switched: false,
+            own: None,
+            first_was: None,
+            second: None,
+            busy: Arc::default(),
+            mirrored: false,
+            mirror_only: true,
+        }
+    }
+
+    pub fn only_mirrors(&self) -> bool {
+        self.mirror_only
+    }
+
+    /// The PC's screen a device that asks to mirror is shown: the main display, or failing that
+    /// the first of the others that is part of the desktop; never one of the driver's monitors.
+    /// Its Windows name, mode and place on the desktop.
+    pub fn mirror_output(&self) -> Result<(String, Mode, Area)> {
+        let driver = driver_names();
+        let all: Vec<Output> = outputs().into_iter().filter(|o| !driver.contains(&o.device)).collect();
+        let Some(output) = all.iter().find(|o| o.primary).or(all.first()) else { bail!("the PC has no screen of its own on the desktop to show") };
+        let (mode, area) = current(&output.device)?;
+        Ok((output.device.clone(), mode, area))
+    }
+
+    /// Say whether the device is shown one of the PC's screens as it is, which nothing is
+    /// arranged for and so nothing is put back.
+    pub fn set_mirrored(&mut self, on: bool) {
+        self.mirrored = on;
+    }
+
+    pub fn mirrored(&self) -> bool {
+        self.mirrored
+    }
+
+    /// Give back what an earlier picture was given (a monitor of its own, a changed mode), if
+    /// there is anything: for a picture that is to be a mirror of the PC's screen instead.
+    pub fn release_given(&mut self) {
+        if !self.mirror_only && (self.own.is_some() || self.second.is_some() || self.switched) {
+            self.release();
+        }
     }
 
 
@@ -1198,6 +1255,10 @@ impl Screen {
 
     /// The client is gone: put the monitor back as it was.
     pub fn release(&mut self) {
+        // A mirrored screen was left as it was; and a host that only mirrors has no driver.
+        if std::mem::take(&mut self.mirrored) || self.mirror_only {
+            return;
+        }
         self.take_back();
         if std::mem::take(&mut self.switched) {
             match restore(&self.device) {
