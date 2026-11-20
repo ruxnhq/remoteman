@@ -424,6 +424,12 @@ try {
     # Never fails the install: what went wrong is in the log, and the exit code says so.
     $script:steamFailed = $false
     try { Install-Steam } catch { Say "steam: $($_.Exception.Message)"; $script:steamFailed = $true }
+    # The host looks for a microphone to play a device's into when it starts, and it started
+    # before this step: started again, it finds Steam's.
+    if ((Get-Service -Name $name -ErrorAction SilentlyContinue).Status -eq 'Running') {
+      Restart-Service -Name $name -Force -ErrorAction SilentlyContinue
+      Say "steam: the host started again, to find Steam's microphone"
+    }
     if ($script:steamFailed) { Say "FAILED: Steam's sound devices weren't installed (see the lines above)"; exit 1 }
     exit 0
   }
