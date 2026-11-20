@@ -83,6 +83,14 @@ impl Gpu {
             // into Y410), FFmpeg's HEVC
             // decoder offers no D3D11VA picture format for 4:4:4 (FFmpeg 9.0: it chooses
             // yuv444p10le on the CPU), so it is decoded on the CPU (decode.rs).
+            // On an NVIDIA card NVDEC does decode it, through FFmpeg's CUDA device, and the
+            // pictures are copied on the card into the textures (cuda.rs, decode.rs): so cheap
+            // that 4:4:4 counts as decoded by the card.
+            if crate::cuda::usable(self).is_ok() {
+                crate::decode::set_nvdec_444(true);
+                return Ok(());
+            }
+            crate::decode::set_nvdec_444(false);
             // SAFETY: calls on the video device.
             let listed = unsafe {
                 let video: ID3D11VideoDevice = self.device.cast().context("the device has no video interface")?;

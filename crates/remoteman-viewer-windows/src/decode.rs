@@ -136,6 +136,21 @@ struct Upload {
     /// it, in Y410 textures, so that the drawing of them can be tried with no card decoder.
     packed: Vec<ID3D11Texture2D>,
     scratch: Vec<u32>,
+    /// For a decoder on NVDEC: CUDA, and the sets' textures as registered with it.
+    cuda: Option<crate::cuda::Cuda>,
+    regs: Vec<Vec<crate::cuda::Resource>>,
+    /// With CUDA: the chroma is one interleaved texture (P416), not two.
+    semi: bool,
+}
+
+impl Drop for Upload {
+    fn drop(&mut self) {
+        if let Some(cuda) = &self.cuda {
+            for r in &self.regs {
+                cuda.unregister(r);
+            }
+        }
+    }
 }
 
 impl Upload {
@@ -190,6 +205,65 @@ impl Upload {
         Ok(texture)
     }
 
+    /// Put a 4:4:4 picture NVDEC decoded (FFmpeg's CUDA frame, planes in the card's memory) into
+    /// the next three textures, GPU to GPU. 10-bit pictures are 16 bits with the 10 at the top.
+    /// Returns the textures and whether the samples are that way (true) or 8-bit (false).
+    ///
+    /// SAFETY: `f` is a decoded CUDA frame with its hardware frames context.
+    unsafe fn put_cuda(&mut self, f: &ffi::AVFrame) -> Result<([ID3D11Texture2D; 3], bool, bool)> {
+        use ffi::AVPixelFormat::*;
+        use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R16G16_UNORM, DXGI_FORMAT_R16_UNORM};
+        // SAFETY: a CUDA frame has its frames context.
+        let sw = unsafe { (*((*f.hw_frames_ctx).data as *const ffi::AVHWFramesContext)).sw_format };
+        // The luma's format, its bytes a sample, whether the 10 bits are at the top, whether
+        // Cb and Cr are interleaved.
+        let (format, bytes, msb, semi) = match sw {
+            AV_PIX_FMT_YUV444P16LE | AV_PIX_FMT_YUV444P10MSBLE => (DXGI_FORMAT_R16_UNORM, 2, true, false),
+            AV_PIX_FMT_P416LE => (DXGI_FORMAT_R16_UNORM, 2, true, true),
+            AV_PIX_FMT_YUV444P => (DXGI_FORMAT_R8_UNORM, 1, false, false),
+            other => bail!("NVDEC gave a picture format ({}, {}) that isn't copied", other as i32, CStr::from_ptr(ffi::av_get_pix_fmt_name(other)).to_string_lossy()),
+        };
+        let (w, h) = (f.width as u32, f.height as u32);
+        let cuda = self.cuda.context("no CUDA")?;
+        if (self.size, self.chroma_size, self.format, self.semi) != ((w, h), (w, h), format, semi) || self.sets.is_empty() {
+            for r in self.regs.drain(..) {
+                cuda.unregister(&r);
+            }
+            self.sets.clear();
+            for _ in 0..HELD {
+                let y = self.texture(w, h, format)?;
+                let set = if semi {
+                    let uv = self.texture(w, h, DXGI_FORMAT_R16G16_UNORM)?;
+                    [y, uv.clone(), uv]
+                } else {
+                    [y, self.texture(w, h, format)?, self.texture(w, h, format)?]
+                };
+                let mut regs = Vec::new();
+                for t in set.iter().take(if semi { 2 } else { 3 }) {
+                    match cuda.register(t) {
+                        Ok(r) => regs.push(r),
+                        Err(e) => {
+                            cuda.unregister(&regs);
+                            return Err(e);
+                        }
+                    }
+                }
+                self.regs.push(regs);
+                self.sets.push(set);
+            }
+            (self.size, self.chroma_size, self.format, self.semi) = ((w, h), (w, h), format, semi);
+        }
+        let n = self.next % self.sets.len();
+        self.next += 1;
+        let plane = |i: usize, bytes: usize| crate::cuda::Plane { ptr: f.data[i] as usize as u64, pitch: f.linesize[i] as usize, width: w as usize * bytes, height: h as usize };
+        if semi {
+            cuda.copy(&self.regs[n], &[plane(0, bytes), plane(1, 4)])?;
+        } else {
+            cuda.copy(&self.regs[n], &[plane(0, bytes), plane(1, bytes), plane(2, bytes)])?;
+        }
+        Ok((self.sets[n].clone(), msb, semi))
+    }
+
     /// Put a 4:2:0 or 4:4:4 frame of 8 or 10 bits into the next three textures, each plane as
     /// it lies in memory (10 bits in the low bits of 16; the shader is told), so the processor
     /// does nothing to it on the way. 4:4:4 keeps its chroma at full size: the shader samples
@@ -233,6 +307,12 @@ pub struct Picture {
     /// For a picture decoded on the CPU: its Cb and Cr, in textures of their own (`texture` is
     /// then the luma alone), each sample as the decoder gave it (10 bits in the low bits).
     pub chroma: Option<(ID3D11Texture2D, ID3D11Texture2D)>,
+    /// With `chroma`: the 10 bits sit at the top of the 16 (as NVDEC leaves them, like P010),
+    /// not at the bottom (as the CPU decoder does).
+    pub msb: bool,
+    /// With `chroma`: the chroma is one texture of Cb and Cr interleaved (R16G16, as NVDEC's
+    /// P416 is); the second texture of `chroma` is then the same one and is not used.
+    pub semi: bool,
     /// Which slice of the array texture.
     pub slice: u32,
     /// The visible size; the texture is the coded size, a little larger (1088 rows for 1080).
@@ -263,6 +343,22 @@ pub struct Decoder {
     pub name: String,
     /// Set for a decoder on the CPU: where its pictures go.
     upload: Option<Upload>,
+    /// For a decoder on NVDEC that has not yet given a picture: the codec to decode on the CPU
+    /// instead if it can't (no driver, or a format it doesn't copy).
+    fallback: Option<(Gpu, Codec)>,
+}
+
+/// Whether 4:4:4 is decoded by the card (NVDEC through CUDA) here, as far as is known: set
+/// where the card is probed (`Gpu::decodes`), cleared if a decoder on NVDEC then fails.
+static NVDEC_444: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_nvdec_444(on: bool) {
+    NVDEC_444.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether this mode is decoded on the processor: in software, and not 4:4:4 on NVDEC.
+pub fn on_processor(mode: remoteman_core::Mode) -> bool {
+    mode_in_software(mode) && !(mode.chroma == remoteman_core::Chroma::C444 && mode.codec == Codec::Hevc && NVDEC_444.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 // SAFETY: used by the decode thread alone.
@@ -270,6 +366,8 @@ unsafe impl Send for Decoder {}
 
 impl Drop for Decoder {
     fn drop(&mut self) {
+        // Its CUDA registrations go while the context still lives.
+        self.upload = None;
         // SAFETY: all four are ours; each call takes a null in its stride.
         unsafe {
             ffi::av_frame_free(&mut self.frame);
@@ -278,6 +376,20 @@ impl Drop for Decoder {
             ffi::av_buffer_unref(&mut self.device);
         }
     }
+}
+
+/// CUDA pictures or none.
+unsafe extern "C" fn pick_cuda(_ctx: *mut ffi::AVCodecContext, mut offered: *const ffi::AVPixelFormat) -> ffi::AVPixelFormat {
+    // SAFETY: the list ends with AV_PIX_FMT_NONE.
+    unsafe {
+        while *offered != ffi::AVPixelFormat::AV_PIX_FMT_NONE {
+            if *offered == ffi::AVPixelFormat::AV_PIX_FMT_CUDA {
+                return *offered;
+            }
+            offered = offered.add(1);
+        }
+    }
+    ffi::AVPixelFormat::AV_PIX_FMT_NONE
 }
 
 /// D3D11VA pictures or none: FFmpeg would otherwise quietly decode on the CPU.
@@ -303,7 +415,7 @@ impl Decoder {
         // SAFETY: FFmpeg's own allocation and set-up calls, each checked; what is allocated is
         // owned by `this` from the start, so an early return frees it.
         unsafe {
-            let mut this = Self { ctx: ptr::null_mut(), device: ptr::null_mut(), packet: ptr::null_mut(), frame: ptr::null_mut(), name: String::new(), upload: None };
+            let mut this = Self { ctx: ptr::null_mut(), device: ptr::null_mut(), packet: ptr::null_mut(), frame: ptr::null_mut(), name: String::new(), upload: None, fallback: None };
             this.device = ffi::av_hwdevice_ctx_alloc(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA);
             anyhow::ensure!(!this.device.is_null(), "out of memory");
             let hw = (*((*this.device).data as *mut ffi::AVHWDeviceContext)).hwctx as *mut ffi::AVD3D11VADeviceContext;
@@ -336,11 +448,55 @@ impl Decoder {
     /// A decoder on the CPU, for a card that has none for `codec`. Its pictures are put into
     /// textures one by one, which costs what the card's own decoder doesn't.
     pub fn software(gpu: &Gpu, codec: Codec) -> Result<Self> {
+        if codec == Codec::Hevc && std::env::var("REMOTEMAN_CUDA").as_deref() != Ok("0") && std::env::var("REMOTEMAN_SOFTWARE").as_deref() != Ok("1") {
+            match Self::nvdec(gpu) {
+                Ok(this) => return Ok(this),
+                Err(e) => {
+                    set_nvdec_444(false);
+                    say!("decoder: no NVDEC through CUDA here ({e:#}); on the CPU");
+                }
+            }
+        }
+        Self::cpu(gpu, codec)
+    }
+
+    /// HEVC on NVDEC through FFmpeg's CUDA device (the card the Direct3D device is on): the
+    /// pictures are copied GPU to GPU into our textures (`Upload::put_cuda`). No frame threads
+    /// and low delay, so a picture comes out for every frame sent.
+    fn nvdec(gpu: &Gpu) -> Result<Self> {
+        init();
+        let found = find_software(Codec::Hevc)?;
+        let ordinal = std::ffi::CString::new(crate::cuda::ordinal(gpu)?)?;
+        // SAFETY: as in `new`.
+        unsafe {
+            let mut this = Self { ctx: ptr::null_mut(), device: ptr::null_mut(), packet: ptr::null_mut(), frame: ptr::null_mut(), name: String::new(), upload: None, fallback: Some((gpu.clone(), Codec::Hevc)) };
+            let err = ffi::av_hwdevice_ctx_create(&mut this.device, ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA, ordinal.as_ptr(), ptr::null_mut(), 0);
+            anyhow::ensure!(err >= 0, "FFmpeg's CUDA device: {}", message(err));
+            let hw = (*((*this.device).data as *mut ffi::AVHWDeviceContext)).hwctx as *const crate::cuda::AvCudaDevice;
+            let cuda = crate::cuda::Cuda::new(hw)?;
+            this.ctx = ffi::avcodec_alloc_context3(found);
+            anyhow::ensure!(!this.ctx.is_null(), "out of memory");
+            (*this.ctx).hw_device_ctx = ffi::av_buffer_ref(this.device);
+            (*this.ctx).get_format = Some(pick_cuda);
+            (*this.ctx).thread_count = 1;
+            (*this.ctx).flags |= ffi::AV_CODEC_FLAG_LOW_DELAY as i32;
+            let err = ffi::avcodec_open2(this.ctx, found, ptr::null_mut());
+            anyhow::ensure!(err >= 0, "open the decoder: {}", message(err));
+            this.packet = ffi::av_packet_alloc();
+            this.frame = ffi::av_frame_alloc();
+            anyhow::ensure!(!this.packet.is_null() && !this.frame.is_null(), "out of memory");
+            this.name = format!("{} (nvdec, cuda)", CStr::from_ptr((*found).name).to_string_lossy());
+            this.upload = Some(Upload { gpu: gpu.clone(), sets: Vec::new(), size: (0, 0), chroma_size: (0, 0), format: Default::default(), next: 0, packed: Vec::new(), scratch: Vec::new(), cuda: Some(cuda), regs: Vec::new(), semi: false });
+            Ok(this)
+        }
+    }
+
+    fn cpu(gpu: &Gpu, codec: Codec) -> Result<Self> {
         init();
         let found = find_software(codec)?;
         // SAFETY: as in `new`.
         unsafe {
-            let mut this = Self { ctx: ptr::null_mut(), device: ptr::null_mut(), packet: ptr::null_mut(), frame: ptr::null_mut(), name: String::new(), upload: None };
+            let mut this = Self { ctx: ptr::null_mut(), device: ptr::null_mut(), packet: ptr::null_mut(), frame: ptr::null_mut(), name: String::new(), upload: None, fallback: None };
             this.ctx = ffi::avcodec_alloc_context3(found);
             anyhow::ensure!(!this.ctx.is_null(), "out of memory");
             // As many threads as there are cores, but none that holds a picture back to
@@ -354,13 +510,32 @@ impl Decoder {
             this.frame = ffi::av_frame_alloc();
             anyhow::ensure!(!this.packet.is_null() && !this.frame.is_null(), "out of memory");
             this.name = format!("{} (on the CPU)", CStr::from_ptr((*found).name).to_string_lossy());
-            this.upload = Some(Upload { gpu: gpu.clone(), sets: Vec::new(), size: (0, 0), chroma_size: (0, 0), format: Default::default(), next: 0, packed: Vec::new(), scratch: Vec::new() });
+            this.upload = Some(Upload { gpu: gpu.clone(), sets: Vec::new(), size: (0, 0), chroma_size: (0, 0), format: Default::default(), next: 0, packed: Vec::new(), scratch: Vec::new(), cuda: None, regs: Vec::new(), semi: false });
             Ok(this)
         }
     }
 
     /// Feed one frame as the core delivers it; returns its picture.
     pub fn decode(&mut self, data: &[u8], age_us: Option<i64>) -> Result<Option<Picture>> {
+        let first = self.decode_now(data, age_us);
+        if let Some((gpu, codec)) = self.fallback.take() {
+            match &first {
+                // NVDEC works: it stays.
+                Ok(Some(_)) => {}
+                Ok(None) => self.fallback = Some((gpu, codec)),
+                Err(e) => {
+                    // The card, driver or format wouldn't do: this and the next frames on the CPU.
+                    set_nvdec_444(false);
+                    say!("decoder: NVDEC through CUDA failed on its first frame ({e:#}); on the CPU");
+                    *self = Self::cpu(&gpu, codec)?;
+                    return self.decode_now(data, age_us);
+                }
+            }
+        }
+        first
+    }
+
+    fn decode_now(&mut self, data: &[u8], age_us: Option<i64>) -> Result<Option<Picture>> {
         // SAFETY: the packet is filled with a copy of `data` (FFmpeg pads it) and unreferenced
         // again; the frame is ours; a D3D11 frame's data[0] is its texture and data[1] the slice.
         unsafe {
@@ -379,24 +554,31 @@ impl Decoder {
             anyhow::ensure!(err >= 0, "decode: {}", message(err));
             let f = &*self.frame;
             if let Some(upload) = self.upload.as_mut() {
+                if f.format == ffi::AVPixelFormat::AV_PIX_FMT_CUDA as i32 {
+                    let put = upload.put_cuda(f);
+                    let (width, height) = (f.width as u32, f.height as u32);
+                    ffi::av_frame_unref(self.frame);
+                    let ([texture, cb, cr], msb, semi) = put?;
+                    return Ok(Some(Picture { hold: ptr::null_mut(), texture, chroma: Some((cb, cr)), msb, semi, slice: 0, width, height, age_us, decoded: std::time::Instant::now() }));
+                }
                 if f.format == ffi::AVPixelFormat::AV_PIX_FMT_YUV444P10LE as i32 && std::env::var("REMOTEMAN_Y410").as_deref() == Ok("1") {
                 let put = upload.put_y410(f);
                 let (width, height) = (f.width as u32, f.height as u32);
                 ffi::av_frame_unref(self.frame);
-                return Ok(Some(Picture { hold: ptr::null_mut(), texture: put?, chroma: None, slice: 0, width, height, age_us, decoded: std::time::Instant::now() }));
+                return Ok(Some(Picture { hold: ptr::null_mut(), texture: put?, chroma: None, msb: false, semi: false, slice: 0, width, height, age_us, decoded: std::time::Instant::now() }));
             }
             let put = upload.put(f);
                 let (width, height) = (f.width as u32, f.height as u32);
                 ffi::av_frame_unref(self.frame);
                 let [texture, cb, cr] = put?;
-                return Ok(Some(Picture { hold: ptr::null_mut(), texture, chroma: Some((cb, cr)), slice: 0, width, height, age_us, decoded: std::time::Instant::now() }));
+                return Ok(Some(Picture { hold: ptr::null_mut(), texture, chroma: Some((cb, cr)), msb: false, semi: false, slice: 0, width, height, age_us, decoded: std::time::Instant::now() }));
             }
             anyhow::ensure!(f.format == ffi::AVPixelFormat::AV_PIX_FMT_D3D11 as i32, "the decoder gave a picture that isn't on the card");
             let raw = f.data[0] as *mut std::ffi::c_void;
             let texture = ID3D11Texture2D::from_raw_borrowed(&raw).context("a picture with no texture")?.clone();
             let hold = ffi::av_frame_clone(self.frame);
             anyhow::ensure!(!hold.is_null(), "out of memory");
-            let picture = Picture { hold, texture, chroma: None, slice: f.data[1] as usize as u32, width: f.width as u32, height: f.height as u32, age_us, decoded: std::time::Instant::now() };
+            let picture = Picture { hold, texture, chroma: None, msb: false, semi: false, slice: f.data[1] as usize as u32, width: f.width as u32, height: f.height as u32, age_us, decoded: std::time::Instant::now() };
             ffi::av_frame_unref(self.frame);
             Ok(Some(picture))
         }
@@ -425,6 +607,7 @@ mod bench {
                 i += 4 + n;
             }
             let mut d = Decoder::software(&gpu, Codec::Hevc).unwrap();
+            eprintln!("DECODER {}", d.name);
             let mut times = Vec::new();
             for f in &frames {
                 let t = std::time::Instant::now();

@@ -634,7 +634,7 @@ impl App {
     /// unasked where the processor keeps up. "Sharp text" asks for it whatever the speed.
     pub fn withholds_444(&self, display: &Display, quality: Quality) -> Option<String> {
         let mode = self.decoders.iter().find(|m| m.chroma == remoteman_core::Chroma::C444)?;
-        if quality == Quality::Sharp || !crate::decode::mode_in_software(*mode) {
+        if quality == Quality::Sharp || !crate::decode::on_processor(*mode) {
             return None;
         }
         let (rate, measured) = self.cpu_444_rate();

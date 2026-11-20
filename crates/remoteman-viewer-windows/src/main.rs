@@ -51,6 +51,7 @@ mod creds;
 mod cursor;
 #[cfg(windows)]
 mod decode;
+mod cuda;
 #[cfg(windows)]
 mod demo;
 #[cfg(windows)]

@@ -1610,7 +1610,7 @@ fn picture_state(app: &App) -> Value {
             "active": vrr_active, "why": vrr_why,
         },
         "sharp_text": {
-            "decoder": match full { None => "none", Some(m) if crate::decode::mode_in_software(*m) => "processor", Some(_) => "card" },
+            "decoder": match full { None => "none", Some(m) if crate::decode::on_processor(*m) => "processor", Some(_) => "card" },
             "rate": rate, "measured": measured,
             "display": [display.width, display.height, display.refresh],
             "offered": full.is_some() && withheld.is_none(), "why": withheld.unwrap_or_default(),
