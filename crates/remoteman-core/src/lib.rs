@@ -8,6 +8,7 @@
 pub mod blob;
 pub mod ffi;
 pub mod host;
+pub mod permissions;
 pub mod rate;
 pub mod receive;
 // The relay talks over a Unix socket.
