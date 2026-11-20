@@ -362,7 +362,7 @@ pub fn settings(v: &Viewer, context: &ViewContext<Viewer>) -> View {
                 row("Send system shortcuts to the computer", "Alt+Tab, the Windows key and others, while a session is in front. Ctrl+Alt+Delete is always in Send keys.", Some(toggle(f.b("system_shortcuts") && s.b("shortcuts"), "Send system shortcuts to the computer", flag("shortcuts"))), f.b("system_shortcuts"), None),
                 row("Release the keyboard", "Gives shortcuts back to this PC, and takes them again", Some(kit::fixed("Ctrl+Alt+Shift")), f.b("release_shortcut"), None),
                 row("On a Mac, Ctrl acts as Command", "Ctrl+C on this keyboard copies on a Mac, as it does here", Some(toggle(s.b("ctrl_as_command"), "On a Mac, Ctrl acts as Command", flag("ctrl-as-command"))), f.b("ctrl_as_command"), None),
-                row("Windows key", "Opens the overview on a Linux computer, Spotlight's key on a Mac", Some(kit::fixed("Super / Command")), f.b("key_mapping"), None),
+                row("Windows key", "Opens the overview on a Linux computer, Spotlight's key on a Mac. Another key can act as it too", Some(choice(s.o("windows_key"), "Windows key", chose(context, "windows-key", None))), f.b("key_mapping"), None),
             ],
         ),
         group(
@@ -450,7 +450,7 @@ pub fn computer(v: &Viewer, context: &ViewContext<Viewer>) -> View {
                 row("Name", "", Some(name_box), true, None),
                 row("Address", c.s("short"), Some(Button::new().content("Edit address…").automation_name("Edit address…").on_click(act(context, "edit-address", json!({"address": address}))).into()), true, None),
                 row("Wake it over the network", "When it is asleep and on the same network", Some(toggle(c.b("wake"), "Wake it over the network", flip(context, cmd("set", json!({"what": "wake", "address": address}))))), f.b("wake"), None),
-                row("Getting in", "Joins your session there if you are logged in, otherwise shows its login screen", Some(kit::fixed("The computer decides")), f.b("way_in"), None),
+                row("Getting in", "Joins your session there if you are logged in, otherwise shows its login screen. A computer with one way in takes no notice", Some(choice(opts.o("way_in"), "Getting in", chose(context, "way-in", a.clone()))), f.b("way_in"), None),
             ],
         ),
         group(

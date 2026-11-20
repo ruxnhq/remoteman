@@ -145,6 +145,10 @@ pub struct Computer {
     pub cards: String,
     /// "Wake it over the network": it may be sent the waking packet.
     pub wake: bool,
+    /// "Getting in": only a session that is already running, never its login screen (the
+    /// hello's `way_in: attach`; the Linux viewer's key, `way-in`). A computer with one way in
+    /// takes no notice.
+    pub attach_only: bool,
     /// Lines this viewer doesn't use (the Linux viewer's), kept as they were.
     pub other: Vec<(String, String)>,
 }
@@ -153,12 +157,46 @@ impl Computer {
     fn new(name: &str, address: &str, os: &str, now: i64, settings: &Settings) -> Self {
         // A new computer's display follows the window: as large as the picture's place, and
         // asked for again when the window changes size (full screen included).
-        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: WINDOW, sound: settings.sound, clipboard: settings.clipboard, second_side: Side::Right, cards: String::new(), wake: true, other: Vec::new() }
+        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: WINDOW, sound: settings.sound, clipboard: settings.clipboard, second_side: Side::Right, cards: String::new(), wake: true, attach_only: false, other: Vec::new() }
     }
 
     /// The network cards it can be woken through.
     pub fn card_list(&self) -> Vec<String> {
         self.cards.split(',').map(str::trim).filter(|c| !c.is_empty()).map(str::to_owned).collect()
+    }
+}
+
+/// A key on this keyboard that can act as the Windows key (Super, Command) on the computer,
+/// as in the Linux viewer: the Windows key itself always does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stand {
+    /// No other key.
+    Own,
+    RightAlt,
+    RightCtrl,
+    CapsLock,
+}
+
+impl Stand {
+    /// Each with its settings word and its name in the drop-down (the first is the default).
+    pub const ALL: [(Stand, &str, &str); 4] = [(Stand::Own, "own", "Super / Command"), (Stand::RightAlt, "right-alt", "Right Alt"), (Stand::RightCtrl, "right-ctrl", "Right Ctrl"), (Stand::CapsLock, "caps-lock", "Caps Lock")];
+
+    pub fn from_key(key: &str) -> Self {
+        Self::ALL.iter().find(|s| s.1 == key).map_or(Stand::Own, |s| s.0)
+    }
+
+    pub fn key(self) -> &'static str {
+        Self::ALL.iter().find(|s| s.0 == self).map_or("own", |s| s.1)
+    }
+
+    /// The key's USB usage.
+    fn usage(self) -> Option<u16> {
+        match self {
+            Stand::Own => None,
+            Stand::RightAlt => Some(0xE6),
+            Stand::RightCtrl => Some(0xE4),
+            Stand::CapsLock => Some(0x39),
+        }
     }
 }
 
@@ -180,6 +218,8 @@ pub struct Settings {
     pub scroll_reversed: bool,
     /// On a Mac, Ctrl on this keyboard is Command there (and the Windows key is Ctrl).
     pub ctrl_as_command: bool,
+    /// The key that acts as the Windows key (Super, Command) besides the Windows key itself.
+    pub super_key: Stand,
     /// The pointer is held in the window and its raw movement sent.
     pub capture: bool,
     /// What a newly paired computer's sessions start with.
@@ -208,6 +248,9 @@ pub struct Settings {
 impl Settings {
     /// The usage to send for a key on this keyboard, for a computer that runs `os`.
     pub fn map_key(&self, usage: u16, os: &str) -> u16 {
+        // A stand-in first: it is then the Windows key like the real one, and goes on
+        // through whatever the Mac setting does to that.
+        let usage = if self.super_key.usage() == Some(usage) { 0xE3 } else { usage };
         let mac = matches!(os.to_ascii_lowercase().as_str(), "macos" | "mac" | "darwin");
         if !(self.ctrl_as_command && mac) {
             return usage;
@@ -225,7 +268,7 @@ impl Settings {
 /// The picture's own keys (this viewer's alone so far).
 const PICTURE_KEYS: [&str; 3] = ["hdr", "variable-refresh", "cpu-444"];
 
-const SETTINGS_KEYS: [&str; 16] = ["capture-pointer", "placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder", "touch", "allow-microphone", "allow-camera"];
+const SETTINGS_KEYS: [&str; 17] = ["super-key", "capture-pointer", "placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder", "touch", "allow-microphone", "allow-camera"];
 
 pub struct Store {
     dir: PathBuf,
@@ -270,6 +313,7 @@ impl Store {
             match_refresh: yes("match-refresh", true),
             scroll_reversed: yes("scroll-reversed", false),
             ctrl_as_command: yes("ctrl-as-command", false),
+            super_key: Stand::from_key(&get("super-key").unwrap_or_default()),
             capture: yes("capture-pointer", false),
             sound: yes("sound", false),
             clipboard: yes("clipboard", false),
@@ -305,6 +349,7 @@ impl Store {
                     "second-side" => c.second_side = SIDES.iter().find(|s| s.1 == value).map_or(Side::Right, |s| s.0),
                     "cards" => c.cards = value.to_owned(),
                     "wake" => c.wake = value != "no",
+                    "way-in" => c.attach_only = value == "attach",
                     other => c.other.push((other.to_owned(), value.to_owned())),
                 }
             }
@@ -417,7 +462,7 @@ impl Store {
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         for c in &self.computers {
             out += &format!(
-                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\npicture-lines={}\nsound={}\nclipboard={}\nsecond-side={}\ncards={}\nwake={}\n",
+                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\npicture-lines={}\nsound={}\nclipboard={}\nsecond-side={}\ncards={}\nwake={}\nway-in={}\n",
                 clean(&c.name),
                 clean(&c.address),
                 clean(&c.os),
@@ -432,6 +477,7 @@ impl Store {
                 SIDES.iter().find(|s| s.0 == c.second_side).map_or("right", |s| s.1),
                 clean(&c.cards),
                 if c.wake { "yes" } else { "no" },
+                if c.attach_only { "attach" } else { "any" },
             );
             for (key, value) in &c.other {
                 out += &format!("{key}={}\n", clean(value));
@@ -448,7 +494,7 @@ impl Store {
         let s = &self.settings;
         let yes = |b: bool| if b { "yes" } else { "no" };
         let mut out = format!(
-            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\ncapture-pointer={}\nsound={}\nclipboard={}\nfolder={}\ntouch={}\nallow-microphone={}\nallow-camera={}\n",
+            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\nsuper-key={}\ncapture-pointer={}\nsound={}\nclipboard={}\nfolder={}\ntouch={}\nallow-microphone={}\nallow-camera={}\n",
             placement_key(s.placement),
             yes(s.hover_bar),
             yes(s.figures),
@@ -458,6 +504,7 @@ impl Store {
             yes(s.match_refresh),
             yes(s.scroll_reversed),
             yes(s.ctrl_as_command),
+            s.super_key.key(),
             yes(s.capture),
             yes(s.sound),
             yes(s.clipboard),
@@ -573,6 +620,97 @@ mod tests {
 
     fn modes() -> Vec<Mode> {
         vec![Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 }, Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 }]
+    }
+
+    fn settings_with(super_key: Stand, ctrl_as_command: bool) -> Settings {
+        let mut s = Store::load(&std::env::temp_dir().join("remoteman-no-such-settings")).settings;
+        s.super_key = super_key;
+        s.ctrl_as_command = ctrl_as_command;
+        s
+    }
+
+    #[test]
+    fn keys_go_as_they_are_by_default() {
+        let s = settings_with(Stand::Own, false);
+        for os in ["linux", "macos", "windows"] {
+            for usage in [0xE0, 0xE3, 0xE4, 0xE6, 0xE7, 0x39, 0x04] {
+                assert_eq!(s.map_key(usage, os), usage);
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_acts_as_command_on_a_mac_only() {
+        let s = settings_with(Stand::Own, true);
+        // Ctrl and the Windows key swap, each side with its own.
+        assert_eq!((s.map_key(0xE0, "macos"), s.map_key(0xE4, "macos")), (0xE3, 0xE7));
+        assert_eq!((s.map_key(0xE3, "macos"), s.map_key(0xE7, "Darwin")), (0xE0, 0xE4));
+        assert_eq!(s.map_key(0xE6, "macos"), 0xE6);
+        for os in ["linux", "windows", ""] {
+            assert_eq!((s.map_key(0xE0, os), s.map_key(0xE3, os)), (0xE0, 0xE3));
+        }
+    }
+
+    #[test]
+    fn another_key_stands_in_for_the_windows_key() {
+        for (stand, usage) in [(Stand::RightAlt, 0xE6), (Stand::RightCtrl, 0xE4), (Stand::CapsLock, 0x39)] {
+            let s = settings_with(stand, false);
+            // It is the left Windows key (Super, Command) everywhere, and the real one still is.
+            for os in ["linux", "macos", "windows"] {
+                assert_eq!(s.map_key(usage, os), 0xE3);
+                assert_eq!(s.map_key(0xE3, os), 0xE3);
+                assert_eq!(s.map_key(0x04, os), 0x04);
+            }
+        }
+        // The others aren't touched.
+        let s = settings_with(Stand::CapsLock, false);
+        assert_eq!((s.map_key(0xE6, "linux"), s.map_key(0xE4, "linux")), (0xE6, 0xE4));
+    }
+
+    #[test]
+    fn a_stand_in_goes_through_the_mac_swap_too() {
+        // Caps Lock as the Windows key, Ctrl as Command: on a Mac Caps Lock is Ctrl, as in the Linux viewer.
+        let s = settings_with(Stand::CapsLock, true);
+        assert_eq!(s.map_key(0x39, "macos"), 0xE0);
+        assert_eq!(s.map_key(0x39, "linux"), 0xE3);
+        // Right Ctrl as the Windows key: it is no Ctrl any more, and so no Command.
+        let s = settings_with(Stand::RightCtrl, true);
+        assert_eq!(s.map_key(0xE4, "macos"), 0xE0);
+        assert_eq!(s.map_key(0xE0, "macos"), 0xE3);
+    }
+
+    #[test]
+    fn the_stand_in_is_kept_in_the_settings_file() {
+        let dir = std::env::temp_dir().join(format!("remoteman-stand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = Store::load(&dir);
+        assert_eq!(store.settings.super_key, Stand::Own);
+        store.settings.super_key = Stand::RightAlt;
+        store.save_settings();
+        let text = std::fs::read_to_string(dir.join("viewer-settings")).unwrap();
+        assert!(text.contains("super-key=right-alt\n"));
+        assert_eq!(Store::load(&dir).settings.super_key, Stand::RightAlt);
+        // A word nobody knows is the Windows key alone.
+        std::fs::write(dir.join("viewer-settings"), "super-key=f13\n").unwrap();
+        assert_eq!(Store::load(&dir).settings.super_key, Stand::Own);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_way_in_is_kept_per_computer_as_the_linux_viewer_keeps_it() {
+        let dir = std::env::temp_dir().join(format!("remoteman-wayin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("viewer-computers"), "[computer]\nname=a\naddress=a:7791\nway-in=attach\n[computer]\nname=b\naddress=b:7791\nway-in=any\n[computer]\nname=c\naddress=c:7791\n").unwrap();
+        let mut store = Store::load(&dir);
+        let by = |s: &Store, n: &str| s.computers.iter().find(|c| c.name == n).map(|c| c.attach_only);
+        assert_eq!((by(&store, "a"), by(&store, "b"), by(&store, "c")), (Some(true), Some(false), Some(false)));
+        store.update("b:7791", |c| c.attach_only = true);
+        let again = Store::load(&dir);
+        assert_eq!((by(&again, "a"), by(&again, "b"), by(&again, "c")), (Some(true), Some(true), Some(false)));
+        // It is a key of its own, not one of the lines kept as they were.
+        assert!(again.computers.iter().all(|c| c.other.iter().all(|(k, _)| k != "way-in")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

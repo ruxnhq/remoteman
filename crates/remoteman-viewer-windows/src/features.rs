@@ -91,11 +91,11 @@ pub const FEATURES: Features = Features {
     scroll_direction: true,
     touch: true,
     system_shortcuts: true,
-    key_mapping: false,
+    key_mapping: true,
     release_shortcut: true,
     second_display: true,
     mirror: true,
-    way_in: false,
+    way_in: true,
 };
 
 pub const NOT_YET: &str = "Not available yet";
