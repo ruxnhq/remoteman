@@ -11,6 +11,7 @@ public class Inp {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
   public static void Key(ushort vk, bool up) { var i = new INPUT[1]; i[0].type = 1; i[0].ki.vk = vk; i[0].ki.flags = up ? 2u : 0u; SendInput(1, i, Marshal.SizeOf(typeof(INPUT))); }
+  public static void Move(int dx, int dy) { var i = new INPUT[1]; i[0].type = 0; i[0].mi.dx = dx; i[0].mi.dy = dy; i[0].mi.flags = 1; SendInput(1, i, Marshal.SizeOf(typeof(INPUT))); }
   public static void Mouse(uint flags, uint data) { var i = new INPUT[1]; i[0].type = 0; i[0].mi.flags = flags; i[0].mi.data = data; SendInput(1, i, Marshal.SizeOf(typeof(INPUT))); }
 }
 '@ -ErrorAction SilentlyContinue

@@ -11,6 +11,8 @@ $front = [Inp]::GetForegroundWindow()
 [Inp]::Key(0x10, $false); [Inp]::Key(0x10, $true)
 [Inp]::SetForegroundWindow($h) | Out-Null
 Start-Sleep -Milliseconds 300
+# Nothing is sent unless the viewer's window really is in front (else it would go to whatever is).
+if ([Inp]::GetForegroundWindow() -ne $h) { "the viewer isn't in front: nothing sent"; return }
 [Inp]::SetCursorPos($X, $Y) | Out-Null; Start-Sleep -Milliseconds 100
 [Inp]::SetCursorPos($X + 40, $Y + 30) | Out-Null; Start-Sleep -Milliseconds 100
 [Inp]::Mouse(0x0002, 0); Start-Sleep -Milliseconds 60; [Inp]::Mouse(0x0004, 0); Start-Sleep -Milliseconds 100   # left down, up

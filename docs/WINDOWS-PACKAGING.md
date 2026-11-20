@@ -114,13 +114,17 @@ computer.
 monitor (the app's window waits hidden behind it) presenting into an HWND flip swap chain with
 tearing allowed, on a Direct3D device that does nothing else (on the engine's device, which also
 decodes, the desktop showed it as an overlay at the monitor's fixed rate). Measured on DISPLAY1
-(ASUS XG32UCWMG, 240 Hz, HDR on) with 100 pictures a second: the monitor blanked 10.00 ms apart
-for the whole run in 8-bit, 10-bit SDR and 10-bit PQ (HDR10 passed through); in a window (the
-`SwapChainPanel`) it stays at 4.17 ms. Earlier reports of 10-bit dropping back after a few seconds
-were another program's window taking the keyboard: the monitor follows the frames only while the
-picture's window (or its process's) is in front. While the bar is out over the picture, its layer
-brings the fixed rate back. DXGI's exclusive full screen also varied the refresh until another
-window took the keyboard, and isn't used.
+(ASUS XG32UCWMG, 240 Hz, HDR on) with 100 pictures a second, a line a second: the monitor blanked
+10.00 ms apart for the whole run in 10-bit SDR (17 s, the full-screen window in front), 8-bit SDR
+(19 s) and 10-bit PQ, HDR10 passed through (19 s); in those two the window in front was the app's
+own, hidden one, not the full-screen window. In a further run with the pointer at the top edge
+(the bar out, its layer over the picture), a click on the picture and the pointer away again (the
+layer taken away), it stayed at 10.00 ms throughout, the full-screen window in front. In a window
+(the `SwapChainPanel`) it stays at 4.17 ms. Every drop to 4.17 ms in full screen came with another
+program's window in front: the earlier report of 10-bit dropping back after a few seconds was
+that. DXGI's exclusive full screen varied the refresh for a few seconds in the probe and then its
+Present failed (DXGI_ERROR_INVALID_CALL), the cause not established; it isn't used, since the
+borderless window holds.
 
 **Not tested before (still true):** a clean Windows without the framework package, the Windows
 App Certification Kit, an upgrade, arm64 (the engine and FFmpeg are x64 only).

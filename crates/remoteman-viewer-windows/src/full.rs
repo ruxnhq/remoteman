@@ -7,9 +7,9 @@
 //! activated top-level window presenting into an HWND flip swap chain with tearing allowed
 //! (measured on an RTX 5090 with an ASUS XG32UCWMG at 240 Hz: `probe.rs`, and this window
 //! with `--watch-vblank`). The draw thread presents into such a swap chain here
-//! (`draw::Surface::Full`); the bar is a DirectComposition layer over it that is taken away
-//! while nothing of the app's is shown, since any layer drawn over the picture makes the
-//! desktop compose it again at the monitor's fixed rate.
+//! (`draw::Surface::Full`), on a Direct3D device that does nothing else (on the engine's,
+//! which decodes, the desktop composed it at the monitor's fixed rate); the bar is a
+//! DirectComposition layer over it, hung there only while something of the app's is shown.
 //!
 //! Input here is the old window's: what isn't the bar's or its menus' goes to the computer.
 

@@ -149,7 +149,8 @@ impl Component for Viewer {
             session_view: false,
             pending,
             theme: options.theme,
-            walk: std::env::var_os("REMOTEMAN_WALK_FILE").map(|p| (p.into(), String::new(), Some(context.set_local_timeout(Duration::from_millis(300), || Msg::WalkTick)))),
+            // (Only with --ui, which the engine takes only for tests.)
+            walk: std::env::var_os("REMOTEMAN_WALK_FILE").filter(|_| options.engine.iter().any(|w| w == "--ui")).map(|p| (p.into(), String::new(), Some(context.set_local_timeout(Duration::from_millis(300), || Msg::WalkTick)))),
             window_size: options.window.unwrap_or((984.0, 644.0)),
             pos: options.pos,
         };
@@ -477,6 +478,11 @@ impl Viewer {
                 self.dialog_hidden = Some(self.dialog_key.clone());
                 self.command(&cmd("cancel", Value::Null), context);
             }
+        }
+        // The engine kept the same dialog (an empty address, the same problem again): it comes
+        // out again, since it is still open there.
+        if self.dialog_hidden.as_deref() == Some(self.dialog_key.as_str()) && !self.dialog_key.is_empty() {
+            self.dialog_hidden = None;
         }
     }
 }
