@@ -537,6 +537,61 @@ pub unsafe extern "C" fn rm_client_close(client: *mut Client) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The second factor (docs/PROTOCOL.md, "Second factor"), client side.
+
+/// The app's context for [`rm_client_set_second_factor_callback`].
+struct AskCtx(*mut c_void);
+// SAFETY: as `BitrateCtx`.
+unsafe impl Send for AskCtx {}
+
+/// Be told when the host wants a code from an authenticator app (its hello said so, and it sends
+/// nothing more until it has one): `on_ask(ctx, left)` with `left` -1 the first time, and after a
+/// wrong code the number of tries left. Call `rm_client_second_factor` to answer. If the host is
+/// already waiting, `on_ask` is called at once, before this returns (so set it right after
+/// `rm_client_connect`). It comes on a core thread; don't call this again from inside it. A null
+/// `on_ask` removes it.
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`; `ctx` is passed back to `on_ask`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_set_second_factor_callback(client: *const Client, on_ask: Option<extern "C" fn(ctx: *mut c_void, left: i32)>, ctx: *mut c_void) {
+    let client = unsafe { &*client };
+    let ctx = AskCtx(ctx);
+    match on_ask {
+        Some(f) => client.on_second_factor(move |left| {
+            let ctx = &ctx;
+            f(ctx.0, left.map_or(-1, |n| n as i32));
+        }),
+        None => client.on_second_factor(|_| {}),
+    }
+}
+
+/// Whether the host wants a code from an authenticator app: 1 or 0 (what the callback is for).
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_second_factor_wanted(client: *const Client) -> i32 {
+    unsafe { &*client }.host_second_factor as i32
+}
+
+/// Answer the host's ask: the six digits from the authenticator app; with `remember` non-zero the
+/// host need not ask this device for 30 days. Never blocks; a wrong code is answered with another
+/// call of the callback, too many with the connection closing ("second_factor: ..." in
+/// `on_closed`). 0 sent, -1 bad arguments.
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`; `code` a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_second_factor(client: *const Client, code: *const c_char, remember: u8) -> i32 {
+    if client.is_null() || code.is_null() {
+        return -1;
+    }
+    unsafe { &*client }.second_factor(&unsafe { text(code) }, remember != 0);
+    0
+}
+
+// ---------------------------------------------------------------------------------------------
 // The host role.
 
 use crate::host::{Accept, ClientInfo, Host, HostHandler, HostOptions, Link};
@@ -1200,4 +1255,59 @@ pub unsafe extern "C" fn rm_host_stop(host: *mut Host) {
     if !host.is_null() {
         unsafe { Box::from_raw(host) }.stop();
     }
+}
+
+/// Whether the host asks devices for a code from an authenticator app: -1 no, else how many
+/// devices are remembered (told "don't ask again" and not yet expired).
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_second_factor(host: *const Host) -> i32 {
+    unsafe { &*host }.second_factor().map_or(-1, |s| s.remembered as i32)
+}
+
+/// Start turning the second factor on: makes a secret and copies "secret\tgrouped\turi" into
+/// `out` (base32; the same in groups of four; the `otpauth://` link for a QR code). It is
+/// asked for only after `rm_host_confirm_second_factor` has had a right code. 0 done, -1 failed
+/// (it is on already: turn it off first).
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `out` writable for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_enable_second_factor(host: *const Host, out: *mut c_char, len: usize) -> i32 {
+    match unsafe { &*host }.enable_second_factor() {
+        Ok(s) => {
+            report(out, len, &format!("{}\t{}\t{}", s.secret, s.grouped, s.uri));
+            0
+        }
+        Err(_) => -1,
+    }
+}
+
+/// The code the app shows: if it is right the second factor is on from now (1), else 0.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `code` a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_confirm_second_factor(host: *const Host, code: *const c_char) -> i32 {
+    unsafe { &*host }.confirm_second_factor(&unsafe { text(code) }) as i32
+}
+
+/// Turn the second factor off (the secret and the remembered devices are thrown away). 0 or -1.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_disable_second_factor(host: *const Host) -> i32 {
+    unsafe { &*host }.disable_second_factor().map_or(-1, |_| 0)
+}
+
+/// Ask every device for a code again, even those told "don't ask again". 0 or -1.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_forget_remembered(host: *const Host) -> i32 {
+    unsafe { &*host }.forget_remembered().map_or(-1, |_| 0)
 }

@@ -50,6 +50,10 @@ pub enum Dialog {
     /// owner confirms there before `until`.
     Code { name: String, code: String, until: Instant },
     Paired { target: Target, key: String },
+    /// The computer asks for a code from an authenticator app (`left`: tries left, after a wrong
+    /// one). Answered with `DialogOk`; `remember` (the locked page's flag) is "don't ask again
+    /// on this device for 30 days".
+    SecondFactor { name: String, left: Option<u32> },
     Forget(String),
     Address { address: String, problem: Option<String> },
     About,
@@ -850,6 +854,14 @@ impl App {
             self.dialog = Some(Dialog::Code { name: host_part(&target.address).to_owned(), code, until: Instant::now() + Duration::from_secs(seconds as u64) });
             self.dirty = true;
         }
+        if let Some(left) = self.session.as_ref().and_then(|s| s.shared.second_factor.lock().unwrap().take()) {
+            say!("the computer asks for a code from an authenticator app{}", left.map(|n| format!(" (wrong; {n} tries left)")).unwrap_or_default());
+            let name = self.session.as_ref().map(|s| s.target.name.clone()).unwrap_or_default();
+            self.dialog = Some(Dialog::SecondFactor { name, left });
+            self.fields.insert(id("second.code"), Field::default());
+            self.focus(id("second.code"), false);
+            self.dirty = true;
+        }
         if let Some(features) = self.session.as_ref().and_then(|s| s.shared.features.lock().unwrap().take()) {
             say!("the computer now offers {features:?}");
             self.session.as_mut().unwrap().features = features;
@@ -917,6 +929,13 @@ impl App {
     fn hold(&mut self, client: Client, shared: Arc<Shared>, target: Target, display: Display) {
         let (_, quality, bitrate) = self.choices(&target.address);
         let (features, os) = (client.host_features.clone(), client.host_os.clone());
+        // A computer that wants a code from an authenticator app says so through this, at once if
+        // it already has: `poll` shows the dialog.
+        let asked = shared.clone();
+        client.on_second_factor(move |left| {
+            *asked.second_factor.lock().unwrap() = Some(left);
+            asked.scene.wake_window();
+        });
         self.session = Some(Session::new(Some(Arc::new(client)), shared, target, features, display, quality, bitrate, os));
     }
 
@@ -1292,6 +1311,9 @@ impl App {
     pub fn stop(&mut self, reason: Option<&str>) {
         let Some(s) = &self.session else { return };
         let (target, shown) = (s.target.clone(), s.shared.presented_total.load(Ordering::Relaxed) > 0);
+        if matches!(self.dialog, Some(Dialog::SecondFactor { .. })) {
+            self.dialog = None;
+        }
         self.end(false);
         self.summary.as_mut().unwrap().ended = reason.map(str::to_owned);
         match reason {
@@ -1701,6 +1723,18 @@ impl App {
                 self.start_attempt(target, true, true);
             }
             Some(Dialog::Pair { .. }) | Some(Dialog::Code { .. }) => {}
+            Some(Dialog::SecondFactor { .. }) => {
+                let typed = self.fields.get(&id("second.code")).map(|f| f.string()).unwrap_or_default();
+                let code: String = typed.chars().filter(|c| !c.is_whitespace()).collect();
+                // Six digits, or the dialog stays as it is.
+                if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) {
+                    if let Some(client) = self.session.as_ref().and_then(|s| s.client.clone()) {
+                        client.second_factor(&code, self.remember);
+                    }
+                    self.dialog = None;
+                    self.remember = false;
+                }
+            }
             Some(Dialog::Paired { .. }) => {
                 // If the connection has gone meanwhile, `poll` has already let it go.
                 self.dialog = None;
@@ -1750,6 +1784,11 @@ impl App {
             Some(Dialog::Pair { waiting: Some(_), .. }) | Some(Dialog::Code { .. }) => self.give_up(),
             // The connection kept from pairing isn't wanted now.
             Some(Dialog::Paired { .. }) => self.end(false),
+            // Not giving the code: the session is over.
+            Some(Dialog::SecondFactor { .. }) => {
+                self.remember = false;
+                self.stop(None);
+            }
             _ => {}
         }
         self.dirty = true;

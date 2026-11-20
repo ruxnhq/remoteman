@@ -385,6 +385,7 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "connections": host.connections(12),
                 "daemon": false,
                 "paused": allowed.paused.load(Ordering::Relaxed),
+                "second_factor": host.second_factor().map(|s| serde_json::json!({ "remembered": s.remembered })),
                 "name": host_name(),
                 "clipboard": allowed.clipboard.load(Ordering::Relaxed),
                 "files": allowed.files.load(Ordering::Relaxed),
@@ -478,7 +479,46 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
             host.connections(n).iter().map(|e| format!("{}\n", serde_json::to_string(e).unwrap_or_default())).collect()
         }
         (Some("device"), _, _) => device(host, line.trim()["device".len()..].trim()),
-        _ => "status | pair on|off|accept|decline | allow clipboard|files on|off | set lock|speakers|notify on|off | device NAME [view-only on|off | allow clipboard|files|sound|mic|camera on|off] | connections [N] | drop | revoke FINGERPRINT | send PATH | sharing on|off\n".into(),
+        (Some("second-factor"), what, arg) => second_factor(host, what, arg),
+        _ => "status | second-factor on|confirm CODE|off|status|forget | pair on|off|accept|decline | allow clipboard|files on|off | set lock|speakers|notify on|off | device NAME [view-only on|off | allow clipboard|files|sound|mic|camera on|off] | connections [N] | drop | revoke FINGERPRINT | send PATH | sharing on|off\n".into(),
+    }
+}
+
+/// `second-factor on|confirm CODE|off|status|forget`: a code from an authenticator app asked for on
+/// top of a device's key. The pipe takes a line and gives one answer, so turning it on is two
+/// steps: `on` makes the secret (and prints it, as a link and in groups of four; `on json` as
+/// JSON for the app), `confirm CODE` with a code the authenticator shows turns it on.
+fn second_factor(host: &Host, what: Option<&str>, arg: Option<&str>) -> String {
+    match (what, arg) {
+        (Some("on"), json) => match host.enable_second_factor() {
+            Ok(s) if json == Some("json") => format!("{}\n", serde_json::json!({ "secret": s.secret, "grouped": s.grouped, "uri": s.uri })),
+            Ok(s) => format!("Add this to an authenticator app: {}\nor type the key by hand: {}\nthen turn it on with a code from the app: remoteman-host ctl second-factor confirm 123456\n", s.uri, s.grouped),
+            Err(e) => format!("{e:#}\n"),
+        },
+        (Some("confirm"), Some(code)) => {
+            if host.confirm_second_factor(code) {
+                tracing::info!("the second factor was switched on by the owner");
+                "ok: devices are asked for a code from now on\n".into()
+            } else {
+                "that code didn't work (or `second-factor on` wasn't run first)\n".into()
+            }
+        }
+        (Some("off"), _) => match host.disable_second_factor() {
+            Ok(()) => {
+                tracing::info!("the second factor was switched off by the owner");
+                "ok\n".into()
+            }
+            Err(e) => format!("{e:#}\n"),
+        },
+        (Some("forget"), _) => match host.forget_remembered() {
+            Ok(()) => "ok: every device is asked for a code again\n".into(),
+            Err(e) => format!("{e:#}\n"),
+        },
+        (Some("status") | None, _) => match host.second_factor() {
+            Some(s) => format!("on; {} device(s) told not to be asked again\n", s.remembered),
+            None => "off\n".into(),
+        },
+        _ => "second-factor on|confirm CODE|off|status|forget\n".into(),
     }
 }
 

@@ -1707,6 +1707,7 @@ dependencies = [
  "anyhow",
  "remoteman-proto",
  "remoteman-transport",
+ "ring",
  "serde",
  "serde_json",
  "tokio",

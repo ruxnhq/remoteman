@@ -384,6 +384,11 @@ impl Viewer {
                 self.pair_text = None;
                 self.address_text = None;
             }
+            // A code that was wrong, or a dialog that is over: the field starts empty.
+            if crate::dialogs::kind_of(&key) == "second-factor" || crate::dialogs::kind_of(&self.dialog_key) == "second-factor" {
+                self.password.clear();
+                self.remember = None;
+            }
             self.dialog_key = key;
             self.dialog_hidden = None;
         }
@@ -469,6 +474,11 @@ impl Viewer {
                 self.dialog_hidden = Some(self.dialog_key.clone());
                 let address = self.address_text.clone().unwrap_or_else(|| d.s("address").trim_end_matches(":7791").to_owned());
                 self.command(&cmd("address-go", json!({"address": address})), context);
+            }
+            ("second-factor", ContentDialogResult::Primary) => {
+                self.dialog_hidden = Some(self.dialog_key.clone());
+                let (code, remember) = (self.password.clone(), self.remember.unwrap_or(false));
+                self.command(&cmd("second-factor-go", json!({"code": code, "remember": remember})), context);
             }
             ("paired" | "forget", ContentDialogResult::Primary) => {
                 self.dialog_hidden = Some(self.dialog_key.clone());
