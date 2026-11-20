@@ -218,9 +218,10 @@ mod tests {
     use remoteman_audio::FRAME_US;
     use std::sync::Mutex;
 
-    /// Record `seconds` from `source`, decode the packets again, and say what came out. The
-    /// packets are written to `C:\rm\shots-b\mic-<what>.opus-packets` (a u16 length before each)
-    /// and the decoded sound to a 48 kHz mono WAV beside it, for listening and for FFmpeg.
+    /// Record `seconds` from `source`, decode the packets again, and say what came out. If
+    /// `REMOTEMAN_TEST_OUT` names a folder, the packets are written there as
+    /// `mic-<what>.opus-packets` (a u16 length before each) and the decoded sound as a 48 kHz
+    /// mono WAV beside it, for listening and for FFmpeg (it is a recording of the room).
     fn record_and_measure(source: Source, seconds: u64, what: &str) -> (Arc<Stats>, Vec<Packet>, Vec<f32>) {
         let packets = Arc::new(Mutex::new(Vec::new()));
         let p = packets.clone();
@@ -242,8 +243,8 @@ mod tests {
             decoder.decode(&packet.data, &mut frame).unwrap();
             out.extend_from_slice(&frame);
         }
-        let dir = std::path::Path::new(r"C:\rm\shots-b");
-        if std::fs::create_dir_all(dir).is_ok() {
+        let dir = std::env::var_os("REMOTEMAN_TEST_OUT").map(std::path::PathBuf::from);
+        if let Some(dir) = dir.filter(|d| std::fs::create_dir_all(d).is_ok()) {
             let mut raw = Vec::new();
             for packet in &packets {
                 raw.extend_from_slice(&(packet.data.len() as u16).to_le_bytes());

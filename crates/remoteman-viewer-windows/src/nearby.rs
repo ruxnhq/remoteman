@@ -467,10 +467,11 @@ fn run(inner: &'static Inner, rx: mpsc::Receiver<Job>) {
         }
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(Job::Resolve(instance)) => {
+                // Only an answer to a resolve says it is there: a browse may be answered from
+                // what Windows remembers of a computer that has gone without a word.
                 let fresh = {
                     let mut seen = inner.seen.lock().unwrap();
                     let s = seen.entry(instance.clone()).or_insert(Sighting { found: None, resolved: None, seen: Instant::now() });
-                    s.seen = Instant::now();
                     s.resolved.is_some_and(|at| at.elapsed() < FRESH)
                 };
                 if fresh {
@@ -479,8 +480,9 @@ fn run(inner: &'static Inner, rx: mpsc::Receiver<Job>) {
                 let found = resolve(&instance);
                 let mut seen = inner.seen.lock().unwrap();
                 let Some(s) = seen.get_mut(&instance) else { continue };
-                s.resolved = Some(Instant::now());
                 if let Some(found) = found {
+                    s.resolved = Some(Instant::now());
+                    s.seen = Instant::now();
                     if s.found.as_ref() != Some(&found) {
                         say!("nearby: {} at {} (key {}, {}, {} network cards)", found.name, if found.address.is_empty() { "no usable address" } else { &found.address }, if found.key.is_empty() { "not said" } else { &found.key }, if found.os.is_empty() { "system not said" } else { &found.os }, found.cards.len());
                         s.found = Some(found);
@@ -759,6 +761,44 @@ mod tests {
             assert_eq!(at.port(), 65001);
             println!("advertised at {ip}, resolved as {at}");
         }
+    }
+
+    /// Through several of the browser's rounds (it browses again every 30 s): an instance
+    /// advertised for 160 s stays found the whole time, and is gone soon after it is withdrawn.
+    /// `cargo test -p remoteman-viewer-windows --lib through_rounds -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn found_through_rounds_and_gone_after() {
+        let advert = advertise("remoteman rounds test", 65004, &[("v", "0"), ("fp", "0123456789ABCDEF"), ("os", "windows")]);
+        let nearby = Nearby::start_for(Arc::new(Scene::default()), TEST).unwrap();
+        let began = Instant::now();
+        let mut first = None;
+        let mut missing = Vec::new();
+        while began.elapsed() < Duration::from_secs(160) {
+            std::thread::sleep(Duration::from_secs(5));
+            let there = !nearby.found().is_empty();
+            let at = began.elapsed().as_secs();
+            match (there, first) {
+                (true, None) => first = Some(at),
+                (false, Some(_)) => missing.push(at),
+                _ => {}
+            }
+            println!("{at:>4} s: {}", if there { "found" } else { "not found" });
+        }
+        drop(advert);
+        let withdrawn = Instant::now();
+        let mut gone = None;
+        while withdrawn.elapsed() < Duration::from_secs(120) {
+            std::thread::sleep(Duration::from_secs(1));
+            if nearby.found().is_empty() {
+                gone = Some(withdrawn.elapsed().as_secs());
+                break;
+            }
+        }
+        println!("first found at {first:?} s; missing at {missing:?}; gone {gone:?} s after it was withdrawn");
+        assert!(first.is_some_and(|s| s <= 10), "not found in its first 10 s");
+        assert!(missing.is_empty(), "lost while advertised");
+        assert!(gone.is_some(), "still found 2 minutes after it was withdrawn");
     }
 
     /// The real network: browse for 12 seconds and print what answers, for remoteman and for

@@ -286,6 +286,8 @@ impl H264 {
 /// What the camera did, for the log and the tests.
 #[derive(Default)]
 pub struct Stats {
+    /// Pictures the camera gave, and frames encoded and sent from them.
+    pub pictures: AtomicU32,
     pub frames: AtomicU32,
     pub keyframes: AtomicU32,
     pub bytes: AtomicU64,
@@ -308,7 +310,7 @@ impl Drop for Camera {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        say!("camera: stopped after {} frames ({} keyframes, {} KB)", self.stats.frames.load(Ordering::Relaxed), self.stats.keyframes.load(Ordering::Relaxed), self.stats.bytes.load(Ordering::Relaxed) / 1024);
+        say!("camera: stopped after {} frames from {} pictures ({} keyframes, {} KB)", self.stats.frames.load(Ordering::Relaxed), self.stats.pictures.load(Ordering::Relaxed), self.stats.keyframes.load(Ordering::Relaxed), self.stats.bytes.load(Ordering::Relaxed) / 1024);
     }
 }
 
@@ -483,15 +485,16 @@ fn run(quit: &AtomicBool, key: &AtomicBool, stats: &Stats, ready: &mpsc::Sender<
             let mut size = (w, h);
             let mut stride = 0usize;
             let mut encoder: Option<H264> = None;
-            let mut last: Option<Instant> = None;
+            // The camera's own time of the last picture used, in 100 ns units.
+            let mut last: Option<i64> = None;
             // When the last keyframe went: one every two seconds or so, by the clock (a camera
             // in a dim room gives fewer pictures than it says, so counting them is not enough).
             let mut keyed = Instant::now();
             let mut said = format!("{name}, {nw}x{nh} {subtype} at {fps:.0} a second, sent as {w}x{h}");
             let mut told = false;
             while !quit.load(Ordering::Relaxed) {
-                let (mut flags, mut sample) = (0u32, None);
-                if let Err(e) = reader.ReadSample(STREAM, 0, None, Some(&mut flags), None, Some(&mut sample)) {
+                let (mut flags, mut time, mut sample) = (0u32, 0i64, None);
+                if let Err(e) = reader.ReadSample(STREAM, 0, None, Some(&mut flags), Some(&mut time), Some(&mut sample)) {
                     if denied(&e) {
                         bail!("Windows keeps the camera from apps (Settings, Privacy & security, Camera)");
                     }
@@ -511,11 +514,13 @@ fn run(quit: &AtomicBool, key: &AtomicBool, stats: &Stats, ready: &mpsc::Sender<
                     }
                 }
                 let Some(sample) = sample else { continue };
-                // A camera faster than the stream: the extra pictures are left out.
-                if last.is_some_and(|at| at.elapsed() < Duration::from_micros(1_000_000 / (FPS as u64 + 2))) {
+                stats.pictures.fetch_add(1, Ordering::Relaxed);
+                // A camera faster than the stream: the extra pictures are left out, by the
+                // camera's own times (when they arrive here is bunched).
+                if time > 0 && last.is_some_and(|at| (0..10_000_000 / (FPS as i64 + 2)).contains(&(time - at))) {
                     continue;
                 }
-                last = Some(Instant::now());
+                last = Some(time);
                 let buffer = sample.ConvertToContiguousBuffer()?;
                 let (mut data, mut length) = (ptr::null_mut(), 0u32);
                 buffer.Lock(&mut data, None, Some(&mut length))?;
@@ -625,7 +630,8 @@ mod tests {
     /// whenever one is asked for, each with its parameter sets in front, and no frame held
     /// back; and what it gives decodes, from the start and from the keyframe asked for. (One
     /// test, because it chooses the encoder through the environment.) Each encoder's frames are
-    /// written to `C:\rm\shots-b\camera-synthetic-<encoder>-<n>.h264`.
+    /// written to `camera-synthetic-<encoder>-<n>.h264` in the folder `REMOTEMAN_TEST_OUT`
+    /// names, if it names one.
     #[test]
     fn every_encoder_here_keeps_to_the_protocol() {
         let mut tried = Vec::new();
@@ -654,8 +660,9 @@ mod tests {
             assert_eq!((pictures, refused), (40, 0), "{name}: decoded from the start");
             let (pictures, refused) = decode(&all[20..]);
             assert_eq!((pictures, refused), (20, 0), "{name}: decoded from the keyframe asked for");
-            let _ = std::fs::create_dir_all(r"C:\rm\shots-b");
-            let _ = std::fs::write(format!(r"C:\rm\shots-b\camera-synthetic-{name}-{which}.h264"), all.concat());
+            if let Some(dir) = test_out() {
+                let _ = std::fs::write(dir.join(format!("camera-synthetic-{name}-{which}.h264")), all.concat());
+            }
             println!("{name} ({which}): 40 frames, keyframes at {keys:?} with parameter sets, all 40 decode, and 20 from the second keyframe");
             tried.push(name);
         }
@@ -673,7 +680,8 @@ mod tests {
     }
 
     /// The real camera for four seconds, a keyframe asked for after two: what Windows gives is
-    /// encoded, and what comes out decodes. Written to `C:\rm\shots-b\camera-real.h264`.
+    /// encoded, and what comes out decodes. Written to `camera-real.h264` in the folder
+    /// `REMOTEMAN_TEST_OUT` names, if it names one (it is a recording of the room).
     /// `cargo test -p remoteman-viewer-windows --lib real_camera -- --ignored --nocapture`
     #[test]
     #[ignore]
@@ -683,11 +691,13 @@ mod tests {
         let f = frames.clone();
         let camera = Camera::start(move |data, key| f.lock().unwrap().push((data.to_vec(), key))).unwrap_or_else(|e| panic!("the camera: {e:#}"));
         println!("camera: {}", camera.device);
+        let stats = camera.stats.clone();
         std::thread::sleep(Duration::from_secs(2));
         let asked_at = frames.lock().unwrap().len();
         camera.keyframe();
         std::thread::sleep(Duration::from_secs(2));
         drop(camera);
+        println!("camera: it gave {} pictures, {} were encoded", stats.pictures.load(std::sync::atomic::Ordering::Relaxed), stats.frames.load(std::sync::atomic::Ordering::Relaxed));
         let frames = std::mem::take(&mut *frames.lock().unwrap());
         let keys: Vec<usize> = frames.iter().enumerate().filter(|(_, f)| f.1).map(|(i, _)| i).collect();
         println!("camera: {} frames in 4 s, keyframes at {keys:?} (one asked for at frame {asked_at})", frames.len());
@@ -701,7 +711,15 @@ mod tests {
         let (pictures, refused) = decode(&all);
         println!("camera: FFmpeg decoded {pictures} pictures, refused {refused}");
         assert_eq!(refused, 0);
-        let _ = std::fs::create_dir_all(r"C:\rm\shots-b");
-        let _ = std::fs::write(r"C:\rm\shots-b\camera-real.h264", all.concat());
+        if let Some(dir) = test_out() {
+            let _ = std::fs::write(dir.join("camera-real.h264"), all.concat());
+        }
+    }
+
+    /// Where a test may leave what it made, if `REMOTEMAN_TEST_OUT` says.
+    fn test_out() -> Option<std::path::PathBuf> {
+        let dir = std::path::PathBuf::from(std::env::var_os("REMOTEMAN_TEST_OUT")?);
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
     }
 }
