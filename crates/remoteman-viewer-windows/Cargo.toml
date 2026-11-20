@@ -5,20 +5,20 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# remoteman for Windows: a Win32 window and Direct3D 11 on the shared core. Everything it needs
+# The Windows viewer's engine, and the old program on it (remoteman-windows.exe: a Win32 window
+# with an interface drawn by itself, Direct3D 11 on the shared core; kept for its tests,
+# --vrr-probe among them). The app people use is crates/remoteman-viewer-app-windows (WinUI 3
+# through windows-reactor), which links the engine and ships as remoteman.exe. Everything here
 # is Windows-only, so on other systems the crate is an empty program and the workspace builds as
-# before.
-# Not "remoteman": the Linux viewer's program has that name, and Cargo refuses two programs of
-# one name in a workspace build (on Linux both would land in target/release, the empty one
-# perhaps on top of the real one). The app ships as remoteman.exe (decided 2026-11-18): whatever
-# packages it copies remoteman-windows.exe to that name, as the tests in the VM do.
-# The engine behind the WinUI 3 app (windows/viewer): sessions, decode, presentation, input,
-# sound, clipboard, files, the store, behind a small C interface (src/engine.rs). On other
-# systems it is empty.
+# before. Not "remoteman": the Linux viewer's program has that name, and Cargo refuses two
+# programs of one name in a workspace build.
+# The engine behind the app (crates/remoteman-viewer-app-windows, WinUI 3 through
+# windows-reactor), which links it as a Rust library: sessions, decode, presentation, input,
+# sound, clipboard, files, the store, behind the interface in src/engine.rs. On other systems
+# it is empty.
 [lib]
 name = "remoteman_engine"
 path = "src/lib.rs"
-crate-type = ["cdylib"]
 
 [[bin]]
 name = "remoteman-windows"
@@ -26,7 +26,12 @@ path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
 remoteman-core = { path = "../remoteman-core" }
+# The microphone: the Linux viewer's Opus settings and framer (on Windows that crate is its
+# Opus half only, with libopus built from the copy opusic-c carries).
+remoteman-audio = { path = "../remoteman-audio" }
 anyhow = "1"
+# libopus, as the Windows host uses it (built with cmake): decodes the sound and conceals lost packets.
+opusic-c = "1.6"
 png = "0.18"
 serde_json = "1"
 windows-numerics = "0.3"
@@ -34,6 +39,7 @@ windows-numerics = "0.3"
 # wrapper doesn't reach.
 ffmpeg-sys-next = { version = "9", default-features = false, features = ["avcodec"] }
 windows = { version = "0.62", features = [
+    "Win32_Devices_Display",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
@@ -56,6 +62,7 @@ windows = { version = "0.62", features = [
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    "Win32_System_Performance",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
@@ -67,4 +74,15 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    # Finding computers (DNS-SD), waking them (each network's broadcast), the camera (Media
+    # Foundation) and touches (pointer input; injected in the tests).
+    "Win32_NetworkManagement_Dns",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_KernelStreaming",
+    "Win32_UI_Input_Pointer",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_UI_Shell_PropertiesSystem",
 ] }

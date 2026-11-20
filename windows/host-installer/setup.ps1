@@ -1,13 +1,15 @@
 # What the host's installer does once its files are in place, and what its uninstaller undoes.
 # Run by the installer (remoteman-host.iss), elevated, hidden; never by hand except to repair:
 #   powershell -ExecutionPolicy Bypass -File setup.ps1 install|uninstall
-# install:   the display driver (Guesthouse's user-mode display driver, signed here with a
-#            certificate made on this machine, trusted only on it, its private key deleted at
-#            once), the inbound firewall rule for the host's port, a task that starts the host
-#            at each logon (elevated, in the user's own desktop session, where it must run), and
-#            the host started now.
-# uninstall: all of that taken away again, and the host's state (its identity and the paired
-#            devices) deleted.
+# install:   the display driver (remoteman's own user-mode display driver, windows/display-driver,
+#            signed here with a certificate made on this machine, trusted only on it, its private
+#            key deleted at once), the inbound firewall rule for the host's port, the service
+#            "remoteman host" (automatic, LocalSystem) that keeps the host running in the
+#            console's session from boot on (crates/remoteman-host-windows/src/service.rs), the
+#            policy that lets services send Ctrl+Alt+Del, and the service started now. An earlier
+#            install's logon task is removed.
+# uninstall: all of that taken away again (the policy back as it was), and the host's state
+#            (its identity and the paired devices) deleted.
 # What install made is written to installed.json beside this script, so that uninstall takes
 # away exactly that (a display device that was here before is left, with the driver it had).
 # Exit code 0, or 1 with the reason as the last line of setup.log.
@@ -20,10 +22,10 @@ $record = Join-Path $app 'installed.json'
 $log = Join-Path $app 'setup.log'
 $port = 7791
 $name = 'remoteman host'                   # the task's and the firewall rule's name
-$hardwareId = 'Root\GuesthouseDisplay'
+$hardwareId = 'Root\RemotemanDisplay'
 $subject = 'CN=remoteman display driver, this machine only'
 $ours = '*remoteman display driver, this machine only*'
-$settingsFolder = 'C:\VirtualDisplayDriver'  # where the driver reads its settings
+$settingsFolder = Join-Path $env:ProgramData 'remoteman\display'  # where the driver reads its settings
 
 function Say([string]$line) { Add-Content -Path $log -Value "$(Get-Date -Format s) $line" }
 
@@ -72,12 +74,14 @@ function Driver-Packages { (& pnputil.exe /enum-drivers) -join "`n" | Select-Str
 # What install made, kept across installs over an earlier one: written after each step, so that a
 # failure part way still leaves uninstall knowing what to take away.
 function Load-Record {
-  $r = [ordered]@{ driverInfs = @(); deviceMade = $false; settingsMade = $false }
+  $r = [ordered]@{ driverInfs = @(); deviceMade = $false; settingsMade = $false; sasSet = $false; sasBefore = $null }
   if (Test-Path $record) {
     $old = Get-Content $record -Raw | ConvertFrom-Json
     $r.driverInfs = @($old.driverInfs | Where-Object { $_ })
     $r.deviceMade = [bool]$old.deviceMade
     $r.settingsMade = [bool]$old.settingsMade
+    # What SoftwareSASGeneration was before the first install set it (null: not set).
+    if ($old.PSObject.Properties.Name -contains 'sasBefore') { $r.sasBefore = $old.sasBefore; $r.sasSet = [bool]$old.sasSet }
   }
   $r
 }
@@ -91,9 +95,12 @@ function Install {
   New-Item -ItemType Directory -Force $state | Out-Null
   & icacls.exe $state /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null
 
-  # The driver's settings, unless a driver of Guesthouse's already has some here.
+  # The driver's settings, unless an earlier install left some (the owner may have changed them).
+  # The driver runs as LOCAL SERVICE, which may change them (its toggle commands write them back);
+  # other users may only read them.
   if (-not (Test-Path (Join-Path $settingsFolder 'vdd_settings.xml'))) {
     New-Item -ItemType Directory -Force $settingsFolder | Out-Null
+    & icacls.exe $settingsFolder /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-19:(OI)(CI)M' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
     Copy-Item (Join-Path $app 'driver\vdd_settings.xml') $settingsFolder -Force
     $made.settingsMade = $true
     Save-Record $made
@@ -113,10 +120,10 @@ function Install {
   # trusted only on this machine, whose private key is deleted before the driver goes in.
   Remove-Certificates
   $package = Join-Path $app 'driver\pkg'
-  $catalog = Join-Path $app 'driver\GuesthouseDisplay.cat'
-  Remove-Item (Join-Path $package 'GuesthouseDisplay.cat'), $catalog -ErrorAction SilentlyContinue
+  $catalog = Join-Path $app 'driver\RemotemanDisplay.cat'
+  Remove-Item (Join-Path $package 'RemotemanDisplay.cat'), $catalog -ErrorAction SilentlyContinue
   New-FileCatalog -Path $package -CatalogFilePath $catalog -CatalogVersion 2.0 | Out-Null
-  Move-Item $catalog (Join-Path $package 'GuesthouseDisplay.cat') -Force
+  Move-Item $catalog (Join-Path $package 'RemotemanDisplay.cat') -Force
   $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject $subject -CertStoreLocation Cert:\LocalMachine\My `
     -KeyExportPolicy NonExportable -NotAfter (Get-Date).AddYears(10)
   $public = New-Object Security.Cryptography.X509Certificates.X509Certificate2 (, $certificate.Export('Cert'))
@@ -124,14 +131,14 @@ function Install {
     $store = New-Object Security.Cryptography.X509Certificates.X509Store $storeName, 'LocalMachine'
     $store.Open('ReadWrite'); $store.Add($public); $store.Close()
   }
-  $signed = Set-AuthenticodeSignature -FilePath (Join-Path $package 'GuesthouseDisplay.cat') -Certificate $certificate -HashAlgorithm SHA256
+  $signed = Set-AuthenticodeSignature -FilePath (Join-Path $package 'RemotemanDisplay.cat') -Certificate $certificate -HashAlgorithm SHA256
   Remove-Item "Cert:\LocalMachine\My\$($certificate.Thumbprint)" -DeleteKey
   if ($signed.Status -ne 'Valid') { throw "signing the driver failed: $($signed.StatusMessage)" }
   Say "driver signed by $($certificate.Thumbprint)"
 
   # Only a package that is new is ours: pnputil names an existing one if it is the same.
   $before = @(Driver-Packages)
-  $inf = Join-Path $package 'GuesthouseDisplay.inf'
+  $inf = Join-Path $package 'RemotemanDisplay.inf'
   $added = (& pnputil.exe /add-driver $inf) -join "`n"
   $new = @(Driver-Packages | Where-Object { $before -notcontains $_ })
   if ($new.Count -eq 0 -and $added -notmatch 'Published Name') { throw "pnputil did not take the driver: $added" }
@@ -155,24 +162,77 @@ function Install {
     -Action Allow -Protocol UDP -LocalPort $port -Program $exe -Profile Any | Out-Null
   Say "firewall rule for UDP $port"
 
-  # Started at each logon, elevated (the driver's device lets in Administrators only), in the
-  # session of whoever logs on: input, the cursor and mode changes work nowhere else.
-  $action = New-ScheduledTaskAction -Execute $exe -Argument "--state `"$state`" --log `"$state\host.log`" --ask" -WorkingDirectory $app
-  $trigger = New-ScheduledTaskTrigger -AtLogOn
-  $principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Highest
-  $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable
-  Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-  Start-ScheduledTask -TaskName $name
-  Say "task registered and started"
+  # Earlier installs started the host at each logon from a scheduled task: gone, or two hosts
+  # would fight over the port.
+  if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+    Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $name -Confirm:$false
+    Say "the logon task of an earlier install removed"
+  }
+
+  # Ctrl+Alt+Del from a device: Windows takes it from a service only where this policy allows
+  # services (1, or 3 with Ease of Access programs). What it was is kept for the uninstaller.
+  $policy = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+  $sas = (Get-ItemProperty $policy -Name SoftwareSASGeneration -ErrorAction SilentlyContinue).SoftwareSASGeneration
+  if ($sas -ne 1 -and $sas -ne 3) {
+    if (-not $made.sasSet) { $made.sasBefore = $sas; $made.sasSet = $true }
+    Set-ItemProperty $policy -Name SoftwareSASGeneration -Value $(if ($sas -eq 2) { 3 } else { 1 }) -Type DWord
+    Save-Record $made
+    Say "SoftwareSASGeneration set (was $(if ($null -eq $sas) { 'not set' } else { $sas }))"
+  }
+
+  # The service: from boot, as SYSTEM, it keeps the host running in the console's session
+  # (the sign-in screen's, the lock screen's, whoever is signed in), with these options.
+  # New devices are asked about by the owner's app (Remoteman Host) when it is installed beside
+  # the host; without it, by the host itself in a window of Windows' own (--ask).
+  $hostArgs = "--state `"$state`" --log `"$state\host.log`""
+  if (-not (Test-Path (Join-Path $app 'app\remoteman-host-app.exe'))) { $hostArgs += ' --ask' }
+  $binary = "`"$exe`" service $hostArgs"
+  $existing = Get-Service -Name $name -ErrorAction SilentlyContinue
+  if ($existing) {
+    # Installed over an earlier install: the command line straight into the service's key
+    # (sc.exe can't be handed one with quotes in it from here).
+    if ($existing.Status -ne 'Stopped') { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue }
+    Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$name" -Name ImagePath -Value $binary -Type ExpandString
+    Set-Service -Name $name -StartupType Automatic
+  } else {
+    New-Service -Name $name -BinaryPathName $binary -DisplayName $name -StartupType Automatic `
+      -Description 'remoteman: lets your paired devices see and control this computer, from the sign-in screen on.' | Out-Null
+  }
+  # Started again if it ever ends: after 5 s, twice, then after a minute.
+  $out = & sc.exe failure $name reset= 86400 actions= restart/5000/restart/5000/restart/60000
+  if ($LASTEXITCODE -ne 0) { Say "the service's restart rule wasn't set: $out" }
+  Start-Service -Name $name
+  Say "service registered and started"
+
+  # How it went, where an unelevated reader can see it (the host's own files are
+  # Administrators' only): the host's answer, or the service's last words if there is none.
+  Start-Sleep -Seconds 6
+  $status = & $exe ctl status 2>&1
+  Say "host: $($status -join ' ')"
+  if ($LASTEXITCODE -ne 0) {
+    Get-Content (Join-Path $state 'service.log') -Tail 15 -ErrorAction SilentlyContinue | ForEach-Object { Say "service.log: $_" }
+  }
 }
 
 function Uninstall {
   Say "uninstall"
   $made = if (Test-Path $record) { Get-Content $record -Raw | ConvertFrom-Json } else { $null }
+  if (Get-Service -Name $name -ErrorAction SilentlyContinue) {
+    Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+    $out = & sc.exe delete $name
+    Say "service removed: $out"
+  }
   if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
     Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $name -Confirm:$false
+  }
+  # The Ctrl+Alt+Del policy as it was before the first install.
+  if ($made -and $made.PSObject.Properties.Name -contains 'sasSet' -and $made.sasSet) {
+    $policy = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    if ($null -eq $made.sasBefore) { Remove-ItemProperty $policy -Name SoftwareSASGeneration -ErrorAction SilentlyContinue }
+    else { Set-ItemProperty $policy -Name SoftwareSASGeneration -Value ([int]$made.sasBefore) -Type DWord }
+    Say "SoftwareSASGeneration put back"
   }
   # The host, stopped by its own pid, wherever it was started from this folder.
   Get-Process -Name remoteman-host -ErrorAction SilentlyContinue | Where-Object Path -eq $exe |

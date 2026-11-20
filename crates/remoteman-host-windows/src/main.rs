@@ -42,6 +42,8 @@
 //! workspace builds whole.
 
 #[cfg(windows)]
+mod advertise;
+#[cfg(windows)]
 mod capture;
 #[cfg(windows)]
 mod clipboard;
@@ -56,7 +58,13 @@ mod convert;
 #[cfg(windows)]
 mod cursor;
 #[cfg(windows)]
+mod desk;
+#[cfg(windows)]
+mod service;
+#[cfg(windows)]
 mod display;
+#[cfg(windows)]
+mod ccd;
 #[cfg(windows)]
 mod encode;
 #[cfg(windows)]
@@ -123,7 +131,20 @@ mod windows_main {
         let mut test_hdr = None::<u64>;
         let (mut allow_files, mut allow_clipboard) = (false, false);
         let mut ask = false;
+        let mut stop_event = None::<String>;
         let mut args = std::env::args().skip(1).peekable();
+        // The service (`service.rs`): it keeps a host, started with the options after the word,
+        // in the console's session. Its own log goes beside the host's state.
+        if args.peek().map(String::as_str) == Some("service") {
+            args.next();
+            let rest: Vec<String> = args.collect();
+            let state = rest.iter().position(|a| a == "--state").and_then(|i| rest.get(i + 1)).map(PathBuf::from).unwrap_or_else(state_dir);
+            let _ = std::fs::create_dir_all(&state);
+            if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(state.join("service.log")) {
+                tracing_subscriber::fmt().with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
+            }
+            return crate::service::run(rest);
+        }
         // Not a host at all: a word with the one that is running.
         if args.peek().map(String::as_str) == Some("ctl") {
             args.next();
@@ -134,6 +155,18 @@ mod windows_main {
             }
             let words: Vec<String> = args.collect();
             print!("{}", crate::control::ask(port, &words.join(" "))?);
+            return Ok(());
+        }
+        // For tests: announce this host on the network under NAME for SECONDS, with a made-up
+        // fingerprint, and nothing else (no driver, no elevation): `--announce-test NAME SECONDS`.
+        if args.peek().map(String::as_str) == Some("--announce-test") {
+            args.next();
+            let name = args.next().context("--announce-test NAME SECONDS")?;
+            let seconds: u64 = args.next().context("--announce-test NAME SECONDS")?.parse()?;
+            tracing_subscriber::fmt().with_ansi(false).init();
+            let advert = crate::advertise::start(&name, remoteman_core::PORT, "0123456789abcdef0123456789abcdef");
+            std::thread::sleep(Duration::from_secs(seconds));
+            drop(advert);
             return Ok(());
         }
         // For looking into the display driver by hand: send it one of its text commands.
@@ -162,6 +195,23 @@ mod windows_main {
             println!("detached");
             return Ok(());
         }
+        // For tests on a PC with screens of its own, without the driver: what a device's coming
+        // and going does to the desktop (`--layout-test STATE beside|main|back|drop|probe OUTPUT
+        // INDEX WxHxR`, see `display::layout_test`).
+        if args.peek().map(String::as_str) == Some("--layout-test") {
+            args.next();
+            const USE: &str = "--layout-test STATE beside|main|back|drop|probe OUTPUT INDEX WxHxR, or STATE watch - SECONDS";
+            let state = PathBuf::from(args.next().context(USE)?);
+            let step = args.next().context(USE)?;
+            let output = args.next().unwrap_or_default();
+            let index: u32 = args.next().unwrap_or_else(|| "0".into()).parse().context(USE)?;
+            let n: Vec<u32> = args.next().unwrap_or_else(|| "800x600x30".into()).split('x').filter_map(|v| v.parse().ok()).collect();
+            anyhow::ensure!(n.len() == 3, USE);
+            tracing_subscriber::fmt().with_ansi(false).init();
+            std::fs::create_dir_all(&state)?;
+            crate::display::layout_test(&state, &step, &output, index, crate::display::Mode { width: n[0], height: n[1], refresh: n[2] })?;
+            return Ok(());
+        }
         while let Some(a) = args.next() {
             let mut value = || args.next().with_context(|| format!("{a} needs a value"));
             match a.as_str() {
@@ -170,6 +220,8 @@ mod windows_main {
                 "--bitrate" => bitrate = value()?.parse().context("--bitrate in Mbit/s")?,
                 "--pair" => pair = true,
                 "--ask" => ask = true,
+                // Set by the service when it starts this host: stop when that event is set.
+                "--stop-event" => stop_event = Some(value()?),
                 // Which encoder: the card's own (NVENC on NVIDIA, Media Foundation's on any
                 // other), or one of the two whatever the card.
                 "--encoder" => crate::encode::WHICH.store(
@@ -219,6 +271,7 @@ mod windows_main {
             Some(path) => {
                 let file = std::fs::OpenOptions::new().create(true).append(true).open(path).with_context(|| format!("--log {}", path.display()))?;
                 tracing_subscriber::fmt().with_max_level(level).with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
+                let _ = crate::control::LOG.set(path.clone());
             }
             None => tracing_subscriber::fmt().with_max_level(level).with_ansi(false).init(),
         }
@@ -230,11 +283,52 @@ mod windows_main {
             return crate::testhdr::run(seconds).inspect_err(|e| tracing::error!("{e:#}"));
         }
         // Anything that goes wrong is in the log before the process ends.
+        if let Some(event) = stop_event {
+            watch_stop_event(&event)?;
+        }
         let result = run(listen, state, pair, name, bitrate, drop_one_in, seconds, probing, fit, (allow_files, allow_clipboard), ask);
         if let Err(e) = &result {
             tracing::error!("{e:#}");
         }
         result
+    }
+
+    /// When the PC locks while a device is connected, the device would see nothing (Windows
+    /// shows the lock screen on the PC's main screen only): it is let go with the reason
+    /// `locked: `, which has its app ask for the password and come back with it.
+    fn watch_lock(host: std::sync::Weak<Host>) {
+        let spawned = std::thread::Builder::new().name("lock".into()).spawn(move || {
+            let mut was = crate::desk::locked();
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                let Some(h) = host.upgrade() else { break };
+                let now = crate::desk::locked();
+                if now && !was && h.link().is_some() {
+                    let user = crate::desk::user_name().unwrap_or_else(|| "its user".into());
+                    h.close_client(&format!("locked: This computer was locked. Enter the password or PIN of {user} on it to go on."));
+                    tracing::info!("the computer was locked with a device connected: the device is asked for the password");
+                }
+                was = now;
+            }
+        });
+        if let Err(e) = spawned {
+            tracing::warn!("couldn't start watching for the lock: {e}");
+        }
+    }
+
+    /// Stop, as on Ctrl-C, when the service sets this event (`--stop-event`).
+    fn watch_stop_event(name: &str) -> Result<()> {
+        use windows::Win32::System::Threading::{INFINITE, OpenEventW, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject};
+        // SAFETY: plain call; the handle is the thread's below for the life of the process.
+        let event = unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, false, &windows::core::HSTRING::from(name)) }.with_context(|| format!("--stop-event {name}"))?;
+        let raw = event.0 as isize;
+        std::thread::Builder::new().name("stop-event".into()).spawn(move || {
+            // SAFETY: the handle lives as long as the process.
+            unsafe { WaitForSingleObject(windows::Win32::Foundation::HANDLE(raw as *mut std::ffi::c_void), INFINITE) };
+            tracing::info!("the service asked this host to stop");
+            STOP.store(true, Ordering::Relaxed);
+        })?;
+        Ok(())
     }
 
     /// Keep pairing open, and put each new device to the owner in a window of Windows' own.
@@ -284,7 +378,8 @@ mod windows_main {
             return probe::run(picture);
         }
 
-        let screen = Screen::open()?;
+        std::fs::create_dir_all(&state).with_context(|| format!("making {}", state.display()))?;
+        let screen = Screen::open(&state)?;
         let name = name.or_else(|| std::env::var("COMPUTERNAME").ok()).unwrap_or_else(|| "windows".into());
         // What the owner switched on earlier holds until switched off; `--allow` adds to it
         // for this run.
@@ -293,6 +388,7 @@ mod windows_main {
         allowed.files.store(allow.0 || saved.0, Ordering::Relaxed);
         allowed.clipboard.store(allow.1 || saved.1, Ordering::Relaxed);
         allowed.paused.store(saved.2, Ordering::Relaxed);
+        allowed.real_screens.store(screen.pc(), Ordering::Relaxed);
         if saved.2 {
             tracing::info!("sharing is switched off (remembered): devices are turned away until `ctl sharing on`");
         }
@@ -320,6 +416,9 @@ mod windows_main {
         let host = std::sync::Arc::new(Host::start(options, session::Host::new(screen, bitrate * 1_000_000, fit, allowed.clone()))?);
         crate::control::serve(host.address.port(), std::sync::Arc::downgrade(&host), allowed, state);
         tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
+        watch_lock(std::sync::Arc::downgrade(&host));
+        // On the network for viewers to find, until the host stops (dropped at the end of this function).
+        let _advert = crate::advertise::start(crate::control::NAME.get().map_or("windows", String::as_str), host.address.port(), &host.fingerprint);
         if pair {
             tracing::info!("pairing: the next unknown device to connect will be trusted");
         }

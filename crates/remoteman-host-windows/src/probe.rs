@@ -43,7 +43,9 @@ pub fn run(picture: bool) -> Result<()> {
         let mode = display::current(&o.device).map(|(m, a)| format!("{}x{} at {} Hz, at {},{}", m.width, m.height, m.refresh, a.left, a.top)).unwrap_or_else(|e| format!("{e:#}"));
         say!("output {}{}: {} [{}], {mode}", o.device, if o.primary { " (primary)" } else { "" }, o.description, o.id);
     }
-    let output = match display::find_output() {
+    // (On a PC with screens of its own the driver's monitors are off the desktop while no device
+    // is here: then its first monitor's output, which shows no frames until a device comes.)
+    let output = match display::find_output().or_else(|e| display::driver_output(0).map(|o| (o, true)).ok_or(e)) {
         Ok((o, sure)) => {
             say!("the driver's monitor is taken to be {} ({})", o.device, if sure { "its adapter is the driver's" } else { "no adapter looks like the driver's; this is the primary display" });
             let modes = display::modes(&o.device);

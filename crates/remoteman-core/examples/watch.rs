@@ -2,14 +2,16 @@
 //! the stream as it came. It builds wherever the core does, so it is the first thing to run on
 //! a new platform.
 //!   watch HOST:PORT [--pair] [--state DIR] [--seconds N] [--size WxH] [--refresh HZ]
-//!         [--decoders av1,hevc,hevc444] [--record FILE]
+//!         [--decoders av1,hevc,hevc444] [--record FILE] [--type TEXT]
+//! `--type`: eight seconds in, a click at the middle of the display, then TEXT as one text
+//! event (input kind 7), as a viewer sends what its user typed.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use remoteman_core::{Chroma, Client, Codec, Display, Frame, Handler, Mode, Options, Placement, StreamInfo};
+use remoteman_core::{Button, Chroma, Client, Codec, Display, Event, Frame, Handler, Mode, Options, Placement, StreamInfo};
 
 #[derive(Default)]
 struct Seen {
@@ -65,6 +67,7 @@ fn main() -> anyhow::Result<()> {
     let (mut pair, mut state, mut seconds, mut size, mut refresh) = (false, PathBuf::from("watch-state"), 5u64, (1920u32, 1080u32), 60u32);
     let mut decoders = vec![mode("av1").unwrap(), mode("hevc").unwrap()];
     let mut record = None;
+    let mut typed = None::<String>;
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| anyhow::anyhow!("{arg} needs a value"));
         match arg.as_str() {
@@ -82,6 +85,7 @@ fn main() -> anyhow::Result<()> {
                 decoders = v.split(',').map(|w| mode(w).ok_or_else(|| anyhow::anyhow!("unknown decoder {w}"))).collect::<Result<_, _>>()?;
             }
             "--record" => record = Some(std::fs::File::create(value()?)?),
+            "--type" => typed = Some(value()?),
             other => anyhow::bail!("unknown option {other}"),
         }
     }
@@ -104,7 +108,17 @@ fn main() -> anyhow::Result<()> {
     println!("host: {} ({}), features {:?}", client.host_name, client.host_os, client.host_features);
 
     let end = Instant::now() + Duration::from_secs(seconds);
+    let type_at = Instant::now() + Duration::from_secs(8);
     while Instant::now() < end && seen.lock().unwrap().closed.is_none() {
+        if let Some(text) = typed.take_if(|_| Instant::now() >= type_at) {
+            client.send(Event::PointerTo { x: 0.5, y: 0.5 });
+            for down in [true, false] {
+                client.send(Event::Button { button: Button::Left, down });
+            }
+            std::thread::sleep(Duration::from_millis(300));
+            client.send(Event::Text(text));
+            println!("typed");
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
     let stats = client.stats();

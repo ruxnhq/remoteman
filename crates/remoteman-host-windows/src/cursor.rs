@@ -92,6 +92,9 @@ impl Cursor {
             let mut sent = None::<CursorShape>;
             let mut failed = false;
             while !stopped.load(Ordering::Relaxed) {
+                // The cursor of the desktop that takes input (the sign-in screen's too, for a
+                // host the service started).
+                crate::desk::follow();
                 let mut info = CURSORINFO { cbSize: size_of::<CURSORINFO>() as u32, ..Default::default() };
                 // SAFETY: `info` is sized as the call wants.
                 match unsafe { GetCursorInfo(&mut info) } {

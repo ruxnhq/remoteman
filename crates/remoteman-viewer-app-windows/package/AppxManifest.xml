@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The MSIX identity of remoteman for Windows (scripts\win-viewer-app.ps1 -Msix packs it with
+     remoteman.exe, FFmpeg's DLLs and the assets). PLACEHOLDERS until the Microsoft Store
+     reserves the name: Identity Name and Publisher, PublisherDisplayName. Partner Center gives
+     the real ones (Product identity page); the Store signs the package with its own
+     certificate. The Windows App Runtime is not inside: the package depends on its framework
+     package (the version windows-reactor's bootstrap asks for), which the Store installs with
+     the app. -->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity Name="PLACEHOLDER.remoteman" Publisher="CN=PLACEHOLDER" Version="0.1.0.0" ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>remoteman</DisplayName>
+    <PublisherDisplayName>PLACEHOLDER</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+    <PackageDependency Name="Microsoft.WindowsAppRuntime.2" MinVersion="2.6.4.0" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App" Executable="remoteman.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements DisplayName="remoteman" Description="See and use another computer's screen from this one."
+        BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- A desktop app with full trust: the low-level keyboard hook, raw mouse input, Credential
+         Manager, the Downloads folder and FFmpeg's DLLs need it. The Store asks why runFullTrust
+         is used at submission. -->
+    <rescap:Capability Name="runFullTrust" />
+    <Capability Name="internetClient" />
+    <Capability Name="privateNetworkClientServer" />
+    <!-- This PC's microphone and camera, lent to a computer in a session: a packaged app gets
+         them (and Windows' prompt for them) only when it says so here. Not tried packaged. -->
+    <DeviceCapability Name="microphone" />
+    <DeviceCapability Name="webcam" />
+  </Capabilities>
+</Package>

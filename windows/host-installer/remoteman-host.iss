@@ -2,8 +2,8 @@
 ; puts the files in .\stage first; docs/WINDOWS-PACKAGING.md says how and why.
 ; One elevation prompt (the installer runs as an administrator), no terminal: the files go to
 ; Program Files, then setup.ps1 installs the display driver, adds the firewall rule, registers
-; the task that starts the host at each logon and starts it. The uninstaller (Settings > Apps)
-; undoes all of it.
+; the service that keeps the host running from boot on and starts it. The uninstaller
+; (Settings > Apps) undoes all of it.
 
 #ifndef AppVersion
   #define AppVersion "0.1.0"
@@ -27,7 +27,8 @@ OutputDir=out
 OutputBaseFilename=remoteman-host-setup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
-WizardStyle=modern
+; Light or dark, as Windows is set (Inno Setup 6.6 and later).
+WizardStyle=modern dynamic
 UninstallDisplayName=remoteman host
 UninstallDisplayIcon={app}\remoteman-host.exe
 ; setup.ps1 stops the host itself, by its pid.
@@ -43,7 +44,7 @@ Source: "stage\driver\*"; DestDir: "{app}\driver"; Flags: ignoreversion recurses
 ; What setup.ps1 writes beside itself, and the catalog it makes.
 Type: files; Name: "{app}\installed.json"
 Type: files; Name: "{app}\setup.log"
-Type: files; Name: "{app}\driver\pkg\GuesthouseDisplay.cat"
+Type: files; Name: "{app}\driver\pkg\RemotemanDisplay.cat"
 Type: dirifempty; Name: "{app}\driver\pkg"
 Type: dirifempty; Name: "{app}\driver"
 Type: dirifempty; Name: "{app}"
@@ -64,13 +65,15 @@ begin
 end;
 
 // Installed over an earlier install: the running host holds its program file, so it is
-// stopped first (its task ended, then the process by its pid, only the one in this folder).
+// stopped first (the service stopped, or an older install's task ended, then any process left
+// by its pid, only the one in this folder).
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   Code: Integer;
 begin
   Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-    '-NoProfile -Command "Stop-ScheduledTask -TaskName ''remoteman host'' -ErrorAction SilentlyContinue; ' +
+    '-NoProfile -Command "Stop-Service -Name ''remoteman host'' -Force -ErrorAction SilentlyContinue; ' +
+    'Stop-ScheduledTask -TaskName ''remoteman host'' -ErrorAction SilentlyContinue; ' +
     'Get-Process -Name remoteman-host -ErrorAction SilentlyContinue | Where-Object Path -eq ''' +
     ExpandConstant('{app}\remoteman-host.exe') +
     ''' | ForEach-Object { Stop-Process -Id $_.Id -Force; $_.WaitForExit(5000) | Out-Null }"',

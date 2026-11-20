@@ -22,11 +22,10 @@ use remoteman_core::Message;
 use remoteman_core::host::Host;
 use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE};
 use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, FlushFileBuffers};
-use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
-use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW};
-use windows::Win32::Security::{GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser};
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-use windows::core::{HSTRING, PWSTR};
+use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
+use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows::Win32::Security::{PSECURITY_DESCRIPTOR, RevertToSelf, SECURITY_ATTRIBUTES};
+use windows::core::HSTRING;
 
 /// `PIPE_ACCESS_DUPLEX`.
 const DUPLEX: u32 = 3;
@@ -63,6 +62,9 @@ pub struct Allowed {
     pub hdr: Arc<AtomicBool>,
     /// Sharing is switched off: no device may connect.
     pub paused: Arc<AtomicBool>,
+    /// The PC has screens of its own, which this host can't capture (only the driver's
+    /// monitors): no `mirror`.
+    pub real_screens: Arc<AtomicBool>,
     pub now: Arc<Mutex<Option<Now>>>,
     /// What the device said of files sent to it: how many it answered for, and the last
     /// answer (whether it took it, and what it said: where it went, or why not).
@@ -73,7 +75,10 @@ pub struct Allowed {
 /// it is. `placement`: a device gets a monitor of its own, placed as it asks. `displays`: and a
 /// second one, where the driver has a third monitor.
 pub fn features(allowed: &Allowed) -> Vec<String> {
-    let mut features: Vec<String> = ["video", "input", "cursor", "configure", "mirror", "sound"].map(String::from).to_vec();
+    let mut features: Vec<String> = ["video", "input", "cursor", "configure", "sound"].map(String::from).to_vec();
+    if !allowed.real_screens.load(Ordering::Relaxed) {
+        features.push("mirror".into());
+    }
     if allowed.own_monitor.load(Ordering::Relaxed) {
         features.push("placement".into());
         if allowed.second.load(Ordering::Relaxed) {
@@ -124,32 +129,31 @@ pub fn pipe_name(port: u16) -> String {
     format!(r"\\.\pipe\remoteman-host-{port}")
 }
 
-/// The pipe's protection: the system and Administrators, and the user this process runs as,
-/// whether or not that user's program is elevated (an elevated program's token makes
-/// Administrators, not the user, the owner of what it creates, so Windows' default would
-/// shut the user's own app out). `None`: Windows' default, if the user can't be named.
+/// The host's log file, for `log` (set at the start when there is one).
+pub static LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Is this process SYSTEM, started by the service? Asked once.
+fn system() -> bool {
+    static IS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *IS.get_or_init(crate::desk::is_system)
+}
+
+/// The pipe's protection: the system and Administrators, and the user: the one this process
+/// runs as, whether or not that user's program is elevated (an elevated program's token makes
+/// Administrators, not the user, the owner of what it creates, so Windows' default would shut
+/// the user's own app out); or, for a host the service started as SYSTEM, whoever is signed in
+/// at the console now (nobody but the system and Administrators while nobody is). `None`:
+/// Windows' default, if the user can't be named. The descriptor is the caller's to free.
 fn protection() -> Option<SECURITY_ATTRIBUTES> {
-    // SAFETY: the token and the buffers are this function's; the SID is read within the
-    // token information it lives in; the descriptor is LocalAlloc'd and kept for the process.
-    unsafe {
-        let mut token = HANDLE::default();
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).ok()?;
-        let mut size = 0u32;
-        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut size);
-        let mut buffer = vec![0u8; size as usize];
-        let got = GetTokenInformation(token, TokenUser, Some(buffer.as_mut_ptr() as *mut c_void), size, &mut size);
-        let _ = windows::Win32::Foundation::CloseHandle(token);
-        got.ok()?;
-        let user = &*(buffer.as_ptr() as *const TOKEN_USER);
-        let mut text = PWSTR::null();
-        ConvertSidToStringSidW(user.User.Sid, &mut text).ok()?;
-        let sid = text.to_string().ok()?;
-        let _ = windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(text.0 as *mut c_void)));
-        let sddl = HSTRING::from(format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;{sid})"));
-        let mut descriptor = PSECURITY_DESCRIPTOR::default();
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(&sddl, 1, &mut descriptor, None).ok()?;
-        Some(SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor.0, bInheritHandle: false.into() })
-    }
+    let user = if system() { crate::desk::console_user_sid() } else { Some(crate::desk::own_sid()?) };
+    let sddl = HSTRING::from(match user {
+        Some(sid) => format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;{sid})"),
+        None => "D:(A;;GA;;;SY)(A;;GA;;;BA)".to_string(),
+    });
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: the text outlives the call; the descriptor is LocalAlloc'd and freed by the caller.
+    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&sddl, 1, &mut descriptor, None) }.ok()?;
+    Some(SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor.0, bInheritHandle: false.into() })
 }
 
 /// Answer the owner's questions for as long as the host lives.
@@ -157,14 +161,20 @@ pub fn serve(port: u16, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
     let name = HSTRING::from(pipe_name(port));
     let spawned = std::thread::Builder::new().name("control".into()).spawn(move || {
         let mut said = false;
-        let protection = protection();
-        if protection.is_none() {
-            tracing::warn!("the control pipe has Windows' default protection: only an elevated prompt can speak to this host");
-        }
+        let mut warned = false;
         loop {
             // A pipe for each question: the one before is closed when it has been answered.
+            // Its protection is made anew each time, as the user at the console may change.
+            let protection = protection();
+            if protection.is_none() && !std::mem::replace(&mut warned, true) {
+                tracing::warn!("the control pipe has Windows' default protection: only an elevated prompt can speak to this host");
+            }
             // SAFETY: plain call; the name and the protection outlive it.
             let pipe = unsafe { CreateNamedPipeW(&name, FILE_FLAGS_AND_ATTRIBUTES(DUPLEX), PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, protection.as_ref().map(|p| p as *const _)) };
+            if let Some(p) = &protection {
+                // SAFETY: LocalAlloc'd by `protection`; the pipe keeps its own copy.
+                let _ = unsafe { windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(p.lpSecurityDescriptor))) };
+            }
             if pipe.is_invalid() {
                 if !std::mem::replace(&mut said, true) {
                     tracing::warn!("no control pipe ({}): this host can't be asked how it stands", windows::core::Error::from_thread());
@@ -187,10 +197,22 @@ pub fn serve(port: u16, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
                 line.push(byte[0]);
             }
             let line = String::from_utf8_lossy(&line);
+            // A host running as SYSTEM opens a file to send with the asking user's rights, so
+            // that nobody gets a file sent that they couldn't read themselves.
+            let as_asker = system() && line.trim().starts_with("send ");
+            // SAFETY: a connected pipe; undone below on this thread.
+            if as_asker && unsafe { ImpersonateNamedPipeClient(pipe) }.is_err() {
+                let _ = file.write_all(b"couldn't take on the asking user's rights to read the file\n");
+                continue;
+            }
             let said = match host.upgrade() {
                 Some(host) => answer(&host, &allowed, &state, line.trim()),
                 None => "the host is stopping\n".into(),
             };
+            if as_asker {
+                // SAFETY: back to this process's own rights.
+                let _ = unsafe { RevertToSelf() };
+            }
             let _ = file.write_all(said.as_bytes());
             // What was written is read before the pipe goes.
             // SAFETY: a live handle.
@@ -267,6 +289,20 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
     }
     let mut words = line.split_whitespace();
     match (words.next(), words.next(), words.next()) {
+        // The end of the host's log (its last N lines, 200 unless said), for the owner's app
+        // and for a prompt that isn't elevated (the log's folder is Administrators' only).
+        (Some("log"), n, _) => {
+            let Some(path) = LOG.get() else { return "this host keeps no log (it wasn't started with --log)\n".into() };
+            let n = n.and_then(|n| n.parse::<usize>().ok()).unwrap_or(200).clamp(1, 5000);
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    let lines: Vec<&str> = text.lines().collect();
+                    lines[lines.len().saturating_sub(n)..].iter().map(|l| format!("{l}\n")).collect()
+                }
+                Err(e) => format!("{}: {e}\n", path.display()),
+            }
+        }
         (Some("status") | None, _, _) => {
             let client = allowed.now.lock().unwrap().as_ref().map(|n| {
                 serde_json::json!({ "name": n.name, "since": n.since, "width": n.width, "height": n.height, "refresh": n.refresh, "placement": n.placement, "picture": n.picture, "sound": n.sound })

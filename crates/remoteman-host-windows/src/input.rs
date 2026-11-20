@@ -3,14 +3,13 @@
 //!
 //! Where this works and where it doesn't. `SendInput` reaches the desktop of the session the
 //! calling process is in, and only the input desktop of that session. So this host must run in
-//! the user's interactive session; started as a service in session 0 it can stream (capture
-//! and encode work there) but its input goes nowhere. For the same reason the sign-in screen,
-//! the lock screen and Windows' own permission prompts are out of reach: they are on the
-//! Winlogon desktop, which only a SYSTEM process attached to that desktop may put input into.
-//! Reaching them later needs a service that starts a helper as SYSTEM in the user's session and
-//! follows the input desktop (`OpenInputDesktop`, `SetThreadDesktop`) as it switches; that is
-//! not built. Windows also drops input meant for a window of a more privileged process, which
-//! doesn't arise here because the display driver already makes this host run elevated.
+//! the console's session, not in session 0. The sign-in screen, the lock screen and Windows'
+//! own permission prompts are on the Winlogon desktop, which only a SYSTEM process attached to
+//! that desktop may put input into: the service (`service.rs`) starts this host as SYSTEM in
+//! the console's session, and each injection first follows the input desktop
+//! (`crate::desk::follow`). A host started any other way reaches the user's desktop only.
+//! Windows also drops input meant for a window of a more privileged process, which doesn't
+//! arise here because the display driver already makes this host run elevated.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -171,6 +170,9 @@ impl Injector {
     }
 
     fn send(&mut self, inputs: &[INPUT]) {
+        // Started by the service: onto the desktop that takes input now (the sign-in or lock
+        // screen's, or the user's).
+        crate::desk::follow();
         // SAFETY: a slice of whole INPUTs and their size.
         let taken = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
         if taken as usize != inputs.len() {
@@ -242,6 +244,14 @@ impl Injector {
                     tracing::debug!(usage, "a key this host has no scancode for");
                     return;
                 };
+                // Ctrl+Alt+Del (HID Delete with a Ctrl and an Alt held): no program can type it,
+                // only the service can make Windows see it.
+                let held = |a: u16, b: u16| self.keys.contains(&a) || self.keys.contains(&b);
+                if *down && *usage == 0x4C && held(0xE0, 0xE4) && held(0xE2, 0xE6) {
+                    let asked = crate::desk::secure_attention();
+                    tracing::info!(asked, "Ctrl+Alt+Del from the device");
+                    return;
+                }
                 if *down {
                     self.keys.insert(*usage);
                 } else {
@@ -255,9 +265,20 @@ impl Injector {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 { ki: KEYBDINPUT { wScan: c, dwFlags: KEYEVENTF_UNICODE | if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) }, ..Default::default() } },
                 };
-                let inputs: Vec<INPUT> = text.encode_utf16().flat_map(|c| [unit(c, false), unit(c, true)]).collect();
-                if !inputs.is_empty() {
+                // One character (down and up) at a time, as the other hosts do: sent as one batch,
+                // Windows' newer text controls (Notepad's, Windows Terminal's) took the first
+                // word and then the last character over and over ("remoteman rrrr…" for
+                // "remoteman from the Mac viewer", seen 2026-11-19).
+                let units: Vec<u16> = text.encode_utf16().collect();
+                for (i, &c) in units.iter().enumerate() {
+                    // (A surrogate pair goes as one: the two halves together.)
+                    if (0xDC00..0xE000).contains(&c) && i > 0 {
+                        continue;
+                    }
+                    let pair = (0xD800..0xDC00).contains(&c) && units.get(i + 1).is_some_and(|n| (0xDC00..0xE000).contains(n));
+                    let inputs: Vec<INPUT> = if pair { vec![unit(c, false), unit(c, true), unit(units[i + 1], false), unit(units[i + 1], true)] } else { vec![unit(c, false), unit(c, true)] };
                     self.send(&inputs);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
             }
             Event::Touch { phase, slot, x, y } => self.touch(*phase, *slot, *x, *y),
@@ -311,6 +332,7 @@ impl Injector {
         } else {
             self.touches.insert(slot, at);
         }
+        crate::desk::follow();
         // SAFETY: a slice of whole contacts.
         if let Err(e) = unsafe { InjectTouchInput(&contacts) } {
             self.refused += 1;

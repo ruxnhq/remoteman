@@ -51,98 +51,115 @@ prompt is allowed) and download nothing.
 **What the Store asks of the owner** (none of it done): a Partner Center developer account
 (individual accounts are free: [open a developer account](https://learn.microsoft.com/en-us/windows/apps/publish/partner-center/open-a-developer-account));
 the app's name reserved there, whose identity (`Identity Name`, `Publisher`,
-`PublisherDisplayName`) replaces the placeholders in `windows/viewer/Package.appxmanifest`; the
+`PublisherDisplayName`) replaces the placeholders in `crates/remoteman-viewer-app-windows/package/AppxManifest.xml`; the
 age-rating questionnaire (IARC); a privacy policy URL (the app talks to other computers and keeps
 paired computers' keys); Store listing text, screenshots and logos; a justification for
 `runFullTrust` (the low-level keyboard hook, raw mouse input, Credential Manager, files to
-Downloads, the engine's DLLs); and the certification itself.
+Downloads, the engine's DLLs); and the certification itself. The manifest also declares the
+`microphone` and `webcam` device capabilities (the viewer lends both to a computer in a
+session); the privacy policy should say so. Not tried in a package yet.
 
 ## The viewer: an MSIX
 
-**Build** (from this PC, holding the VM: `tools/vm.sh take NAME` first):
+Since 2026-11-19 the viewer is WinUI 3 written in Rust with Microsoft's windows-reactor
+(`crates/remoteman-viewer-app-windows`, the view) over the engine (`crates/remoteman-viewer-windows`,
+linked in as a Rust library): one program, `remoteman.exe`, no C# and no .NET. The C# view
+(`windows/viewer`) and its build scripts are gone.
 
-    scripts/win-viewer-winui.sh --msix
+**Build** (on Windows: Rust with MSVC, Build Tools with CMake, FFmpeg 9 LGPL shared in
+`C:\ffmpeg`, libclang in `C:\rm\llvm\bin`, the Windows SDK's `makeappx.exe` for the MSIX):
 
-It cross-builds `remoteman_engine.dll` here, sends `windows/viewer`, the engine and three of
-FFmpeg's DLLs into the guest, and runs the command that does it inside Windows:
+    powershell -ExecutionPolicy Bypass -File scripts\win-viewer-app.ps1 -Msix [-Out target\viewer-msix] [-Version 0.1.0.0]
 
-    powershell -File windows\viewer\build.ps1 -Packaged [-Out C:\rm\msix] [-TestCert]
+It builds the exe framework-dependent (`REMOTEMAN_FRAMEWORK_DEPENDENT=1`: no Windows App Runtime
+staged beside it, no manifest that looks for one there; in `target\fd`, a short name because
+CMake's paths for Opus run past MSBuild's 260 characters under a longer one), lays out
+`remoteman.exe`, FFmpeg's three DLLs, the assets and `crates/remoteman-viewer-app-windows/package/
+AppxManifest.xml` (with the version given), and packs them with `makeappx`. That leaves
+`target\viewer-msix\remoteman_0.1.0.0_x64.msix`, **unsigned** (the Store signs what is uploaded).
+The manifest declares full trust, the network, the microphone and the camera as before, and a
+`PackageDependency` on `Microsoft.WindowsAppRuntime.2` at 2.6.4 (the version windows-reactor's
+bootstrap asks for; Reactor sets per-monitor DPI awareness itself, so no manifest in the exe is
+needed). No test certificate is made and nothing is signed or installed by the script.
 
-That leaves `C:\rm\msix\Remoteman_0.1.0.0_x64.msix`, **unsigned** (the Store signs what is
-uploaded). `-TestCert` (the script passes it) also signs it with a test certificate whose subject
-is the manifest's `Publisher` (`CN=PLACEHOLDER`), made once in the building account's store, and
-leaves its public half as `remoteman-test.cer`, so that it can be installed for a test: import
-the `.cer` into `LocalMachine\TrustedPeople`, then `Add-AppxPackage` the `.msix` as the user.
+**What is in it: 43.6 MB to download (the C# app's: 54.9 MB), 102.6 MB installed (130 MB), 9
+files:** `remoteman.exe` (9 MB: the view, the engine, Opus, the static CRT), FFmpeg's
+`avcodec-63` (90 MB of the 103), `avutil-61`, `swresample-7`, four logos, the manifest. The
+Windows App Runtime is the Store's framework package, installed with the app.
 
-**What is in it: 54.9 MB to download, 130 MB installed, 69 files** (`msix-contents.txt`): the view
-(`remoteman.exe`, `remoteman.dll`), .NET 10 trimmed, WinUI's projection, the engine (6 MB) and
-FFmpeg's `avcodec-63` (94 MB of the 130), `avutil-61`, `swresample-7`. The Windows App SDK
-itself is not inside: it is the Store's framework package `Microsoft.WindowsAppRuntime.2`, which
-the Store installs with the app. Trimming done:
+**The folder that runs with nothing installed** (development, tests, a download outside the
+Store):
 
-- FFmpeg: only what the engine loads (it links `avcodec` and `avutil`; `avcodec` needs
-  `swresample`). `avformat`, `avfilter`, `avdevice` and `swscale` are left out (also from the
-  unpackaged build).
-- The Windows App SDK's parts by name instead of the `Microsoft.WindowsAppSDK` package, which
-  brought its ML runtime (ONNX Runtime and DirectML, 42 MB), AI, Widgets and Search into the app.
-  The unpackaged folder went from 527 files and 390 MB to 456 and 273 MB with this.
-- .NET trimmed (`PublishTrimmed`, `TrimMode=partial`, packaged build only) with WinUI's projection
-  kept whole: trimmed, the window's own backdrop (`StayingMica`, a subclass of a WinUI type)
-  failed to load and the app closed at start. Untrimmed the package was 104.7 MB; trimmed
-  without the ML parts, 54.9 MB. The one reflection helper (`Engine.Do`'s anonymous objects) is
-  now generic with its properties kept.
-- No `VCRUNTIME140.dll` is needed any more: the Rust programs for Windows are linked with the
-  static C runtime (`.cargo/config.toml`), so the engine and the host need only the Universal
-  CRT every Windows 10 and 11 has (checked: neither imports `VCRUNTIME140`).
+    powershell -ExecutionPolicy Bypass -File scripts\win-viewer-app.ps1 [-Out target\viewer-app]
 
-What would shrink it most next: an FFmpeg built with only the decoders the engine uses (HEVC,
-AV1, and the hardware-acceleration glue) instead of the full LGPL build; `avcodec` would go from
-94 MB to a few. Not done.
+`remoteman.exe`, FFmpeg's three DLLs and the Windows App Runtime 2.6.4 beside them, as
+windows-reactor-setup stages it (the first build on a PC downloads it from NuGet into
+`%LOCALAPPDATA%\windows-reactor-setup`; its list is the pinned Reactor's `assets\runtime.txt`, less
+`Microsoft.Web.WebView2.Core.dll`, which only Reactor's WebView2 control loads): **209 files, 160
+MB** (the C# app's folder: 456 files, 273 MB). Started from that folder with nothing on the path, a
+played session (`--play`) decoded on the card and showed in the window.
 
-**Tested in the VM** (Windows 11 build 26300, RTX 5090 by GPU-PV), with the throwaway Linux host
-`RM_AGENT_ARGS=--keep-output scripts/headless-host.sh` on this PC:
-installed with the test certificate (`signed Developer`); found in Start by typing "remoteman"
-(`viewer-1-start-menu.png`); started from there (`viewer-2-opened.png`: Computers, "No computers
-yet"); paired with 10.0.2.2:7799 (`viewer-3-pair.png`); connected, the host's moving content shown
-in the window with the session's pill (`viewer-4-session.png`); stopped; `Remove-AppxPackage`:
-no package left, its data folder (`LocalState\remoteman` with the client's key and the paired
-host) gone with it, nothing in Credential Manager. Eight launches in a row through `shell:AppsFolder` (what its Start
-entry starts, without typing into Start) all ran.
+**Tested on the owner's PC** (Windows 11 build 26300, RTX 5090), with no host (made-up sessions:
+`--play` clips through the real decoder and drawing; the old program's walk steps for every
+other state, `--ui` with `REMOTEMAN_WALK_FILE`): every page, dialog and menu in light and dark
+through UI Automation, with pictures (`crates/remoteman-viewer-app-windows/test/walk.ps1`); full
+screen's bar and a menu of it as the engine's draw thread saves them (`test/fullshots.ps1`);
+pointer, both buttons, the wheel and keys (a letter, Tab, the arrows, Alt, F10, Space) reaching
+the engine from real input; variable refresh in full screen (`test/vrr.ps1`, below). **Not
+tested:** a real host (left for the owner's session), the MSIX installed (nothing is installed on
+that PC), the second display's window, a touchscreen, the microphone and camera lent to a
+computer.
 
-**One launch not explained:** on the first launch after the guest's restart, the test's UI
-Automation didn't find the window, though the app's process was running (it was stopped by its
-pid at the end). The crash reports in Windows' log at that time were older ones, logged again at
-10:00:11, before that launch at 10:00:47. The cause isn't established. Thirteen other launches
-showed their window. In case one does crash, the view now writes an unhandled exception to
-`LocalState\remoteman-crash.log` in the package's folder even without `--log`. The engine now
-logs a panic's message before the app ends: it can't unwind out of the C functions, and a window
-app has no stderr.
+**Variable refresh** happens in full screen only, which is a window of the engine's own over the
+monitor (the app's window waits hidden behind it) presenting into an HWND flip swap chain with
+tearing allowed, on a Direct3D device that does nothing else (on the engine's device, which also
+decodes, the desktop showed it as an overlay at the monitor's fixed rate). Measured on DISPLAY1
+(ASUS XG32UCWMG, 240 Hz, HDR on) with 100 pictures a second, a line a second: the monitor blanked
+10.00 ms apart for the whole run in 10-bit SDR (17 s, the full-screen window in front), 8-bit SDR
+(19 s) and 10-bit PQ, HDR10 passed through (19 s); in those two the window in front was the app's
+own, hidden one, not the full-screen window. In a further run with the pointer at the top edge
+(the bar out, its layer over the picture), a click on the picture and the pointer away again (the
+layer taken away), it stayed at 10.00 ms throughout, the full-screen window in front. In a window
+(the `SwapChainPanel`) it stays at 4.17 ms. Every drop to 4.17 ms in full screen came with another
+program's window in front: the earlier report of 10-bit dropping back after a few seconds was
+that. DXGI's exclusive full screen varied the refresh for a few seconds in the probe and then its
+Present failed (DXGI_ERROR_INVALID_CALL), the cause not established; it isn't used, since the
+borderless window holds.
 
-**Left in the VM by the test** (test tooling, not the app): the test certificate in
-`LocalMachine\TrustedPeople` and its key in SYSTEM's own store, so that the next `--msix` build
-can be installed again.
+**Not tested before (still true):** a clean Windows without the framework package, the Windows
+App Certification Kit, an upgrade, arm64 (the engine and FFmpeg are x64 only).
 
-**Not tested:** a clean Windows without the Windows App SDK's framework package (the VM had it
-from earlier work; the Store installs it with the app, a sideload needs it installed first),
-the Windows App Certification Kit, an upgrade from one version to the next, arm64 (the engine and
-FFmpeg are x64 only).
-
-**A Store submission still needs:** the identity from Partner Center in the manifest; the
-version scheme (as I understand it, not looked up today, Store versions keep the last field 0:
-`0.1.0.0` does); real logos at every
-scale and the listing's art; the Windows App Certification Kit run on the package; the privacy
-policy and `runFullTrust` justification above. Then the unsigned `.msix` is uploaded as it is.
-
+**A Store submission still needs:** the identity from Partner Center in
+`crates/remoteman-viewer-app-windows/package/AppxManifest.xml`; the version scheme (Store
+versions keep the last field 0); real logos at every scale and the listing's art; the Windows App
+Certification Kit run on the package; the privacy policy and `runFullTrust` justification above.
+Then the unsigned `.msix` is uploaded as it is.
 ## The host: an installer of its own
 
-**Build** (from this PC, holding the VM):
+**The display driver is remoteman's own** (since 2026-11-19, on the owner's word that remoteman
+must not depend on Guesthouse): `windows/display-driver`, forked from Guesthouse's fork of
+zako-vdd, with its own name, hardware id, control GUID, shared-object names, settings folder and
+EDID, and Guesthouse's VM link taken out. Its README says what changed; its BUILDING.md how it is
+built (Build Tools and the driver kit's NuGet packages, no Visual Studio driver integration).
+Everything below that was run before that date ran with Guesthouse's build of the driver.
+
+**Build on Windows** (one command; needs Build Tools with C++, Rust, Inno Setup 6 and the driver
+kit's NuGet packages):
+
+    powershell -ExecutionPolicy Bypass -File scripts\win-host-installer.ps1 [-Version 0.1.0]
+
+It builds the host, the driver (`windows\display-driver\build.ps1`) and the installer, which it
+leaves in `target\installer`.
+
+**Build from Linux** (holding the VM; the driver must have been built in Windows first, as Linux
+can't build it):
 
     scripts/win-host-installer.sh [VERSION]
 
-It cross-builds `remoteman-host.exe` here, sends it with `windows/host-installer` and Guesthouse's display
-driver (`GuesthouseDisplay.dll`, `.inf`, `vdd_settings.xml` set to three monitors, the driver's
-MIT and MS-PL licences; from `$GUESTHOUSE_DRIVER`, by default the VM's copy) into the guest and
-runs the command that does it inside Windows:
+It cross-builds `remoteman-host.exe` here, sends it with `windows/host-installer` and remoteman's
+display driver (`RemotemanDisplay.dll`, `.inf`, `vdd_settings.xml` asking for three monitors, the
+driver's MIT and MS-PL licences; from `$REMOTEMAN_DRIVER`, by default
+`windows/display-driver/out`) into the guest and runs the command that does it inside Windows:
 
     powershell -File windows\host-installer\build.ps1 [-Version 0.1.0]
 
@@ -157,19 +174,38 @@ jrsoftware.org, its signature checked) and leaves `C:\rm\installer\remoteman-hos
 2. the display driver: a catalog over its two files, signed with a certificate made on this
    machine (`CN=remoteman display driver, this machine only`), put in the machine's Root and
    TrustedPublisher stores, its private key deleted at once so nothing else can ever be signed
-   with it; the driver package added, the display device made (or, if one is there, updated);
-   the driver's settings into `C:\VirtualDisplayDriver` unless a driver already has some there;
+   with it; the driver package added, the display device (`Root\RemotemanDisplay`) made (or, if
+   one is there, updated); the driver's settings into `%ProgramData%\remoteman\display` unless an
+   earlier install left some there (Administrators and SYSTEM full, LOCAL SERVICE, which the
+   driver runs as, may change them, Users may read them);
 3. an inbound firewall rule, "remoteman host": UDP 7791, for that program only, every profile;
-4. a scheduled task, "remoteman host", that starts the host at each logon, elevated, in the
-   session of whoever logs on (input, the cursor and mode changes work nowhere else), restarted
-   if it stops; started at once. The host keeps its state (its identity, the paired devices) in
-   `C:\ProgramData\remoteman\host`, readable by Administrators and SYSTEM only, and asks about
-   each new device in a window on the desktop (`--ask`) until the owner's app exists;
+4. **since 2026-11-19, a service**, "remoteman host" (automatic, LocalSystem, restarted if it
+   ends), started at once (`crates/remoteman-host-windows/src/service.rs`): from boot on it keeps
+   one host running as SYSTEM in the console's session, with no window, and moves it when the
+   console moves to another session. That host follows the input desktop
+   (`crates/remoteman-host-windows/src/desk.rs`), so it reaches the sign-in screen, the lock
+   screen and Windows' permission prompts; its control pipe admits whoever is signed in at the
+   console; files from a device go to that user's Downloads (refused while nobody is signed in).
+   Ctrl+Alt+Del from a device goes to the service, which sends it with `SendSAS`, so the
+   installer sets the policy `SoftwareSASGeneration` to allow services (and the uninstaller puts
+   back what it was). An earlier install's logon task is removed. (Before that date: a
+   scheduled task that started the host at each logon, elevated, in a console window that
+   stopped the host when closed.) The host keeps its state (its identity, the paired devices)
+   in `C:\ProgramData\remoteman\host`, readable by Administrators and SYSTEM only (its log
+   through `remoteman-host ctl log` too), and asks about each new device in a window on the
+   desktop (`--ask`) until the owner's app is in the installer. On a PC with screens of its
+   own the driver's monitors are on the desktop only while a device is, placed against the PC's
+   screens, which are written down first (`screens.txt` in the state folder) and put back
+   exactly when the device leaves or by the next host after a crash. The host announces itself
+   on the network for viewers to find (DNS-SD `_remoteman._udp` through Windows' own
+   `DnsServiceRegister`: the LAN card's address, `v`, `fp`, `os=windows`, `mac`; `advertise.rs`;
+   `remoteman-host --announce-test NAME SECONDS` tries it without the driver);
 5. what it made is written to `installed.json`, after each step, so that the uninstaller takes
    away exactly that.
 
-The uninstaller (Settings > Apps > remoteman host) stops the task and the host (by its pid),
-removes the task, the firewall rule, the display device if it made it, the driver package if it
+The uninstaller (Settings > Apps > remoteman host) stops the service (or, from an older
+install, the task) and the host (by its pid), removes the service and the task, puts the
+Ctrl+Alt+Del policy back, removes the firewall rule, the display device if it made it, the driver package if it
 added it, its certificates, the settings folder if it made it, the host's state, and its files.
 A failure in `setup.ps1` shows as a message, its reason in `setup.log`, and as exit code 1 in a
 silent install (`/VERYSILENT /SUPPRESSMSGBOXES`).
@@ -225,6 +261,134 @@ a real PC with a screen, where the driver's first monitor appears as an extra sc
 desktop; Secure Boot with a real monitor; an upgrade over an earlier install; Windows' own
 firewall prompt (the rule exists before the host first listens, so none should appear).
 
+## The host's installer in Rust (WinUI 3), next to the Inno one
+
+Written 2026-11-19, on branch `worktree-agent-a1e78cd8e7a5e995f`. The installer's pages are WinUI 3
+in Rust through windows-reactor, like Remoteman Host: `crates/remoteman-host-installer-windows`,
+one program, `remoteman-host-setup.exe`. The Inno Setup files above stay until this one has
+been through a real install.
+
+**Build on Windows** (one command; Build Tools with C++, Rust, CMake from Build Tools, the driver
+kit's NuGet packages; no Inno Setup):
+
+    powershell -ExecutionPolicy Bypass -File scripts\win-host-setup.ps1 [-Version 0.1.0] [-Out FOLDER] [-Payload FOLDER] [-NoApp]
+
+It builds the host, the driver (`windows\display-driver\build.ps1`) and Remoteman Host
+(`crates\remoteman-host-app-windows\stage.ps1`, when that crate is there), gathers the files to
+install in `OUT\payload` (`remoteman-host.exe`, `setup.ps1`, `driver\pkg\RemotemanDisplay.dll`
+and `.inf`, `driver\vdd_settings.xml` and the two licences, `app\`), builds the installer and
+packs it: `target\installer\remoteman-host-setup-VERSION.exe`. `-Payload FOLDER` packs a folder
+gathered by hand instead of building the host, driver and app. setup.ps1 is the tree's own
+(`windows\host-installer\setup.ps1`): a tree whose setup.ps1 still registers the logon task
+makes an installer that would add that task beside an installed service, so build from a tree
+with the service-based one.
+
+**One file, 19.4 MB** with the app (18.7 MB without `app\`): the program 4.2 MB, the Windows App
+Runtime 2.6.4 its pages need 12.6 MB (205 files, 57.3 MB unpacked), the rest 2.5 MB (the host,
+Remoteman Host's exe, setup.ps1, the driver: 9.9 MB unpacked). The archive is appended to the
+exe (`src/archive.rs`): each file's content once, however many paths have it, so the runtime
+beside Remoteman Host in `app\` is the pages' runtime, carried once; two XZ streams (LZMA2 preset
+9 behind the x86 branch filter, `lzma-rust2`, pure Rust, Apache-2.0), the first with the runtime
+only; a JSON index with each file's SHA-256, checked as each file is written and read back
+after. The uninstaller, `uninstall.exe` in the install folder, is the program and the first
+stream (16.8 MB), so installed the runtime is there twice: unpacked in `app\` (64 MB) and packed
+in `uninstall.exe`. The archive ends 8-byte aligned before a trailer that is found before an
+appended code signature, so the file can still be signed (not tried).
+
+**A run is three processes of the one exe** (`src/main.rs`, `src/launch.rs`): what the user
+opened asks Windows to run the same file elevated (the one UAC prompt, before the first page),
+waits, and stays unelevated, so that it is what starts Remoteman Host afterwards, as the user;
+the elevated one unpacks the runtime and the bare exe into a new folder under `C:\Windows\Temp`
+that only Administrators and SYSTEM can write to (0.6 s) and runs the pages from there, then
+deletes it; the pages (`src/ui.rs`) run the steps (`src/engine.rs`) on a thread of their own.
+Nothing elevated loads a DLL from a folder the user can write to: the pages' folder is
+administrators' only, and the other two load DLLs by name from System32 only
+(`SetDefaultDllDirectories`; their own imports are Windows' known DLLs, and a DLL planted beside
+the exe under the name of the one that isn't, `bcryptprimitives.dll`, was not loaded). Run from
+the install folder (the uninstaller), the first copies itself to %TEMP% and hands over from there.
+
+**Installing** (also over an earlier install, by this installer or by the Inno one):
+
+1. the running host stopped: the service "remoteman host" (SCM, up to 30 s), an older install's
+   logon task (`schtasks /End`), any `remoteman-host.exe` left from the install folder and
+   `app\remoteman-host-app.exe` (which holds its runtime's files) ended by pid, as the Inno
+   installer's PrepareToInstall did;
+2. the first change: the install folder `C:\Program Files\remoteman host`, `uninstall.exe` in it,
+   and the Settings > Apps entry, `HKLM\...\Uninstall\remoteman host` (DisplayName,
+   DisplayVersion, Publisher "remoteman", DisplayIcon, InstallLocation, UninstallString
+   `"...\uninstall.exe" --uninstall`, QuietUninstallString, InstallDate, EstimatedSize, NoModify,
+   NoRepair); the Inno installer's entry (`{6A0F3C2E-...}_is1`) and `unins000.*` deleted (never
+   run: its uninstaller would delete the host's state). This comes before the files and
+   setup.ps1, not after setup.ps1 as first asked, so that an install that fails at any later
+   step can still be uninstalled;
+3. the files, over what is there (files of an earlier `app\` that this one doesn't have are
+   deleted; nothing else is, `installed.json` above all); each file read back and checked;
+4. `setup.ps1 install`, as the Inno installer ran it: hidden PowerShell, `-NoProfile
+   -ExecutionPolicy Bypass -File`, in the install folder; setup.log's new lines are shown as
+   they come; exit code 0, or 1 with the reason as setup.log's last line;
+5. with `app\`: `HKLM\...\Run`, "remoteman host" = `"...\app\remoteman-host-app.exe" --background`,
+   and a shortcut `Remoteman Host.lnk` in the common Start menu (without `app\`, an earlier
+   install's are removed). Done, "Open Remoteman Host" opens its window and Close starts it in
+   the background, both by the unelevated first process, as the user.
+
+**Uninstalling** (Settings > Apps): Remoteman Host ended, `setup.ps1 uninstall`, the folder
+deleted (setup.log kept as `%TEMP%\remoteman-host-setup-removed.log` first; a file in use is
+moved out to Windows' Temp and deleted at restart), then the entry, the Run value and the
+shortcut. A step that fails stops everything after it; the page says which, why, and where the
+log is (`setup.log` in the install folder, which has the installer's lines and setup.ps1's;
+before the folder exists, `%TEMP%\remoteman-host-setup.log`, every process's lines).
+
+**For tests and scripts:** `--dry-run` shows every page and walks every step without elevation
+and changes nothing: what would be done is logged, and the files go to
+`%TEMP%\remoteman-host-setup-dry-run\remoteman host` instead (that folder's `uninstall.exe`
+uninstalls it as the real one would). `--fail-at stop|files|register|setup|app` (uninstalling:
+`stop|setup|files|entries`) makes that step fail, in dry runs only. `--theme light|dark`.
+`--silent` has no pages; exit code 0 done, 1 failed (2: cancelled on the first page or at the
+UAC prompt). It is a windowed program, so a script waits for it with
+`Start-Process -Wait -PassThru`.
+
+**Tested here (dry runs only; nothing was installed, uninstalled, stopped or written to the
+registry on this PC):** `crates/remoteman-host-installer-windows/test/walk.ps1` drives every page
+through UI Automation in light and dark, with screenshots in `C:\rm\shots-setup` (welcome, the
+steps, the close refused while they run, done, failed at setup.ps1 and at the files, the
+uninstaller's confirm, steps, done and failure, and with no `--theme` the theme Windows is set
+to) and each run's exit code; `test/checks.ps1`: a
+silent install whose 213 files all arrived with their sizes and SHA-256, the `would` lines (what
+a real install would have changed on this PC, where the Inno install is: stop the service, the
+entry and the Inno takeover, setup.ps1, the Run value and the shortcut), the uninstaller copying
+itself out of the folder (silent and with its pages) and the folder and the copy gone after; the
+pages' DLLs: all 17 of the runtime's that load come from the pages' own folder, none from the
+Windows App Runtime packages installed on this PC (`WindowsApps`, `SystemApps`), and with
+`Microsoft.ui.xaml.dll` taken out of a copy of that folder the window doesn't open at all
+(`0x8007007E`, no fallback). `cargo test` runs what only a real install runs, in folders of its
+own: setup.ps1 started as above (a stand-in that writes setup.log as the real one does, warns
+and fails: the reason read is its `FAILED` line from this run, its lines shown as they come,
+exit 0 done; and one PowerShell can't parse, beside an earlier install's `FAILED` line: the
+reason is what PowerShell said, not the old line),
+the files written over an install (`installed.json` left, an earlier `app\` file gone), the
+Start menu shortcut, and the archive packed, unpacked, cut down to the uninstaller and found
+damaged. **Never run at all:** a real install, upgrade or uninstall; the UAC prompt; the
+registry writes and deletes; the service stopped and a SYSTEM process ended; the folder under
+`C:\Windows\Temp` with its ACL; delete-at-restart; Settings > Apps running the uninstaller;
+Explorer opening Remoteman Host when the first process is itself elevated; Notepad opened from
+the elevated pages; a second administrator's credentials at the prompt; a PC that never had the
+runtime (the module check is the stand-in); a downloaded file (with its zone mark), whose
+relaunch skips the zone check (`SEE_MASK_NOZONECHECKS`) so that it is not asked about twice:
+the first thing to watch in the real test.
+
+**What Reactor couldn't do, and how it is done instead:** no closing event, so the steps can't
+veto a close: the window's procedure is wrapped (`SetWindowLongPtrW`) and `WM_CLOSE` is refused
+while they run, with a line saying why; `LocalSender` isn't `Send`, so the steps' events come
+back through a chain of `spawn_background` tasks, each waiting for the next event; the window's
+icon is a file path, so the icon is written beside the exe. No change to `vendor/windows-reactor`.
+
+**On Linux** the crate is a stub (`main` says it runs only on Windows; every dependency is under
+`[target.'cfg(windows)']`; `build.rs` does nothing). A Linux build of the workspace still fetches
+the windows-rs git repository (Cargo resolves git sources for every platform: a Linux-target
+`cargo fetch --offline` without it fails, naming Remoteman Host's crate first, which has the same
+dependency) but compiles none of it. Built on Linux for Windows (cargo-xwin), the installer would
+have no runtime to pack and no manifest to find it: build it on Windows.
+
 ## What an unsigned download shows a user
 
 Neither of these was seen here (the VM's files have no "downloaded from the internet" mark, and
@@ -254,22 +418,48 @@ below is from memory of how Windows 11 shows them, not looked up today:
    before the host works for anyone but an administrator who is logged on.
 4. **Store identity:** open the Partner Center account, reserve the name, and answer the age
    rating and privacy questions.
-5. **A smaller FFmpeg** for the viewer (94 MB of its 130).
+5. **A smaller FFmpeg** for the viewer (avcodec is 90 MB of its 103 installed).
 
 ## When the owner's app (Remoteman Host) lands
 
-From the host session's list (shared notes, `win-host-install.md`; branch
-`claude/win-host-rest-55f8f7`, app in `windows/host`, which is why the installer lives in
-`windows/host-installer`). The installer then also needs to:
+The app is `crates/remoteman-host-app-windows` (`remoteman-host-app.exe`): WinUI 3 written in
+Rust with Microsoft's windows-reactor (`vendor/windows-reactor`, pinned to a windows-rs commit;
+`vendor/windows-reactor/VENDORED.md`), no C# or .NET. It speaks to the host only over the host's
+control pipe. Its folder, built on Windows:
 
-- carry the app's publish folder (`scripts/win-host-app.sh`, self-contained, with
-  `Assets\*.ico`) into `{app}\app` and start `remoteman-host-app.exe --background` at sign-in,
-  not elevated (HKCU or HKLM `Run`), removed by the uninstaller;
+    powershell -File crates\remoteman-host-app-windows\stage.ps1 [-Out target\host-app]
+
+`remoteman-host-app.exe` (4 MB, the tray icons inside it, the static CRT) and the Windows App
+Runtime 2.6.4 beside it, self-contained (`windows-reactor-setup` embeds the manifest that finds
+the runtime there, so nothing is installed and no `VCRUNTIME140.dll` is needed): 31 files
+(`Microsoft.ui.xaml.dll`, `Microsoft.UI.Xaml.Controls.dll`, `Microsoft.WindowsAppRuntime.dll`,
+DWriteCore, the composition and input DLLs, three `.pri` resource indexes), the
+`Microsoft.UI.Xaml` folder, and 86 language folders of WinUI's own strings: 206 files,
+64,120,183 bytes in all. The layout is kept as it is (the DLLs beside the exe). The first build on
+a PC downloads the runtime from NuGet into `%LOCALAPPDATA%\windows-reactor-setup`; a build
+cross-compiled from Linux (cargo-xwin) stages nothing and would need the runtime installed.
+
+`crates/remoteman-host-app-windows/test/` drives it with no host: `fakehost.ps1` (a stand-in for
+the host's pipe that keeps state and logs every word), `walk.ps1` (every page, switch, menu item
+and dialog through UI Automation, with screenshots), `mica.ps1` (the backdrop with another window
+active), `notify.ps1` (the Windows notifications seen).
+
+From the host session's list (shared notes, `win-host-install.md`; branch
+`claude/win-host-rest-55f8f7`, which is why the installer lives in `windows/host-installer`). The
+installer then also needs to:
+
+- carry that folder into `{app}\app` and start `remoteman-host-app.exe --background` at sign-in,
+  not elevated, for every user who signs in (HKLM `...\CurrentVersion\Run`, or a Startup
+  shortcut in the common Start menu), removed by the uninstaller; a second start (the Start menu
+  shortcut while the icon is there) only opens the running app's window;
 - agree on the host's state folder: this installer gives the host
   `C:\ProgramData\remoteman\host` (Administrators and SYSTEM only, deleted on uninstall); the
   host session's list says `%LOCALAPPDATA%\remoteman\host`. The app talks to the host over its
   pipe, so either works; per-machine fits a host started for whoever logs on;
-- drop `--ask` from the task once the app asks about new devices.
+- drop `--ask` from the task: the app now asks about new devices (`status`'s `pending`, answered
+  with `pair accept` / `pair decline`);
+- keep the pipe open to the signed-in user's unelevated app: today `control.rs` grants the user
+  the host runs as, which is that user only while the host runs in their session.
 
 Its list also says the host needs the VC++ runtime: no longer, with this branch's
 `.cargo/config.toml` (static CRT; the host's imports were checked).
