@@ -12,13 +12,13 @@ publish.workspace = true
 # one name in a workspace build (on Linux both would land in target/release, the empty one
 # perhaps on top of the real one). The app ships as remoteman.exe (decided 2026-11-18): whatever
 # packages it copies remoteman-windows.exe to that name, as the tests in the VM do.
-# The engine behind the WinUI 3 app (windows/viewer): sessions, decode, presentation, input,
-# sound, clipboard, files, the store, behind a small C interface (src/engine.rs). On other
-# systems it is empty.
+# The engine behind the app (crates/remoteman-viewer-app-windows, WinUI 3 through
+# windows-reactor), which links it as a Rust library: sessions, decode, presentation, input,
+# sound, clipboard, files, the store, behind the interface in src/engine.rs. On other systems
+# it is empty.
 [lib]
 name = "remoteman_engine"
 path = "src/lib.rs"
-crate-type = ["cdylib"]
 
 [[bin]]
 name = "remoteman-windows"

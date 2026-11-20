@@ -139,6 +139,11 @@ pub enum Surface {
     Window(HWND),
     #[allow(dead_code)]
     Panel(IDXGISwapChain1),
+    /// The engine's full-screen window (`full.rs`): the picture in an HWND flip swap chain
+    /// that may tear, so a monitor that varies its refresh can follow the frames, and the
+    /// interface in a layer over it only while there is something of it to show.
+    #[allow(dead_code)]
+    Full(HWND),
 }
 
 /// The window's layers above the picture, and the compositor's side (none for a panel).
@@ -148,10 +153,16 @@ struct Layers {
     /// window changes size).
     ui_swap: IDXGISwapChain1,
     ui_target: Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
-    /// The device, the window's target (kept alive), and the picture's layer.
+    /// The device, the window's target (kept alive), and the picture's layer (none in full
+    /// screen, where the picture is the window's own swap chain).
     dcomp: IDCompositionDevice,
     _target: IDCompositionTarget,
-    video_visual: IDCompositionVisual,
+    video_visual: Option<IDCompositionVisual>,
+    /// The interface's layer and what it hangs from; in full screen it hangs there only while
+    /// it shows something (`ui_on`).
+    root: IDCompositionVisual,
+    ui_visual: IDCompositionVisual,
+    ui_on: bool,
 }
 
 struct Drawer {
@@ -375,7 +386,65 @@ impl Drawer {
                     dcomp.Commit()?;
                     let painter = Painter::new(&gpu.device)?;
                     say!("interface: Direct2D on the same device, in a layer of its own over the picture's; text in {}", painter.family());
-                    (swap, Some(Layers { painter, ui_swap, ui_target: None, dcomp, _target: target, video_visual }))
+                    (swap, Some(Layers { painter, ui_swap, ui_target: None, dcomp, _target: target, video_visual: Some(video_visual), root, ui_visual, ui_on: true }))
+                }
+                Surface::Full(hwnd) => {
+                    let factory: IDXGIFactory2 = gpu.device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
+                    let mut client = windows::Win32::Foundation::RECT::default();
+                    let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+                    let (width, height) = (client.right.max(8) as u32, client.bottom.max(8) as u32);
+                    let tears = tearing_supported(&gpu);
+                    // 10-bit, as the stream is: measured to vary the refresh as 8-bit does, in sRGB
+                    // and in PQ, while the window has the keyboard. (REMOTEMAN_FULL_FORMAT=8: 8-bit,
+                    // for measuring.)
+                    let eight = std::env::var("REMOTEMAN_FULL_FORMAT").as_deref() == Ok("8");
+                    let mut desc = DXGI_SWAP_CHAIN_DESC1 {
+                        Width: width,
+                        Height: height,
+                        Format: if eight { DXGI_FORMAT_B8G8R8A8_UNORM } else { DXGI_FORMAT_R10G10B10A2_UNORM },
+                        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                        BufferCount: 2,
+                        Scaling: DXGI_SCALING_STRETCH,
+                        SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                        AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                        Flags: (WAITABLE.0 | if tears { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 } else { 0 }) as u32,
+                        ..Default::default()
+                    };
+                    let swap = match factory.CreateSwapChainForHwnd(&gpu.device, hwnd, &desc, None, None) {
+                        Ok(swap) => swap,
+                        Err(e) => {
+                            say!("no 10-bit swap chain for the window ({e}): 8-bit");
+                            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                            factory.CreateSwapChainForHwnd(&gpu.device, hwnd, &desc, None, None).context("create the full-screen swap chain")?
+                        }
+                    };
+                    // Alt+Enter is no business of DXGI's here.
+                    let _ = factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+                    let ui_desc = DXGI_SWAP_CHAIN_DESC1 {
+                        Width: width,
+                        Height: height,
+                        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                        BufferCount: 2,
+                        Scaling: DXGI_SCALING_STRETCH,
+                        SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                        AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+                        Flags: 0,
+                        ..Default::default()
+                    };
+                    let ui_swap = factory.CreateSwapChainForComposition(&gpu.device, &ui_desc, None).context("create the interface's swap chain")?;
+                    let dcomp: IDCompositionDevice = DCompositionCreateDevice(&gpu.device.cast::<IDXGIDevice>()?).context("no DirectComposition")?;
+                    let target = dcomp.CreateTargetForHwnd(hwnd, true).context("a composition target for the window")?;
+                    let (root, ui_visual) = (dcomp.CreateVisual()?, dcomp.CreateVisual()?);
+                    ui_visual.SetContent(&ui_swap)?;
+                    // The interface's layer is hung on once there is something to show.
+                    target.SetRoot(&root)?;
+                    dcomp.Commit()?;
+                    let painter = Painter::new(&gpu.device)?;
+                    say!("full screen: the picture in the window's own swap chain (HWND, flip model{}), the interface in a layer over it only while it shows something", if tears { ", tearing allowed" } else { ", DXGI doesn't allow tearing" });
+                    (swap, Some(Layers { painter, ui_swap, ui_target: None, dcomp, _target: target, video_visual: None, root, ui_visual, ui_on: false }))
                 }
             };
             let now = swap.GetDesc1()?;
@@ -599,15 +668,37 @@ impl Drawer {
     fn place_video(&mut self, area: Option<(i32, i32, i32, i32)>) -> Result<()> {
         if self.clip != Some(area) {
             self.clip = Some(area);
-            // A panel is the picture's place, all of it.
+            // A panel is the picture's place, all of it; in full screen the picture is drawn
+            // where it goes, in the window's own swap chain.
             let Some(layers) = &self.layers else { return Ok(()) };
+            let Some(video_visual) = &layers.video_visual else { return Ok(()) };
             let (x, y, w, h) = area.unwrap_or((0, 0, 0, 0));
             let r = windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F { left: x as f32, top: y as f32, right: (x + w) as f32, bottom: (y + h) as f32 };
             // SAFETY: calls on interfaces held here; the rectangle lives through the call.
             unsafe {
-                layers.video_visual.SetClip2(&r)?;
+                video_visual.SetClip2(&r)?;
                 layers.dcomp.Commit()?;
             }
+        }
+        Ok(())
+    }
+
+    /// In full screen: hang the interface's layer over the picture while it shows something,
+    /// and take it away while it shows nothing (the picture can then be shown by itself).
+    fn show_interface(&mut self, on: bool) -> Result<()> {
+        let Some(layers) = &mut self.layers else { return Ok(()) };
+        if layers.video_visual.is_some() || layers.ui_on == on {
+            return Ok(());
+        }
+        layers.ui_on = on;
+        // SAFETY: calls on interfaces held here.
+        unsafe {
+            if on {
+                layers.root.AddVisual(&layers.ui_visual, true, None)?;
+            } else {
+                layers.root.RemoveVisual(&layers.ui_visual)?;
+            }
+            layers.dcomp.Commit()?;
         }
         Ok(())
     }
@@ -824,6 +915,7 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
                 drawn = Some(frame.clone());
                 painted = true;
             }
+            drawer.show_interface(!frame.ops.is_empty())?;
         }
         // The picture's layer is there while a session is, where the interface leaves room.
         let whole = Some((0, 0, drawer.size.0 as i32, drawer.size.1 as i32));

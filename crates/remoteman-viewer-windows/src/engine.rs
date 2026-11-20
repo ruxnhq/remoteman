@@ -1,20 +1,25 @@
-//! The engine's C interface, for the WinUI 3 app (`windows/viewer/Engine.cs` is its other
-//! side). Every call comes on the app's thread, the one that owns its window.
+//! The engine's interface, for the app (`crates/remoteman-viewer-app-windows`, WinUI 3 through
+//! windows-reactor), which links this crate as a library and calls it on its UI thread, the
+//! one that owns its window. Every call comes on that thread.
 //!
 //! The engine drives the same [`App`] the old program does: what is on screen, what each
 //! press does and the sessions are its, unchanged; the app shows its state and hands it what
 //! people do. Between them:
-//! - `remoteman_state` gives the whole state as one JSON document (UTF-16). When it has
-//!   changed, the engine calls the app's `notify` (on the app's thread, from inside one of
-//!   these calls or from the engine's own window's messages);
-//! - `remoteman_command` takes what people did that isn't the picture's, as JSON (`command`);
-//! - the picture's input comes through typed calls (`remoteman_pointer` and the rest), in the
-//!   panel's pixels.
+//! - [`state`] gives the whole state as one JSON document. When it has changed, the engine
+//!   calls the app's `notify` (on the app's thread, from inside one of these calls or from the
+//!   engine's own window's messages): the app must only take note there and read the state
+//!   later, never call back into the engine from inside `notify`;
+//! - [`command`] takes what people did that isn't the picture's, as JSON (`Engine::command`
+//!   lists the words); the state's `effects` are what only the app can do;
+//! - the picture's input comes through typed calls ([`pointer`] and the rest), in the panel's
+//!   pixels; [`attach`] makes the swap chain the app's `SwapChainPanel` shows.
 //!
 //! The engine has a window of its own that nobody sees (a message-only window on the app's
 //! thread): other threads wake it, it ticks sixty times a second, it hears the clipboard
 //! change and, while the pointer is captured, the mouse's raw movement. The keyboard hook that
 //! takes the system's shortcuts during a session is the old program's, on the same thread.
+//! In full screen the picture is presented from a top-level window of the engine's own
+//! (`full.rs`), where a monitor can vary its refresh to follow the frames.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -33,7 +38,7 @@ use windows::Win32::System::DataExchange::{AddClipboardFormatListener, GetClipbo
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{GUID, HRESULT, IUnknown, Interface, w};
+use windows::core::{Interface, w};
 
 use crate::app::{App, Choice, Dialog, Effect, Flag, Msg, Screen};
 use crate::features::FEATURES;
@@ -46,29 +51,31 @@ const WM_WAKE: u32 = WM_APP + 1;
 /// The wheel's notch in the protocol's pixels, as the old window has it.
 const NOTCH: f32 = 40.0;
 
-/// WinUI 3's `ISwapChainPanelNative` (microsoft.ui.xaml.media.dxinterop.h): IUnknown's three
-/// and then `SetSwapChain(IDXGISwapChain*)`.
-const SWAP_CHAIN_PANEL_NATIVE: GUID = GUID::from_u128(0x63aad0b8_7c24_40ff_85a8_640d944cc325);
+/// Called on the app's thread when the state has changed.
+pub type Notify = Box<dyn Fn()>;
 
-type Notify = extern "system" fn();
-
-struct Engine {
-    app: RefCell<App>,
+pub(crate) struct Engine {
+    pub(crate) app: RefCell<App>,
     hwnd: isize,
     /// The app's window, and the panel's place in it: x, y, width, height in pixels.
-    host: Cell<isize>,
+    pub(crate) host: Cell<isize>,
     panel: Cell<(i32, i32, i32, i32)>,
+    /// The panel's scale (pixels to the app's units), as last told.
+    panel_scale: Cell<(f32, f32)>,
     notify: Notify,
-    /// The state as last handed out, and as last told about.
-    text: RefCell<Vec<u16>>,
+    /// The state as last told about.
     told: RefCell<String>,
     /// What only the app can do, until it has read the state.
     effects: RefCell<Vec<Value>>,
-    drawing: RefCell<Option<JoinHandle<()>>>,
+    pub(crate) drawing: RefCell<Option<JoinHandle<()>>>,
+    /// The panel's swap chain, kept for drawing into again after full screen.
+    chain: RefCell<Option<windows::Win32::Graphics::Dxgi::IDXGISwapChain1>>,
+    /// The engine's own full-screen window while there is one (`full.rs`).
+    pub(crate) full: RefCell<Option<Rc<crate::full::Full>>>,
     deadline: Cell<Option<Instant>>,
     // Input, as the old window keeps it.
     held: RefCell<HashSet<u16>>,
-    buttons: Cell<u8>,
+    pub(crate) buttons: Cell<u8>,
     released: Cell<bool>,
     chord: Cell<bool>,
     captured: Cell<bool>,
@@ -76,9 +83,9 @@ struct Engine {
     own_copy: Cell<u32>,
     hook: Cell<isize>,
     second: RefCell<Option<(isize, JoinHandle<()>, Arc<Shared>)>>,
-    /// The host's cursor, made into a Windows one, for the app to wear over the picture.
-    cursor: Cell<Option<HCURSOR>>,
-    cursor_serial: Cell<u32>,
+    /// The host's cursor, made into a Windows one (worn in full screen).
+    pub(crate) cursor: Cell<Option<HCURSOR>>,
+    pub(crate) got_shape: Cell<bool>,
     /// When the monitor under the window was last looked at (`watch_monitor`).
     watched: Cell<Option<Instant>>,
     /// Fingers on the touchscreen that the computer knows of (`touch.rs`).
@@ -87,203 +94,101 @@ struct Engine {
 
 thread_local! {
     static ENGINE: RefCell<Option<Rc<Engine>>> = const { RefCell::new(None) };
-    static ERROR: RefCell<Vec<u16>> = const { RefCell::new(Vec::new()) };
 }
 
-fn engine() -> Option<Rc<Engine>> {
+pub(crate) fn engine() -> Option<Rc<Engine>> {
     ENGINE.with(|e| e.borrow().clone())
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
+// The interface.
+
+/// Start the engine: `words` are the command line's words, as the old program takes them;
+/// `notify` is called on this thread when the state has changed.
+pub fn start(words: Vec<String>, notify: Notify) -> Result<()> {
+    start_engine(words, notify).inspect_err(|e| say!("failed: {e:#}"))
 }
 
-/// A UTF-16 string the app handed over.
-///
-/// # Safety
-/// `p` is null or points at a string that ends with a 0.
-unsafe fn read(p: *const u16) -> String {
-    if p.is_null() {
-        return String::new();
-    }
-    let mut n = 0;
-    // SAFETY: the caller's word that the string ends.
-    unsafe {
-        while *p.add(n) != 0 {
-            n += 1;
-        }
-        String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
-    }
-}
-
-// The C interface.
-
-/// Start the engine: `args` are the command line's words, one a line (as the old program
-/// takes them); `notify` is called on this thread when the state has changed. 0 when it has
-/// started; otherwise `remoteman_error` says why.
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_start(args: *const u16, notify: Notify) -> i32 {
-    // SAFETY: the app's word.
-    let words: Vec<String> = unsafe { read(args) }.lines().map(str::to_owned).filter(|w| !w.is_empty()).collect();
-    match start(words, notify) {
-        Ok(()) => 0,
-        Err(e) => {
-            say!("failed: {e:#}");
-            ERROR.with(|t| *t.borrow_mut() = wide(&format!("{e:#}")));
-            1
-        }
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_error() -> *const u16 {
-    ERROR.with(|t| t.borrow().as_ptr())
-}
-
-/// The state as JSON, valid until the next call into the engine.
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_state() -> *const u16 {
-    let Some(e) = engine() else { return std::ptr::null() };
-    let Some(mut v) = e.state_value() else { return e.text.borrow().as_ptr() };
+/// The state as JSON, with the effects the app has to carry out since it last asked
+/// (`effects`). `None` before the engine has started (or while it is busy, which a call from
+/// inside `notify` would find).
+pub fn state() -> Option<Value> {
+    let e = engine()?;
+    let mut v = e.state_value()?;
     *e.told.borrow_mut() = v.to_string();
     v["effects"] = Value::Array(e.effects.borrow_mut().drain(..).collect());
-    *e.text.borrow_mut() = wide(&v.to_string());
-    e.text.borrow().as_ptr()
+    Some(v)
 }
 
-/// Something people did, as JSON (see `Engine::command`). 0 when it was understood.
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_command(json: *const u16) -> i32 {
-    let Some(e) = engine() else { return 1 };
-    // SAFETY: the app's word.
-    let text = unsafe { read(json) };
-    let ok = match serde_json::from_str::<Value>(&text) {
-        Ok(v) => e.command(&v),
-        Err(err) => {
-            say!("a command that isn't JSON: {err}");
-            false
-        }
-    };
+/// Something people did, as JSON (see `Engine::command`). Whether it was understood.
+pub fn command(v: &Value) -> bool {
+    let Some(e) = engine() else { return false };
+    let ok = e.command(v);
     e.publish();
-    if ok { 0 } else { 1 }
+    ok
 }
 
-/// Give the engine the app's `SwapChainPanel` (any interface of it) and the window it is in.
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_attach(panel: *mut c_void, window: isize) -> i32 {
-    let Some(e) = engine() else { return 1 };
-    match e.attach(panel, window) {
-        Ok(()) => 0,
-        Err(err) => {
-            say!("the panel can't show pictures: {err:#}");
-            ERROR.with(|t| *t.borrow_mut() = wide(&format!("{err:#}")));
-            1
-        }
-    }
+/// A swap chain (`IDXGISwapChain1`) for the app's `SwapChainPanel`, as a raw COM pointer the
+/// app now owns one reference of (it hands it to the panel and lets its own go). The engine's
+/// `windows` crate and the app's WinUI library are different versions of windows-rs, so it
+/// crosses as a pointer.
+pub struct PanelChain(pub *mut c_void);
+
+/// Give the engine the app's window (its handle) and get the swap chain for its panel; the
+/// engine draws into it from now on. Called once the panel has a size ([`panel`] first).
+pub fn attach(window: isize) -> Result<PanelChain> {
+    let e = engine().context("the engine hasn't started")?;
+    e.attach(window).inspect_err(|err| say!("the panel can't show pictures: {err:#}"))
 }
 
 /// Where the panel is in the app's window and how large, in pixels, and its scale.
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_panel(x: i32, y: i32, width: i32, height: i32, scale_x: f32, scale_y: f32) {
+pub fn panel(x: i32, y: i32, width: i32, height: i32, scale_x: f32, scale_y: f32) {
     let Some(e) = engine() else { return };
     e.panel.set((x, y, width, height));
+    e.panel_scale.set((scale_x, scale_y));
     e.resync(scale_x, scale_y);
     e.publish();
 }
 
 /// The pointer is at this place in the panel, in pixels.
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_pointer(x: i32, y: i32) {
+pub fn pointer(x: i32, y: i32) {
     let Some(e) = engine() else { return };
     if !e.captured.get() && e.forwarding() {
         e.pointer(x, y);
     }
 }
 
-/// 0 left, 1 right, 2 middle.
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_button(button: i32, down: bool, x: i32, y: i32) {
+/// A mouse button: 0 left, 1 right, 2 middle.
+pub fn button(button: i32, down: bool, x: i32, y: i32) {
     let Some(e) = engine() else { return };
-    let (button, bit) = match button {
-        1 => (Button::Right, 2),
-        2 => (Button::Middle, 4),
-        _ => (Button::Left, 1),
-    };
-    if !e.forwarding() {
-        return;
-    }
-    if !e.captured.get() {
-        e.pointer(x, y);
-    }
-    if down {
-        e.send(Event::Button { button, down: true });
-        e.buttons.set(e.buttons.get() | bit);
-    } else if e.buttons.get() & bit != 0 {
-        e.send(Event::Button { button, down: false });
-        e.buttons.set(e.buttons.get() & !bit);
-    }
+    e.button(button, down, Some((x, y)));
 }
 
 /// The wheel turned by this many notches (positive away from the user, or to the right).
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_wheel(notches: f32, horizontal: bool) {
+pub fn wheel(notches: f32, horizontal: bool) {
     let Some(e) = engine() else { return };
-    if !e.forwarding() {
-        return;
+    if e.forwarding() {
+        e.wheel(notches, horizontal);
     }
-    let k = if e.app.borrow().store.settings.scroll_reversed { -NOTCH } else { NOTCH };
-    // The wheel counts away from the user positive; the protocol counts towards the end of
-    // the document positive.
-    e.send(if horizontal { Event::Scroll { dx: notches * k, dy: 0.0 } } else { Event::Scroll { dx: 0.0, dy: -notches * k } });
 }
 
 /// A key on the picture, by where it is on the keyboard (set 1 scancode and the E0 bit).
 /// Returns whether it went to the computer (the app then does nothing else with it).
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_key(scancode: u32, extended: bool, down: bool, repeat: bool) -> bool {
+pub fn key(scancode: u32, extended: bool, down: bool, repeat: bool) -> bool {
     let Some(e) = engine() else { return false };
-    const F11: u16 = 0x57;
-    const I: u16 = 0x17;
-    let session = e.forwarding();
-    if !session {
-        return false;
-    }
-    let held = |vk: i32| unsafe { GetKeyState(vk) } < 0;
-    let scancode = scancode as u16;
-    if down && scancode == F11 && !extended {
-        // The window's own, as in the Linux viewer.
-        if !repeat {
-            e.app.borrow_mut().update(Msg::ToggleFullscreen);
-            e.publish();
-        }
-        return true;
-    }
-    if down && scancode == I && held(0x10) && held(0x11) && held(0x12) {
-        e.chord.set(false);
-        if !repeat {
-            e.app.borrow_mut().update(Msg::ToggleFigures);
-            e.publish();
-        }
-        return true;
-    }
-    e.key(scancode, extended, down);
-    e.publish();
-    true
+    e.picture_key(scancode as u16, extended, down, repeat)
 }
 
 /// A finger on the touchscreen over the panel: `id` is Windows' pointer id for the contact,
 /// `phase` 0 down, 1 move, 2 up (also for a cancelled contact or a lost capture), at this place
 /// in the panel in pixels. Returns whether it went to the computer as a touch; if not, the app
 /// treats it as the pointer, as before.
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_touch(id: u32, phase: i32, x: i32, y: i32) -> bool {
+pub fn touch(id: u32, phase: i32, x: i32, y: i32) -> bool {
     let Some(e) = engine() else { return false };
     e.touch(id, crate::touch::phase(phase), x, y)
 }
 
 /// The panel got the keyboard, or lost it.
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_focus(focused: bool) {
+pub fn focus(focused: bool) {
     let Some(e) = engine() else { return };
     if !focused {
         e.hold_pointer(false);
@@ -291,28 +196,12 @@ pub extern "system" fn remoteman_focus(focused: bool) {
     }
 }
 
-/// The host's cursor as a Windows cursor (0: none to show; the app shows the arrow until the
-/// host has said), and a number that changes when it does.
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_cursor(serial: *mut u32) -> isize {
-    let Some(e) = engine() else { return 0 };
-    if !serial.is_null() {
-        // SAFETY: the app's pointer to its number.
-        unsafe { *serial = e.cursor_serial.get() };
-    }
-    let gone = e.app.borrow().session.as_ref().is_some_and(|s| s.shared.cursor_gone.load(Ordering::Relaxed));
-    if gone || e.captured.get() {
-        return -1;
-    }
-    e.cursor.get().map_or(0, |c| c.0 as isize)
-}
-
 /// Leaving: nothing may be left connected. Returns what the process should end with.
-#[unsafe(no_mangle)]
-pub extern "system" fn remoteman_stop() -> i32 {
+pub fn stop() -> i32 {
     let Some(e) = ENGINE.with(|x| x.borrow_mut().take()) else { return 2 };
     e.release_keys();
     e.close_second();
+    crate::full::leave(&e, false);
     e.hold_pointer(false);
     let hook = e.hook.replace(0);
     // SAFETY: our own hook and window.
@@ -327,11 +216,7 @@ pub extern "system" fn remoteman_stop() -> i32 {
         app.closing();
         app.scene.clone()
     };
-    scene.quit.store(true, Ordering::Relaxed);
-    scene.poke();
-    if let Some(drawing) = e.drawing.borrow_mut().take() {
-        let _ = drawing.join();
-    }
+    e.stop_drawing(&scene);
     let app = e.app.borrow();
     if let Some(s) = &app.summary {
         say!(
@@ -354,15 +239,24 @@ pub extern "system" fn remoteman_stop() -> i32 {
     app.code.unwrap_or(0)
 }
 
+/// Whether Windows is set to dark apps.
+pub fn system_dark() -> bool {
+    crate::window::system_dark()
+}
+
+/// For tests: lines in the engine's log (`--log`) from the app, marked as the view's.
+pub fn say(line: &str) {
+    say!("view: {line}");
+}
+
 // Starting.
 
-fn start(words: Vec<String>, notify: Notify) -> Result<()> {
+fn start_engine(words: Vec<String>, notify: Notify) -> Result<()> {
     let args = crate::args::parse_from(words)?;
     if let Some(path) = &args.log {
         crate::log::to_file(path)?;
     }
-    // A panic ends the app (it can't unwind out of the engine's C functions): say why first,
-    // since a window app has no stderr to see it on.
+    // A panic: say why first, since a window app has no stderr to see it on.
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         say!("panic: {info}");
@@ -417,11 +311,13 @@ fn start(words: Vec<String>, notify: Notify) -> Result<()> {
         hwnd: hwnd.0 as isize,
         host: Cell::new(0),
         panel: Cell::new((0, 0, 0, 0)),
+        panel_scale: Cell::new((1.0, 1.0)),
         notify,
-        text: RefCell::new(Vec::new()),
         told: RefCell::new(String::new()),
         effects: RefCell::new(Vec::new()),
         drawing: RefCell::new(None),
+        chain: RefCell::new(None),
+        full: RefCell::new(None),
         deadline: Cell::new(seconds.map(|s| Instant::now() + Duration::from_secs(s))),
         held: RefCell::new(HashSet::new()),
         buttons: Cell::new(0),
@@ -433,7 +329,7 @@ fn start(words: Vec<String>, notify: Notify) -> Result<()> {
         hook: Cell::new(0),
         second: RefCell::new(None),
         cursor: Cell::new(None),
-        cursor_serial: Cell::new(0),
+        got_shape: Cell::new(false),
         watched: Cell::new(None),
         fingers: RefCell::new(crate::touch::Fingers::default()),
     });
@@ -450,45 +346,15 @@ fn start(words: Vec<String>, notify: Notify) -> Result<()> {
 }
 
 impl Engine {
-    fn attach(&self, panel: *mut c_void, window: isize) -> Result<()> {
-        anyhow::ensure!(!panel.is_null(), "no panel");
+    fn attach(&self, window: isize) -> Result<PanelChain> {
         self.host.set(window);
         // Before anything connects: the hello says whether this monitor is in HDR.
         self.watch_monitor();
-        let (gpu, scene) = {
-            let app = self.app.borrow();
-            (app.gpu.clone(), app.scene.clone())
-        };
+        let gpu = self.app.borrow().gpu.clone();
         let (_, _, w, h) = self.panel.get();
         let swap = crate::draw::panel_chain(&gpu, w.max(8) as u32, h.max(8) as u32)?;
-        // SAFETY: the app hands over a live interface of the panel, which is borrowed here
-        // and not released; the swap chain is ours and the panel keeps its own reference.
-        unsafe {
-            let unknown = IUnknown::from_raw_borrowed(&panel).context("no panel")?;
-            let mut native: *mut c_void = std::ptr::null_mut();
-            unknown.query(&SWAP_CHAIN_PANEL_NATIVE, &mut native).ok().context("the panel has no ISwapChainPanelNative")?;
-            type SetSwapChain = unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT;
-            let vtable = *(native as *const *const usize);
-            let set: SetSwapChain = std::mem::transmute(*vtable.add(3));
-            let done = set(native, swap.as_raw());
-            // (Release, IUnknown's third.)
-            let release: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*vtable.add(2));
-            release(native);
-            done.ok().context("give the panel its swap chain")?;
-        }
-        if self.drawing.borrow().is_none() {
-            struct Send1(windows::Win32::Graphics::Dxgi::IDXGISwapChain1);
-            // SAFETY: the swap chain is free-threaded; it is only used by the draw thread from
-            // here on.
-            unsafe impl Send for Send1 {}
-            let swap = Send1(swap);
-            let shot = self.app.borrow().args.shot.clone();
-            let drawing = crate::draw::start_on(gpu, scene, move || {
-                let swap = swap;
-                crate::draw::Surface::Panel(swap.0)
-            }, shot)?;
-            *self.drawing.borrow_mut() = Some(drawing);
-        }
+        *self.chain.borrow_mut() = Some(swap.clone());
+        self.draw_panel()?;
         say!("engine: the panel shows the picture");
         if self.app.borrow().args.watch_vblank {
             let scene = self.app.borrow().scene.clone();
@@ -498,12 +364,126 @@ impl Engine {
         // (Taken out first: the app mustn't stay borrowed while the player starts.)
         let play = self.app.borrow().args.play.clone();
         if let Some(path) = play {
-            return self.play(&path);
+            self.play(&path)?;
+        } else {
+            // Now there is a window: the computer named on the command line, if one was.
+            self.app.borrow_mut().start();
+            self.publish();
         }
-        // Now there is a window: the computer named on the command line, if one was.
-        self.app.borrow_mut().start();
-        self.publish();
+        // The app's reference: it hands it to its panel.
+        Ok(PanelChain(swap.into_raw()))
+    }
+
+    /// Draw into the panel's swap chain (again, after full screen).
+    pub(crate) fn draw_panel(&self) -> Result<()> {
+        if self.drawing.borrow().is_some() {
+            return Ok(());
+        }
+        let Some(swap) = self.chain.borrow().clone() else { return Ok(()) };
+        struct Send1(windows::Win32::Graphics::Dxgi::IDXGISwapChain1);
+        // SAFETY: the swap chain is free-threaded; it is only used by the draw thread from
+        // here on (the panel only shows it).
+        unsafe impl Send for Send1 {}
+        let swap = Send1(swap);
+        let (gpu, scene, shot) = {
+            let app = self.app.borrow();
+            (app.gpu.clone(), app.scene.clone(), app.args.shot.clone())
+        };
+        scene.quit.store(false, Ordering::Relaxed);
+        let drawing = crate::draw::start_on(gpu, scene, move || {
+            let swap = swap;
+            crate::draw::Surface::Panel(swap.0)
+        }, shot)?;
+        *self.drawing.borrow_mut() = Some(drawing);
         Ok(())
+    }
+
+    /// Stop the draw thread there is (the panel's or full screen's), and wait for it.
+    pub(crate) fn stop_drawing(&self, scene: &Scene) {
+        scene.quit.store(true, Ordering::Relaxed);
+        scene.poke();
+        if let Some(drawing) = self.drawing.borrow_mut().take() {
+            let _ = drawing.join();
+        }
+    }
+
+    /// The panel's size and scale, told to the draw thread and the app again (after full
+    /// screen, which had its own).
+    pub(crate) fn repanel(&self) {
+        let (sx, sy) = self.panel_scale.get();
+        self.resync(sx, sy);
+    }
+
+    /// The window that has the keyboard when the session has it: the app's, or the engine's
+    /// own in full screen.
+    pub(crate) fn front(&self) -> bool {
+        // SAFETY: a plain query.
+        let front = unsafe { GetForegroundWindow() }.0 as isize;
+        front == self.host.get() || self.full.borrow().as_ref().is_some_and(|f| f.hwnd == front)
+    }
+
+    /// A mouse button on the picture (0 left, 1 right, 2 middle), at this place in pixels when
+    /// the pointer isn't captured.
+    pub(crate) fn button(&self, button: i32, down: bool, at: Option<(i32, i32)>) {
+        let (button, bit) = match button {
+            1 => (Button::Right, 2),
+            2 => (Button::Middle, 4),
+            _ => (Button::Left, 1),
+        };
+        if !self.forwarding() && !(!down && self.buttons.get() & bit != 0) {
+            return;
+        }
+        if let (false, Some((x, y))) = (self.captured.get(), at) {
+            self.pointer(x, y);
+        }
+        if down {
+            self.send(Event::Button { button, down: true });
+            self.buttons.set(self.buttons.get() | bit);
+        } else if self.buttons.get() & bit != 0 {
+            self.send(Event::Button { button, down: false });
+            self.buttons.set(self.buttons.get() & !bit);
+        }
+    }
+
+    pub(crate) fn wheel(&self, notches: f32, horizontal: bool) {
+        let k = if self.app.borrow().store.settings.scroll_reversed { -NOTCH } else { NOTCH };
+        // The wheel counts away from the user positive; the protocol counts towards the end of
+        // the document positive.
+        self.send(if horizontal { Event::Scroll { dx: notches * k, dy: 0.0 } } else { Event::Scroll { dx: 0.0, dy: -notches * k } });
+    }
+
+    /// A key on the picture: F11 and Ctrl+Alt+Shift+I are the window's own; the rest goes to
+    /// the computer while it has the keyboard. Whether it was taken.
+    pub(crate) fn picture_key(&self, scancode: u16, extended: bool, down: bool, repeat: bool) -> bool {
+        const F11: u16 = 0x57;
+        const I: u16 = 0x17;
+        if !self.forwarding() {
+            // A key let go that the computer was told is down still goes.
+            if !down {
+                self.key(scancode, extended, false);
+            }
+            return false;
+        }
+        let held = |vk: i32| unsafe { GetKeyState(vk) } < 0;
+        if down && scancode == F11 && !extended {
+            // The window's own, as in the Linux viewer.
+            if !repeat {
+                self.app.borrow_mut().update(Msg::ToggleFullscreen);
+                self.publish();
+            }
+            return true;
+        }
+        if down && scancode == I && held(0x10) && held(0x11) && held(0x12) {
+            self.chord.set(false);
+            if !repeat {
+                self.app.borrow_mut().update(Msg::ToggleFigures);
+                self.publish();
+            }
+            return true;
+        }
+        self.key(scancode, extended, down);
+        self.publish();
+        true
     }
 
     /// For tests: a made-up session whose picture is a recorded HEVC stream, played at 60 a
@@ -565,9 +545,10 @@ impl Engine {
     }
 
     /// The panel's size or scale changed, or the monitor under it.
-    fn resync(&self, sx: f32, sy: f32) {
+    pub(crate) fn resync(&self, sx: f32, sy: f32) {
         let (_, _, w, h) = self.panel.get();
-        if w <= 0 || h <= 0 {
+        // In full screen the picture's place is the engine's own window, which says its size.
+        if w <= 0 || h <= 0 || self.full.borrow().is_some() {
             return;
         }
         let host = HWND(self.host.get() as *mut _);
@@ -586,7 +567,7 @@ impl Engine {
     /// a session is asked again when that changes), its refresh, and whether it varies its
     /// refresh. Looked at when the panel changes and once a second, since Windows' HDR switch
     /// and the window's monitor can change without the panel's size.
-    fn watch_monitor(&self) {
+    pub(crate) fn watch_monitor(&self) {
         let host = HWND(self.host.get() as *mut _);
         if host.0.is_null() {
             return;
@@ -626,7 +607,7 @@ impl Engine {
 
     /// Whether pictures are presented as they arrive (variable refresh) or at the display's
     /// refresh: the switch, full screen, the monitor, and DXGI.
-    fn decide_refresh(&self) {
+    pub(crate) fn decide_refresh(&self) {
         let Ok(app) = self.app.try_borrow() else { return };
         let scene = &app.scene;
         let range = *scene.vrr_range.lock().unwrap();
@@ -637,23 +618,37 @@ impl Engine {
         }
     }
 
-    fn forwarding(&self) -> bool {
+    pub(crate) fn forwarding(&self) -> bool {
         self.app.try_borrow().map(|a| a.forwarding()).unwrap_or(false)
     }
 
-    fn send(&self, event: Event) {
-        if let Some(client) = self.app.try_borrow().ok().and_then(|a| a.client().cloned()) {
+    pub(crate) fn send(&self, event: Event) {
+        let Ok(app) = self.app.try_borrow() else { return };
+        if let Some(client) = app.client().cloned() {
+            drop(app);
             client.send(event);
+        } else if app.args.play.is_some() && app.session.is_some() {
+            // For tests: a played session has no computer to send to; what would have gone is
+            // in the log (the pointer's place at most once a second).
+            static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+            if matches!(event, Event::PointerTo { .. } | Event::PointerBy { .. }) {
+                let mut last = LAST.lock().unwrap();
+                if last.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) {
+                    return;
+                }
+                *last = Some(Instant::now());
+            }
+            say!("input (a played session, not sent): {event:?}");
         }
     }
 
-    fn point_at(&self, index: u8) {
+    pub(crate) fn point_at(&self, index: u8) {
         if self.pointer_on.replace(index) != index {
             self.send(Event::Display(index));
         }
     }
 
-    fn pointer(&self, x: i32, y: i32) {
+    pub(crate) fn pointer(&self, x: i32, y: i32) {
         self.point_at(0);
         let at = self.app.borrow().fraction(x as f32, y as f32);
         if let Some((x, y)) = at {
@@ -662,7 +657,7 @@ impl Engine {
     }
 
     /// A key by where it is on the keyboard (as the old window's).
-    fn key(&self, scancode: u16, extended: bool, down: bool) {
+    pub(crate) fn key(&self, scancode: u16, extended: bool, down: bool) {
         let Some(own) = crate::keys::usage(scancode, extended) else { return };
         let modifier = (0xE0..=0xE7).contains(&own);
         let usage = self.app.borrow().key_for(own);
@@ -683,7 +678,7 @@ impl Engine {
         }
     }
 
-    fn release_keys(&self) {
+    pub(crate) fn release_keys(&self) {
         let held: Vec<u16> = self.held.borrow_mut().drain().collect();
         for usage in held {
             self.send(Event::Key { usage, down: false });
@@ -747,7 +742,7 @@ impl Engine {
             return ours;
         }
         // SAFETY: plain queries.
-        let (front, ctrl) = unsafe { (GetForegroundWindow().0 as isize == self.host.get(), GetAsyncKeyState(0x11) < 0) };
+        let (front, ctrl) = (self.front(), unsafe { GetAsyncKeyState(0x11) } < 0);
         let alt = key.flags.0 & LLKHF_ALTDOWN.0 != 0;
         let system = match key.vkCode {
             LWIN | RWIN => true,
@@ -763,7 +758,7 @@ impl Engine {
     }
 
     /// Hold the pointer in the panel and send its raw movement, or let it go.
-    fn hold_pointer(&self, hold: bool) {
+    pub(crate) fn hold_pointer(&self, hold: bool) {
         use windows::Win32::UI::Input::{RAWINPUTDEVICE, RAWINPUTDEVICE_FLAGS, RIDEV_INPUTSINK, RIDEV_REMOVE, RegisterRawInputDevices};
         if self.captured.replace(hold) == hold {
             return;
@@ -779,9 +774,14 @@ impl Engine {
             let _ = RAWINPUTDEVICE_FLAGS(0);
             let _ = RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32);
             if hold {
-                let (x, y, w, h) = self.panel.get();
+                // The panel in the app's window, or the picture in full screen's.
+                let full = self.full.borrow().as_ref().map(|f| f.hwnd);
+                let ((x, y, w, h), window) = match full {
+                    Some(hwnd) => (self.app.borrow().video_pixels().unwrap_or((0, 0, 1, 1)), hwnd),
+                    None => (self.panel.get(), self.host.get()),
+                };
                 let mut at = POINT { x, y };
-                let _ = windows::Win32::Graphics::Gdi::ClientToScreen(HWND(self.host.get() as *mut _), &mut at);
+                let _ = windows::Win32::Graphics::Gdi::ClientToScreen(HWND(window as *mut _), &mut at);
                 let _ = ClipCursor(Some(&RECT { left: at.x, top: at.y, right: at.x + w, bottom: at.y + h }));
             } else {
                 let _ = ClipCursor(None);
@@ -794,7 +794,7 @@ impl Engine {
     }
 
     /// This PC's clipboard changed: text, else a picture, goes to the computer.
-    fn copied(&self) {
+    pub(crate) fn copied(&self) {
         // SAFETY: a plain query.
         if unsafe { GetClipboardSequenceNumber() } == self.own_copy.get() {
             return;
@@ -810,7 +810,7 @@ impl Engine {
     }
 
     /// Take the host's newest cursor shape, if there is one.
-    fn cursor_changed(&self) {
+    pub(crate) fn cursor_changed(&self) {
         let shape = self.app.borrow().session.as_ref().and_then(|s| s.shared.cursor.lock().unwrap().take());
         let Some(shape) = shape else { return };
         let made = crate::cursor::make(&shape);
@@ -826,9 +826,10 @@ impl Engine {
             app.remote_cursor = (shape.width > 0).then(|| Arc::new(shape));
         }
         let old = self.cursor.replace(made);
-        self.cursor_serial.set(self.cursor_serial.get().wrapping_add(1));
+        self.got_shape.set(true);
+        crate::full::set_cursor(self);
         if let Some(old) = old {
-            // The app may still be wearing it for a moment: it is let go a little later.
+            // The window may still be wearing it for a moment: it is let go a little later.
             let old = old.0 as isize;
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_secs(2));
@@ -854,7 +855,7 @@ impl Engine {
         // A captured pointer: while the app's window has the keyboard and the picture is the
         // computer's, and Ctrl+Alt+Shift hasn't given it back.
         // SAFETY: a plain query.
-        let front = unsafe { GetForegroundWindow() }.0 as isize == self.host.get();
+        let front = self.front();
         let want = front && !self.released.get() && self.app.borrow().forwarding() && self.app.borrow().store.settings.capture && self.panel.get().2 > 0;
         self.hold_pointer(want);
         if self.deadline.get().is_some_and(|d| Instant::now() >= d) {
@@ -866,12 +867,18 @@ impl Engine {
 
     /// Do what the app's state asks of the engine itself, keep what is the app's, and tell the
     /// app if what it shows has changed.
-    fn publish(&self) {
+    pub(crate) fn publish(&self) {
+        let full = self.full.borrow().is_some();
         let effects = {
             let Ok(mut app) = self.app.try_borrow_mut() else { return };
-            // Nothing is drawn by the kit here: what it would draw is the app's to show.
-            app.dirty = false;
-            std::mem::take(&mut app.effects)
+            if full {
+                // In full screen the engine's own window shows the kit's bar, menus and news.
+                app.finish()
+            } else {
+                // Nothing is drawn by the kit here: what it would draw is the app's to show.
+                app.dirty = false;
+                std::mem::take(&mut app.effects)
+            }
         };
         for effect in effects {
             self.apply(effect);
@@ -882,23 +889,47 @@ impl Engine {
         }
     }
 
-    fn apply(&self, effect: Effect) {
-        let host = HWND(self.host.get() as *mut _);
+    pub(crate) fn apply(&self, effect: Effect) {
+        // What a file dialog belongs to: the app's window, or full screen's.
+        let host = HWND(self.full.borrow().as_ref().map_or(self.host.get(), |f| f.hwnd) as *mut _);
         let out = |v: Value| self.effects.borrow_mut().push(v);
         match effect {
             Effect::Minimise => out(json!({"do": "minimise"})),
             Effect::Maximise => out(json!({"do": "maximise"})),
             Effect::Close => out(json!({"do": "close"})),
             Effect::Quit => out(json!({"do": "quit", "code": self.app.borrow().code.unwrap_or(0)})),
-            Effect::Fullscreen(on) => out(json!({"do": "fullscreen", "on": on})),
-            Effect::Title(title) => out(json!({"do": "title", "text": title})),
+            Effect::Fullscreen(on) => {
+                // Full screen is a window of the engine's own over the monitor (`full.rs`),
+                // where the monitor can vary its refresh; the app's window waits behind it.
+                if on {
+                    if let Err(e) = crate::full::enter(self) {
+                        say!("full screen: no window of its own: {e:#}");
+                        self.app.borrow_mut().set_fullscreen(false);
+                    }
+                } else {
+                    crate::full::leave(self, true);
+                }
+                out(json!({"do": "fullscreen", "on": self.full.borrow().is_some()}));
+            }
+            Effect::Title(title) => {
+                crate::full::title(self, &title);
+                out(json!({"do": "title", "text": title}));
+            }
             Effect::Size(w, h) => out(json!({"do": "size", "width": w, "height": h})),
             Effect::ReleaseKeys => self.release_keys(),
             Effect::ForgetCursor => {
+                // Let go a little later, as in `cursor_changed`: a window may still wear it.
                 if let Some(old) = self.cursor.take() {
-                    let _ = old;
+                    let old = old.0 as isize;
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_secs(2));
+                        // SAFETY: ours, and nobody's cursor by now.
+                        unsafe {
+                            let _ = DestroyCursor(HCURSOR(old as *mut _));
+                        }
+                    });
                 }
-                self.cursor_serial.set(self.cursor_serial.get().wrapping_add(1));
+                self.got_shape.set(false);
             }
             Effect::SetClipboard(text) => {
                 crate::window::clipboard_set(&text);
@@ -1127,7 +1158,7 @@ impl Engine {
 
     /// The state without what the app has to do (`None` while the app is busy).
     fn state_value(&self) -> Option<Value> {
-        self.app.try_borrow().ok().map(|app| state(&app))
+        self.app.try_borrow().ok().map(|app| state_of(&app))
     }
 }
 
@@ -1175,7 +1206,7 @@ fn options(app: &App, choice: &Choice) -> Value {
 }
 
 /// Everything the app shows, as it is now.
-fn state(app: &App) -> Value {
+fn state_of(app: &App) -> Value {
     let screen = match &app.screen {
         Screen::Computers => json!({"kind": "computers"}),
         Screen::Connecting => json!({"kind": "connecting", "name": app.attempt.as_ref().map(|a| a.target.name.clone()), "address": app.attempt.as_ref().map(|a| a.target.address.clone())}),

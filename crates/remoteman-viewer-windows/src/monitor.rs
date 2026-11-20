@@ -183,8 +183,17 @@ pub fn watch_vblanks(hwnd: isize, scene: std::sync::Arc<crate::stream::Scene>) {
             let fixed = gaps.iter().filter(|g| (**g - period).abs() < 0.5).count();
             let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
             let longest = gaps.iter().cloned().fold(0.0, f64::max);
+            // Which window has the keyboard: a monitor varies its refresh only for the activated
+            // one (and not for long when another window comes in front).
+            let front = {
+                use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow};
+                let mut class = [0u16; 64];
+                // SAFETY: plain queries into a buffer of the size given.
+                let n = unsafe { GetClassNameW(GetForegroundWindow(), &mut class) }.max(0) as usize;
+                String::from_utf16_lossy(&class[..n])
+            };
             say!(
-                "vblank: {} in {every} s, {mean:.2} ms apart on average, {longest:.2} at most; {fixed} one fixed refresh ({period:.2} ms) apart; {}",
+                "vblank: {} in {every} s, {mean:.2} ms apart on average, {longest:.2} at most; {fixed} one fixed refresh ({period:.2} ms) apart; {}; in front: {front}",
                 gaps.len() + 1,
                 if scene.tearing.load(Ordering::Relaxed) { "presenting with tearing allowed" } else { "presenting at the refresh" }
             );
