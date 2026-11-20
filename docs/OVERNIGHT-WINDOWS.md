@@ -209,3 +209,12 @@ unmuted before, muted while the test client listened (host: "the PC's speakers a
 sound is still recorded)"), the client heard 8.5 s of the 440 Hz tone with the PC muted, the
 microphone went into Steam's, and the output was unmuted again when it left. The test client's
 pairing was revoked and its identity deleted.
+
+## Variable refresh in a window (09:20-09:40)
+Measured on DISPLAY1 (XG32UCWMG, VRR 48-240 Hz) with a clean 100-pictures-a-second clip: full
+screen follows the pictures (variable refresh works); in a window the monitor stays at 240 Hz
+(vblanks 4.17 ms apart). A window of our own over the panel with an HWND flip-model swap chain
+(child, owned popup, 8- and 10-bit) stayed "drawn by the desktop's compositor" at 4.17 ms too:
+Windows gives independent flip, and with it variable refresh, only to a window covering its
+monitor. Not built. What might do it is outside the app: NVIDIA's "G-SYNC for windowed and full
+screen mode" in the NVIDIA Control Panel (not tried; the owner's setting).
