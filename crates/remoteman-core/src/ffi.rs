@@ -891,6 +891,34 @@ pub unsafe extern "C" fn rm_host_set_features(host: *const Host, features: *cons
     unsafe { &*host }.set_features(list);
 }
 
+/// The host program's own context for [`rm_host_set_bitrate_callback`], which the core may use
+/// from its handler thread.
+struct BitrateCtx(*mut c_void);
+// SAFETY: the host program promises its context may be used from the core's handler thread
+// (as with `RmHostCallbacks`).
+unsafe impl Send for BitrateCtx {}
+
+/// Have the core follow the network with the picture's bitrate: when the client reports lost
+/// frames the core calls `on_bitrate` with a lower target in bits a second, and with higher ones
+/// after a clean stretch, never above the client's ceiling (`configure`) or `default_bps`, what
+/// the host encodes at when the client set none (0: nothing is followed until it sets one).
+/// The call comes on the core's handler thread, one at a time with the other callbacks; change
+/// the encoder's rate live, without a keyframe. The core sends the client `status` itself. Call
+/// it any time after `rm_host_start`; it takes effect from the next client, and a null
+/// `on_bitrate` does nothing. Hosts that never call this keep encoding at what they chose.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `ctx` is passed back to `on_bitrate`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_set_bitrate_callback(host: *const Host, default_bps: u32, on_bitrate: Option<extern "C" fn(ctx: *mut c_void, bits_per_second: u32)>, ctx: *mut c_void) {
+    let Some(f) = on_bitrate else { return };
+    let ctx = BitrateCtx(ctx);
+    unsafe { &*host }.set_bitrate_hook(default_bps, move |bps| {
+        let ctx = &ctx;
+        f(ctx.0, bps);
+    });
+}
+
 /// Let the next unknown device in (it is remembered, and pairing turns itself off), or stop.
 ///
 /// # Safety

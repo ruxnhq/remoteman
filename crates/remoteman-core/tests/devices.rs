@@ -113,7 +113,7 @@ fn devices_are_listed_dropped_revoked_and_forgotten() {
             _ => {}
         }
     };
-    assert_eq!(told, ["video", "clipboard"]);
+    assert_eq!(told, ["video", "clipboard", "parity"]);
 
     // Dropped: the client is told why, the host keeps listening and still trusts it.
     assert!(host.drop_client());
