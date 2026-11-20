@@ -43,7 +43,7 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 | The driver unplugs a device's monitor when it leaves (`DESTROYMONITOR`) | **built, not installed** (59db529): `DESTROYMONITOR n` departs the monitor, new `PLUGMONITOR n` brings it back with the same identity; the host plugs a device's monitor in when it comes and unplugs it when it leaves (PC with screens only); driver 0.1.1.0. Morning test plan in the merge's branch report (below) |
 | A display scale for the device's monitor | **built** (92cb5b2): after the device's monitor is up, its Windows scale is set to the step nearest the device's `scale` (`DisplayConfigSetDeviceInfo`, -4), never on the PC's own screens or when mirroring. The GET was read on this PC (the ROG: 100-350 %, 300 % recommended); the SET needs the driver's monitor (elevated), not run |
 | Steam's sound devices from the user's Steam, speakers switched while a device listens | **built** (7564e3c): the installer looks for Steam's devices and says how to get them (Steam packs the drivers inside `drivers.exe`, nothing to give pnputil); while a device listens the default output becomes Steam Streaming Speakers and is put back after (`speakers.json` survives a crash), switchable. Not run (no Steam devices on this PC; no default device changed) |
-| A camera for the PC (virtual camera) | **partial, not merged**: 3 commits on `worktree-agent-a55cd6d8b120f75f6` (a media source DLL for Windows' Frame Server, the installer registering it); stopped by the restart before its report |
+| A camera for the PC (virtual camera) | **built** (a9d240e): `remoteman-vcam-windows`, a media source DLL the installer registers (HKLM), fed through shared memory by the host, which decodes the device's H.264 with Windows' own decoder; `camera` offered only when registered. Tested in-process (black, then test frames, then black); Windows' camera service refused a per-user registration, so the real path waits for an install |
 | AMD and Intel encoders with loss recovery | **partial, not merged**: a Direct3D 12 video encoder was started (one uncommitted file in its worktree) and stopped by the restart. AMF/Intel's own SDKs not testable here (the Radeon iGPU has no driver) |
 
 ### Every host (the shared core, `remoteman-core`)
@@ -91,3 +91,10 @@ Windows Update restarted the PC at 00:09 PST (`MoUsoCoreWorker`, event 1074), an
 session and its five running agents; nothing ran from then until 07:30. In flight then: the
 virtual camera, the Direct3D 12 encoder, NVDEC for 4:4:4, the second factor and full screen's
 menus. Not reached: more than one viewer at once.
+
+## The morning
+At 07:40 the driver's 3200x2400 monitor was Windows' main display at 0,0 with no device
+connected and sharing off, the PC's three screens left of it: Windows had rebuilt the desktop at
+the 00:09 restart (the XG32UCWMGs asleep and disconnected then), and the installed (old) host
+doesn't take the driver's monitors off. `C:m	oolsix-screens.ps1` put DISPLAY1 back at 0,0 as
+the main screen. The new host's watch between devices does this by itself.
