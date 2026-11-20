@@ -15,7 +15,7 @@ param([int]$Port = 7899, [string]$Log = "C:\rm\shots-host\fakehost.log")
 $state = [ordered]@{
   address = "0.0.0.0:$Port"; fingerprint = "c41e77a09b2d5f36aa18e2b7"; pairing = $false; pending = $null
   devices = [System.Collections.ArrayList]@(@{ fingerprint = "2b90e4c715af83d6"; name = "iPhone"; connected = $false })
-  daemon = $false; paused = $false; name = "DEN-PC"; clipboard = $false; files = $false; microphone = $true
+  daemon = $false; paused = $false; name = "DEN-PC"; clipboard = $false; files = $false; lock_on_leave = $false; speakers_follow = $true; microphone = $true
   client = $null; sent = [ordered]@{ answered = 0; ok = $false; said = "" }
 }
 
@@ -56,6 +56,7 @@ function Answer([string]$line) {
       $state.devices.Remove($d); return "ok"
     }
     '^allow (clipboard|files) (on|off)$' { $state[$w[1]] = ($w[2] -eq "on"); return "ok" }
+    '^set (lock|speakers) (on|off)$' { $state[$(if ($w[1] -eq 'lock') { 'lock_on_leave' } else { 'speakers_follow' })] = ($w[2] -eq "on"); return "ok" }
     '^fake pending' { $state.pending = [ordered]@{ name = ($w[2] -replace '_', ' '); fingerprint = $w[4]; code = $w[3]; seconds = 60 }; return "ok" }
     '^fake client' {
       $d = $state.devices | Where-Object { $_.fingerprint -eq $w[3] } | Select-Object -First 1
@@ -66,7 +67,7 @@ function Answer([string]$line) {
     }
     '^fake gone$' { $state.client = $null; foreach ($d in $state.devices) { $d.connected = $false }; return "ok" }
   }
-  return "status | pair on|off|accept|decline | allow clipboard|files on|off | drop | revoke FINGERPRINT | send PATH | sharing on|off"
+  return "status | pair on|off|accept|decline | allow clipboard|files on|off | set lock|speakers on|off | drop | revoke FINGERPRINT | send PATH | sharing on|off"
 }
 
 New-Item -ItemType Directory -Force (Split-Path $Log) | Out-Null

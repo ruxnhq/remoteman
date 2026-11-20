@@ -81,6 +81,10 @@ pub struct Host {
     unlocked_for_client: bool,
     /// Wrong passwords for unlocking in a row, and until when no more are taken.
     wrong: (u32, Option<std::time::Instant>),
+    /// The PC is kept awake while a device is connected (`awake.rs`).
+    awake: Option<crate::awake::Awake>,
+    /// The PC's speakers are switched to Steam's while the device listens (`speakers.rs`).
+    switched: Option<crate::speakers::Switched>,
 }
 
 /// How many wrong passwords in a row before none are taken for a while (Windows' own limit on
@@ -90,7 +94,7 @@ const WRONG_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 impl Host {
     pub fn new(screen: Screen, bitrate: u32, fit: Fit, allowed: Allowed) -> Self {
-        Self { screen, bitrate, fit, allowed, clipboard_wanted: false, copies: Arc::default(), sound: None, microphone: None, mic_count: (0, 0, None), live: None, unlocked_for_client: false, wrong: (0, None) }
+        Self { screen, bitrate, fit, allowed, clipboard_wanted: false, copies: Arc::default(), sound: None, microphone: None, mic_count: (0, 0, None), live: None, unlocked_for_client: false, wrong: (0, None), awake: None, switched: None }
     }
 
     /// A device has come to a locked PC (or one at its sign-in screen), which Windows shows on
@@ -424,7 +428,13 @@ impl Host {
     /// Send the desktop's sound to the client, or stop.
     fn send_sound(&mut self, on: bool) {
         self.sound = None;
+        self.switched = None;
         let (Some(l), true) = (self.live.as_ref(), on) else { return };
+        // The PC's own speakers go quiet while the device listens (if the owner allows it and
+        // Steam's speakers exist); the sound is then recorded from those.
+        if self.allowed.speakers_follow.load(Ordering::Relaxed) {
+            self.switched = crate::speakers::Switched::engage();
+        }
         l.link.send_message(Message::SoundFormat { codec: "opus".into(), rate: sound::SAMPLE_RATE, channels: 2, frame_us: sound::FRAME_US as u32 });
         match Speaker::start(l.link.clone()) {
             Ok(speaker) => self.sound = Some(speaker),
@@ -508,7 +518,7 @@ impl HostHandler for Host {
     }
 
     fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
-        self.left();
+        self.end(false);
         if self.allowed.paused.load(Ordering::Relaxed) {
             tracing::info!(name = %client.name, "a device came while sharing is off: turned away");
             return Err("sharing is switched off on this computer".into());
@@ -516,7 +526,9 @@ impl HostHandler for Host {
         self.unlock_for(client)?;
         let screen = client.display;
         tracing::info!(name = %client.name, ?screen, decoders = ?client.decoders, cursor_apart = client.cursor, "client");
-        self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link, false).inspect_err(|e| tracing::error!("couldn't start the picture: {e}"))
+        let accepted = self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link, false).inspect_err(|e| tracing::error!("couldn't start the picture: {e}"))?;
+        self.awake = crate::awake::Awake::new();
+        Ok(accepted)
     }
 
     fn message(&mut self, message: &Message) {
@@ -610,10 +622,22 @@ impl HostHandler for Host {
     }
 
     fn left(&mut self) {
+        self.end(true);
+    }
+}
+
+impl Host {
+    /// The session ends. `last`: no other device is about to take its place (then the setting
+    /// "lock when a device disconnects" applies).
+    fn end(&mut self, last: bool) {
         *self.allowed.now.lock().unwrap() = None;
         self.clipboard_wanted = false;
         self.take_microphone(false);
         self.sound = None;
+        // The speakers back as they were, after the sound has stopped recording from Steam's.
+        self.switched = None;
+        self.awake = None;
+        let was_up = self.live.is_some();
         if let Some(l) = self.stop() {
             drop(l);
             self.screen.release();
@@ -623,6 +647,9 @@ impl HostHandler for Host {
         if std::mem::take(&mut self.unlocked_for_client) {
             let locked = crate::desk::lock_now();
             tracing::info!(locked, "the device that unlocked this computer has gone: locked again");
+        } else if last && was_up && self.allowed.lock_on_leave.load(Ordering::Relaxed) && !crate::desk::locked() {
+            let locked = crate::desk::lock_now();
+            tracing::info!(locked, "the device has gone: this computer is locked (the owner's setting)");
         }
     }
 }
