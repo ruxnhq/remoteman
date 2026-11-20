@@ -331,7 +331,7 @@ fn flip(context: &ViewContext<Viewer>, v: Value) -> Callback<bool> {
 fn rows_page(head: View, groups: Vec<View>) -> View {
     let mut col = vec![head];
     col.extend(groups);
-    scroll(StackPanel::new().spacing(18.0).margin(Thickness::new(40.0, 8.0, 40.0, 28.0)).max_width(1000.0).children(col))
+    scroll(StackPanel::new().spacing(18.0).margin(Thickness::new(40.0, 8.0, 40.0, 28.0)).children(col))
 }
 
 pub fn settings(v: &Viewer, context: &ViewContext<Viewer>) -> View {

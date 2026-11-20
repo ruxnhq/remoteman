@@ -1146,6 +1146,13 @@ impl Engine {
                 app.set_camera(on);
                 return true;
             }
+            // For tests (`--ui`, which keeps the list made up and the network out): one of the
+            // old program's walk steps (`walk.rs`), the app put into that screen or state.
+            "walk" if app.args.ui.is_some() => {
+                crate::walk::apply(&mut app, &s("step"));
+                say!("walk: {}", s("step"));
+                return true;
+            }
             other => {
                 say!("a command nobody knows: {other}");
                 return false;

@@ -95,6 +95,12 @@ pub fn apply(app: &mut App, step: &str) {
         app.stop(None);
     }
     app.screen = Screen::Computers;
+    // A computer on this network that isn't paired, for the list's Nearby.
+    app.sightings.unpaired = if step == "empty" {
+        Vec::new()
+    } else {
+        vec![crate::nearby::Found { name: "Living room PC".into(), address: "living-room.local:7791".into(), key: "5d0a1c".into(), os: "windows".into(), cards: Vec::new() }]
+    };
     match step {
         "empty" | "list" => {}
         "list-tip" => {

@@ -59,6 +59,9 @@ pub struct Viewer {
     pub session_view: bool,
     pending: Rc<Cell<bool>>,
     theme: WindowTheme,
+    /// For tests: a file whose words are the next walk step for the engine, and the last step
+    /// taken from it, looked at every 300 ms.
+    walk: Option<(std::path::PathBuf, String, Option<ComponentTimer>)>,
     window_size: (f64, f64),
     pos: Option<(i32, i32)>,
 }
@@ -87,6 +90,8 @@ pub enum Msg {
     /// The pointer at the picture's top edge; the pill's timer; the pointer on the pill.
     BarPeek,
     BarAway,
+    /// For tests: look at the walk file again (`REMOTEMAN_WALK_FILE`).
+    WalkTick,
     OverBar(bool),
     Scheme(ColorScheme),
     Bitrate(f64),
@@ -144,6 +149,7 @@ impl Component for Viewer {
             session_view: false,
             pending,
             theme: options.theme,
+            walk: std::env::var_os("REMOTEMAN_WALK_FILE").map(|p| (p.into(), String::new(), Some(context.set_local_timeout(Duration::from_millis(300), || Msg::WalkTick)))),
             window_size: options.window.unwrap_or((984.0, 644.0)),
             pos: options.pos,
         };
@@ -233,6 +239,18 @@ impl Component for Viewer {
                 self.over_bar = on;
                 if !on && self.bar_peek {
                     self.bar_timer = Some(context.set_local_timeout(Duration::from_secs(2), || Msg::BarAway));
+                }
+            }
+            Msg::WalkTick => {
+                let step = self.walk.as_ref().and_then(|w| std::fs::read_to_string(&w.0).ok()).map(|s| s.trim().to_owned()).unwrap_or_default();
+                if let Some(w) = &mut self.walk {
+                    if !step.is_empty() && step != w.1 {
+                        w.1 = step.clone();
+                        self.command(&cmd("walk", json!({"step": step})), context);
+                    }
+                }
+                if let Some(w) = &mut self.walk {
+                    w.2 = Some(context.set_local_timeout(Duration::from_millis(300), || Msg::WalkTick));
                 }
             }
             Msg::Scheme(scheme) => {
