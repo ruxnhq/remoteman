@@ -72,7 +72,7 @@ struct SessionScreen: View {
     /// "Attached · 2560 × 1496, 120 Hz": the picture's own size and rate once it is known.
     private var caption: String {
         let f = facts
-        if let w = f.width, let h = f.height, let r = f.refresh { return "Attached · \(w) × \(h), \(r) Hz" }
+        if let w = f.width, let h = f.height, let r = f.refresh { return "Attached · \(w) × \(h), \(r) Hz" + (session.streamHDR ? " · HDR" : "") }
         if let d = model.requested { return "Attached · \(d.width) × \(d.height), \(d.refresh) Hz" }
         return "Attached"
     }
@@ -454,7 +454,7 @@ struct HoverBar: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(computer.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     if let w = facts.width, let h = facts.height, let r = facts.refresh {
-                        Text(verbatim: "\(w) × \(h) at \(r) Hz").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                        Text(verbatim: "\(w) × \(h) at \(r) Hz" + (session.streamHDR ? " · HDR" : "")).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     }
                 }
             }

@@ -331,6 +331,8 @@ final class ViewerSession: ObservableObject {
     @Published private(set) var transfers: [Transfer] = []
     /// What the host says the picture is encoded at, in bits a second (0: not told).
     @Published private(set) var hostBitrate = 0
+    /// The picture coming in is HDR (the computer said BT.2020 PQ): the session's controls say so.
+    @Published private(set) var streamHDR = false
     /// The ceiling this device asked for (0: the host chooses).
     @Published private(set) var bitrateLimit = 0
     /// Something for the user to read about a feature that didn't work.
@@ -864,6 +866,7 @@ final class ViewerSession: ObservableObject {
 
     private func teardown() {
         pairingCode = nil
+        streamHDR = false
         loggingIn = false
         timer?.invalidate()
         timer = nil
@@ -909,6 +912,7 @@ final class ViewerSession: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.renderer?.headroom = { ViewerSession.headroomNow }
             self?.renderer?.setHDR(info.hdr)
+            self?.streamHDR = info.hdr
         }
         let d = VideoDecoder(
             info: info,

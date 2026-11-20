@@ -105,6 +105,10 @@ final class AppModel: ObservableObject {
     func followTest() {
         // `--follow-test address`: a computer added for the test and removed after it.
         let args = CommandLine.arguments
+        // `--hdr N`: as if this screen had that much headroom (this Mac's own has none).
+        if let h = args.firstIndex(of: "--hdr").flatMap({ $0 + 1 < args.count ? Float(args[$0 + 1]) : nil }) {
+            ViewerSession.forcedHeadroom = h
+        }
         let address = args.firstIndex(of: "--follow-test").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? ""
         var made: SavedComputer.ID?
         if !address.isEmpty {
