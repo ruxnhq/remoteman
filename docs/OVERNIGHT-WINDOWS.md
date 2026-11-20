@@ -51,10 +51,10 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 |---|---|
 | Bitrate following the network | **done, loopback-tested** (defe4fd): the core's host cuts ×0.8 on a loss report, climbs ~6 %/s after 2 s clean, up to the device's limit; the Windows host applies it live; the Mac host through `rm_host_set_bitrate_callback` (the Mac session wires it once `main` is pushed). Not run with a real host |
 | Parity for lost fragments | **done, loopback-tested** (defe4fd): datagram kind 7, XOR over groups of 10 fragments, asked for in the hello (the core's client always asks); every host built with this core sends it. One datagram in 19 dropped: 30 frames of 20 kB came whole. Not run with a real host |
-| Static refinement of a still picture | not started |
+| Static refinement of a still picture | **Mac host: done, measured** (Mac session, 6c21c9f on `apple/phase1-client`: after 0.4 s still, the last frame again at 8x the bitrate and quality 1.0; a 4K page of small text from 24.3 to 28.6 dB PSNR; `--refine no`). Windows host: not started |
 | Per-device permissions, view-only | not started |
 | A log of connections, and a notice | not started |
-| Keeping the host awake while connected, locking it on disconnect | in work (Windows host) |
+| Keeping the host awake while connected, locking it on disconnect | Mac host: already there (a display-sleep assertion per session; "Lock this Mac when the device leaves", off by default). Windows host: in work |
 | A second factor for unattended access | not started (needs a design) |
 | Game controllers | not started |
 | Apple Pencil and Windows pens (input event 9, the Mac session's format) | in work (core, Windows host) |
