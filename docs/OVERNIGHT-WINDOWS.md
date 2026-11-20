@@ -28,10 +28,10 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 | Item | State |
 |---|---|
 | Conceal lost sound packets (Opus PLC, in-band FEC) | **done, unit-tested** (c991c14): libopus replaces FFmpeg for sound; gaps from sequence numbers, up to 100 ms made up, the next packet's FEC copy used; tests with a synthetic sine and 1-in-10 loss. Not heard through WASAPI |
-| Windows key mapping (`key_mapping`, greyed) | in work |
-| "Getting in" choice (`way_in`, greyed) | in work |
-| The host's cursor shape in a window | not started |
-| HEVC 4:4:4 decoded on the card (Y410 drawn) | not started |
+| Windows key mapping (`key_mapping`, greyed) | **done, unit-tested** (72f7998): a "Windows key" stand-in (Right Alt, Right Ctrl or Caps Lock act as Super, as in the Linux viewer), before the Mac Ctrl/Command swap; the row seen through UI Automation. No keys sent to a host (the Mac test host is locked) |
+| "Getting in" choice (`way_in`, greyed) | **done, unit-tested** (72f7998): per computer, "The computer decides" or "Only a session that is already running" (`attach_only`); only the Linux daemon has more than one way in; not run against it |
+| The host's cursor shape in a window | in work |
+| HEVC 4:4:4 decoded on the card (Y410 drawn) | in work |
 | Variable refresh in a window | not started (feasibility first) |
 | Full screen's menus off the old Direct2D kit | not started |
 
@@ -39,24 +39,25 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 | Item | State |
 |---|---|
 | Mirroring the PC's own screens | in work |
-| HDR mastering and light-level metadata; HEVC 4:4:4 in HDR | not started |
-| The driver unplugs a device's monitor when it leaves (`DESTROYMONITOR`) | not started (build only) |
+| HDR mastering and light-level metadata; HEVC 4:4:4 in HDR | in work |
+| The driver unplugs a device's monitor when it leaves (`DESTROYMONITOR`) | **built, not installed** (59db529): `DESTROYMONITOR n` departs the monitor, new `PLUGMONITOR n` brings it back with the same identity; the host plugs a device's monitor in when it comes and unplugs it when it leaves (PC with screens only); driver 0.1.1.0. Morning test plan in the merge's branch report (below) |
 | A display scale for the device's monitor | not started |
-| Steam's sound devices from the user's Steam, speakers switched while a device listens | not started |
+| Steam's sound devices from the user's Steam, speakers switched while a device listens | in work |
 | A camera for the PC (virtual camera) | not started |
 | AMD and Intel encoders with loss recovery | **not testable here** (the Radeon iGPU has no driver; nothing to be installed) |
 
 ### Every host (the shared core, `remoteman-core`)
 | Item | State |
 |---|---|
-| Bitrate following the network | in work |
-| Parity for lost fragments | in work |
+| Bitrate following the network | **done, loopback-tested** (defe4fd): the core's host cuts ×0.8 on a loss report, climbs ~6 %/s after 2 s clean, up to the device's limit; the Windows host applies it live; the Mac host through `rm_host_set_bitrate_callback` (the Mac session wires it once `main` is pushed). Not run with a real host |
+| Parity for lost fragments | **done, loopback-tested** (defe4fd): datagram kind 7, XOR over groups of 10 fragments, asked for in the hello (the core's client always asks); every host built with this core sends it. One datagram in 19 dropped: 30 frames of 20 kB came whole. Not run with a real host |
 | Static refinement of a still picture | not started |
 | Per-device permissions, view-only | not started |
 | A log of connections, and a notice | not started |
-| Keeping the host awake while connected, locking it on disconnect | not started |
+| Keeping the host awake while connected, locking it on disconnect | in work (Windows host) |
 | A second factor for unattended access | not started (needs a design) |
 | Game controllers | not started |
+| Apple Pencil and Windows pens (input event 9, the Mac session's format) | in work (core, Windows host) |
 | More than one viewer at once | not started |
 
 ### Apple (the Mac session)
@@ -78,3 +79,9 @@ Asked at 23:35 PST; its share of the budget about 5 points. Its answer:
 - Python 3.15 was installed per-user (`%LOCALAPPDATA%\Python\pythoncore-3.15-64`, 23:32) by the
   Python install manager already on this PC, the first time `python` was run tonight from Git
   Bash. Nothing else was installed.
+
+## Notes
+- `main` is not pushed (the owner's rule), so the Mac session can't merge tonight's core changes
+  until the owner pushes; it builds and wires them (`rm_host_set_bitrate_callback`, the pen) then.
+- The Mac locked itself at 23:28; its test host 7803 shows the lock screen, so nothing was typed
+  or clicked into it tonight.
