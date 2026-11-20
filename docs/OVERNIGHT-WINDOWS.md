@@ -204,3 +204,8 @@ tone was too quiet for the client's level gate); the mute did NOT happen: the ho
 note while acting as the user and the state folder refused it. Fixed in fc11e56 (looked up and
 muted as the user, written by the host). `C:\rm\installer-2026-11-20-016\remoteman-host-setup-0.1.6.exe`.
 The test client is paired as "testclient" (to be revoked after testing).
+0.1.6 installed (09:15) and the test run again from this PC (09:16): the PC's default output
+unmuted before, muted while the test client listened (host: "the PC's speakers are muted (the
+sound is still recorded)"), the client heard 8.5 s of the 440 Hz tone with the PC muted, the
+microphone went into Steam's, and the output was unmuted again when it left. The test client's
+pairing was revoked and its identity deleted.
