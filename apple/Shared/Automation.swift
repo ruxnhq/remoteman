@@ -82,6 +82,7 @@ enum Automation {
             case "--scale": display.scale = Float(value()) ?? display.scale
             case "--refresh": display.refresh = Int(value()) ?? display.refresh
             case "--decoders": decoders = value()
+            case "--present": VideoRenderer.onArrival = value() != "tick"  // arrival (default) or tick
             case "--hdr": ViewerSession.forcedHeadroom = Float(value())  // as if the screen had this headroom
             case "--view-only": session.viewOnly = ["yes", "1", "true"].contains(value())
             case "--script": script = value()

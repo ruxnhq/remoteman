@@ -169,7 +169,7 @@ final class RefreshMeter {
 
         @objc private func tick() {
             flushPointer()
-            renderer?.draw()
+            renderer?.tick()
             // The cursor's size follows the picture's, which is known once a frame is in.
             let v = renderer?.videoSize
             if v != cursorVideoSize {
@@ -596,7 +596,7 @@ final class RefreshMeter {
 
         @objc private func tick() {
             flushPointer()
-            session.renderer?.draw()
+            session.renderer?.tick()
             // The cursor's size follows the picture's, which is known once a frame is in.
             let v = session.renderer?.videoSize
             if v != cursorVideoSize {

@@ -100,7 +100,7 @@ final class ExternalView: UIView {
         r.setNeedsRedraw()
     }
 
-    @objc private func tick() { session?.renderer2?.draw() }
+    @objc private func tick() { session?.renderer2?.tick() }
 }
 
 /// Gives a connected monitor its own scene; every other window is SwiftUI's as usual.

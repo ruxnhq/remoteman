@@ -1052,6 +1052,8 @@ final class ViewerSession: ObservableObject {
         out += "  age at presentation ms: median \(pct(ages, 0.5)) p95 \(pct(ages, 0.95)) p99 \(pct(ages, 0.99)) max \(pct(ages, 1.0)) (\(ages.count) frames with a clock)\n"
         out += "  decode ms: median \(pct(dec, 0.5)) p95 \(pct(dec, 0.95)) p99 \(pct(dec, 0.99)) max \(pct(dec, 1.0))\n"
         out += "  gap between frames shown ms: median \(pct(gaps, 0.5)) p99 \(pct(gaps, 0.99)) max \(pct(gaps, 1.0))\n"
+        let onScreen = renderer?.takeOnScreenLog() ?? []
+        out += "  arrival to on screen ms: median \(pct(onScreen, 0.5)) p95 \(pct(onScreen, 0.95)) p99 \(pct(onScreen, 0.99)) (\(onScreen.count) frames; drawn \(VideoRenderer.onArrival ? "as they arrive" : "at the display's tick"))\n"
         statsLock.lock()
         let beats = rhythmSeen
         statsLock.unlock()

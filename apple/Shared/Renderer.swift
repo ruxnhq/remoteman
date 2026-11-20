@@ -121,6 +121,41 @@ final class VideoRenderer {
     private var lastAgeAtPresentUs: Int64 = -1
     /// Every frame shown: when (uptime ns) and how old it was (µs, -1 unknown). For run summaries.
     private var shownLog: [(UInt64, Int64)] = []
+    /// For each frame, ms from its arrival here to the moment the screen showed it.
+    private var onScreenLog: [Double] = []
+
+    /// Each frame is drawn and presented the moment it is handed over, instead of at the next tick of
+    /// the display link: it reaches the screen at the screen's next refresh, up to a whole tick
+    /// sooner, and frames that come unevenly are shown unevenly as they came. Set before frames come.
+    static var onArrival = true
+    private let presentQueue = DispatchQueue(label: "remoteman.present", qos: .userInteractive)
+    /// The size the layer is drawn at, set on the main thread only (CAMetalLayer's own is read off it).
+    private var layerSize = CGSize.zero
+
+    func takeOnScreenLog() -> [Double] {
+        lock.lock()
+        defer { lock.unlock() }
+        let l = onScreenLog
+        onScreenLog = []
+        return l
+    }
+
+    /// Main thread: keep the layer's size and, when frames are drawn as they come, draw what needs
+    /// drawing again (a zoom, a new size, the end of a picture). Call at each display refresh.
+    func tick() {
+        guard Self.onArrival else { return draw() }
+        lock.lock()
+        let frame = pending ?? current
+        let redraw = needsRedraw
+        lock.unlock()
+        let size = frame == nil ? CGSize(width: 16, height: 16) : drawableSize
+        if size.width >= 1, size.height >= 1, layer.drawableSize != size {
+            layer.drawableSize = size
+            setNeedsRedraw()
+        }
+        layerSize = layer.drawableSize
+        if redraw { presentQueue.async { [weak self] in self?.draw(sized: false) } }
+    }
 
     func takeShownLog() -> [(UInt64, Int64)] {
         lock.lock()
@@ -170,6 +205,7 @@ final class VideoRenderer {
         if pending != nil { superseded += 1 }
         pending = f
         lock.unlock()
+        if Self.onArrival { presentQueue.async { [weak self] in self?.draw(sized: false) } }
     }
 
     func clear() {
@@ -277,7 +313,7 @@ final class VideoRenderer {
     }
 
     /// Draw the newest frame if there is one that hasn't been shown. Call at each display refresh.
-    func draw() {
+    func draw(sized: Bool = true) {
         lock.lock()
         let fresh = pending
         pending = nil
@@ -289,9 +325,22 @@ final class VideoRenderer {
         guard fresh != nil || redraw else { return }
         // With no picture the layer is black whatever its size: a few pixels then, so that the
         // full-size buffers behind the view go back until there is a picture again.
-        let size = frame == nil ? CGSize(width: 16, height: 16) : drawableSize
-        if size.width >= 1, size.height >= 1, layer.drawableSize != size { layer.drawableSize = size }
+        if sized {
+            let size = frame == nil ? CGSize(width: 16, height: 16) : drawableSize
+            if size.width >= 1, size.height >= 1, layer.drawableSize != size { layer.drawableSize = size }
+        }
         guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return }
+        if let fresh {
+            // When the screen really showed it, against when it came.
+            let came = fresh.receivedNs
+            drawable.addPresentedHandler { [weak self] d in
+                guard d.presentedTime > 0, let self else { return }
+                let ms = (d.presentedTime * 1e9 - Double(came)) / 1e6
+                self.lock.lock()
+                if self.onScreenLog.count < 200_000 { self.onScreenLog.append(ms) }
+                self.lock.unlock()
+            }
+        }
         let keep = encode(frame?.pixelBuffer, into: drawable.texture, format: layer.pixelFormat, commandBuffer: cb)
         cb.present(drawable)
         // With no picture left to show, the decoded pictures the texture cache still holds go
