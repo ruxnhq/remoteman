@@ -244,6 +244,7 @@ enum Automation {
                     print("remoteman: host cursor at \(at.map { String(format: "%.3f, %.3f visible %@", $0.x, $0.y, $0.visible ? "yes" : "no") } ?? "unknown"), shape \(s)")
                 // Features. stats: the figures since the last one (prints the picture's size and rate).
                 case "features": print("remoteman: host features \(DispatchQueue.main.sync { session.features }.sorted().joined(separator: ","))")
+                case "soundage": print("remoteman: sound packets' median age on arrival \(session.soundAgeMs().map { String(format: "%.1f ms", $0) } ?? "unknown")")
                 case "stats":
                     let t = DispatchQueue.main.sync { () -> String in
                         let st = session.stats  // the last half second, as the app shows it

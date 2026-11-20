@@ -345,6 +345,15 @@ final class ViewerSession: ObservableObject {
     /// The connected computer's address as settings are kept under it.
     var hostKey: String { target }
     private let sound = SoundPlayer()
+    private var hostOffsetUs: Int64?
+    private var soundAges: [Double] = []
+    /// Median age of the sound packets when they arrived, ms (nil before any).
+    func soundAgeMs() -> Double? {
+        statsLock.lock()
+        defer { statsLock.unlock() }
+        guard !soundAges.isEmpty else { return nil }
+        return soundAges.sorted()[soundAges.count / 2]
+    }
     private let soundSetup = DispatchQueue(label: "remoteman.sound.setup")
     private var mic: MicSender?
     private var sharing: Sharing?
@@ -693,7 +702,18 @@ final class ViewerSession: ObservableObject {
                         DispatchQueue.main.async { if let self, self.generation == gen { self.pairingCode = code } }
                     }
                     c.onMessage = { [weak self] m in self?.message(m, sharing: sharing, generation: gen) }
-                    c.onSound = { [weak self] data, start, seq, _ in self?.sound.packet(data, start: start, seq: seq) }
+                    c.onSound = { [weak self] data, start, seq, timeUs in
+                        guard let self else { return }
+                        // The packet's age on arrival, on the host's clock as the frames give it.
+                        self.statsLock.lock()
+                        if let off = self.hostOffsetUs {
+                            let age = Double(Int64(DispatchTime.now().uptimeNanoseconds / 1000) + off - Int64(timeUs)) / 1000
+                            self.soundAges.append(age)
+                            if self.soundAges.count > 400 { self.soundAges.removeFirst(200) }
+                        }
+                        self.statsLock.unlock()
+                        self.sound.packet(data, start: start, seq: seq)
+                    }
                     c.onBlob = { what, id, kind, header, data, complete in
                         sharing.blob(what: what, id: id, kind: kind, header: header, data: data, complete: complete)
                     }
@@ -703,6 +723,12 @@ final class ViewerSession: ObservableObject {
                         self?.frame2(data, key: flags & 1 != 0, number: number, captureUs: captureUs, ageUs: ageUs)
                     }
                     c.onFrame = { [weak self] data, flags, number, captureUs, ageUs in
+                        // The host's clock against this one, from a frame whose age the core knows.
+                        if let self, ageUs >= 0 {
+                            self.statsLock.lock()
+                            self.hostOffsetUs = Int64(captureUs) + ageUs - Int64(DispatchTime.now().uptimeNanoseconds / 1000)
+                            self.statsLock.unlock()
+                        }
                         self?.frame(
                             data, key: flags & 1 != 0, recovery: flags & 2 != 0, number: number, captureUs: captureUs,
                             ageUs: ageUs)
@@ -1114,7 +1140,15 @@ final class ViewerSession: ObservableObject {
             s += "shown \(f(shownFps, 0)) fps · received \(f(receivedFps, 0)) fps · replaced unseen \(replaced)\n"
             s += "decode \(f(decodeMedianMs, 2)) ms (max \(f(decodeMaxMs, 2))) · age \(f(ageMs)) ms\n"
             s += "lost \(lost) · loss reports \(keyframeRequests) · round trip \(f(roundTripMs, 2)) ms"
-            if soundOn { s += "\nsound buffer \(f(soundBufferMs, 0)) ms · concealed \(soundConcealed) · left out \(soundDropped)" }
+            if soundOn {
+                s += "\nsound buffer \(f(soundBufferMs, 0)) ms · concealed \(soundConcealed) · left out \(soundDropped)"
+                #if os(iOS)
+                    // What the device itself adds after the buffer, and where the sound goes.
+                    let a = AVAudioSession.sharedInstance()
+                    let route = a.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ",")
+                    s += "\nsound out \(route) · output \(f(a.outputLatency * 1000, 0)) ms · I/O \(f(a.ioBufferDuration * 1000, 1)) ms · \(wifiPausing ? "deep" : "shallow")"
+                #endif
+            }
             if decodeErrors > 0 { s += "\ndecode errors \(decodeErrors): \(lastError)" }
             if wifiPausing { s += "\nWi-Fi is pausing about twice a second (not the stream)" }
             return s
