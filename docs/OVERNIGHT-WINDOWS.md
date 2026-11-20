@@ -76,9 +76,9 @@ Asked at 23:35 PST; its share of the budget about 5 points. Its answer:
   (Mac host).
 
 ## Side effects
-- Python 3.15 was installed per-user (`%LOCALAPPDATA%\Python\pythoncore-3.15-64`, 23:32) by the
-  Python install manager already on this PC, the first time `python` was run tonight from Git
-  Bash. Nothing else was installed.
+- Python 3.15 was installed per-user (`%LOCALAPPDATA%\Python\pythoncore-3.15-64`, 23:32) the first
+  time `python` was run tonight, by the Python install manager, which the owner had installed
+  for this work (21:23, from the Store). Nothing else was installed.
 
 ## Notes
 - `main` is not pushed (the owner's rule), so the Mac session can't merge tonight's core changes
@@ -96,7 +96,8 @@ menus. Not reached: more than one viewer at once.
 At 07:40 the driver's 3200x2400 monitor was Windows' main display at 0,0 with no device
 connected and sharing off, the PC's three screens left of it: Windows had rebuilt the desktop at
 the 00:09 restart (the XG32UCWMGs asleep and disconnected then), and the installed (old) host
-doesn't take the driver's monitors off. `C:m	oolsix-screens.ps1` put DISPLAY1 back at 0,0 as
+doesn't take the driver's monitors off. `C:
+m	oolsix-screens.ps1` put DISPLAY1 back at 0,0 as
 the main screen. The new host's watch between devices does this by itself.
 
 ## Installing the new host (for the owner)
