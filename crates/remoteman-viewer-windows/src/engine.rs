@@ -607,7 +607,9 @@ impl Engine {
         };
         let changed = app.scene.screen_hdr.swap(hdr, Ordering::Relaxed) != hdr;
         let (white, peak) = (light.white.to_bits(), light.peak.to_bits());
-        let lighter = app.scene.screen_white.swap(white, Ordering::Relaxed) != white || app.scene.screen_peak.swap(peak, Ordering::Relaxed) != peak;
+        // (Both stored, whichever changed.)
+        let (was_white, was_peak) = (app.scene.screen_white.swap(white, Ordering::Relaxed), app.scene.screen_peak.swap(peak, Ordering::Relaxed));
+        let lighter = was_white != white || was_peak != peak;
         if changed || lighter || app.scene.headroom.load(Ordering::Relaxed) == 0 {
             say!(
                 "screen: {} (Windows says {}){}",

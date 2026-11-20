@@ -91,13 +91,11 @@ float3 nits_pq(float3 n) {
     return pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), 78.84375);
 }
 
-// Light with SDR white at 1, whose brightest is `top`, fitted under `room`: unchanged up to a
-// knee (never below white, so everything up to white stays exactly as bright as it was), and
-// above it brought down along a curve that leaves the knee smoothly and puts `top` on `room`
-// (extended Reinhard, on the largest channel, which keeps hues).
-float3 fit(float3 lin, float top, float room) {
+// Light with SDR white at 1, whose brightest is `top`, fitted under `room`: unchanged up to
+// `knee`, and above it brought down along a curve that leaves the knee smoothly and puts `top`
+// on `room` (extended Reinhard, on the largest channel, which keeps hues).
+float3 fit(float3 lin, float top, float room, float knee) {
     float m = max(max(lin.r, lin.g), lin.b);
-    float knee = max(1.0, 0.75 * room);
     if (top <= room || m <= knee) return min(lin, room);
     if (room - knee < 1e-3) return lin * (room / m);
     float x = (m - knee) / (room - knee);
@@ -120,19 +118,19 @@ float4 ps(Corner c) : SV_Target {
     if (mode < 1.5) {
         // To this HDR screen: the stream's SDR white onto this screen's (a Mac puts its desktop
         // at 100 nits; Windows' white here may be 240), its highlights fitted under this
-        // screen's brightest. Primaries stay BT.2020, as the swap chain is.
-        float3 rel = fit(pq_nits(e) / white, peak / white, max(here_peak / here_white, 1.0));
+        // screen's brightest. Primaries stay BT.2020, as the swap chain is. Everything up to
+        // white is kept exactly (the knee is never below it).
+        float room = max(here_peak / here_white, 1.0);
+        float3 rel = fit(pq_nits(e) / white, peak / white, room, max(1.0, 0.75 * room));
         return float4(nits_pq(rel * here_white), 1);
     }
     // To SDR: linear light with SDR white at 1, BT.2020 to BT.709 primaries, the highlights
-    // brought down so that the stream's peak lands at white (extended Reinhard on the largest
-    // channel, which keeps hues), then the screen's gamma.
+    // fitted under the screen's white with the knee at 90 % of it, then the screen's gamma.
+    // So the stream's white comes out at 95 % (it was brought down to about half when the
+    // stream's peak was put on white: a desktop's white text showed as grey 189 of 255).
     float3 lin = pq_nits(e) / white;
     lin = max(mul(float3x3(1.6605, -0.5876, -0.0728, -0.1246, 1.1329, -0.0083, -0.0182, -0.1006, 1.1187), lin), 0);
-    float m = max(max(lin.r, lin.g), max(lin.b, 1e-6));
-    float w = max(peak / white, 1.0);
-    float k = (m * (1 + m / (w * w)) / (1 + m)) / m;
-    return float4(pow(saturate(lin * k), 1.0 / 2.2), 1);
+    return float4(pow(saturate(fit(lin, max(peak / white, 1.0), 1.0, 0.9)), 1.0 / 2.2), 1);
 }
 ";
 
