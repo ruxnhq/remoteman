@@ -122,16 +122,16 @@ pub fn mode_in_software(mode: remoteman_core::Mode) -> bool {
     mode.chroma == remoteman_core::Chroma::C444 || is_software(mode.codec)
 }
 
-/// Textures a picture decoded on the CPU is put into: one of 16 bits for the luma, one of two
-/// 16-bit channels for the chroma (formats every card has), a few pairs used in turn so that
+/// Textures a picture decoded on the CPU is put into: one a plane (Y, Cb, Cr), of 16 bits for
+/// 10-bit pictures and 8 for 8-bit (formats every card has), a few sets used in turn so that
 /// the one on screen isn't written to.
 struct Upload {
     gpu: Gpu,
-    pairs: Vec<(ID3D11Texture2D, ID3D11Texture2D)>,
+    sets: Vec<[ID3D11Texture2D; 3]>,
     size: (u32, u32),
+    chroma_size: (u32, u32),
+    format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
     next: usize,
-    luma: Vec<u16>,
-    chroma: Vec<u16>,
 }
 
 impl Upload {
@@ -154,69 +154,38 @@ impl Upload {
         texture.context("no texture")
     }
 
-    /// Put a 4:2:0 or 4:4:4 frame of 8 or 10 bits into the next pair of textures. 4:4:4 keeps
-    /// its chroma at full size: the shader samples it with the same coordinates, so nothing is
-    /// halved on the way.
+    /// Put a 4:2:0 or 4:4:4 frame of 8 or 10 bits into the next three textures, each plane as
+    /// it lies in memory (10 bits in the low bits of 16; the shader is told), so the processor
+    /// does nothing to it on the way. 4:4:4 keeps its chroma at full size: the shader samples
+    /// it with the same coordinates, so nothing is halved.
     ///
-    /// SAFETY: `f` is a decoded software frame in a planar 4:2:0 format, its planes valid for
-    /// its size.
-    unsafe fn put(&mut self, f: &ffi::AVFrame) -> Result<(ID3D11Texture2D, ID3D11Texture2D)> {
-        use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM};
-        let (w, h) = (f.width as usize, f.height as usize);
+    /// SAFETY: `f` is a decoded software frame in a planar format, its planes valid for its
+    /// size.
+    unsafe fn put(&mut self, f: &ffi::AVFrame) -> Result<[ID3D11Texture2D; 3]> {
+        use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R16_UNORM};
+        let (w, h) = (f.width as u32, f.height as u32);
         use ffi::AVPixelFormat::*;
         let full = [AV_PIX_FMT_YUV444P10LE as i32, AV_PIX_FMT_YUV444P as i32].contains(&f.format);
         let (cw, ch) = if full { (w, h) } else { (w.div_ceil(2), h.div_ceil(2)) };
         let ten = [AV_PIX_FMT_YUV420P10LE as i32, AV_PIX_FMT_YUV444P10LE as i32].contains(&f.format);
         anyhow::ensure!(ten || [AV_PIX_FMT_YUV420P as i32, AV_PIX_FMT_YUV444P as i32].contains(&f.format), "the software decoder gave a picture format ({}) that isn't drawn", f.format);
-        if self.size != (w as u32, h as u32) || self.chroma.len() != cw * ch * 2 {
-            self.pairs.clear();
+        let format = if ten { DXGI_FORMAT_R16_UNORM } else { DXGI_FORMAT_R8_UNORM };
+        if (self.size, self.chroma_size, self.format) != ((w, h), (cw, ch), format) {
+            self.sets.clear();
             for _ in 0..HELD {
-                self.pairs.push((self.texture(w as u32, h as u32, DXGI_FORMAT_R16_UNORM)?, self.texture(cw as u32, ch as u32, DXGI_FORMAT_R16G16_UNORM)?));
+                self.sets.push([self.texture(w, h, format)?, self.texture(cw, ch, format)?, self.texture(cw, ch, format)?]);
             }
-            self.size = (w as u32, h as u32);
-            self.luma = vec![0; w * h];
-            self.chroma = vec![0; cw * ch * 2];
+            (self.size, self.chroma_size, self.format) = ((w, h), (cw, ch), format);
         }
-        // Every sample ends up as the card's 10-bit pictures have it: the code in the top ten
-        // of sixteen bits.
-        // SAFETY (for the block): rows are read within each plane's width and height.
+        let set = self.sets[self.next % self.sets.len()].clone();
+        self.next += 1;
+        // SAFETY: each plane is read for its rows at its own pitch, within its size.
         unsafe {
-            for y in 0..h {
-                let to = &mut self.luma[y * w..(y + 1) * w];
-                let row = f.data[0].add(y * f.linesize[0] as usize);
-                if ten {
-                    for (t, s) in to.iter_mut().zip(std::slice::from_raw_parts(row as *const u16, w)) {
-                        *t = s << 6;
-                    }
-                } else {
-                    for (t, s) in to.iter_mut().zip(std::slice::from_raw_parts(row, w)) {
-                        *t = (*s as u16) << 8;
-                    }
-                }
+            for (i, texture) in set.iter().enumerate() {
+                self.gpu.context.UpdateSubresource(texture, 0, None, f.data[i] as *const _, f.linesize[i] as u32, 0);
             }
-            for y in 0..ch {
-                let to = &mut self.chroma[y * cw * 2..(y + 1) * cw * 2];
-                let (u, v) = (f.data[1].add(y * f.linesize[1] as usize), f.data[2].add(y * f.linesize[2] as usize));
-                if ten {
-                    let (u, v) = (std::slice::from_raw_parts(u as *const u16, cw), std::slice::from_raw_parts(v as *const u16, cw));
-                    for x in 0..cw {
-                        to[2 * x] = u[x] << 6;
-                        to[2 * x + 1] = v[x] << 6;
-                    }
-                } else {
-                    let (u, v) = (std::slice::from_raw_parts(u, cw), std::slice::from_raw_parts(v, cw));
-                    for x in 0..cw {
-                        to[2 * x] = (u[x] as u16) << 8;
-                        to[2 * x + 1] = (v[x] as u16) << 8;
-                    }
-                }
-            }
-            let pair = self.pairs[self.next % self.pairs.len()].clone();
-            self.next += 1;
-            self.gpu.context.UpdateSubresource(&pair.0, 0, None, self.luma.as_ptr() as *const _, (w * 2) as u32, 0);
-            self.gpu.context.UpdateSubresource(&pair.1, 0, None, self.chroma.as_ptr() as *const _, (cw * 4) as u32, 0);
-            Ok(pair)
         }
+        Ok(set)
     }
 }
 
@@ -225,9 +194,9 @@ pub struct Picture {
     /// Keeps the slice from being decoded into again; freed when the picture is dropped.
     hold: *mut ffi::AVFrame,
     pub texture: ID3D11Texture2D,
-    /// For a picture decoded on the CPU: its chroma, in a texture of its own (`texture` is
-    /// then the luma alone).
-    pub chroma: Option<ID3D11Texture2D>,
+    /// For a picture decoded on the CPU: its Cb and Cr, in textures of their own (`texture` is
+    /// then the luma alone), each sample as the decoder gave it (10 bits in the low bits).
+    pub chroma: Option<(ID3D11Texture2D, ID3D11Texture2D)>,
     /// Which slice of the array texture.
     pub slice: u32,
     /// The visible size; the texture is the coded size, a little larger (1088 rows for 1080).
@@ -349,7 +318,7 @@ impl Decoder {
             this.frame = ffi::av_frame_alloc();
             anyhow::ensure!(!this.packet.is_null() && !this.frame.is_null(), "out of memory");
             this.name = format!("{} (on the CPU)", CStr::from_ptr((*found).name).to_string_lossy());
-            this.upload = Some(Upload { gpu: gpu.clone(), pairs: Vec::new(), size: (0, 0), next: 0, luma: Vec::new(), chroma: Vec::new() });
+            this.upload = Some(Upload { gpu: gpu.clone(), sets: Vec::new(), size: (0, 0), chroma_size: (0, 0), format: Default::default(), next: 0 });
             Ok(this)
         }
     }
@@ -377,8 +346,8 @@ impl Decoder {
                 let put = upload.put(f);
                 let (width, height) = (f.width as u32, f.height as u32);
                 ffi::av_frame_unref(self.frame);
-                let (texture, chroma) = put?;
-                return Ok(Some(Picture { hold: ptr::null_mut(), texture, chroma: Some(chroma), slice: 0, width, height, age_us, decoded: std::time::Instant::now() }));
+                let [texture, cb, cr] = put?;
+                return Ok(Some(Picture { hold: ptr::null_mut(), texture, chroma: Some((cb, cr)), slice: 0, width, height, age_us, decoded: std::time::Instant::now() }));
             }
             anyhow::ensure!(f.format == ffi::AVPixelFormat::AV_PIX_FMT_D3D11 as i32, "the decoder gave a picture that isn't on the card");
             let raw = f.data[0] as *mut std::ffi::c_void;

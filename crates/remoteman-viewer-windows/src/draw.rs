@@ -56,6 +56,8 @@ Corner vs(uint n : SV_VertexID) {
 
 Texture2DArray<float> luma : register(t0);
 Texture2DArray<float2> chroma : register(t1);
+// A picture decoded on the CPU has Cb and Cr apart: Cb in `chroma`'s first channel, Cr here.
+Texture2DArray<float> cr : register(t2);
 SamplerState smooth : register(s0);
 
 // `visible`: the part of the texture that is picture (it is the coded size, a little larger),
@@ -64,13 +66,15 @@ SamplerState smooth : register(s0);
 // `yrange`, `mid` and `crange` are the code values of the range's ends.
 // `mode`: 0 BT.709 (SDR, as before); 1 BT.2020 with PQ, passed through to a swap chain that is
 // itself PQ BT.2020 (an HDR screen); 2 the same tone-mapped to SDR (a screen that isn't HDR).
-// `white` and `peak`: where the stream's SDR white and brightest sit, in nits.
+// `white` and `peak`: where the stream's SDR white and brightest sit, in nits. `planar`: Cr
+// is in a texture of its own.
 cbuffer Picture : register(b0) {
     float2 visible;
     float2 last;
     float scale, black, yrange, mid;
     float crange;
     float mode, white, peak;
+    float planar, unused1, unused2, unused3;
 };
 
 float3 pq_nits(float3 e) {
@@ -81,7 +85,8 @@ float3 pq_nits(float3 e) {
 float4 ps(Corner c) : SV_Target {
     float3 at = float3(min(c.uv * visible, last), 0);
     float y = (luma.Sample(smooth, at) * scale - black) / yrange;
-    float2 cc = (chroma.Sample(smooth, at) * scale - mid) / crange;
+    float2 raw = planar > 0.5 ? float2(chroma.Sample(smooth, at).x, cr.Sample(smooth, at)) : chroma.Sample(smooth, at);
+    float2 cc = (raw * scale - mid) / crange;
     if (mode < 0.5) {
         // Limited-range BT.709, the same numbers as the Linux viewer.
         return float4(y + 1.5748 * cc.y, y - 0.1873 * cc.x - 0.4681 * cc.y, y + 1.8556 * cc.x, 1);
@@ -115,11 +120,13 @@ fn compile(entry: PCSTR, target: PCSTR) -> Result<Vec<u8>> {
     }
 }
 
-/// The two planes of one slice, as the shader reads them.
+/// The two planes of one slice, as the shader reads them; or three, for a picture decoded on
+/// the CPU (Cb in `chroma`, Cr in `cr`).
 #[derive(Clone)]
 struct Planes {
     luma: ID3D11ShaderResourceView,
     chroma: ID3D11ShaderResourceView,
+    cr: Option<ID3D11ShaderResourceView>,
 }
 
 /// Where the picture goes: a window of our own, with the interface drawn in a layer over it,
@@ -387,7 +394,7 @@ impl Drawer {
                 ..Default::default()
             };
             gpu.device.CreateSamplerState(&s, Some(&mut sampler))?;
-            let c = D3D11_BUFFER_DESC { ByteWidth: 48, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
+            let c = D3D11_BUFFER_DESC { ByteWidth: 64, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
             gpu.device.CreateBuffer(&c, None, Some(&mut constants))?;
             let flags = DXGI_SWAP_CHAIN_FLAG(now.Flags as i32);
             let tears = flags.0 & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 != 0;
@@ -438,7 +445,7 @@ impl Drawer {
             unsafe { self.gpu.device.CreateShaderResourceView(texture, Some(&desc), Some(&mut view))? };
             view.context("no view")
         };
-        Ok(Planes { luma: view(luma)?, chroma: view(chroma)? })
+        Ok(Planes { luma: view(luma)?, chroma: view(chroma)?, cr: None })
     }
 
     /// What the shader should read for this picture: the decoder's own slice, or a copy of it.
@@ -446,7 +453,7 @@ impl Drawer {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         // SAFETY: the out pointer is valid.
         unsafe { picture.texture.GetDesc(&mut desc) };
-        if let Some(chroma) = &picture.chroma {
+        if let Some((cb, cr)) = &picture.chroma {
             // Decoded on the CPU: two plain textures, made for sampling.
             let key = (picture.texture.as_raw() as usize, 0);
             if let Some(planes) = self.views.get(&key) {
@@ -463,7 +470,8 @@ impl Drawer {
                 unsafe { self.gpu.device.CreateShaderResourceView(texture, Some(&d), Some(&mut view))? };
                 view.context("no view")
             };
-            let planes = Planes { luma: view(&picture.texture, DXGI_FORMAT_R16_UNORM)?, chroma: view(chroma, DXGI_FORMAT_R16G16_UNORM)? };
+            // Three plain textures, of one format (R16 or R8).
+            let planes = Planes { luma: view(&picture.texture, desc.Format)?, chroma: view(cb, desc.Format)?, cr: Some(view(cr, desc.Format)?) };
             if self.views.len() > 16 {
                 self.views.clear();
             }
@@ -633,15 +641,20 @@ impl Drawer {
             ctx.DSSetShader(None, None);
             ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
             if let (Some(((planes, desc), picture)), Some(area)) = (planes, video) {
-                let ten = desc.Format == DXGI_FORMAT_P010 || desc.Format == DXGI_FORMAT_R16_UNORM;
                 // P010 keeps its 10 bits at the top of 16: a normalised sample times 65535/64 is
-                // the 10-bit code.
-                let (scale, black, yrange, mid, crange) = if ten { (65535.0 / 64.0, 64.0, 876.0, 512.0, 896.0) } else { (255.0, 16.0, 219.0, 128.0, 224.0) };
+                // the 10-bit code. A picture decoded on the CPU has them at the bottom (R16), or
+                // 8 bits (R8).
+                let (scale, black, yrange, mid, crange) = match desc.Format {
+                    DXGI_FORMAT_P010 => (65535.0 / 64.0, 64.0, 876.0, 512.0, 896.0),
+                    DXGI_FORMAT_R16_UNORM => (65535.0, 64.0, 876.0, 512.0, 896.0),
+                    _ => (255.0, 16.0, 219.0, 128.0, 224.0),
+                };
                 let (tw, th) = (desc.Width as f32, desc.Height as f32);
                 let (vw, vh) = (picture.width as f32, picture.height as f32);
                 let (hdr, white, peak) = colour;
                 let mode = if !hdr { 0.0 } else if self.pq { 1.0 } else { 2.0 };
-                let constants: [f32; 12] = [vw / tw, vh / th, (vw - 0.5) / tw, (vh - 0.5) / th, scale, black, yrange, mid, crange, mode, white, peak];
+                let planar = if planes.cr.is_some() { 1.0 } else { 0.0 };
+                let constants: [f32; 16] = [vw / tw, vh / th, (vw - 0.5) / tw, (vh - 0.5) / th, scale, black, yrange, mid, crange, mode, white, peak, planar, 0.0, 0.0, 0.0];
                 ctx.UpdateSubresource(&self.constants, 0, None, constants.as_ptr() as *const _, 0, 0);
                 let (ax, ay, aw, ah) = (area.0 as f32, area.1 as f32, area.2 as f32, area.3 as f32);
                 let fit = (aw / vw).min(ah / vh);
@@ -650,10 +663,10 @@ impl Drawer {
                 ctx.RSSetViewports(Some(&[viewport]));
                 ctx.PSSetShader(&self.ps, None);
                 ctx.PSSetConstantBuffers(0, Some(&[Some(self.constants.clone())]));
-                ctx.PSSetShaderResources(0, Some(&[Some(planes.luma), Some(planes.chroma)]));
+                ctx.PSSetShaderResources(0, Some(&[Some(planes.luma), Some(planes.chroma), planes.cr]));
                 ctx.Draw(3, 0);
                 // Let go of the slice, so the decoder may write to it again when its turn comes.
-                ctx.PSSetShaderResources(0, Some(&[None, None]));
+                ctx.PSSetShaderResources(0, Some(&[None, None, None]));
             }
             // Direct2D draws with the same context: leave nothing of ours bound to it.
             ctx.OMSetRenderTargets(None, None);
