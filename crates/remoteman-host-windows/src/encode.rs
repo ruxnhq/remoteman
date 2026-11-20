@@ -101,6 +101,9 @@ const NVIDIA: u32 = 0x10de;
 pub const AUTO: u8 = 0;
 pub const NVENC: u8 = 1;
 pub const ANY_MAKERS: u8 = 2;
+/// Direct3D 12 Video Encode (`d3d12enc.rs`): any maker's GPU, with loss recovery and live
+/// rate changes. Asked for with `--encoder d3d12`; not yet the default anywhere.
+pub const D3D12: u8 = 3;
 /// Which encoder `--encoder` asked for; the card's own by default.
 pub static WHICH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(AUTO);
 

@@ -23,7 +23,7 @@ use anyhow::{Context, Result, bail, ensure};
 use remoteman_encode::{FrameEncoder, HdrLight, How, Made};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device5, ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D, D3D11_BOX};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device5, ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_P010, DXGI_FORMAT_UNKNOWN, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory4};
@@ -241,7 +241,7 @@ impl Params {
         b.flag(false); // dependent slices
         b.flag(false); // output flag present
         b.u(3, 0); // extra slice header bits
-        b.flag(false); // sign data hiding
+        b.flag(env_flag("REMOTEMAN_D3D12_SDH", false)); // sign data hiding
         b.flag(self.cabac_init_present);
         b.ue(0); // refs in list 0 by default: 1
         b.ue(0);
@@ -250,11 +250,11 @@ impl Params {
         b.flag(self.transform_skip);
         b.flag(self.cu_qp_delta);
         if self.cu_qp_delta {
-            b.ue(0);
+            b.ue(std::env::var("REMOTEMAN_D3D12_CUQPDEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
         }
         b.se(0);
         b.se(0);
-        b.flag(false); // slice chroma qp offsets present
+        b.flag(true); // slice chroma qp offsets present (the driver writes them)
         b.flag(false); // weighted pred
         b.flag(false); // weighted bipred
         b.flag(false); // transquant bypass
@@ -384,6 +384,14 @@ fn d3d12_device(gpu: &Gpu) -> Result<ID3D12Device> {
     unsafe {
         let factory: IDXGIFactory4 = CreateDXGIFactory1()?;
         let adapter: IDXGIAdapter = factory.EnumAdapterByLuid(windows::Win32::Foundation::LUID { LowPart: gpu.luid.0, HighPart: gpu.luid.1 })?;
+        if std::env::var_os("REMOTEMAN_D3D12_DEBUG").is_some() {
+            let mut dbg: Option<ID3D12Debug> = None;
+            if D3D12GetDebugInterface(&mut dbg).is_ok() {
+                if let Some(d) = dbg {
+                    d.EnableDebugLayer();
+                }
+            }
+        }
         let mut device: Option<ID3D12Device> = None;
         D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_11_0, &mut device).context("a Direct3D 12 device")?;
         device.context("no device")
@@ -432,18 +440,34 @@ fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) ->
     check(video, D3D12_FEATURE_VIDEO_ENCODER_INPUT_FORMAT, &mut fmt)?;
     ensure!(fmt.IsSupported.as_bool(), "the HEVC encoder takes no P010 input");
 
-    let mut sup = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC::default();
-    let mut cs = D3D12_FEATURE_DATA_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT {
-        Codec: D3D12_VIDEO_ENCODER_CODEC_HEVC,
-        Profile: profile_desc(),
-        CodecSupportLimits: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT {
-            DataSize: std::mem::size_of::<D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC>() as u32,
-            Anonymous: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_0 { pHEVCSupport: &mut sup },
-        },
-        ..Default::default()
-    };
-    check(video, D3D12_FEATURE_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT, &mut cs)?;
-    ensure!(cs.IsSupported.as_bool(), "the HEVC encoder takes no configuration of ours");
+    // The query takes the configuration we would like and says whether it is supported: try
+    // from the biggest coding units down.
+    let mut found = None;
+    for (max_cu, depth) in [(3, 3u8), (2, 3), (2, 2), (1, 2), (1, 1), (2, 1)] {
+        let mut sup = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC {
+            SupportFlags: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC_FLAG_NONE,
+            MinLumaCodingUnitSize: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_CUSIZE(0),
+            MaxLumaCodingUnitSize: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_CUSIZE(max_cu),
+            MinLumaTransformUnitSize: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_TUSIZE(0),
+            MaxLumaTransformUnitSize: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_TUSIZE(3.min(max_cu + 1)),
+            max_transform_hierarchy_depth_inter: depth,
+            max_transform_hierarchy_depth_intra: depth,
+        };
+        let mut cs = D3D12_FEATURE_DATA_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT {
+            Codec: D3D12_VIDEO_ENCODER_CODEC_HEVC,
+            Profile: profile_desc(),
+            CodecSupportLimits: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT {
+                DataSize: std::mem::size_of::<D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC>() as u32,
+                Anonymous: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_0 { pHEVCSupport: &mut sup },
+            },
+            ..Default::default()
+        };
+        if check(video, D3D12_FEATURE_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT, &mut cs).is_ok() && cs.IsSupported.as_bool() {
+            found = Some(sup);
+            break;
+        }
+    }
+    let sup = found.context("the HEVC encoder takes none of the coding unit configurations tried")?;
 
     let mut pc = D3D12_VIDEO_ENCODER_CODEC_PICTURE_CONTROL_SUPPORT_HEVC::default();
     let mut ps = D3D12_FEATURE_DATA_VIDEO_ENCODER_CODEC_PICTURE_CONTROL_SUPPORT {
@@ -461,7 +485,7 @@ fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) ->
     // Our configuration: the smallest coding units the encoder allows up to 32x32 (64x64 where
     // it has no smaller maximum), its transform units, its hierarchy depths; no AMP, no SAO.
     let config = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC {
-        ConfigurationFlags: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_NONE,
+        ConfigurationFlags: if sup.SupportFlags.0 & D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC_FLAG_ASYMETRIC_MOTION_PARTITION_REQUIRED.0 != 0 { D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_USE_ASYMETRIC_MOTION_PARTITION } else { D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_NONE },
         MinLumaCodingUnitSize: sup.MinLumaCodingUnitSize,
         MaxLumaCodingUnitSize: sup.MaxLumaCodingUnitSize,
         MinLumaTransformUnitSize: sup.MinLumaTransformUnitSize,
@@ -471,7 +495,7 @@ fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) ->
     };
 
     // The whole thing together.
-    let (cw, ch) = (w.next_multiple_of(16), h.next_multiple_of(16));
+    let (cw, ch) = (w, h);
     let mut cfg = config;
     let mut gop = D3D12_VIDEO_ENCODER_SEQUENCE_GOP_STRUCTURE_HEVC { GOPLength: 0, PPicturePeriod: 0, log2_max_pic_order_cnt_lsb_minus4: POC_BITS - 4 };
     let cbr = cbr_params(bitrate, fps, true);
@@ -585,6 +609,7 @@ pub struct Encoder {
     fence11: ID3D11Fence,
     shared_fence: ID3D12Fence,
     queue: ID3D12CommandQueue,
+    device: ID3D12Device,
     allocator: ID3D12CommandAllocator,
     list: ID3D12VideoEncodeCommandList2,
     encoder: ID3D12VideoEncoder,
@@ -626,7 +651,11 @@ impl Encoder {
     pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, s: &Settings) -> Result<Self> {
         ensure!(s.mode.codec == remoteman_core::Codec::Hevc && s.mode.chroma == remoteman_core::Chroma::C420, "Direct3D 12 encoding here is HEVC 4:2:0 only");
         let (w, h, fps) = (s.width, s.height, s.fps.max(1));
-        let (cw, ch) = (w.next_multiple_of(16), h.next_multiple_of(16));
+        // The coded size is the picture's: the input is copied whole (a planar texture is copied
+        // as a whole or not at all), so a size the smallest coding unit (8) doesn't divide is
+        // left to the other encoders.
+        ensure!(w % 8 == 0 && h % 8 == 0, "Direct3D 12 encoding here needs a picture size that 8 divides, not {w}x{h}");
+        let (cw, ch) = (w, h);
         // SAFETY: Direct3D 12 calls as documented, with live arguments and out-parameters.
         unsafe {
             let device = d3d12_device(gpu)?;
@@ -646,9 +675,9 @@ impl Encoder {
                 EncodeProfile: D3D12_VIDEO_ENCODER_PROFILE_DESC { DataSize: 4, Anonymous: D3D12_VIDEO_ENCODER_PROFILE_DESC_0 { pHEVCProfile: &mut profile } },
                 InputFormat: DXGI_FORMAT_P010,
                 CodecConfiguration: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION { DataSize: std::mem::size_of_val(&config) as u32, Anonymous: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_0 { pHEVCConfig: &mut config } },
-                MaxMotionEstimationPrecision: D3D12_VIDEO_ENCODER_MOTION_ESTIMATION_PRECISION_MODE_MAXIMUM,
+                MaxMotionEstimationPrecision: D3D12_VIDEO_ENCODER_MOTION_ESTIMATION_PRECISION_MODE_QUARTER_PIXEL,
             };
-            let encoder: ID3D12VideoEncoder = video.CreateVideoEncoder(&desc).context("CreateVideoEncoder")?;
+            let encoder: ID3D12VideoEncoder = video.CreateVideoEncoder(&desc).with_context(|| format!("CreateVideoEncoder (config {:?}, caps {:?})", config, caps))?;
             let mut level = chosen.level;
             let res = D3D12_VIDEO_ENCODER_PICTURE_RESOLUTION_DESC { Width: cw, Height: ch };
             let hdesc = D3D12_VIDEO_ENCODER_HEAP_DESC {
@@ -667,19 +696,32 @@ impl Encoder {
             let device4: ID3D12Device4 = device.cast()?;
             let list: ID3D12VideoEncodeCommandList2 = device4.CreateCommandList1(0, D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE, D3D12_COMMAND_LIST_FLAG_NONE).context("the video encode command list")?;
 
-            // The input: a texture both APIs open, the converter's output copied into it.
+            // The input: a texture both APIs open (made in Direct3D 11, which shares P010 more
+            // readily), the converter's output copied into it.
+            let sd = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC {
+                Width: cw,
+                Height: ch,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_P010,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: windows::Win32::Graphics::Direct3D11::D3D11_USAGE_DEFAULT,
+                BindFlags: windows::Win32::Graphics::Direct3D11::D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: (windows::Win32::Graphics::Direct3D11::D3D11_RESOURCE_MISC_SHARED.0 | windows::Win32::Graphics::Direct3D11::D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0) as u32,
+            };
+            let mut shared11: Option<ID3D11Texture2D> = None;
+            gpu.device.CreateTexture2D(&sd, None, Some(&mut shared11)).context("the shared input texture (Direct3D 11)")?;
+            let shared11 = shared11.context("no input texture")?;
+            let dxgi: windows::Win32::Graphics::Dxgi::IDXGIResource1 = shared11.cast().context("IDXGIResource1")?;
+            let handle = dxgi.CreateSharedHandle(None, 0x1000_0000, None).context("sharing the input texture")?;
             let mut shared: Option<ID3D12Resource> = None;
-            device
-                .CreateCommittedResource(&heap(D3D12_HEAP_TYPE_DEFAULT), D3D12_HEAP_FLAG_SHARED, &texture_desc(cw, ch, 1, D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS), D3D12_RESOURCE_STATE_COMMON, None, &mut shared)
-                .context("the shared input texture")?;
-            let shared = shared.context("no input texture")?;
-            let handle = device.CreateSharedHandle(&shared, None, 0x1000_0000, None)?;
-            let shared11: windows::core::Result<ID3D11Texture2D> = gpu.device1.OpenSharedResource1(handle);
+            let opened = device.OpenSharedHandle(handle, &mut shared);
             let _ = CloseHandle(handle);
-            let shared11 = shared11.context("opening the input texture in Direct3D 11")?;
-
-            let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_SHARED)?;
-            let fh = device.CreateSharedHandle(&fence, None, 0x1000_0000, None)?;
+            opened.context("opening the input texture in Direct3D 12")?;
+            let shared = shared.context("no input texture")?;
+            let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_SHARED).context("a shared fence")?;
+            let fh = device.CreateSharedHandle(&fence, None, 0x1000_0000, None).context("sharing the fence")?;
             let device5: ID3D11Device5 = gpu.device.cast().context("ID3D11Device5")?;
             let mut fence11_out: Option<ID3D11Fence> = None;
             let fence11 = device5.OpenSharedFence(fh, &mut fence11_out).map(|_| fence11_out);
@@ -729,15 +771,15 @@ impl Encoder {
                 max_tb_log2: 2 + config.MaxLumaTransformUnitSize.0 as u32,
                 depth_inter: config.max_transform_hierarchy_depth_inter as u32,
                 depth_intra: config.max_transform_hierarchy_depth_intra as u32,
-                amp: false,
+                amp: config.ConfigurationFlags.0 & D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_USE_ASYMETRIC_MOTION_PARTITION.0 != 0,
                 sao: false,
                 hdr: s.hdr,
                 light: s.light,
                 cu_qp_delta: env_flag("REMOTEMAN_D3D12_CUQP", true),
-                cabac_init_present: env_flag("REMOTEMAN_D3D12_CABACINIT", false),
+                cabac_init_present: env_flag("REMOTEMAN_D3D12_CABACINIT", true),
                 strong_intra: env_flag("REMOTEMAN_D3D12_STRONG", false),
                 temporal_mvp: env_flag("REMOTEMAN_D3D12_TMVP", false),
-                transform_skip: false,
+                transform_skip: env_flag("REMOTEMAN_D3D12_TSKIP", false),
             };
             let note = format!("Direct3D 12 HEVC Main10 level idx {} on {}: {} refs/P, DPB {}, flags {:#x}, vbv {vbv}, reconfig {reconfigurable}", caps.level, gpu.adapter, caps.max_l0_refs, caps.max_dpb, caps.support_flags);
             Ok(Self {
@@ -750,6 +792,7 @@ impl Encoder {
                 fence11,
                 shared_fence: fence,
                 queue,
+                device: device.clone(),
                 allocator,
                 list,
                 encoder,
@@ -809,8 +852,7 @@ impl Encoder {
         // Copy the converter's picture into the shared texture and hand it over.
         // SAFETY: live interfaces of the device the converter works on and of the encoder's.
         unsafe {
-            let b = D3D11_BOX { left: 0, top: 0, front: 0, right: p.width, bottom: p.height, back: 1 };
-            self.gpu_context.CopySubresourceRegion(&self.shared11, 0, 0, 0, 0, &self.input11, 0, Some(&b));
+            self.gpu_context.CopyResource(&self.shared11, &self.input11);
             self.shared_value += 1;
             self.gpu_context.Signal(&self.fence11, self.shared_value)?;
         }
@@ -882,7 +924,6 @@ impl Encoder {
                 set(self.pics[i].slice, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, &mut before, &mut self.recon_state);
             }
             set(work, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, &mut before, &mut self.recon_state);
-            before.push(transition(&self.bitstream, 0, self.bitstream_state, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE));
             before.push(transition(&self.meta, 0, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE));
             self.list.ResourceBarrier(&before);
 
@@ -917,7 +958,7 @@ impl Encoder {
             };
             self.list.EncodeFrame(&self.encoder, &self.heap, &input_args, &output_args);
 
-            let mut after = vec![transition(&self.meta, 0, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ), transition(&self.resolved, 0, self.resolved_state, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE)];
+            let mut after = vec![transition(&self.meta, 0, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ)]; 
             after.push(transition(&self.input, 0, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, D3D12_RESOURCE_STATE_COMMON));
             after.push(transition(&self.input, 1, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, D3D12_RESOURCE_STATE_COMMON));
             self.list.ResourceBarrier(&after);
@@ -932,9 +973,22 @@ impl Encoder {
                 ResolvedLayoutMetadata: D3D12_VIDEO_ENCODER_ENCODE_OPERATION_METADATA_BUFFER { pBuffer: ManuallyDrop::new(Some(self.resolved.clone())), Offset: 0 },
             };
             self.list.ResolveEncoderOutputMetadata(&resolve_in, &resolve_out);
-            let last = [transition(&self.resolved, 0, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_COPY_DEST), transition(&self.bitstream, 0, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_COPY_DEST), transition(&self.meta, 0, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, D3D12_RESOURCE_STATE_COMMON)];
+            let last = [transition(&self.meta, 0, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, D3D12_RESOURCE_STATE_COMMON)];
             self.list.ResourceBarrier(&last);
-            self.list.Close()?;
+            if let Err(e) = self.list.Close() {
+                if let Ok(q) = self.device.cast::<ID3D12InfoQueue>() {
+                    for i in 0..q.GetNumStoredMessages() {
+                        let mut len = 0;
+                        let _ = q.GetMessage(i, None, &mut len);
+                        let mut buf = vec![0u8; len];
+                        let m = buf.as_mut_ptr() as *mut D3D12_MESSAGE;
+                        if q.GetMessage(i, Some(m), &mut len).is_ok() {
+                            eprintln!("D3D12: {}", std::ffi::CStr::from_ptr((*m).pDescription as *const _).to_string_lossy());
+                        }
+                    }
+                }
+                return Err(e.into());
+            }
 
             // Wait for the converter's copy, run, and wait for the end.
             let shared_fence = self.shared_fence.clone();
