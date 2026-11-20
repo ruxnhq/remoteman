@@ -317,6 +317,10 @@ pub struct Reassembler {
     next: u32,
     /// Frames given up since the last call to [`Self::take_lost`]: the first and last.
     lost: Option<(u32, u32)>,
+    /// Something of this epoch has arrived: losses count from the first frame seen, not from 0.
+    /// (A device that joins another's session comes in at the lead's frame numbers: the frames
+    /// before it came weren't lost to it, and 464 of them were counted so on 2026-11-20.)
+    begun: bool,
     /// Fragments rebuilt from parity so far.
     repaired: u64,
 }
@@ -334,7 +338,7 @@ impl Reassembler {
 
     /// For another stream in the picture's layout (the device's camera).
     pub fn of(kind: u8) -> Self {
-        Self { kind, epoch: 0, partial: BTreeMap::new(), next: 0, lost: None, repaired: 0 }
+        Self { kind, epoch: 0, partial: BTreeMap::new(), next: 0, lost: None, begun: false, repaired: 0 }
     }
 
     /// The epoch being put together.
@@ -347,6 +351,7 @@ impl Reassembler {
         self.epoch = epoch;
         self.partial.clear();
         self.next = 0;
+        self.begun = false;
     }
 
     /// The frames given up since this was last asked, as the first and last of them.
@@ -367,6 +372,10 @@ impl Reassembler {
             return Ok(Parity::parse(datagram).ok().and_then(|(p, data)| self.parity(&p, data)));
         }
         let (f, payload) = Fragment::parse_as(self.kind, datagram)?;
+        if f.epoch == self.epoch && !self.begun {
+            self.begun = true;
+            self.next = f.frame;
+        }
         if f.epoch != self.epoch || f.frame < self.next {
             return Ok(None);
         }
@@ -383,6 +392,10 @@ impl Reassembler {
     }
 
     fn parity(&mut self, p: &Parity, data: &[u8]) -> Option<Frame> {
+        if p.epoch == self.epoch && !self.begun {
+            self.begun = true;
+            self.next = p.frame;
+        }
         if p.epoch != self.epoch || p.frame < self.next {
             return None;
         }
