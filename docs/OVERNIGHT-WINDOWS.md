@@ -160,3 +160,10 @@ extended linear BT.2020 layer), which had never run on an iPad. At 08:23 the Mac
 iPad and iPhone apps ask for SDR until that is fixed. Also seen: connecting waited 8 s for Windows
 to list the 3200x2400@120 mode on the freshly plugged monitor before going on (it came up at that
 mode anyway); to look at.
+Later (08:40): the real cause was the host's AV1 metadata OBUs after all. The iPad's VideoToolbox
+AV1 decoder gives no picture and no error for a sample holding them (the Mac's takes them, which
+is why the Mac test passed). The Mac session's viewers now leave type 5 OBUs out of the sample,
+and HDR is back on the iPad and iPhone (checked from the iPad against this host: AV1 10-bit HDR
+drawn, values at the middle 0.434/0.332/0.057 of SDR white; HDR now drawn in extended linear
+Display P3). The host stops sending AV1 metadata OBUs too (c14640e, not installed yet), so older
+iPad apps don't go black; `REMOTEMAN_AV1_HDR_METADATA=1` sends them.
