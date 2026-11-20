@@ -19,11 +19,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use remoteman_core::Codec;
 use remoteman_encode::{FrameEncoder, How, Made};
+
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Media::MediaFoundation::{
     CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI,
     IMF2DBuffer, IMFActivate, IMFDXGIDeviceManager, IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFTransform, MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING, MF_MT_MPEG2_PROFILE, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateDXGIDeviceManager,
+    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING, MF_MT_MPEG2_PROFILE, MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateDXGIDeviceManager,
     MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_FULL, MFSampleExtension_CleanPoint, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
     MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_HARDWARE_VENDOR_ID_Attribute, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
     MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_AV1, MFVideoFormat_HEVC, MFVideoFormat_P010, METransformHaveOutput, METransformNeedInput,
@@ -201,7 +202,13 @@ impl Encoder {
                 t.SetUINT64(&MF_MT_FRAME_SIZE, pair(s.width, s.height))?;
                 t.SetUINT64(&MF_MT_FRAME_RATE, pair(s.fps.max(1), 1))?;
                 t.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pair(1, 1))?;
-                t.SetUINT32(&MF_MT_INTERLACE_MODE, PROGRESSIVE)
+                t.SetUINT32(&MF_MT_INTERLACE_MODE, PROGRESSIVE)?;
+                // What the converter makes of an SDR desktop: BT.709, limited range. An encoder
+                // told nothing tags its stream otherwise (AMD's: BT.2020 PQ, an HDR stream).
+                t.SetUINT32(&MF_MT_VIDEO_PRIMARIES, 2)?;
+                t.SetUINT32(&MF_MT_TRANSFER_FUNCTION, 5)?;
+                t.SetUINT32(&MF_MT_YUV_MATRIX, 1)?;
+                t.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, 2)
             };
             let hevc = s.mode.codec == Codec::Hevc;
             let out = MFCreateMediaType()?;
@@ -336,12 +343,18 @@ impl Encoder {
                 buffer.Lock(&mut at, None, Some(&mut length))?;
                 self.frame.clear();
                 let data = std::slice::from_raw_parts(at, length as usize);
-                // A keyframe must carry its parameter sets: an HEVC one that begins with
-                // anything but the video parameter set (type 32) gets them put in front.
-                if clean && self.hevc && !self.header.is_empty() && !starts_with_vps(data) {
-                    self.frame.extend_from_slice(&self.header);
+                // A keyframe must carry its parameter sets: an HEVC one that has no video
+                // parameter set (type 32) before its first picture gets them, after the access
+                // unit delimiter if it begins with one (AMD's encoder writes one to every frame).
+                let at = if clean && self.hevc && !self.header.is_empty() && !has_vps(data) { Some(after_delimiter(data)) } else { None };
+                match at {
+                    Some(at) => {
+                        self.frame.extend_from_slice(&data[..at]);
+                        self.frame.extend_from_slice(&self.header);
+                        self.frame.extend_from_slice(&data[at..]);
+                    }
+                    None => self.frame.extend_from_slice(data),
                 }
-                self.frame.extend_from_slice(data);
                 let _ = buffer.Unlock();
                 return Ok(clean);
             }
@@ -350,14 +363,33 @@ impl Encoder {
     }
 }
 
-/// Does an HEVC frame (with start codes) begin with a video parameter set?
-fn starts_with_vps(data: &[u8]) -> bool {
-    let at = match data {
-        [0, 0, 1, ..] => 3,
-        [0, 0, 0, 1, ..] => 4,
-        _ => return false,
-    };
-    data.get(at).is_some_and(|b| (b >> 1) & 0x3f == 32)
+/// The NAL units of an HEVC frame with start codes: (offset of the start code, type).
+fn nals(data: &[u8]) -> Vec<(usize, u8)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 3 < data.len() {
+        if data[i..i + 3] == [0, 0, 1] {
+            out.push((if i > 0 && data[i - 1] == 0 { i - 1 } else { i }, (data[i + 3] >> 1) & 0x3f));
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Does an HEVC frame carry a video parameter set before its first picture?
+fn has_vps(data: &[u8]) -> bool {
+    nals(data).iter().take_while(|(_, kind)| *kind >= 32).any(|(_, kind)| *kind == 32)
+}
+
+/// Where parameter sets go in a frame: after its access unit delimiter (type 35) if it begins
+/// with one, else at the start.
+fn after_delimiter(data: &[u8]) -> usize {
+    match nals(data).as_slice() {
+        [(0, 35), (next, _), ..] => *next,
+        _ => 0,
+    }
 }
 
 impl FrameEncoder for Encoder {

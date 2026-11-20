@@ -420,9 +420,13 @@ fn check<T>(video: &ID3D12VideoDevice3, feature: D3D12_FEATURE_VIDEO, data: &mut
 /// and a 1080-row picture must be coded as 1088 rows and cropped (FFmpeg's encoder does the same).
 /// A driver that doesn't say asks for the smallest coding unit, 8.
 fn size_multiples(video: &ID3D12VideoDevice3, vendor: u32) -> (u32, u32) {
-    // The driver says 1 (no requirement) all the same: AMD's encoder codes whole groups of 16
-    // rows, and a stream that says 1080 rows decodes wrongly in its last 56 (found by bisecting).
-    let floor: u32 = std::env::var("REMOTEMAN_D3D12_ALIGN").ok().and_then(|v| v.parse().ok()).unwrap_or(if vendor == 0x1002 { 16 } else { 8 });
+    // The driver says 1 (no requirement) all the same. AMD's encoder codes whole coding tree
+    // blocks (64x64): a stream that says 1080 rows decodes wrongly in its last 56, and one that
+    // says 368 (a multiple of 16, not of 64) fails to parse in a picture of a few hundred
+    // (found by bisecting; 384 is clean over thousands). The picture is coded at the aligned size
+    // and cropped by the stream's parameter sets. NVIDIA's takes any multiple of the smallest
+    // coding unit.
+    let floor: u32 = std::env::var("REMOTEMAN_D3D12_ALIGN").ok().and_then(|v| v.parse().ok()).unwrap_or(if vendor == 0x1002 { 64 } else { 8 });
     let mut r = D3D12_FEATURE_DATA_VIDEO_ENCODER_OUTPUT_RESOLUTION { Codec: D3D12_VIDEO_ENCODER_CODEC_HEVC, ..Default::default() };
     let said = check(video, D3D12_FEATURE_VIDEO_ENCODER_OUTPUT_RESOLUTION, &mut r);
     if env_flag("REMOTEMAN_D3D12_DEBUG", false) {
@@ -432,7 +436,7 @@ fn size_multiples(video: &ID3D12VideoDevice3, vendor: u32) -> (u32, u32) {
     (multiple(r.ResolutionWidthMultipleRequirement), multiple(r.ResolutionHeightMultipleRequirement))
 }
 
-fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) -> Result<Chosen> {
+fn choose(video: &ID3D12VideoDevice3, vendor: u32, w: u32, h: u32, fps: u32, bitrate: u32) -> Result<Chosen> {
     let mut profile = D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN10;
     let profile_ptr: *mut D3D12_VIDEO_ENCODER_PROFILE_HEVC = &mut profile;
     let profile_desc = || D3D12_VIDEO_ENCODER_PROFILE_DESC { DataSize: 4, Anonymous: D3D12_VIDEO_ENCODER_PROFILE_DESC_0 { pHEVCProfile: profile_ptr } };
@@ -520,7 +524,10 @@ fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) ->
     let config = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC {
         ConfigurationFlags: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAGS(
             (if sup.SupportFlags.0 & D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC_FLAG_ASYMETRIC_MOTION_PARTITION_REQUIRED.0 != 0 { D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_USE_ASYMETRIC_MOTION_PARTITION.0 } else { 0 })
-                | if env_flag("REMOTEMAN_D3D12_AMP", false) { D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_USE_ASYMETRIC_MOTION_PARTITION.0 } else { 0 },
+                // AMD's encoder uses asymmetric partitions whether it was asked to or not, and
+                // a stream whose SPS says it doesn't (the flag unset) fails to parse now and then
+                // (found as a CABAC error once in some hundreds of pictures). Say so.
+                | if sup.SupportFlags.0 & D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC_FLAG_ASYMETRIC_MOTION_PARTITION_SUPPORT.0 != 0 && env_flag("REMOTEMAN_D3D12_AMP", vendor == 0x1002) { D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_USE_ASYMETRIC_MOTION_PARTITION.0 } else { 0 },
         ),
         MinLumaCodingUnitSize: sup.MinLumaCodingUnitSize,
         MaxLumaCodingUnitSize: sup.MaxLumaCodingUnitSize,
@@ -697,7 +704,7 @@ impl Encoder {
             let video: ID3D12VideoDevice3 = device.cast().context("ID3D12VideoDevice3 (no Direct3D 12 video on this GPU or driver)")?;
             let (mw, mh) = size_multiples(&video, gpu.vendor);
             let (cw, ch) = (w.next_multiple_of(mw), h.next_multiple_of(mh));
-            let chosen = choose(&video, cw, ch, fps, s.bitrate)?;
+            let chosen = choose(&video, gpu.vendor, cw, ch, fps, s.bitrate)?;
             let caps = chosen.caps.clone();
             let vbv = caps.support_flags & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_VBV_SIZE_CONFIG_AVAILABLE.0 != 0 && env_flag("REMOTEMAN_D3D12_VBV", true);
             let reconfigurable = caps.support_flags & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_RECONFIGURATION_AVAILABLE.0 != 0;
@@ -806,8 +813,8 @@ impl Encoder {
                 max_cb_log2: 3 + config.MaxLumaCodingUnitSize.0 as u32,
                 min_tb_log2: 2 + config.MinLumaTransformUnitSize.0 as u32,
                 max_tb_log2: 2 + config.MaxLumaTransformUnitSize.0 as u32,
-                depth_inter: config.max_transform_hierarchy_depth_inter as u32,
-                depth_intra: config.max_transform_hierarchy_depth_intra as u32,
+                depth_inter: std::env::var("REMOTEMAN_D3D12_SPSDEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(config.max_transform_hierarchy_depth_inter as u32),
+                depth_intra: std::env::var("REMOTEMAN_D3D12_SPSDEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(config.max_transform_hierarchy_depth_intra as u32),
                 amp: config.ConfigurationFlags.0 & D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_USE_ASYMETRIC_MOTION_PARTITION.0 != 0,
                 sao: false,
                 hdr: s.hdr,
