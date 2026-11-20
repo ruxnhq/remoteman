@@ -189,56 +189,6 @@ pub fn watch_vblanks(hwnd: isize, scene: std::sync::Arc<crate::stream::Scene>) {
     });
 }
 
-unsafe extern "system" fn flip_procedure(hwnd: windows::Win32::Foundation::HWND, msg: u32, w: windows::Win32::Foundation::WPARAM, l: windows::Win32::Foundation::LPARAM) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::Foundation::LRESULT;
-    use windows::Win32::UI::WindowsAndMessaging::*;
-    match msg {
-        // The pointer is the app's window's, under this one on the same thread: it goes there.
-        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
-        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
-        WM_ERASEBKGND => LRESULT(1),
-        WM_PAINT => {
-            // SAFETY: our own window.
-            let _ = unsafe { windows::Win32::Graphics::Gdi::ValidateRect(Some(hwnd), None) };
-            LRESULT(0)
-        }
-        // SAFETY: passing the message on as it came.
-        _ => unsafe { DefWindowProcW(hwnd, msg, w, l) },
-    }
-}
-
-/// The window the picture goes to while variable refresh is on: borderless, over the whole of
-/// the monitor `owner` is on, owned by it and so above it. It takes neither the keyboard nor
-/// the pointer (both stay with `owner`, under it on the same thread), so the app works as it
-/// did; the app's own things over the picture (its bar, menus) are under it, so it is hidden
-/// while there are any. Made hidden; `show_flip_window` puts it up.
-pub fn flip_window(owner: windows::Win32::Foundation::HWND) -> Option<windows::Win32::Foundation::HWND> {
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::UI::WindowsAndMessaging::*;
-    use windows::core::w;
-    // SAFETY: Win32 calls with structures that live through each call.
-    unsafe {
-        let instance = GetModuleHandleW(None).ok()?;
-        let class = WNDCLASSW { lpfnWndProc: Some(flip_procedure), hInstance: instance.into(), lpszClassName: w!("remoteman-engine-vrr"), ..Default::default() };
-        RegisterClassW(&class);
-        CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP, w!("remoteman-engine-vrr"), w!("remoteman picture"), WS_POPUP, 0, 0, 8, 8, Some(owner), None, Some(instance.into()), None).ok()
-    }
-}
-
-/// Put the window up over the whole of `owner`'s monitor, or take it down.
-pub fn show_flip_window(hwnd: windows::Win32::Foundation::HWND, owner: windows::Win32::Foundation::HWND, show: bool) {
-    use windows::Win32::UI::WindowsAndMessaging::*;
-    // SAFETY: calls on our own window.
-    unsafe {
-        if show {
-            let (.., r, _) = crate::window::monitor_of(owner);
-            let _ = SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        } else {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
-    }
-}
-
 /// What the "Variable refresh rate" switch comes to: whether each frame is presented as it
 /// arrives (with tearing allowed, so a monitor that varies its refresh shows it at once), and
 /// if not, why not, in the words the app may show.

@@ -79,7 +79,7 @@ pub const FEATURES: Features = Features {
     files: true,
     folder_choice: true,
     hdr: true,
-    variable_refresh: true,
+    variable_refresh: false,
     refresh_choice: true,
     follow_window: true,
     sharp_text: true,

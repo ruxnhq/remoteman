@@ -38,12 +38,6 @@ pub struct Scene {
     /// The range of refresh rates the monitor under the window varies within, if it can.
     #[allow(dead_code)]
     pub vrr_range: Mutex<Option<(u32, u32)>>,
-    /// While variable refresh is on: the engine's window over the whole monitor that the
-    /// picture is presented in instead (0: none, the panel or window as usual).
-    pub flip_hwnd: AtomicIsize,
-    /// The app has something of its own over the picture (its bar, a menu): the flip window,
-    /// which would hide it, isn't put up.
-    pub overlay: AtomicBool,
     /// Said by the draw thread: its swap chain was made so that it may tear (DXGI allows it),
     /// and the last picture was presented that way.
     pub tearing_allowed: AtomicBool,

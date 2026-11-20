@@ -81,8 +81,6 @@ struct Engine {
     cursor_serial: Cell<u32>,
     /// When the monitor under the window was last looked at (`watch_monitor`).
     watched: Cell<Option<Instant>>,
-    /// The window the picture goes to while variable refresh is on (0: not made yet).
-    flip: Cell<isize>,
 }
 
 thread_local! {
@@ -322,12 +320,6 @@ pub extern "system" fn remoteman_stop() -> i32 {
     if let Some(drawing) = e.drawing.borrow_mut().take() {
         let _ = drawing.join();
     }
-    if e.flip.get() != 0 {
-        // SAFETY: our own window, and the draw thread that presented in it is gone.
-        unsafe {
-            let _ = DestroyWindow(HWND(e.flip.get() as *mut _));
-        }
-    }
     let app = e.app.borrow();
     if let Some(s) = &app.summary {
         say!(
@@ -431,7 +423,6 @@ fn start(words: Vec<String>, notify: Notify) -> Result<()> {
         cursor: Cell::new(None),
         cursor_serial: Cell::new(0),
         watched: Cell::new(None),
-        flip: Cell::new(0),
     });
     ENGINE.with(|x| *x.borrow_mut() = Some(e.clone()));
     // The Windows key, Alt+Tab and the like, while a session has the keyboard.
@@ -607,10 +598,7 @@ impl Engine {
     }
 
     /// Whether pictures are presented as they arrive (variable refresh) or at the display's
-    /// refresh: the switch, full screen, the monitor, and DXGI. While they are, the picture is
-    /// in a window of the engine's own over the monitor (`monitor::flip_window`), except while
-    /// the app has something over the picture (its bar, a menu, a dialog, the figures, a line
-    /// of news), which that window would hide.
+    /// refresh: the switch, full screen, the monitor, and DXGI.
     fn decide_refresh(&self) {
         let Ok(app) = self.app.try_borrow() else { return };
         let scene = &app.scene;
@@ -618,28 +606,8 @@ impl Engine {
         let (on, why) = crate::monitor::variable_refresh(FEATURES.variable_refresh && app.store.settings.variable_refresh, app.fullscreen, range, scene.tearing_allowed.load(Ordering::Relaxed));
         if scene.variable_refresh.swap(on, Ordering::Relaxed) != on {
             say!("variable refresh: {}", if on { "on: each picture is presented as it arrives" } else { why });
+            scene.poke();
         }
-        let covered = scene.overlay.load(Ordering::Relaxed) || app.store.settings.figures || app.toast.is_some() || app.dialog.is_some();
-        let up = on && !covered && app.screen == Screen::Session;
-        if up == (scene.flip_hwnd.load(Ordering::Relaxed) != 0) {
-            return;
-        }
-        let host = HWND(self.host.get() as *mut _);
-        if self.flip.get() == 0 {
-            match crate::monitor::flip_window(host) {
-                Some(w) => self.flip.set(w.0 as isize),
-                None => return say!("variable refresh: no window for the picture"),
-            }
-        }
-        let flip = HWND(self.flip.get() as *mut _);
-        if up {
-            scene.flip_hwnd.store(flip.0 as isize, Ordering::Relaxed);
-            crate::monitor::show_flip_window(flip, host, true);
-        } else {
-            crate::monitor::show_flip_window(flip, host, false);
-            scene.flip_hwnd.store(0, Ordering::Relaxed);
-        }
-        scene.poke();
     }
 
     fn forwarding(&self) -> bool {
@@ -1017,11 +985,6 @@ impl Engine {
             }
             "figures" => Msg::ToggleFigures,
             "fullscreen" => Msg::ToggleFullscreen,
-            "overlay" => {
-                // The app has something of its own over the picture (its bar), or not.
-                app.scene.overlay.store(b("on"), Ordering::Relaxed);
-                return true;
-            }
             "now-fullscreen" => {
                 // The app's window went into full screen, or out of it.
                 app.set_fullscreen(b("on"));
@@ -1255,12 +1218,7 @@ fn picture_state(app: &App) -> Value {
     };
     let range = *scene.vrr_range.lock().unwrap();
     let tearing_allowed = scene.tearing_allowed.load(Ordering::Relaxed);
-    let (vrr_on, mut vrr_why) = if FEATURES.variable_refresh { crate::monitor::variable_refresh(st.variable_refresh, app.fullscreen, range, tearing_allowed) } else { (false, crate::features::NOT_YET) };
-    // On, but the picture is in the panel while the app has something over it.
-    let vrr_active = scene.tearing.load(Ordering::Relaxed);
-    if vrr_on && !vrr_active {
-        vrr_why = "Paused while something is over the picture";
-    }
+    let (vrr_active, vrr_why) = if FEATURES.variable_refresh { crate::monitor::variable_refresh(st.variable_refresh, app.fullscreen, range, tearing_allowed) } else { (false, crate::features::NOT_YET) };
     // 4:4:4: where it is decoded, how fast the processor is taken to be, and whether it is in
     // what Automatic offers for the display this window would ask for now.
     let full = app.decoders.iter().find(|m| m.chroma == remoteman_core::Chroma::C444);
@@ -1277,7 +1235,7 @@ fn picture_state(app: &App) -> Value {
         },
         "variable_refresh": {
             "on": st.variable_refresh, "range": range.map(|(lo, hi)| json!([lo, hi])), "tearing_allowed": tearing_allowed,
-            "active": vrr_active, "why": vrr_why,
+            "active": vrr_active, "tearing": scene.tearing.load(Ordering::Relaxed), "why": vrr_why,
             "presenting": scene.presenting.lock().unwrap().clone(),
         },
         "sharp_text": {
