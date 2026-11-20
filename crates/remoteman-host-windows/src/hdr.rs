@@ -70,6 +70,7 @@ pub fn state(device: &str) -> Option<(bool, bool)> {
 
 /// Switch HDR on or off for the monitor showing `device`.
 pub fn set(device: &str, on: bool) -> Result<()> {
+    crate::desk::follow();
     let Some((adapter, id)) = target(device) else { bail!("{device} isn't part of the desktop") };
     let mut set = DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE { header: header(DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE, size_of::<DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE>(), adapter, id), ..Default::default() };
     set.Anonymous.value = on as u32;

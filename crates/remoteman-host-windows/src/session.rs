@@ -76,11 +76,62 @@ pub struct Host {
     microphone: Option<Microphone>,
     mic_count: (u32, u32, Option<u32>),
     live: Option<Live>,
+    /// The PC was locked when this client came and was unlocked with its password: it is
+    /// locked again when the client goes.
+    unlocked_for_client: bool,
+    /// Wrong passwords for unlocking in a row, and until when no more are taken.
+    wrong: (u32, Option<std::time::Instant>),
 }
+
+/// How many wrong passwords in a row before none are taken for a while (Windows' own limit on
+/// wrong tries counts them too), and for how long.
+const WRONG_TRIES: u32 = 5;
+const WRONG_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 impl Host {
     pub fn new(screen: Screen, bitrate: u32, fit: Fit, allowed: Allowed) -> Self {
-        Self { screen, bitrate, fit, allowed, clipboard_wanted: false, copies: Arc::default(), sound: None, microphone: None, mic_count: (0, 0, None), live: None }
+        Self { screen, bitrate, fit, allowed, clipboard_wanted: false, copies: Arc::default(), sound: None, microphone: None, mic_count: (0, 0, None), live: None, unlocked_for_client: false, wrong: (0, None) }
+    }
+
+    /// A device has come to a locked PC (or one at its sign-in screen), which Windows shows on
+    /// the PC's main screen only. As on the other hosts (docs/PROTOCOL.md, "A locked host"):
+    /// the device is asked for the password (or PIN) of the PC's user, and with it the host
+    /// types it into Windows' lock screen, as its owner would. `Err` is what the device is
+    /// told; one that starts "locked: " invites it to try again with the password.
+    fn unlock_for(&mut self, client: &ClientInfo) -> Result<(), String> {
+        if !crate::desk::locked() {
+            return Ok(());
+        }
+        if !crate::desk::is_system() {
+            return Err("this computer is locked, and this host can't unlock it (it wasn't started by its service)".into());
+        }
+        // A device that keeps guessing is kept waiting.
+        if let Some(until) = self.wrong.1.filter(|until| *until > std::time::Instant::now()) {
+            let minutes = (until - std::time::Instant::now()).as_secs() / 60 + 1;
+            return Err(format!("this computer is locked, and after too many wrong passwords it takes no more for {minutes} min"));
+        }
+        let user = crate::desk::user_name().map_or_else(|| "its user".to_string(), |u| u.to_string());
+        let Some(password) = client.unlock.as_deref().filter(|p| !p.is_empty()) else {
+            tracing::info!(device = client.name, "this computer is locked: the device is asked for the password");
+            return Err(format!("locked: This computer is locked. Enter the password or PIN of {user} on it."));
+        };
+        match crate::desk::unlock_with(password) {
+            Ok(true) => {
+                self.wrong = (0, None);
+                self.unlocked_for_client = true;
+                tracing::info!(device = client.name, "this computer was locked: unlocked for a paired device; it locks again when the device leaves");
+                Ok(())
+            }
+            Ok(false) => {
+                self.wrong.0 += 1;
+                tracing::warn!(device = client.name, tries = self.wrong.0, "a wrong password for unlocking this computer");
+                if self.wrong.0 >= WRONG_TRIES {
+                    self.wrong = (0, Some(std::time::Instant::now() + WRONG_WAIT));
+                }
+                Err("locked: That password is not right.".into())
+            }
+            Err(e) => Err(format!("this computer is locked and couldn't be unlocked: {e:#}")),
+        }
     }
 
     /// What the picture is encoded at when the client's ceiling is `ceiling`.
@@ -107,7 +158,9 @@ impl Host {
         // documented way to set a monitor's scale for the user.
         let want = display::Mode { width: screen.width, height: screen.height, refresh: screen.refresh.clamp(1, 240) };
         // A device that asks to mirror is shown the monitor as it is, no faster than it asked.
-        let mirror = screen.placement == Placement::Mirror;
+        // Not on a PC with screens of its own: the driver's monitor isn't one of them, so there
+        // is nothing there to mirror yet, and the device gets an extra display instead.
+        let mirror = screen.placement == Placement::Mirror && !self.screen.pc();
         // Otherwise a monitor of its own where the driver has one to give, else the driver's
         // one monitor at the device's size.
         let place = match screen.placement {
@@ -419,6 +472,7 @@ impl HostHandler for Host {
             tracing::info!(name = %client.name, "a device came while sharing is off: turned away");
             return Err("sharing is switched off on this computer".into());
         }
+        self.unlock_for(client)?;
         let screen = client.display;
         tracing::info!(name = %client.name, ?screen, decoders = ?client.decoders, cursor_apart = client.cursor, "client");
         self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link, false).inspect_err(|e| tracing::error!("couldn't start the picture: {e}"))
@@ -523,6 +577,11 @@ impl HostHandler for Host {
             drop(l);
             self.screen.release();
             tracing::info!("the client is gone");
+        }
+        // Unlocked for that device: locked again now that it has gone.
+        if std::mem::take(&mut self.unlocked_for_client) {
+            let locked = crate::desk::lock_now();
+            tracing::info!(locked, "the device that unlocked this computer has gone: locked again");
         }
     }
 }

@@ -178,16 +178,33 @@ jrsoftware.org, its signature checked) and leaves `C:\rm\installer\remoteman-hos
    earlier install left some there (Administrators and SYSTEM full, LOCAL SERVICE, which the
    driver runs as, may change them, Users may read them);
 3. an inbound firewall rule, "remoteman host": UDP 7791, for that program only, every profile;
-4. a scheduled task, "remoteman host", that starts the host at each logon, elevated, in the
-   session of whoever logs on (input, the cursor and mode changes work nowhere else), restarted
-   if it stops; started at once. The host keeps its state (its identity, the paired devices) in
-   `C:\ProgramData\remoteman\host`, readable by Administrators and SYSTEM only, and asks about
-   each new device in a window on the desktop (`--ask`) until the owner's app exists;
+4. **since 2026-11-19, a service**, "remoteman host" (automatic, LocalSystem, restarted if it
+   ends), started at once (`crates/remoteman-host-windows/src/service.rs`): from boot on it keeps
+   one host running as SYSTEM in the console's session, with no window, and moves it when the
+   console moves to another session. That host follows the input desktop
+   (`crates/remoteman-host-windows/src/desk.rs`), so it reaches the sign-in screen, the lock
+   screen and Windows' permission prompts; its control pipe admits whoever is signed in at the
+   console; files from a device go to that user's Downloads (refused while nobody is signed in).
+   Ctrl+Alt+Del from a device goes to the service, which sends it with `SendSAS`, so the
+   installer sets the policy `SoftwareSASGeneration` to allow services (and the uninstaller puts
+   back what it was). An earlier install's logon task is removed. (Before that date: a
+   scheduled task that started the host at each logon, elevated, in a console window that
+   stopped the host when closed.) The host keeps its state (its identity, the paired devices)
+   in `C:\ProgramData\remoteman\host`, readable by Administrators and SYSTEM only (its log
+   through `remoteman-host ctl log` too), and asks about each new device in a window on the
+   desktop (`--ask`) until the owner's app is in the installer. On a PC with screens of its
+   own the driver's monitors are on the desktop only while a device is, placed against the PC's
+   screens, which are written down first (`screens.txt` in the state folder) and put back
+   exactly when the device leaves or by the next host after a crash. The host announces itself
+   on the network for viewers to find (DNS-SD `_remoteman._udp` through Windows' own
+   `DnsServiceRegister`: the LAN card's address, `v`, `fp`, `os=windows`, `mac`; `advertise.rs`;
+   `remoteman-host --announce-test NAME SECONDS` tries it without the driver);
 5. what it made is written to `installed.json`, after each step, so that the uninstaller takes
    away exactly that.
 
-The uninstaller (Settings > Apps > remoteman host) stops the task and the host (by its pid),
-removes the task, the firewall rule, the display device if it made it, the driver package if it
+The uninstaller (Settings > Apps > remoteman host) stops the service (or, from an older
+install, the task) and the host (by its pid), removes the service and the task, puts the
+Ctrl+Alt+Del policy back, removes the firewall rule, the display device if it made it, the driver package if it
 added it, its certificates, the settings folder if it made it, the host's state, and its files.
 A failure in `setup.ps1` shows as a message, its reason in `setup.log`, and as exit code 1 in a
 silent install (`/VERYSILENT /SUPPRESSMSGBOXES`).

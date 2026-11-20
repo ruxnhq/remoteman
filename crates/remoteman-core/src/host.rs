@@ -442,6 +442,19 @@ impl Host {
         }
     }
 
+    /// Drop the connected client with these words as the closing reason (one that begins
+    /// `locked: ` asks the client for its user's password, as an `error` with that code does;
+    /// docs/PROTOCOL.md, "A locked host"). It stays trusted. Says whether there was one.
+    pub fn close_client(&self, reason: &str) -> bool {
+        match self.who.lock().unwrap().as_ref() {
+            Some((_, conn)) => {
+                conn.close(CLOSE_DROPPED.into(), reason.as_bytes());
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The connected client, if there is one.
     pub fn link(&self) -> Option<Link> {
         self.link.lock().unwrap().clone()
