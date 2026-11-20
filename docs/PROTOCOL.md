@@ -156,7 +156,7 @@ The host reports every move, the client's own included, a pipeline's delay later
 
 Everything beside the picture and input. Three rules hold for all of it:
 
-- **A host lists what it has** in its hello's `features`: `sound`, `mic`, `camera`, `configure`, `clipboard`, `files`, `parity`. A client offers only those.
+- **A host lists what it has** in its hello's `features`: `sound`, `mic`, `camera`, `configure`, `clipboard`, `files`, `parity`, `pen`. A client offers only those.
 - **Nothing of a feature is sent to a side that hasn't asked for it.** Each starts with a message from the client, so a client or host that knows nothing of a feature is never handed a datagram or a stream it can't read. (A client must still ignore datagram kinds it doesn't know.)
 - **When the desktop behind the connection changes** (a new stream epoch because the login screen gave way to the session), what the client had switched on stays on: the host side carries it over, and the client hears `sound_format` again.
 
@@ -255,6 +255,18 @@ A sequence of events on the input stream, each a `u8` type and then its fields:
 | 5 key | `u16 usage, u8 down` | A USB HID usage on page 7 (keyboard), by physical position, modifiers included. Any ⌘/Ctrl swapping is done by the client. |
 | 6 touch | `u8 phase, u8 slot, f32 x, f32 y` | Phase 0 down, 1 move, 2 up. `slot` tells fingers apart. Position as for type 1. |
 | 7 text | `u16 length`, then UTF-8 | Text typed through an on-screen keyboard or input method, put in as typed. |
+| 9 pen | `u8 phase, u8 buttons, f32 x, f32 y, f32 pressure, f32 tilt_x, f32 tilt_y, f32 twist` | See Pen. 27 bytes with the type. |
+
+### Pen
+
+A client sends type 9 only to a host that lists `pen` in its features, and falls back to touch or mouse for any other. One pen at a time, no id.
+
+- `phase`: 0 contact down, 1 move in contact, 2 contact up, 3 hover move (in range, no contact), 4 left hover range.
+- `buttons`: bit 0 the barrel (side) button, bit 1 the eraser end. A change while the pen is down or hovering is sent as a move.
+- `x`, `y`: as for type 1: little-endian `f32`s, fractions (0 to 1) of the display from its top left.
+- `pressure`: 0 to 1, 0 while hovering. `tilt_x`, `tilt_y`: degrees, -90 to 90, as Windows pointer input has them. `twist`: degrees, 0 to 359, 0 if unknown.
+
+A host that can inject a pen lists `pen`, and lifts the pen if the client leaves mid-stroke.
 
 A host ignores event types it doesn't know only if it can skip them, so new types go into a new protocol version.
 

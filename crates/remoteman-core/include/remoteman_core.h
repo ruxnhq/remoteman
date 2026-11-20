@@ -164,6 +164,12 @@ void rm_client_scroll(const rm_client *client, float dx, float dy);             
 void rm_client_key(const rm_client *client, uint16_t usage, uint8_t down);       // USB HID usage, page 7
 void rm_client_touch(const rm_client *client, uint8_t phase, uint8_t slot, float x, float y); // 0 down, 1 move, 2 up
 void rm_client_text(const rm_client *client, const char *utf8);
+// Pen (docs/PROTOCOL.md, "Pen"): phase 0 down, 1 move in contact, 2 up, 3 hover, 4 left range;
+// buttons bit 0 barrel, bit 1 eraser; x, y fractions of the display; pressure 0..1; tilt degrees
+// -90..90; twist 0..359. Returns 0 and sends nothing when the host doesn't list "pen" in
+// rm_client_features (send touch or mouse instead), else 1.
+int32_t rm_client_pen(const rm_client *client, uint8_t phase, uint8_t buttons, float x, float y,
+                      float pressure, float tilt_x, float tilt_y, float twist);
 
 // Leave and free the client. `on_closed` is called before this returns or shortly after.
 void rm_client_close(rm_client *client);
@@ -210,7 +216,7 @@ typedef struct rm_accept {
 
 // One input event (docs/PROTOCOL.md, Input). Fields a kind doesn't use are zero.
 typedef struct rm_input {
-    uint8_t kind;             // 1 pointer to, 2 pointer by, 3 button, 4 scroll, 5 key, 6 touch, 7 text
+    uint8_t kind;             // 1 pointer to, 2 pointer by, 3 button, 4 scroll, 5 key, 6 touch, 7 text, 8 display, 9 pen
     uint8_t button;           // 0 left, 1 right, 2 middle
     uint8_t down;
     uint8_t phase;            // touch: 0 down, 1 move, 2 up
@@ -218,6 +224,11 @@ typedef struct rm_input {
     uint16_t usage;           // key: USB HID usage, page 7
     float x, y;               // 1 and 6: fractions of the display; 2 and 4: display pixels
     const char *text;         // 7: UTF-8, valid only during the call
+    // Appended for kind 9 (pen; phase 0 down, 1 move, 2 up, 3 hover, 4 left range; button is the
+    // buttons byte, bit 0 barrel, bit 1 eraser; x, y fractions). Zero for the other kinds.
+    float pressure;           // 0 to 1
+    float tilt_x, tilt_y;     // degrees, -90 to 90
+    float twist;              // degrees, 0 to 359
 } rm_input;
 
 // All called on one thread of the core's, one at a time; they may block.
