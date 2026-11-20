@@ -177,3 +177,16 @@ iPad apps don't go black; `REMOTEMAN_AV1_HDR_METADATA=1` sends them.
 - Pencil: not tried (no Pencil).
 - `C:\rm\installer-2026-11-20-013\remoteman-host-setup-0.1.3.exe` (b16b20d): 0.1.2 plus the pointer
   nudge and no AV1 metadata OBUs.
+
+## Sound (08:40-09:05)
+The owner: sound to the iPad "works but with terrible delay". Measured by the Mac session on the
+iPad with a test tone (built-in speaker, shallow buffer): about 60 ms from the host's capture
+stamp to the speaker; WASAPI loopback itself adds under 10 ms (measured here). The lag heard was
+the PC's own speakers playing ~60 ms ahead. The Mac session cut the iPad's deep (Wi-Fi) buffer
+from 100-170 to 60-110 ms. Fixes here: the host mutes the PC's default output while a device
+listens (loopback records the same level muted, measured; restored after, and at the next start
+after a crash), whether or not Steam's speakers exist; and the installer installs Steam's
+streaming speakers and microphone from the user's own Steam folder (`drivers.exe` is a ZIP after
+a 430 KB stub; the x64 INF/SYS/CAT, Microsoft-signed catalogs, installed with pnputil), which
+gives the PC a device's microphone. `C:\rm\installer-2026-11-20-014\remoteman-host-setup-0.1.4.exe`
+(7a75e1c). Not yet seen: the mute from the service, the Steam devices' install.
