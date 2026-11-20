@@ -1,6 +1,6 @@
 //! What the host does for a client: the monitor brought to its size, the picture out, its input
 //! in, the cursor apart if it asks. The connection itself is the shared core's. Built like the
-//! Linux agent's session, with less: no camera, no second display, no unlocking, and the
+//! Linux agent's session, with less: no second display, no unlocking, and the
 //! display is the driver's one monitor brought to the device's size, not a monitor of its own.
 
 use std::collections::BTreeMap;

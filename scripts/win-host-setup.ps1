@@ -36,7 +36,7 @@ if (Test-Path $vswhere) {
 Push-Location $root
 try {
   if (-not $Payload) {
-    & cargo build --release --locked -p remoteman-host-windows
+    & cargo build --release --locked -p remoteman-host-windows -p remoteman-vcam-windows
     if ($LASTEXITCODE -ne 0) { throw "the host's build failed ($LASTEXITCODE)" }
     $driverOut = Join-Path $root 'windows\display-driver\out'
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'windows\display-driver\build.ps1') -Out $driverOut
@@ -50,8 +50,9 @@ try {
     }
     $Payload = Join-Path $Out 'payload'
     if (Test-Path $Payload) { Remove-Item -Recurse -Force $Payload }
-    New-Item -ItemType Directory -Force "$Payload\driver\pkg" | Out-Null
+    New-Item -ItemType Directory -Force "$Payload\driver\pkg", "$Payload\vcam" | Out-Null
     Copy-Item (Join-Path $root 'target\release\remoteman-host.exe'), (Join-Path $root 'windows\host-installer\setup.ps1') $Payload
+    Copy-Item (Join-Path $root 'target\release\remoteman_vcam_windows.dll') "$Payload\vcam"
     Copy-Item (Join-Path $driverOut 'RemotemanDisplay.dll'), (Join-Path $driverOut 'RemotemanDisplay.inf') "$Payload\driver\pkg"
     foreach ($f in 'vdd_settings.xml', 'LICENSE', 'LICENSE-MS-PL') { Copy-Item (Join-Path $driverOut $f) "$Payload\driver" }
     if ($withApp) { Copy-Item -Recurse $appOut "$Payload\app" }
