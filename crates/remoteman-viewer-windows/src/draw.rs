@@ -727,7 +727,12 @@ impl Drawer {
                 view.context("no view")
             };
             // Three plain textures, of one format (R16 or R8).
-            let planes = Planes { luma: view(&picture.texture, desc.Format)?, chroma: view(cb, desc.Format)?, cr: Some(view(cr, desc.Format)?) };
+            let planes = if picture.semi {
+                // Cb and Cr interleaved in one texture: the shader reads both from it.
+                Planes { luma: view(&picture.texture, desc.Format)?, chroma: view(cb, DXGI_FORMAT_R16G16_UNORM)?, cr: None }
+            } else {
+                Planes { luma: view(&picture.texture, desc.Format)?, chroma: view(cb, desc.Format)?, cr: Some(view(cr, desc.Format)?) }
+            };
             if self.views.len() > 16 {
                 self.views.clear();
             }
@@ -936,6 +941,7 @@ impl Drawer {
                 // 8 bits (R8).
                 let (scale, black, yrange, mid, crange) = match desc.Format {
                     DXGI_FORMAT_P010 => (65535.0 / 64.0, 64.0, 876.0, 512.0, 896.0),
+                    DXGI_FORMAT_R16_UNORM if picture.msb => (65535.0 / 64.0, 64.0, 876.0, 512.0, 896.0),
                     DXGI_FORMAT_R16_UNORM => (65535.0, 64.0, 876.0, 512.0, 896.0),
                     DXGI_FORMAT_Y410 => (1023.0, 64.0, 876.0, 512.0, 896.0),
                     _ => (255.0, 16.0, 219.0, 128.0, 224.0),

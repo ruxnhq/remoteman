@@ -32,6 +32,8 @@ mod cursor;
 #[cfg(windows)]
 mod decode;
 #[cfg(windows)]
+mod cuda;
+#[cfg(windows)]
 mod demo;
 #[cfg(windows)]
 mod draw;

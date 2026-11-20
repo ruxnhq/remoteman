@@ -505,7 +505,7 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
                     // Only a busy picture says how fast the processor is: a still desktop
                     // decodes many times faster than one that moves (0.4 bits a pixel is 50
                     // Mbit/s at 1920x1080 and 60 a second).
-                    if i.mode.chroma == remoteman_core::Chroma::C444 && crate::decode::mode_in_software(i.mode) && n >= 60 && bits_a_pixel >= 0.1 {
+                    if i.mode.chroma == remoteman_core::Chroma::C444 && crate::decode::on_processor(i.mode) && n >= 60 && bits_a_pixel >= 0.1 {
                         // Pixels a microsecond are millions a second.
                         let rate = (pixels * n as u64 / all.max(1)) as u32;
                         s.cpu_444_rate.store(rate.max(1), Ordering::Relaxed);
