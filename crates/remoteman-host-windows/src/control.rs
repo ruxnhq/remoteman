@@ -54,7 +54,7 @@ pub struct Allowed {
     pub clipboard: Arc<AtomicBool>,
     /// Lock the PC when a device's session ends (off unless the owner says so).
     pub lock_on_leave: Arc<AtomicBool>,
-    /// Make Steam's speakers the default output while a device listens, so the PC's own go quiet (on unless the owner says otherwise).
+    /// Mute the PC's speakers (or make Steam's the default output) while a device listens (on unless the owner says otherwise).
     pub speakers_follow: Arc<AtomicBool>,
     /// A device this host can play a client's microphone into was found.
     pub microphone: Arc<AtomicBool>,

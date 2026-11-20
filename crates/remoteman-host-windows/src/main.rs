@@ -49,6 +49,8 @@ mod camera;
 mod awake;
 #[cfg(windows)]
 mod speakers;
+#[cfg(all(windows, test))]
+mod mutetest;
 #[cfg(windows)]
 mod capture;
 #[cfg(windows)]

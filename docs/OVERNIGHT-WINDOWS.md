@@ -138,3 +138,101 @@ call (-1, -2), so the driver's monitor stayed the main display.
 `C:\rm\installer-2026-11-20-multi\remoteman-host-setup-0.1.2.exe`, built from 8cff415: the
 installed 0.1.1 plus more than one device at once. Optional; the default ("It takes over") behaves
 as 0.1.1 does.
+
+Installed by the owner at 08:08: started clean (the driver's monitors unplugged in 16 ms, the PC's three screens as they were, "When a second device connects: It takes over"); sharing still off.
+
+## The Apple side on the new core (Mac session, 08:09)
+`origin/main` (eeaef22) merged into `apple/phase1-client` (9667a3e): the core and every Apple
+target build. The Mac host follows the bitrate (a 5 Mbit/s ceiling followed on loopback), lists
+`parity` and `pen` and injects the pen as tablet events; the iPad sends the Pencil as pen events
+(pressure, tilt, roll on a Pencil Pro) to hosts that list `pen`; the viewers say "View only" when
+the host leaves `input` out. Installed on the everyday Mac host, the test host 7803, the iPad and
+the iPhone. Not yet on the Apple side: game controllers, the second factor's prompt, more than one
+device, permissions UI. Not run: rate cuts and parity under real loss, the pen end to end.
+
+## The iPad's black picture (08:16-08:23)
+The owner's first test: the iPad (the Mac session's 9667a3e app) connected as an extra display,
+input worked, the picture stayed black. The host's log showed frames going out whole with real
+content (no loss reported, no keyframe asked for). The Mac viewer, pointed at this host at 08:22,
+decoded the same AV1 10-bit HDR stream (metadata OBUs, parity, refinement) with VideoToolbox and
+real values: the host's stream is fine. The fault is the iOS app's HDR drawing (a 16-bit float,
+extended linear BT.2020 layer), which had never run on an iPad. At 08:23 the Mac session made the
+iPad and iPhone apps ask for SDR until that is fixed. Also seen: connecting waited 8 s for Windows
+to list the 3200x2400@120 mode on the freshly plugged monitor before going on (it came up at that
+mode anyway); to look at.
+Later (08:40): the real cause was the host's AV1 metadata OBUs after all. The iPad's VideoToolbox
+AV1 decoder gives no picture and no error for a sample holding them (the Mac's takes them, which
+is why the Mac test passed). The Mac session's viewers now leave type 5 OBUs out of the sample,
+and HDR is back on the iPad and iPhone (checked from the iPad against this host: AV1 10-bit HDR
+drawn, values at the middle 0.434/0.332/0.057 of SDR white; HDR now drawn in extended linear
+Display P3). The host stops sending AV1 metadata OBUs too (c14640e, not installed yet), so older
+iPad apps don't go black; `REMOTEMAN_AV1_HDR_METADATA=1` sends them.
+
+## The owner's device test (08:16-08:45)
+- Extra display: works (after the iPad's HDR fix); disconnect puts the screens back and unplugs
+  the driver's monitor in 5 ms.
+- Mirror: works (DISPLAY1 3840x2160 captured in HDR, about 7 ms a picture); the pointer didn't
+  show until the PC's own mouse moved (Windows had hidden it after typing or touch). Fixed:
+  the host nudges the pointer a pixel and back when a session starts (b16b20d).
+- Pencil: not tried (no Pencil).
+- `C:\rm\installer-2026-11-20-013\remoteman-host-setup-0.1.3.exe` (b16b20d): 0.1.2 plus the pointer
+  nudge and no AV1 metadata OBUs.
+
+## Sound (08:40-09:05)
+The owner: sound to the iPad "works but with terrible delay". Measured by the Mac session on the
+iPad with a test tone (built-in speaker, shallow buffer): about 60 ms from the host's capture
+stamp to the speaker; WASAPI loopback itself adds under 10 ms (measured here). The lag heard was
+the PC's own speakers playing ~60 ms ahead. The Mac session cut the iPad's deep (Wi-Fi) buffer
+from 100-170 to 60-110 ms. Fixes here: the host mutes the PC's default output while a device
+listens (loopback records the same level muted, measured; restored after, and at the next start
+after a crash), whether or not Steam's speakers exist; and the installer installs Steam's
+streaming speakers and microphone from the user's own Steam folder (`drivers.exe` is a ZIP after
+a 430 KB stub; the x64 INF/SYS/CAT, Microsoft-signed catalogs, installed with pnputil), which
+gives the PC a device's microphone. `C:\rm\installer-2026-11-20-014\remoteman-host-setup-0.1.4.exe`
+(7a75e1c). Not yet seen: the mute from the service, the Steam devices' install.
+Installing 0.1.4 (09:01): the host part went in at once; the Steam step took about 6 minutes and
+looked stuck. Both of Steam's devices did install (speakers 09:03:37, microphone 09:04:21); the
+time went in checking for them, which asked each of the PC's 308 devices for its hardware ids (0.2
+s each, several times over). Now one query of the device list (0.3 s, 4be7f07), and the host is
+restarted after the step so it finds Steam's microphone (it looks only at start; 331dcb5).
+`C:\rm\installer-2026-11-20-015\remoteman-host-setup-0.1.5.exe`. Also removed: two leftover tray
+entries in Settings from test copies of the tray app (a worktree's and `C:\rm\hostapp-rust`'s).
+Tested from this PC with the test client as the device (mirror, nothing saved; 09:11): the
+microphone works (the client's 1 kHz tone came out of "Microphone (Steam Streaming Microphone)"
+at -11.6 dB peak, its level); the sound stream came clean (1724 packets, none missing; the test
+tone was too quiet for the client's level gate); the mute did NOT happen: the host wrote its
+note while acting as the user and the state folder refused it. Fixed in fc11e56 (looked up and
+muted as the user, written by the host). `C:\rm\installer-2026-11-20-016\remoteman-host-setup-0.1.6.exe`.
+The test client is paired as "testclient" (to be revoked after testing).
+0.1.6 installed (09:15) and the test run again from this PC (09:16): the PC's default output
+unmuted before, muted while the test client listened (host: "the PC's speakers are muted (the
+sound is still recorded)"), the client heard 8.5 s of the 440 Hz tone with the PC muted, the
+microphone went into Steam's, and the output was unmuted again when it left. The test client's
+pairing was revoked and its identity deleted.
+
+## Variable refresh in a window (09:20-09:40)
+Measured on DISPLAY1 (XG32UCWMG, VRR 48-240 Hz) with a clean 100-pictures-a-second clip: full
+screen follows the pictures (variable refresh works); in a window the monitor stays at 240 Hz
+(vblanks 4.17 ms apart). A window of our own over the panel with an HWND flip-model swap chain
+(child, owned popup, 8- and 10-bit) stayed "drawn by the desktop's compositor" at 4.17 ms too:
+Windows gives independent flip, and with it variable refresh, only to a window covering its
+monitor. Not built. What might do it is outside the app: NVIDIA's "G-SYNC for windowed and full
+screen mode" in the NVIDIA Control Panel (not tried; the owner's setting).
+
+## Main display, and the Apple side (09:35-09:50)
+- Main display with 0.1.7 (the test client as the device, 2400x1600): the device's display became
+  the main one at 0,0 with the PC's three screens kept on and moved left in their arrangement;
+  when it left, the screens came back exactly, 10 windows came back to the main screen, the
+  driver's monitor was unplugged; its scale set to 200 %. The 8 s wait for the mode was still
+  there (the off-the-desktop check never fired); now at most 3 s, then the arrangement asks for
+  the mode (b09bcb6, `C:\rm\installer-2026-11-20-018\remoteman-host-setup-0.1.8.exe`, not installed).
+- The Mac session built the Apple side (28b69d6, 55a0878 on its branch, not installed): the second
+  factor's prompt, the Mac host's second-device setting, per-device permissions with the log and a
+  notice, game controllers in the viewers; checked on its own loopback. The tests against this
+  PC need the owner: switching the second factor on here was stopped by this session's permission
+  check (it changes who can sign in); the half-started setup was discarded (status off).
+- "It watches" against this PC (09:43, the owner set it): the test client led in mirror; the Mac
+  viewer joined for 18 s, got the lead's 3840x2160 AV1 stream, hello without `input` ("View
+  only"), the lead undisturbed. It counted 464 frames lost at the join (the lead's frames before
+  it came): fixed in the reassembler (losses count from the first frame seen, edef240, 5f59877).
+  The second factor: the owner chose not to test it here. The test client is unpaired again.

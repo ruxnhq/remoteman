@@ -37,7 +37,12 @@ pub struct Features {
     /// window of the engine's own with the keyboard and an HWND swap chain that may tear
     /// (`full.rs`, `draw.rs`). Measured on an RTX 5090 with a 240 Hz VRR monitor (`probe.rs`,
     /// and that window with `--watch-vblank`); the app's `SwapChainPanel` never makes the
-    /// monitor vary its refresh, so in a window it stays at the monitor's rate.
+    /// monitor vary its refresh, so in a window it stays at the monitor's rate. Tried for a
+    /// window too (2026-11): a window of the engine's own over the panel's place, a child or an
+    /// owned popup, with an HWND flip swap chain that may tear (10 and 8 bits, plain styles):
+    /// Windows composed it ("drawn by the desktop's compositor") and the vertical blanks stayed
+    /// 4.17 ms apart for 100 pictures a second, with the window in front. Only a window that
+    /// covers its monitor is shown by itself; "Optimizations for windowed games" isn't set here.
     #[allow(dead_code)] // (The old program's window doesn't present that way.)
     pub variable_refresh: bool,
     /// A choice of whether the stream follows this monitor's refresh rate (it always does).

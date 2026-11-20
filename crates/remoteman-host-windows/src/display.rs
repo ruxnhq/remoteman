@@ -1324,7 +1324,8 @@ impl Screen {
         tracing::info!(modes = list.len(), "asking the driver to add {}x{} at {} Hz (it re-creates the monitor)", want.width, want.height, want.refresh);
         self.driver.set_modes(&list)?;
         let asked = Instant::now();
-        while asked.elapsed() < Duration::from_secs(8) {
+        // Windows takes its time listing a new mode, and on a PC whose device monitors are plugged in for each device it never did within 8 s, though the arrangement that followed always got the mode at once (2026-11-20): wait 3 s at most, then go on and let the arrangement ask for it.
+        while asked.elapsed() < Duration::from_secs(3) {
             std::thread::sleep(Duration::from_millis(200));
             // The monitors come back as new outputs, perhaps under other names. With several,
             // the first is found by its number; any of them listing the mode means all do.
@@ -1335,11 +1336,22 @@ impl Screen {
                 self.device = output.device;
                 return Ok(());
             }
+            // A monitor that isn't on the desktop has no modes Windows will list (the driver
+            // unplugs a device's monitor between devices, and plugs it back in off the
+            // desktop): once it is back, go on, and let the arrangement that follows (which
+            // asks for the mode) say whether it is there. Waiting the full 8 s cost every
+            // connection with a new size 8 s (2026-11-20), and the mode was there each time.
+            if self.pc && asked.elapsed() >= Duration::from_millis(1500) && !attached(&output.device) {
+                tracing::info!(after_ms = asked.elapsed().as_millis() as u64, output = %output.device, "the monitor is back, off the desktop (where Windows lists no modes): going on");
+                self.device = output.device;
+                return Ok(());
+            }
         }
         if let Ok((output, _)) = find_output() {
             self.device = output.device;
         }
-        bail!("the driver was asked, but 8 s later Windows doesn't list the mode");
+        tracing::info!("the driver was given the mode; 3 s later Windows doesn't list it yet: going on (the arrangement asks for it)");
+        Ok(())
     }
 
     /// The client is gone: put the monitor back as it was.
