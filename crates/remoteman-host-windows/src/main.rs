@@ -73,6 +73,8 @@ mod ccd;
 mod dpi;
 #[cfg(windows)]
 mod encode;
+#[cfg(windows)]
+mod d3d12enc;
 #[cfg(all(windows, test))]
 mod enctest;
 #[cfg(windows)]
