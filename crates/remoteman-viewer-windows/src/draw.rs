@@ -860,8 +860,11 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
         }
         if draws {
             // For the next refresh of the display (there is room, so this doesn't wait); or,
-            // with variable refresh, at once with tearing allowed: a monitor that varies its
-            // refresh then shows the picture now, and the next when it comes.
+            // with variable refresh, at once with tearing allowed, so that a monitor that varies
+            // its refresh shows the picture now. Never so far: the swap chains made here are for
+            // composition and aren't allowed to tear (`chain_flags`), since that was measured
+            // not to make the monitor vary its refresh; what does (an activated window with an
+            // 8-bit HWND swap chain, `probe.rs`) isn't built.
             let tear = drawer.tears && scene.variable_refresh.load(Ordering::Relaxed);
             if scene.tearing.swap(tear, Ordering::Relaxed) != tear {
                 say!("presenting: {}", if tear { "each picture as it arrives, tearing allowed (variable refresh)" } else { "at the display's refresh" });

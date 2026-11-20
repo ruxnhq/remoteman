@@ -627,7 +627,7 @@ public sealed class SessionBar : UserControl
         ToolTipService.SetToolTip(hdr, "When the computer offers it and this monitor is in HDR. Now: " + pic.O("hdr").S("why"));
         hdr.Click += (_, _) => Engine.Do("toggle", new { flag = "hdr" });
         m.Items.Add(hdr);
-        var vrr = new ToggleMenuFlyoutItem { Text = _state.O("features").B("variable_refresh") ? "Variable refresh rate" : "Variable refresh rate (not available yet)", IsChecked = _state.O("settings").B("variable_refresh"), IsEnabled = _state.O("features").B("variable_refresh") && pic.O("variable_refresh")?["range"] is JsonArray && pic.O("variable_refresh").B("tearing_allowed") };
+        var vrr = new ToggleMenuFlyoutItem { Text = _state.O("features").B("variable_refresh") ? "Variable refresh rate" : "Variable refresh rate (not available yet)", IsChecked = _state.O("features").B("variable_refresh") && _state.O("settings").B("variable_refresh"), IsEnabled = _state.O("features").B("variable_refresh") && pic.O("variable_refresh")?["range"] is JsonArray && pic.O("variable_refresh").B("tearing_allowed") };
         ToolTipService.SetToolTip(vrr, "Shows each frame when it arrives, in full screen. Now: " + pic.O("variable_refresh").S("why"));
         vrr.Click += (_, _) => Engine.Do("toggle", new { flag = "variable-refresh" });
         m.Items.Add(vrr);
