@@ -67,6 +67,8 @@ mod display;
 mod ccd;
 #[cfg(windows)]
 mod encode;
+#[cfg(all(windows, test))]
+mod enctest;
 #[cfg(windows)]
 mod hdr;
 #[cfg(windows)]

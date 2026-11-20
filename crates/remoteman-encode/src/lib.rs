@@ -27,6 +27,33 @@ struct Cfg {
     hdr_pq: u32,
     long_term: u32,
     short_term: u32,
+    hdr_light: u32,
+    hdr_chroma: [u32; 8],
+    hdr_max_lum: u32,
+    hdr_min_lum: u32,
+    hdr_max_cll: u32,
+    hdr_max_fall: u32,
+}
+
+/// What an HDR stream (BT.2020 PQ) says about the picture's light, as the mastering display
+/// colour volume (SMPTE ST 2086) and the content light level (CTA-861.3), written on keyframes:
+/// SEI messages in HEVC, metadata OBUs in AV1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HdrLight {
+    /// The display's peak luminance, in nits.
+    pub peak: f32,
+    /// Its black level, in nits.
+    pub min: f32,
+    /// MaxCLL: the brightest pixel's light, in nits (0: unknown).
+    pub max_cll: u32,
+    /// MaxFALL: the brightest frame's average light, in nits (0: unknown).
+    pub max_fall: u32,
+}
+
+impl HdrLight {
+    /// BT.2020 primaries and a D65 white point, in ST 2086's units of 0.00002: green, blue, red,
+    /// white, each x then y.
+    const BT2020: [u32; 8] = [8500, 39850, 6550, 2300, 35400, 14600, 15635, 16450];
 }
 
 #[cfg(not(windows))]
@@ -147,6 +174,12 @@ impl Config {
             hdr_pq: 0,
             long_term: self.long_term,
             short_term: self.short_term.unwrap_or(0),
+            hdr_light: 0,
+            hdr_chroma: [0; 8],
+            hdr_max_lum: 0,
+            hdr_min_lum: 0,
+            hdr_max_cll: 0,
+            hdr_max_fall: 0,
         }
     }
 }
@@ -180,9 +213,28 @@ impl Encoder {
     /// encoder works on it from threads of its own), and must outlive the encoder.
     #[cfg(windows)]
     pub unsafe fn new_d3d11(device: *mut c_void, cfg: &Config, hdr: bool) -> Result<Self> {
+        // SAFETY: as the caller vouches.
+        unsafe { Self::new_d3d11_light(device, cfg, hdr, None) }
+    }
+
+    /// As [`Self::new_d3d11`], and an HDR stream (`hdr`) with `light` says it in its keyframes:
+    /// BT.2020 mastering primaries, the display's peak and black, MaxCLL and MaxFALL.
+    ///
+    /// # Safety
+    /// As [`Self::new_d3d11`].
+    #[cfg(windows)]
+    pub unsafe fn new_d3d11_light(device: *mut c_void, cfg: &Config, hdr: bool, light: Option<HdrLight>) -> Result<Self> {
         let mut err = [0 as c_char; 256];
         let mut raw = cfg.raw();
         raw.hdr_pq = hdr as u32;
+        if let (true, Some(l)) = (hdr, light) {
+            raw.hdr_light = 1;
+            raw.hdr_chroma = HdrLight::BT2020;
+            raw.hdr_max_lum = (l.peak * 10000.0).round().clamp(1.0, u32::MAX as f32) as u32;
+            raw.hdr_min_lum = (l.min * 10000.0).round().max(0.0) as u32;
+            raw.hdr_max_cll = l.max_cll;
+            raw.hdr_max_fall = l.max_fall;
+        }
         // SAFETY: the wrapper's contract; `err` is a writable buffer of the given length.
         unsafe {
             let enc = rm_nvenc_open_d3d11(device, &raw, err.as_mut_ptr(), 256);
