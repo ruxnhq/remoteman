@@ -659,10 +659,16 @@ impl Client {
         self.host_features.iter().any(|f| f == "pen")
     }
 
-    /// Send one input event. Never blocks. A pen event for a host that doesn't list `pen` is
-    /// dropped: it would be a type the host can't read.
+    /// Whether the host takes game controller states: it lists `gamepad` in its features.
+    pub fn host_has_gamepad(&self) -> bool {
+        self.host_features.iter().any(|f| f == "gamepad")
+    }
+
+    /// Send one input event. Never blocks. A pen event for a host that doesn't list `pen` (and
+    /// a gamepad state for one without `gamepad`) is dropped: it would be a type the host can't
+    /// read.
     pub fn send(&self, event: Event) {
-        if matches!(event, Event::Pen { .. }) && !self.host_has_pen() {
+        if (matches!(event, Event::Pen { .. }) && !self.host_has_pen()) || (matches!(event, Event::Gamepad { .. }) && !self.host_has_gamepad()) {
             return;
         }
         let _ = self.input.send(event);

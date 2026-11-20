@@ -195,13 +195,15 @@ pub struct Injector {
     pen_device: Option<PenDevice>,
     pen_failed: bool,
     pen_state: PenState,
+    /// The virtual game controller (gamepad.rs).
+    gamepad: crate::gamepad::Gamepad,
     /// Events Windows didn't take, and whether that has been said.
     refused: u32,
 }
 
 impl Injector {
     pub fn new(area: Arc<Mutex<Area>>) -> Self {
-        Self { area, keys: BTreeSet::new(), buttons: BTreeSet::new(), moved: (0.0, 0.0), scrolled: (0.0, 0.0), touches: BTreeMap::new(), touch: None, pen_device: None, pen_failed: false, pen_state: PenState::Away, refused: 0 }
+        Self { area, keys: BTreeSet::new(), buttons: BTreeSet::new(), moved: (0.0, 0.0), scrolled: (0.0, 0.0), touches: BTreeMap::new(), touch: None, pen_device: None, pen_failed: false, pen_state: PenState::Away, gamepad: Default::default(), refused: 0 }
     }
 
     fn send(&mut self, inputs: &[INPUT]) {
@@ -318,6 +320,7 @@ impl Injector {
             }
             Event::Touch { phase, slot, x, y } => self.touch(*phase, *slot, *x, *y),
             Event::Pen { phase, buttons, x, y, pressure, tilt_x, tilt_y, twist } => self.pen(*phase, *buttons, *x, *y, *pressure, *tilt_x, *tilt_y, *twist),
+            Event::Gamepad { .. } => self.gamepad.inject(event),
             // This host gives a device one display, so there is nothing to choose between.
             Event::Display(_) => {}
         }
@@ -487,6 +490,7 @@ impl Injector {
         }
         // The device goes with the session.
         self.pen_device = None;
+        self.gamepad.release();
     }
 }
 
