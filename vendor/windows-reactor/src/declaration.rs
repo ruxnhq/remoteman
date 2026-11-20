@@ -776,6 +776,111 @@ pub enum MenuItem {
         label: Rc<str>,
         items: Rc<Vec<Self>>,
     },
+    // remoteman patch (VENDORED.md, patch 6): check and radio items, and items dressed with an
+    // icon, a tooltip or a shortcut's text.
+    /// An item with a check mark while `checked` (WinUI's `ToggleMenuFlyoutItem`). A click
+    /// reports its key; the app says whether it is checked from then on.
+    Check {
+        key: Key,
+        label: Rc<str>,
+        enabled: bool,
+        checked: bool,
+    },
+    /// One of the items of `group` of which one is chosen (`RadioMenuFlyoutItem`).
+    Radio {
+        key: Key,
+        label: Rc<str>,
+        enabled: bool,
+        checked: bool,
+        group: Rc<str>,
+    },
+    /// An item, check item or radio item with a glyph of Segoe Fluent Icons before it, a
+    /// tooltip, or a keyboard shortcut's text after it.
+    Dressed {
+        item: Rc<Self>,
+        glyph: Option<Rc<str>>,
+        tooltip: Option<Rc<str>>,
+        accelerator: Option<Rc<str>>,
+    },
+}
+
+// remoteman patch (VENDORED.md, patch 6).
+impl MenuItem {
+    pub fn check(key: impl Into<Key>, label: impl Into<Rc<str>>, checked: bool) -> Self {
+        Self::Check {
+            key: key.into(),
+            label: label.into(),
+            enabled: true,
+            checked,
+        }
+    }
+
+    pub fn radio(
+        key: impl Into<Key>,
+        label: impl Into<Rc<str>>,
+        group: impl Into<Rc<str>>,
+        checked: bool,
+    ) -> Self {
+        Self::Radio {
+            key: key.into(),
+            label: label.into(),
+            enabled: true,
+            checked,
+            group: group.into(),
+        }
+    }
+
+    /// Greys an item, check item or radio item out (or not).
+    pub fn enabled(mut self, on: bool) -> Self {
+        match &mut self {
+            Self::Item { enabled, .. } | Self::Check { enabled, .. } | Self::Radio { enabled, .. } => *enabled = on,
+            Self::Dressed { item, .. } => *item = Rc::new((**item).clone().enabled(on)),
+            Self::Separator { .. } | Self::Submenu { .. } => {}
+        }
+        self
+    }
+
+    /// A glyph of Segoe Fluent Icons before the label.
+    pub fn glyph(self, glyph: impl Into<Rc<str>>) -> Self {
+        let glyph = Some(glyph.into());
+        self.dress(|d| d.0 = glyph)
+    }
+
+    pub fn tooltip(self, tooltip: impl Into<Rc<str>>) -> Self {
+        let tooltip = Some(tooltip.into());
+        self.dress(|d| d.1 = tooltip)
+    }
+
+    /// A keyboard shortcut's text, shown after the label (it does nothing itself).
+    pub fn accelerator_text(self, text: impl Into<Rc<str>>) -> Self {
+        let text = Some(text.into());
+        self.dress(|d| d.2 = text)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn dress(self, change: impl FnOnce(&mut (Option<Rc<str>>, Option<Rc<str>>, Option<Rc<str>>))) -> Self {
+        match self {
+            Self::Dressed { item, glyph, tooltip, accelerator } => {
+                let mut d = (glyph, tooltip, accelerator);
+                change(&mut d);
+                Self::Dressed { item, glyph: d.0, tooltip: d.1, accelerator: d.2 }
+            }
+            Self::Separator { .. } | Self::Submenu { .. } => self,
+            item => {
+                let mut d = (None, None, None);
+                change(&mut d);
+                Self::Dressed { item: Rc::new(item), glyph: d.0, tooltip: d.1, accelerator: d.2 }
+            }
+        }
+    }
+
+    /// The key a click on this entry reports.
+    pub fn key(&self) -> &Key {
+        match self {
+            Self::Item { key, .. } | Self::Separator { key } | Self::Submenu { key, .. } | Self::Check { key, .. } | Self::Radio { key, .. } => key,
+            Self::Dressed { item, .. } => item.key(),
+        }
+    }
 }
 
 impl MenuItem {

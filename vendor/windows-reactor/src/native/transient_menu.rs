@@ -279,16 +279,15 @@ fn build_menu_items(
 ) -> windows_core::Result<()> {
     for entry in items {
         let item: MenuFlyoutItemBase = match entry {
-            MenuItem::Item {
-                key,
-                label,
-                enabled,
-            } => {
-                let item = MenuFlyoutItem::new()?;
-                item.SetText(label)?;
-                item.cast::<IControl>()?.SetIsEnabled(*enabled)?;
+            // remoteman patch (VENDORED.md, patch 6): check, radio and dressed items too.
+            MenuItem::Item { .. }
+            | MenuItem::Check { .. }
+            | MenuItem::Radio { .. }
+            | MenuItem::Dressed { .. } => {
+                let Some((item, key)) = super::menu_items::native_item(entry)? else {
+                    continue;
+                };
                 let callback = callback.clone();
-                let key = key.clone();
                 revokers.push(item.Click(local::handler(move |_, _| callback.call(key.clone())))?);
                 item.cast()?
             }

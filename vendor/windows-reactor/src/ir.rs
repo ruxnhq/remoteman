@@ -223,8 +223,9 @@ fn validate_key(keys: &mut HashSet<Key>, key: &Key) {
 pub(crate) fn validate_menu_items(items: &[MenuItem], keys: &mut HashSet<Key>) {
     for item in items {
         let (key, children) = match item {
-            MenuItem::Item { key, .. } | MenuItem::Separator { key } => (key, None),
             MenuItem::Submenu { key, items, .. } => (key, Some(items.as_slice())),
+            // (remoteman patch: Check, Radio and Dressed have a key and no children.)
+            other => (other.key(), None),
         };
         validate_key(keys, key);
         if let Some(children) = children {

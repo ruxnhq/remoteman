@@ -35,6 +35,20 @@ comment ("Spike patch" for blurman's, "remoteman patch" for ours).
    open (`NativeWindowState::is_closed`, `src/native/winui/window/mod.rs`). Hiding a dialog of a
    window that had closed with the dialog open crashed the same way.
 
+6. **Check and radio menu items, and dressed items** (remoteman, for the viewer's session
+   menus): `MenuItem::Check` (WinUI's `ToggleMenuFlyoutItem`), `MenuItem::Radio`
+   (`RadioMenuFlyoutItem`, with a group name) and `MenuItem::Dressed` (an item, check item or
+   radio item with a Segoe Fluent Icons glyph, a tooltip, or a keyboard shortcut's text after
+   the label), with `MenuItem::check`, `radio`, `enabled`, `glyph`, `tooltip`,
+   `accelerator_text` and `key` in `src/declaration.rs`. A click reports the item's key as
+   before; the app says from then on whether it is checked. The native items are made in the
+   new `src/native/menu_items.rs`, which both `build_menu_items` (`src/native/winui/
+   attachments.rs` for menus on controls, `src/native/transient_menu.rs` for the notification
+   icon's) call for every entry that is clicked; `src/ir.rs` validates their keys. The new
+   bindings (the two classes, their interfaces and factories) and `IMenuFlyoutItem`'s
+   `put_Icon` and `put_KeyboardAcceleratorTextOverride` (typed in `src/native/bindings.rs`) are
+   windows-bindgen's output over this commit's winmd, not written by hand.
+
 Cargo.toml: the `[lints]` and docs.rs sections are gone (with `[lints.rust]` set here instead)
 and the dependencies name the git commit instead of the windows-rs workspace. `public-api.txt` is
 upstream's and does not list the patches.

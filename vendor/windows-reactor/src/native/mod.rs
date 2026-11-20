@@ -20,6 +20,14 @@ mod app;
 mod app_shim;
 mod bootstrap;
 mod local;
+// remoteman patch (VENDORED.md, patch 6): check and radio menu items.
+#[allow(
+    clippy::upper_case_acronyms,
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals
+)]
+mod menu_items;
 mod notifyicon;
 mod transient_menu;
 mod winui;
