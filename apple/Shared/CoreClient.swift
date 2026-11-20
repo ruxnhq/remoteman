@@ -253,6 +253,10 @@ final class CoreClient: SharingLink {
     func scroll(dx: Float, dy: Float) { with { rm_client_scroll($0, dx, dy) } }
     func key(usage: UInt16, down: Bool) { with { rm_client_key($0, usage, down ? 1 : 0) } }
     func touch(phase: UInt8, slot: UInt8, x: Float, y: Float) { with { rm_client_touch($0, phase, slot, x, y) } }
+    /// Apple Pencil: phase 0 down, 1 move, 2 up, 3 hover, 4 out of range. Nothing goes to a host without `pen`.
+    func pen(phase: UInt8, buttons: UInt8, x: Float, y: Float, pressure: Float, tiltX: Float, tiltY: Float, twist: Float) {
+        with { _ = rm_client_pen($0, phase, buttons, x, y, pressure, tiltX, tiltY, twist) }
+    }
     func text(_ s: String) { with { rm_client_text($0, s) } }
 
     /// Leave. Safe to call more than once.

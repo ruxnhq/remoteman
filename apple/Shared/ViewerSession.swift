@@ -736,6 +736,8 @@ final class ViewerSession: ObservableObject {
                     }
                     self.client = client
                     self.features = features
+                    // A computer that lets this device watch only: say so once, since nothing it does will reach it.
+                    if !features.contains("input") { self.notice = "View only: this computer shows its screen but takes no input from this device." }
                     self.sharing = shared
                     shared?.transferChanged = { [weak self] t in
                         guard let self, self.generation == gen else { return }

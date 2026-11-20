@@ -75,6 +75,7 @@ while !args.isEmpty {
     case "--refine": options.refine = yes()
     case "--dump-source": _ = value()
     case "--refine-factor": HostEncoder.refineFactor = Int(value()) ?? 8
+    case "--follow-loss": options.followLoss = yes()
     case "--test-bursts": TestWindow.bursts = yes()
     case "--encoder": HostEncoder.testMode = value()
     case "--pace": options.pace = yes()

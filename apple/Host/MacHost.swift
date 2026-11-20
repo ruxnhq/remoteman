@@ -60,6 +60,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var testPen = false
         /// A still picture is sent once more, sharper (off: `--refine no`).
         var refine = true
+        /// Let the core lower and raise the bitrate as the network loses or doesn't (off: `--follow-loss no`).
+        var followLoss = true
         /// Offer this Mac's sound (--sound no leaves it out).
         var sound = true
         /// Silence this Mac's own speakers while a device plays its sound, so that it is heard in
@@ -117,7 +119,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// What this host offers now: the camera and the microphone only while remoteman's own are installed on this Mac.
     private var featureList: String {
-        "video,input,cursor,placement,configure,mirror,displays" + (MacHost.hdrCapture && options.tenBit ? ",hdr" : "") + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
+        "video,input,cursor,placement,configure,mirror,displays,pen" + (MacHost.hdrCapture && options.tenBit ? ",hdr" : "") + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
             + (options.allowFiles ? ",files" : "") + (HostCamera.installed ? ",camera" : "") + (HostMicrophone.installed ? ",mic" : "")
     }
     private var announced = ""
@@ -256,7 +258,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let still = CACurrentMediaTime() - lastCaptureAt
         let go = options.refine && !refined && still >= 0.4 && lastBuffer != nil
         if go { refined = true; refinements += 1 }
-        let enc = encoder, pb = lastBuffer, rate = picture.map { bitrate(for: $0) } ?? 25_000_000
+        let enc = encoder, pb = lastBuffer, rate = followedRate > 0 ? followedRate : picture.map { bitrate(for: $0) } ?? 25_000_000
         lock.unlock()
         guard go, let enc, let pb else { return }
         frames.async {
@@ -346,8 +348,27 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         hostLog("host: listening on \(parts.first ?? options.listen), fingerprint \(parts.count > 1 ? parts[1] : "?"), pairing \(rm_host_pairing(h) != 0 ? "on" : "off")")
         listening = (parts.first ?? options.listen, parts.count > 1 ? parts[1] : "")
         if options.confirm { rm_host_set_confirm(h, 1) }
+        // The core follows loss: it lowers the rate when the device reports losses and raises it
+        // again while all is well, up to the device's ceiling or this; the encoder takes it live.
+        if options.followLoss {
+            rm_host_set_bitrate_callback(h, 40_000_000, { ctx, bits in
+                Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().followRate(Int(bits))
+            }, Unmanaged.passUnretained(self).toOpaque())
+        }
         advertise(options.advertise)
     }
+
+    /// The core's thread: the rate the network allows now.
+    private func followRate(_ bits: Int) {
+        lock.lock()
+        let enc = encoder
+        let changed = abs(bits - followedRate) * 10 > followedRate
+        followedRate = bits
+        lock.unlock()
+        enc?.setBitrate(bits)
+        if changed { hostLog("host: bitrate following the network: \(bits / 1000) kbit/s") }
+    }
+    private var followedRate = 0
 
     private var listening = ("", "")
     /// The device is shown this Mac's own screen as it is (it asked to mirror).
@@ -867,6 +888,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         case 5: input.handle(.key(i.usage, i.down != 0))
         case 6: input.handle(.touch(phase: i.phase, slot: i.slot, i.x, i.y))
         case 7: if let t = i.text { input.handle(.text(String(cString: t))) }
+        case 9:
+            input.penAt(
+                phase: i.phase, buttons: i.button, x: i.x, y: i.y, pressure: i.pressure, tiltX: i.tilt_x, tiltY: i.tilt_y, twist: i.twist)
         default: break
         }
     }

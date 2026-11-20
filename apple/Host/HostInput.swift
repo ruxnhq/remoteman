@@ -219,6 +219,14 @@ final class HostInput {
         }
     }
 
+    /// A pen event with its place as fractions of the device's display.
+    func penAt(phase: UInt8, buttons: UInt8, x: Float, y: Float, pressure: Float, tiltX: Float, tiltY: Float, twist: Float) {
+        guard let (b, _) = display() else { return }
+        let p = CGPoint(x: b.minX + b.width * CGFloat(min(1, max(0, x))), y: b.minY + b.height * CGFloat(min(1, max(0, y))))
+        HostInput.wake()
+        pen(phase: phase, buttons: buttons, at: p, pressure: pressure, tiltX: tiltX, tiltY: tiltY, twist: twist)
+    }
+
     private func proximity(_ near: Bool, eraser: Bool) {
         guard let e = CGEvent(source: source) else { return }
         e.type = .tabletProximity
