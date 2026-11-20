@@ -177,6 +177,18 @@ pub fn shown() -> Result<Vec<Shown>> {
         .collect())
 }
 
+/// The active sources: output name, the source's adapter and id, and its monitor's device path (lower case).
+pub fn sources() -> Result<Vec<(String, LUID, u32, String)>> {
+    let c = query(QDC_ONLY_ACTIVE_PATHS)?;
+    Ok(c.paths
+        .iter()
+        .filter_map(|p| {
+            let (a, id) = (p.sourceInfo.adapterId, p.sourceInfo.id);
+            Some((source_name(a, id)?, a, id, monitor_path(p.targetInfo.adapterId, p.targetInfo.id).unwrap_or_default()))
+        })
+        .collect())
+}
+
 /// Is a monitor matching the pattern connected (whether or not it is on the desktop)?
 pub fn present(monitor: &str) -> bool {
     let Ok(c) = query(QDC_ALL_PATHS) else { return false };

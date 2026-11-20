@@ -52,6 +52,10 @@ pub struct Now {
 pub struct Allowed {
     pub files: Arc<AtomicBool>,
     pub clipboard: Arc<AtomicBool>,
+    /// Lock the PC when a device's session ends (off unless the owner says so).
+    pub lock_on_leave: Arc<AtomicBool>,
+    /// Make Steam's speakers the default output while a device listens, so the PC's own go quiet (on unless the owner says otherwise).
+    pub speakers_follow: Arc<AtomicBool>,
     /// A device this host can play a client's microphone into was found.
     pub microphone: Arc<AtomicBool>,
     /// The driver has a second monitor to give a device as its own.
@@ -62,10 +66,15 @@ pub struct Allowed {
     pub hdr: Arc<AtomicBool>,
     /// Sharing is switched off: no device may connect.
     pub paused: Arc<AtomicBool>,
-    /// The PC has screens of its own, which this host can't capture (only the driver's
-    /// monitors): no `mirror`.
+    /// The PC has screens of its own: `mirror` shows a device its main screen as it is.
     pub real_screens: Arc<AtomicBool>,
     pub now: Arc<Mutex<Option<Now>>>,
+    /// Tell the owner when a device connects, is refused or is paired (on unless the owner says
+    /// otherwise): the app shows a notification for each of `notices`.
+    pub notify: Arc<AtomicBool>,
+    /// The last few things the core reported about devices, each with a number that counts up
+    /// from this host's start, for the app to notice the new ones by.
+    pub notices: Arc<Mutex<std::collections::VecDeque<(u64, remoteman_core::host::ConnectionEvent)>>>,
     /// What the device said of files sent to it: how many it answered for, and the last
     /// answer (whether it took it, and what it said: where it went, or why not).
     pub sent: Arc<Mutex<(u64, bool, String)>>,
@@ -75,18 +84,18 @@ pub struct Allowed {
 /// it is. `placement`: a device gets a monitor of its own, placed as it asks. `displays`: and a
 /// second one, where the driver has a third monitor.
 pub fn features(allowed: &Allowed) -> Vec<String> {
-    let mut features: Vec<String> = ["video", "input", "cursor", "configure", "sound"].map(String::from).to_vec();
-    if !allowed.real_screens.load(Ordering::Relaxed) {
-        features.push("mirror".into());
-    }
+    let mut features: Vec<String> = ["video", "input", "cursor", "configure", "mirror", "sound", "pen"].map(String::from).to_vec();
     if allowed.own_monitor.load(Ordering::Relaxed) {
         features.push("placement".into());
         if allowed.second.load(Ordering::Relaxed) {
             features.push("displays".into());
         }
-        if allowed.hdr.load(Ordering::Relaxed) {
-            features.push("hdr".into());
-        }
+    }
+    if crate::gamepad::available() {
+        features.push("gamepad".into());
+    }
+    if allowed.hdr.load(Ordering::Relaxed) {
+        features.push("hdr".into());
     }
     if allowed.microphone.load(Ordering::Relaxed) {
         features.push("mic".into());
@@ -117,17 +126,66 @@ fn saved_path(state: &Path) -> PathBuf {
     state.join("allowed.json")
 }
 
-/// What the owner switched earlier: (files, clipboard, sharing off).
-pub fn load(state: &Path) -> (bool, bool, bool) {
-    let saved = std::fs::read_to_string(saved_path(state)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    let is = |key: &str| saved.as_ref().and_then(|v| v.get(key)).and_then(|v| v.as_bool()).unwrap_or(false);
-    (is("files"), is("clipboard"), is("paused"))
+/// What the owner switched earlier.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub files: bool,
+    pub clipboard: bool,
+    /// Sharing off.
+    pub paused: bool,
+    pub lock_on_leave: bool,
+    pub speakers_follow: bool,
+    pub notify: bool,
+}
+
+/// Keep what the core says of a device for the app to show (`Allowed::notices`).
+pub fn note(allowed: &Allowed, event: &remoteman_core::host::ConnectionEvent) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let mut notices = allowed.notices.lock().unwrap();
+    notices.push_back((SEQ.fetch_add(1, Ordering::Relaxed), event.clone()));
+    while notices.len() > 20 {
+        notices.pop_front();
+    }
+}
+
+pub fn load(state: &Path) -> Saved {
+    parse(std::fs::read_to_string(saved_path(state)).ok().as_deref())
+}
+
+fn parse(text: Option<&str>) -> Saved {
+    let saved = text.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    let is = |key: &str, otherwise: bool| saved.as_ref().and_then(|v| v.get(key)).and_then(|v| v.as_bool()).unwrap_or(otherwise);
+    Saved { files: is("files", false), clipboard: is("clipboard", false), paused: is("paused", false), lock_on_leave: is("lock_on_leave", false), speakers_follow: is("speakers_follow", true), notify: is("notify", true) }
 }
 
 fn save(state: &Path, allowed: &Allowed) -> std::io::Result<()> {
-    let saved = serde_json::json!({ "files": allowed.files.load(Ordering::Relaxed), "clipboard": allowed.clipboard.load(Ordering::Relaxed), "paused": allowed.paused.load(Ordering::Relaxed) });
+    let on = |b: &Arc<AtomicBool>| b.load(Ordering::Relaxed);
+    let saved = serde_json::json!({
+        "files": on(&allowed.files), "clipboard": on(&allowed.clipboard), "paused": on(&allowed.paused),
+        "lock_on_leave": on(&allowed.lock_on_leave), "speakers_follow": on(&allowed.speakers_follow),
+        "notify": on(&allowed.notify),
+    });
     std::fs::create_dir_all(state)?;
     std::fs::write(saved_path(state), saved.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_default_and_round_trip() {
+        // Nothing saved: files, clipboard, pause and lock are off; the speakers follow.
+        assert_eq!(parse(None), Saved { files: false, clipboard: false, paused: false, lock_on_leave: false, speakers_follow: true, notify: true });
+        // A file from before these settings existed.
+        assert_eq!(parse(Some(r#"{"files":true,"clipboard":false,"paused":true}"#)), Saved { files: true, clipboard: false, paused: true, lock_on_leave: false, speakers_follow: true, notify: true });
+        let dir = std::env::temp_dir().join(format!("remoteman-settings-{}", std::process::id()));
+        let allowed = Allowed::default();
+        allowed.lock_on_leave.store(true, Ordering::Relaxed);
+        save(&dir, &allowed).unwrap();
+        assert_eq!(load(&dir), Saved { files: false, clipboard: false, paused: false, lock_on_leave: true, speakers_follow: false, notify: false });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 pub fn pipe_name(port: u16) -> String {
@@ -321,12 +379,17 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "fingerprint": host.fingerprint,
                 "pairing": host.pairing(),
                 "pending": host.pending(),
-                "devices": host.devices(),
+                "devices": devices_json(host),
+                "notify": allowed.notify.load(Ordering::Relaxed),
+                "notices": allowed.notices.lock().unwrap().iter().map(|(seq, e)| { let mut v = serde_json::to_value(e).unwrap_or_default(); v["seq"] = (*seq).into(); v }).collect::<Vec<_>>(),
+                "connections": host.connections(12),
                 "daemon": false,
                 "paused": allowed.paused.load(Ordering::Relaxed),
                 "name": host_name(),
                 "clipboard": allowed.clipboard.load(Ordering::Relaxed),
                 "files": allowed.files.load(Ordering::Relaxed),
+                "lock_on_leave": allowed.lock_on_leave.load(Ordering::Relaxed),
+                "speakers_follow": allowed.speakers_follow.load(Ordering::Relaxed),
                 "microphone": allowed.microphone.load(Ordering::Relaxed),
                 "client": client,
                 "sent": sent,
@@ -393,6 +456,112 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
-        _ => "status | pair on|off|accept|decline | allow clipboard|files on|off | drop | revoke FINGERPRINT | send PATH | sharing on|off\n".into(),
+        // Host settings: lock the PC when a device's session ends; Steam's speakers as the
+        // default output while a device listens.
+        (Some("set"), Some(what @ ("lock" | "speakers" | "notify")), Some(word @ ("on" | "off"))) => {
+            let on = word == "on";
+            match what {
+                "lock" => &allowed.lock_on_leave,
+                "speakers" => &allowed.speakers_follow,
+                _ => &allowed.notify,
+            }
+            .store(on, Ordering::Relaxed);
+            tracing::info!(setting = what, on, "setting switched by the owner");
+            match save(state, allowed) {
+                Ok(()) => "ok\n".into(),
+                Err(e) => format!("done, but it won't be remembered: {e}\n"),
+            }
+        }
+        // The last N lines of the connection log (10 unless said), one JSON object a line.
+        (Some("connections"), n, _) => {
+            let n = n.and_then(|n| n.parse::<usize>().ok()).unwrap_or(10).clamp(1, 1000);
+            host.connections(n).iter().map(|e| format!("{}\n", serde_json::to_string(e).unwrap_or_default())).collect()
+        }
+        (Some("device"), _, _) => device(host, line.trim()["device".len()..].trim()),
+        _ => "status | pair on|off|accept|decline | allow clipboard|files on|off | set lock|speakers|notify on|off | device NAME [view-only on|off | allow clipboard|files|sound|mic|camera on|off] | connections [N] | drop | revoke FINGERPRINT | send PATH | sharing on|off\n".into(),
     }
+}
+
+/// The devices this host trusts with what each may do.
+fn devices_json(host: &Host) -> Vec<serde_json::Value> {
+    host.devices()
+        .into_iter()
+        .map(|d| {
+            let permissions = host.permissions(&d.fingerprint);
+            let mut v = serde_json::to_value(&d).unwrap_or_default();
+            v["permissions"] = serde_json::to_value(permissions).unwrap_or_default();
+            v
+        })
+        .collect()
+}
+
+/// The device a name or the start of a fingerprint means: the name as the device gave it (any
+/// case), a fingerprint's start, or the start of a name when only one starts so.
+fn find_device(host: &Host, name: &str) -> Result<remoteman_core::host::Device, String> {
+    let all = host.devices();
+    let lower = name.to_lowercase();
+    let exact: Vec<_> = all.iter().filter(|d| d.name.to_lowercase() == lower || d.fingerprint == name).collect();
+    let found: Vec<_> = if !exact.is_empty() {
+        exact
+    } else {
+        all.iter().filter(|d| (name.len() >= 4 && d.fingerprint.starts_with(&lower)) || d.name.to_lowercase().starts_with(&lower)).collect()
+    };
+    match found.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(format!("no device is called {name:?} (see `status`)")),
+        _ => Err(format!("{name:?} could mean more than one device: {}", found.iter().map(|d| format!("{} ({})", d.name, &d.fingerprint[..8.min(d.fingerprint.len())])).collect::<Vec<_>>().join(", "))),
+    }
+}
+
+/// `device NAME` shows what a device may do; `device NAME view-only on|off` and `device NAME
+/// allow clipboard|files|sound|mic|camera on|off` change it. NAME may have spaces in it.
+fn device(host: &Host, rest: &str) -> String {
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    let n = tokens.len();
+    let onoff = |w: &str| match w {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    };
+    let (name, change) = if n >= 3 && tokens[n - 2] == "view-only" && onoff(tokens[n - 1]).is_some() {
+        (tokens[..n - 2].join(" "), Some(("input", !onoff(tokens[n - 1]).unwrap())))
+    } else if n >= 4 && tokens[n - 3] == "allow" && onoff(tokens[n - 1]).is_some() && ["clipboard", "files", "sound", "mic", "camera"].contains(&tokens[n - 2]) {
+        (tokens[..n - 3].join(" "), Some((tokens[n - 2], onoff(tokens[n - 1]).unwrap())))
+    } else {
+        (tokens.join(" "), None)
+    };
+    if name.is_empty() {
+        return "device NAME [view-only on|off | allow clipboard|files|sound|mic|camera on|off]\n".into();
+    }
+    let found = match find_device(host, &name) {
+        Ok(d) => d,
+        Err(why) => return format!("{why}\n"),
+    };
+    let mut p = host.permissions(&found.fingerprint);
+    if let Some((what, on)) = change {
+        match what {
+            "input" => p.input = on,
+            "clipboard" => p.clipboard = on,
+            "files" => p.files = on,
+            "sound" => p.sound = on,
+            "mic" => p.mic = on,
+            _ => p.camera = on,
+        }
+        if let Err(e) = host.set_permissions(&found.fingerprint, p) {
+            return format!("done, but it won't be remembered: {e:#}\n");
+        }
+        tracing::info!(device = found.name, what, on, "a device's permission changed by the owner");
+    }
+    let yn = |b: bool| if b { "allowed" } else { "not allowed" };
+    format!(
+        "{} ({}): {}; clipboard {}, files {}, sound {}, microphone {}, camera {}\n",
+        found.name,
+        &found.fingerprint[..16.min(found.fingerprint.len())],
+        if p.input { "can control this PC" } else { "view only" },
+        yn(p.clipboard),
+        yn(p.files),
+        yn(p.sound),
+        yn(p.mic),
+        yn(p.camera)
+    )
 }

@@ -37,6 +37,7 @@ typedef struct rm_nvenc_cfg {
     uint32_t hdr_light;
     uint32_t hdr_chroma[8];
     uint32_t hdr_max_lum, hdr_min_lum, hdr_max_cll, hdr_max_fall;
+    uint32_t slices;      // HEVC: pictures cut into this many slices (0 or 1: one), so a decoder can use threads
 } rm_nvenc_cfg;
 
 typedef struct rm_nvenc {
@@ -57,6 +58,8 @@ typedef struct rm_nvenc {
     uint8_t *out;
     size_t out_cap;
     uint32_t last_qp;     // the last frame's average quantiser, as the encoder reported it
+    uint32_t boost_from;  // nonzero while a refining frame is under way
+    NV_ENC_RC_PARAMS boost_rc; // the rate control parameters to go back to after it
     MASTERING_DISPLAY_INFO mastering;  // HDR metadata, handed to the encoder with each keyframe
     CONTENT_LIGHT_LEVEL light;
     uint8_t av1_mdcv[25], av1_cll[5];  // the same as AV1 metadata OBU payloads
@@ -306,6 +309,7 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
         h->hevcVUIParameters.transferCharacteristics = trc;
         h->hevcVUIParameters.colourMatrix = mat;
         if (e->hdr_sei) { h->outputMasteringDisplay = 1; h->outputMaxCll = 1; }
+        if (cfg->slices > 1) { h->sliceMode = 3; h->sliceModeData = cfg->slices; }
         if (!cfg->chroma444) {
             // The conversion averages each 2x2 block, so chroma sits in the block's centre.
             h->hevcVUIParameters.chromaSampleLocationFlag = 1;
@@ -486,6 +490,48 @@ int rm_nvenc_set_bitrate(rm_nvenc *e, uint32_t bitrate) {
     r.forceIDR = 0;
     if ((s = e->f.nvEncReconfigureEncoder(e->enc, &r))) return nv_fail(e, s, "reconfigure");
     return 0;
+}
+
+// Static refinement: the next frame may take `factor` times the usual bits. begin raises the
+// rate (and the rate buffer with it, one frame's worth) without a keyframe; end puts back what
+// was there. The caller does both around one frame.
+static int reconfigure_now(rm_nvenc *e) {
+    NV_ENC_RECONFIGURE_PARAMS r = { NV_ENC_RECONFIGURE_PARAMS_VER };
+    NVENCSTATUS s;
+    r.reInitEncodeParams = e->init;
+    r.reInitEncodeParams.encodeConfig = &e->config;
+    r.resetEncoder = 0;
+    r.forceIDR = 0;
+    if ((s = e->f.nvEncReconfigureEncoder(e->enc, &r))) return nv_fail(e, s, "reconfigure");
+    return 0;
+}
+
+// With qp != 0 the encoder is put in constant-QP mode at that quantiser for the frame; if it
+// refuses (or qp is 0) the rate is raised `factor` times instead. end puts back the rate
+// control parameters as they were.
+int rm_nvenc_boost_begin(rm_nvenc *e, uint32_t factor, uint32_t qp) {
+    uint64_t up;
+    if (e->boost_from) return 0;
+    e->boost_rc = e->config.rcParams;
+    e->boost_from = 1;
+    if (qp) {
+        NV_ENC_RC_PARAMS *rc = &e->config.rcParams;
+        rc->rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
+        rc->constQP.qpInterP = qp;
+        rc->constQP.qpInterB = qp;
+        rc->constQP.qpIntra = qp;
+        if (!reconfigure_now(e)) return 0;
+        e->config.rcParams = e->boost_rc;
+    }
+    up = (uint64_t)e->boost_rc.averageBitRate * factor;
+    return rm_nvenc_set_bitrate(e, up > 0xffffffffu ? 0xffffffffu : (uint32_t)up);
+}
+
+int rm_nvenc_boost_end(rm_nvenc *e) {
+    if (!e->boost_from) return 0;
+    e->boost_from = 0;
+    e->config.rcParams = e->boost_rc;
+    return reconfigure_now(e);
 }
 
 // Tell the encoder the frame with this timestamp never arrived: later frames must not refer to it.

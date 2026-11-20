@@ -132,6 +132,10 @@ struct Upload {
     chroma_size: (u32, u32),
     format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
     next: usize,
+    /// For `REMOTEMAN_Y410=1` (a test): 4:4:4 10-bit packed as the card's decoder would give
+    /// it, in Y410 textures, so that the drawing of them can be tried with no card decoder.
+    packed: Vec<ID3D11Texture2D>,
+    scratch: Vec<u32>,
 }
 
 impl Upload {
@@ -152,6 +156,38 @@ impl Upload {
         // SAFETY: the description lives through the call.
         unsafe { self.gpu.device.CreateTexture2D(&desc, None, Some(&mut texture)).context("a texture for a picture decoded on the CPU")? };
         texture.context("no texture")
+    }
+
+    /// Pack a yuv444p10 frame into Y410 (U in bits 0-9, Y in 10-19, V in 20-29, A 30-31) in the
+    /// next of a few textures of that format.
+    ///
+    /// SAFETY: `f` is a decoded yuv444p10le frame, its planes valid for its size.
+    unsafe fn put_y410(&mut self, f: &ffi::AVFrame) -> Result<ID3D11Texture2D> {
+        let (w, h) = (f.width as usize, f.height as usize);
+        if self.size != (w as u32, h as u32) || self.format != windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_Y410 || self.packed.is_empty() {
+            self.packed.clear();
+            for _ in 0..HELD {
+                self.packed.push(self.texture(w as u32, h as u32, windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_Y410)?);
+            }
+            self.size = (w as u32, h as u32);
+            self.format = windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_Y410;
+            self.scratch = vec![0; w * h];
+        }
+        // SAFETY: rows are read within each plane's width and height.
+        unsafe {
+            for y in 0..h {
+                let row = |i: usize| std::slice::from_raw_parts(f.data[i].add(y * f.linesize[i] as usize) as *const u16, w);
+                let (py, pu, pv) = (row(0), row(1), row(2));
+                for x in 0..w {
+                    self.scratch[y * w + x] = (pu[x] as u32 & 0x3ff) | ((py[x] as u32 & 0x3ff) << 10) | ((pv[x] as u32 & 0x3ff) << 20) | (3 << 30);
+                }
+            }
+        }
+        let texture = self.packed[self.next % self.packed.len()].clone();
+        self.next += 1;
+        // SAFETY: the scratch is w*h*4 bytes.
+        unsafe { self.gpu.context.UpdateSubresource(&texture, 0, None, self.scratch.as_ptr() as *const _, (w * 4) as u32, 0) };
+        Ok(texture)
     }
 
     /// Put a 4:2:0 or 4:4:4 frame of 8 or 10 bits into the next three textures, each plane as
@@ -318,7 +354,7 @@ impl Decoder {
             this.frame = ffi::av_frame_alloc();
             anyhow::ensure!(!this.packet.is_null() && !this.frame.is_null(), "out of memory");
             this.name = format!("{} (on the CPU)", CStr::from_ptr((*found).name).to_string_lossy());
-            this.upload = Some(Upload { gpu: gpu.clone(), sets: Vec::new(), size: (0, 0), chroma_size: (0, 0), format: Default::default(), next: 0 });
+            this.upload = Some(Upload { gpu: gpu.clone(), sets: Vec::new(), size: (0, 0), chroma_size: (0, 0), format: Default::default(), next: 0, packed: Vec::new(), scratch: Vec::new() });
             Ok(this)
         }
     }
@@ -343,7 +379,13 @@ impl Decoder {
             anyhow::ensure!(err >= 0, "decode: {}", message(err));
             let f = &*self.frame;
             if let Some(upload) = self.upload.as_mut() {
-                let put = upload.put(f);
+                if f.format == ffi::AVPixelFormat::AV_PIX_FMT_YUV444P10LE as i32 && std::env::var("REMOTEMAN_Y410").as_deref() == Ok("1") {
+                let put = upload.put_y410(f);
+                let (width, height) = (f.width as u32, f.height as u32);
+                ffi::av_frame_unref(self.frame);
+                return Ok(Some(Picture { hold: ptr::null_mut(), texture: put?, chroma: None, slice: 0, width, height, age_us, decoded: std::time::Instant::now() }));
+            }
+            let put = upload.put(f);
                 let (width, height) = (f.width as u32, f.height as u32);
                 ffi::av_frame_unref(self.frame);
                 let [texture, cb, cr] = put?;
@@ -357,6 +399,42 @@ impl Decoder {
             let picture = Picture { hold, texture, chroma: None, slice: f.data[1] as usize as u32, width: f.width as u32, height: f.height as u32, age_us, decoded: std::time::Instant::now() };
             ffi::av_frame_unref(self.frame);
             Ok(Some(picture))
+        }
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// Not a check: decodes the clips in `REMOTEMAN_CLIP_DIR` (length-prefixed frames, as the host's
+    /// `write_clips` test writes them) through the software decoder and says how long a picture takes.
+    #[test]
+    fn software_444_clips() {
+        let Some(dir) = std::env::var_os("REMOTEMAN_CLIP_DIR") else { return };
+        let Ok(gpu) = Gpu::open() else { return eprintln!("no GPU: skipped") };
+        let mut names: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "rm")).collect();
+        names.sort();
+        for path in names {
+            let bytes = std::fs::read(&path).unwrap();
+            let mut frames = Vec::new();
+            let mut i = 0;
+            while i + 4 <= bytes.len() {
+                let n = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+                frames.push(&bytes[i + 4..i + 4 + n]);
+                i += 4 + n;
+            }
+            let mut d = Decoder::software(&gpu, Codec::Hevc).unwrap();
+            let mut times = Vec::new();
+            for f in &frames {
+                let t = std::time::Instant::now();
+                let p = d.decode(f, None).unwrap();
+                times.push((t.elapsed().as_secs_f64() * 1000.0, p.is_some()));
+            }
+            let mut ms: Vec<f64> = times.iter().skip(5).map(|t| t.0).collect();
+            ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let avg = ms.iter().sum::<f64>() / ms.len() as f64;
+            eprintln!("DECODE {}: {} frames, {} pictures, avg {avg:.1} ms, median {:.1} ms, max {:.1} ms", path.file_name().unwrap().to_string_lossy(), frames.len(), times.iter().filter(|t| t.1).count(), ms[ms.len() / 2], ms[ms.len() - 1]);
         }
     }
 }

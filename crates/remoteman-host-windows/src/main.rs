@@ -3,7 +3,7 @@
 //!
 //!     remoteman-host [--listen ADDR:PORT] [--state DIR] [--pair] [--name NAME] [--log FILE]
 //!                    [--bitrate MBIT] [--mode keep|listed|any] [--allow files,clipboard]
-//!                    [--encoder auto|nvenc|mf] [--seconds N]
+//!                    [--encoder auto|nvenc|mf] [--refine yes|no] [--seconds N]
 //!     remoteman-host --probe | --probe-picture [--log FILE]
 //!     remoteman-host ctl [--port PORT] WORDS
 //!
@@ -46,6 +46,10 @@ mod advertise;
 #[cfg(windows)]
 mod camera;
 #[cfg(windows)]
+mod awake;
+#[cfg(windows)]
+mod speakers;
+#[cfg(windows)]
 mod capture;
 #[cfg(windows)]
 mod clipboard;
@@ -68,15 +72,20 @@ mod display;
 #[cfg(windows)]
 mod ccd;
 #[cfg(windows)]
+mod dpi;
+#[cfg(windows)]
 mod encode;
 #[cfg(all(windows, test))]
 mod enctest;
 #[cfg(windows)]
 mod hdr;
 #[cfg(windows)]
+mod gamepad;
 mod input;
 #[cfg(windows)]
 mod mf;
+#[cfg(windows)]
+mod mirror;
 #[cfg(windows)]
 mod pipeline;
 #[cfg(windows)]
@@ -118,6 +127,9 @@ mod windows_main {
 
     /// Ctrl-C, the console closing, or the user signing out.
     static STOP: AtomicBool = AtomicBool::new(false);
+
+    /// `--test-mirror-only`: no driver, and nothing done to the desktop.
+    static MIRROR_ONLY: AtomicBool = AtomicBool::new(false);
 
     unsafe extern "system" fn on_console(_event: u32) -> BOOL {
         STOP.store(true, Ordering::Relaxed);
@@ -237,6 +249,13 @@ mod windows_main {
                     },
                     Ordering::Relaxed,
                 ),
+                // Static refinement: one finer frame once the picture has been still for a
+                // moment (on by default; NVENC only).
+                "--refine" => match value()?.as_str() {
+                    "yes" | "on" => crate::pipeline::REFINE.store(true, Ordering::Relaxed),
+                    "no" | "off" => crate::pipeline::REFINE.store(false, Ordering::Relaxed),
+                    other => anyhow::bail!("--refine {other}: yes or no"),
+                },
                 "--allow" => {
                     for what in value()?.split(',') {
                         match what.trim() {
@@ -263,6 +282,10 @@ mod windows_main {
                         other => anyhow::bail!("--mode {other}: keep, listed, any"),
                     }
                 }
+                // For tests, as a user who may not open the driver: serves the PC's own main screen
+                // to a device that asks to mirror and nothing else; the driver isn't opened, the
+                // desktop isn't arranged, and the host isn't announced on the network.
+                "--test-mirror-only" => MIRROR_ONLY.store(true, Ordering::Relaxed),
                 // For tests: lose one video packet in this many.
                 "--test-drop-one-in" => drop_one_in = Some(value()?.parse().context("--test-drop-one-in N")?),
                 other => anyhow::bail!("unknown option {other}"),
@@ -383,17 +406,23 @@ mod windows_main {
         }
 
         std::fs::create_dir_all(&state).with_context(|| format!("making {}", state.display()))?;
-        let screen = Screen::open(&state)?;
+        let mirror_only = MIRROR_ONLY.load(Ordering::Relaxed);
+        let screen = if mirror_only { Screen::mirror_only() } else { Screen::open(&state)? };
         let name = name.or_else(|| std::env::var("COMPUTERNAME").ok()).unwrap_or_else(|| "windows".into());
         // What the owner switched on earlier holds until switched off; `--allow` adds to it
         // for this run.
         let allowed = crate::control::Allowed::default();
         let saved = crate::control::load(&state);
-        allowed.files.store(allow.0 || saved.0, Ordering::Relaxed);
-        allowed.clipboard.store(allow.1 || saved.1, Ordering::Relaxed);
-        allowed.paused.store(saved.2, Ordering::Relaxed);
+        allowed.files.store(allow.0 || saved.files, Ordering::Relaxed);
+        allowed.clipboard.store(allow.1 || saved.clipboard, Ordering::Relaxed);
+        allowed.paused.store(saved.paused, Ordering::Relaxed);
+        allowed.lock_on_leave.store(saved.lock_on_leave, Ordering::Relaxed);
+        allowed.speakers_follow.store(saved.speakers_follow, Ordering::Relaxed);
+        allowed.notify.store(saved.notify, Ordering::Relaxed);
         allowed.real_screens.store(screen.pc(), Ordering::Relaxed);
-        if saved.2 {
+        // A host that died while a device listened left the speakers switched: put them back.
+        crate::speakers::init(&state);
+        if saved.paused {
             tracing::info!("sharing is switched off (remembered): devices are turned away until `ctl sharing on`");
         }
         let _ = crate::control::NAME.set(name.clone());
@@ -405,24 +434,29 @@ mod windows_main {
             None => tracing::info!(?outputs, "no virtual microphone here (Steam's \"Steam Streaming Microphone\" or VB-CABLE): a device's microphone can't be taken"),
         }
         let mut screen = screen;
-        let own = fit != Fit::Keep && screen.has_own();
+        let own = !mirror_only && fit != Fit::Keep && screen.has_own();
         allowed.own_monitor.store(own, Ordering::Relaxed);
         allowed.second.store(own && screen.has_second(), Ordering::Relaxed);
         // HDR for a device's own monitor: the driver's monitors take it, and NVENC says it.
-        let hdr = own && crate::encode::WHICH.load(Ordering::Relaxed) != crate::encode::ANY_MAKERS && crate::encode::library().is_ok();
+        let hdr = (own || mirror_only) && crate::encode::WHICH.load(Ordering::Relaxed) != crate::encode::ANY_MAKERS && crate::encode::library().is_ok();
         allowed.hdr.store(hdr, Ordering::Relaxed);
-        if !own {
+        if mirror_only {
+            tracing::info!("test host: the driver isn't used and the desktop isn't touched; a device may mirror the PC's main screen and nothing else");
+        } else if !own {
             tracing::info!("the display driver has no second monitor to give (its settings say one monitor, or `--mode keep`): a device gets the one monitor at its own size");
         }
         let features = crate::control::features(&allowed);
         tracing::info!(?features, "what this host does");
         let options = HostOptions { listen, state: state.clone(), name, os: "windows".into(), features, pair, test_drop_one_in: drop_one_in };
         let host = std::sync::Arc::new(Host::start(options, session::Host::new(screen, bitrate * 1_000_000, fit, allowed.clone()))?);
+        // What the core says of devices (paired, connected, refused) is kept for the app's notifications.
+        let noted = allowed.clone();
+        host.set_notice_hook(move |event| crate::control::note(&noted, event));
         crate::control::serve(host.address.port(), std::sync::Arc::downgrade(&host), allowed, state);
         tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
         watch_lock(std::sync::Arc::downgrade(&host));
         // On the network for viewers to find, until the host stops (dropped at the end of this function).
-        let _advert = crate::advertise::start(crate::control::NAME.get().map_or("windows", String::as_str), host.address.port(), &host.fingerprint);
+        let _advert = (!mirror_only).then(|| crate::advertise::start(crate::control::NAME.get().map_or("windows", String::as_str), host.address.port(), &host.fingerprint));
         if pair {
             tracing::info!("pairing: the next unknown device to connect will be trusted");
         }

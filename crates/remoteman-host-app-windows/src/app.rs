@@ -66,8 +66,9 @@ pub struct HostApp {
     asked: Option<String>,
     /// How many files the device had answered for when last seen.
     answered: Option<u64>,
-    /// Whether a device was connected when last seen.
-    had_client: Option<bool>,
+    /// The number of the newest host report about a device seen so far (none before the first
+    /// answer: what happened before the app started is not announced).
+    seen_notice: Option<u64>,
     jobs: Sender<Job>,
     icons: Icons,
     theme: WindowTheme,
@@ -84,6 +85,9 @@ pub enum AppMessage {
     Share(bool),
     Clipboard(bool),
     Files(bool),
+    LockOnLeave(bool),
+    Speakers(bool),
+    Notify(bool),
     Answer(ContentDialogResult),
     NewsClosed,
     SendFile,
@@ -139,13 +143,33 @@ impl HostApp {
             self.answered = Some(s.answered);
         }
         // A device that just connected (not one already connected when the app started).
-        let client = status.as_ref().ok().and_then(|s| s.client.clone());
-        if self.had_client == Some(false)
-            && let Some(c) = &client
-        {
-            self.notify(context, &format!("{} connected", c.name), &format!("It has {} on {pc}.", host::placement_phrase(&c.placement)));
+        // What the host reported about devices since the last answer (not what happened before
+        // the app started): a device connected, was refused, or was paired. Said when the owner
+        // wants to be told.
+        if let Ok(s) = &status {
+            let newest = s.notices.iter().map(|n| n.seq).max();
+            if let Some(mut seen) = self.seen_notice {
+                // The numbers start again when the host does.
+                if newest.unwrap_or(0) < seen {
+                    seen = 0;
+                }
+                for n in s.notices.iter().filter(|n| n.seq > seen) {
+                    if s.notify {
+                        let text = match n.event.as_str() {
+                            "connected" => match s.client.as_ref().filter(|c| c.name == n.name) {
+                                Some(c) => format!("It has {} on {pc}.", host::placement_phrase(&c.placement)),
+                                None => format!("{} is now connected to {pc}.", n.name),
+                            },
+                            "refused" if n.reason.is_empty() => format!("{} tried to connect to {pc} and was turned away.", n.name),
+                            "refused" => format!("{} tried to connect to {pc}: {}", n.name, n.reason),
+                            _ => format!("{} can now connect to {pc}.", n.name),
+                        };
+                        self.notify(context, &n.words(), &text);
+                    }
+                }
+            }
+            self.seen_notice = Some(newest.unwrap_or(0));
         }
-        self.had_client = Some(client.is_some());
         // A device that wants to pair is put to the owner, once.
         match status.as_ref().ok().and_then(|s| s.pending.clone()) {
             Some(p) if self.asked.as_deref() != Some(p.fingerprint.as_str()) => {
@@ -242,7 +266,7 @@ impl Application for HostApp {
             asking: None,
             asked: None,
             answered: None,
-            had_client: None,
+            seen_notice: None,
             jobs,
             icons: system::icons(),
             theme: start.theme,
@@ -303,6 +327,21 @@ impl Application for HostApp {
                     self.tell(format!("allow files {}", if on { "on" } else { "off" }));
                 }
             }
+            AppMessage::LockOnLeave(on) => {
+                if matches!(&self.status, Ok(s) if s.lock_on_leave != on) {
+                    self.tell(format!("set lock {}", if on { "on" } else { "off" }));
+                }
+            }
+            AppMessage::Speakers(on) => {
+                if matches!(&self.status, Ok(s) if s.speakers_follow != on) {
+                    self.tell(format!("set speakers {}", if on { "on" } else { "off" }));
+                }
+            }
+            AppMessage::Notify(on) => {
+                if matches!(&self.status, Ok(s) if s.notify != on) {
+                    self.tell(format!("set notify {}", if on { "on" } else { "off" }));
+                }
+            }
             AppMessage::Answer(result) => {
                 // Taken away (answered elsewhere, or its minute is up): nothing to say.
                 if let Some(p) = self.asking.take() {
@@ -359,6 +398,9 @@ impl Application for HostApp {
                 share: context.callback(AppMessage::Share),
                 clipboard: context.callback(AppMessage::Clipboard),
                 files: context.callback(AppMessage::Files),
+                lock_on_leave: context.callback(AppMessage::LockOnLeave),
+                speakers: context.callback(AppMessage::Speakers),
+                notify: context.callback(AppMessage::Notify),
                 answer: context.callback(AppMessage::Answer),
                 news_closed: context.callback(|()| AppMessage::NewsClosed),
                 send_file: context.callback(|()| AppMessage::SendFile),

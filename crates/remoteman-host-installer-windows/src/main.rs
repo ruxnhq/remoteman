@@ -44,6 +44,8 @@ mod engine;
 #[cfg(windows)]
 mod launch;
 #[cfg(windows)]
+mod steam;
+#[cfg(windows)]
 mod log;
 #[cfg(windows)]
 mod system;

@@ -8,6 +8,7 @@
 pub mod blob;
 pub mod ffi;
 pub mod host;
+pub mod permissions;
 pub mod rate;
 pub mod receive;
 // The relay talks over a Unix socket.
@@ -22,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 pub use remoteman_proto::control::{Chroma, Codec, Display, Mode, Placement, Side};
-pub use remoteman_proto::input::{Button, Event, TouchPhase};
+pub use remoteman_proto::input::{Button, Event, PenPhase, TouchPhase};
 pub use remoteman_proto::keys;
 pub use remoteman_proto::{PORT, PROTO};
 use remoteman_proto::video::{CursorAt, KIND_CURSOR, KIND_VIDEO, Reassembler};
@@ -653,8 +654,24 @@ impl Client {
         sender
     }
 
-    /// Send one input event. Never blocks.
+    /// Whether the host takes pen events: it lists `pen` in its features. A client without
+    /// that sends touch or mouse instead.
+    pub fn host_has_pen(&self) -> bool {
+        self.host_features.iter().any(|f| f == "pen")
+    }
+
+    /// Whether the host takes game controller states: it lists `gamepad` in its features.
+    pub fn host_has_gamepad(&self) -> bool {
+        self.host_features.iter().any(|f| f == "gamepad")
+    }
+
+    /// Send one input event. Never blocks. A pen event for a host that doesn't list `pen` (and
+    /// a gamepad state for one without `gamepad`) is dropped: it would be a type the host can't
+    /// read.
     pub fn send(&self, event: Event) {
+        if (matches!(event, Event::Pen { .. }) && !self.host_has_pen()) || (matches!(event, Event::Gamepad { .. }) && !self.host_has_gamepad()) {
+            return;
+        }
         let _ = self.input.send(event);
     }
 

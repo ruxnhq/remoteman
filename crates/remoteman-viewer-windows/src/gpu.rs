@@ -78,7 +78,9 @@ impl Gpu {
     /// FFmpeg alone says nothing: it only goes to the card at the first frame.)
     pub fn decodes(&self, mode: Mode) -> Result<()> {
         if mode.codec == Codec::Hevc && mode.chroma == Chroma::C444 && mode.depth == 10 {
-            // Whatever the card lists (an RTX 5090: HEVC Main 4:4:4 10 into Y410), FFmpeg's HEVC
+            // The drawing takes Y410 and AYUV (draw.rs; tried with `REMOTEMAN_Y410=1`, which packs the
+            // CPU's pictures that way), but whatever the card lists (an RTX 5090: HEVC Main 4:4:4 10
+            // into Y410), FFmpeg's HEVC
             // decoder offers no D3D11VA picture format for 4:4:4 (FFmpeg 9.0: it chooses
             // yuv444p10le on the CPU), so it is decoded on the CPU (decode.rs).
             // SAFETY: calls on the video device.

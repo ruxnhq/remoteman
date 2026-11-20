@@ -37,6 +37,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::DataExchange::{AddClipboardFormatListener, GetClipboardSequenceNumber};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Interface, w};
 
@@ -82,6 +83,8 @@ pub(crate) struct Engine {
     pointer_on: Cell<u8>,
     own_copy: Cell<u32>,
     hook: Cell<isize>,
+    /// Game controllers, read on a thread of their own (pads.rs).
+    pads: crate::pads::Pads,
     second: RefCell<Option<(isize, JoinHandle<()>, Arc<Shared>)>>,
     /// The host's cursor, made into a Windows one (worn in full screen).
     pub(crate) cursor: Cell<Option<HCURSOR>>,
@@ -176,6 +179,28 @@ pub(crate) fn engine() -> Option<Rc<Engine>> {
     ENGINE.with(|e| e.borrow().clone())
 }
 
+// The computer's cursor over the picture in the app's window.
+
+unsafe extern "system" fn worn(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    if msg == WM_SETCURSOR && (l.0 & 0xFFFF) as u32 == HTCLIENT {
+        if let Some(cursor) = engine().and_then(|e| e.windowed_cursor()) {
+            // SAFETY: as in `wear_now`.
+            unsafe { SetCursor(cursor) };
+            return LRESULT(1);
+        }
+    }
+    // SAFETY: the next procedure in the chain.
+    unsafe { DefSubclassProc(hwnd, msg, w, l) }
+}
+
+unsafe extern "system" fn subclass_child(hwnd: HWND, _: LPARAM) -> windows::core::BOOL {
+    // SAFETY: as in `wear_in_children`.
+    unsafe {
+        let _ = SetWindowSubclass(hwnd, Some(worn), 0x524d43, 0);
+    }
+    true.into()
+}
+
 // The interface.
 
 /// Start the engine: `words` are the command line's words, as the old program takes them;
@@ -221,6 +246,7 @@ pub fn panel(x: i32, y: i32, width: i32, height: i32, scale_x: f32, scale_y: f32
     let Some(e) = engine() else { return };
     e.panel.set((x, y, width, height));
     e.panel_scale.set((scale_x, scale_y));
+    e.wear_in_children();
     e.resync(scale_x, scale_y);
     e.publish();
 }
@@ -404,6 +430,7 @@ fn start_engine(words: Vec<String>, notify: Notify) -> Result<()> {
         pointer_on: Cell::new(0),
         own_copy: Cell::new(0),
         hook: Cell::new(0),
+        pads: crate::pads::Pads::start(),
         second: RefCell::new(None),
         cursor: Cell::new(None),
         got_shape: Cell::new(false),
@@ -725,7 +752,9 @@ impl Engine {
         // Whatever it is, it comes after the pointer's newest place.
         self.pacer.flush();
         let Ok(app) = self.app.try_borrow() else { return };
-        if let Some(client) = app.client().cloned() {
+        if app.view_only() {
+            // The computer shows this device the picture only: nothing is sent to control it.
+        } else if let Some(client) = app.client().cloned() {
             drop(app);
             client.send(event);
         } else if app.args.play.is_some() && app.session.is_some() {
@@ -754,7 +783,7 @@ impl Engine {
         self.point_at(0);
         let (at, client) = {
             let app = self.app.borrow();
-            (app.fraction(x as f32, y as f32), app.client().cloned())
+            (app.fraction(x as f32, y as f32), app.input_client().cloned())
         };
         match (at, client) {
             (Some((x, y)), Some(client)) => self.pacer.put(client, x, y),
@@ -936,6 +965,7 @@ impl Engine {
         let old = self.cursor.replace(made);
         self.got_shape.set(true);
         crate::full::set_cursor(self);
+        self.wear_now();
         if let Some(old) = old {
             // The window may still be wearing it for a moment: it is let go a little later.
             let old = old.0 as isize;
@@ -946,6 +976,63 @@ impl Engine {
                     let _ = DestroyCursor(HCURSOR(old as *mut _));
                 }
             });
+        }
+    }
+
+    /// In the app's window: what the cursor should be if the pointer is over the computer's
+    /// picture right now. `None`: not ours to say (the app's own cursors apply); `Some(None)`:
+    /// no cursor (the host says it has none here).
+    fn windowed_cursor(&self) -> Option<Option<HCURSOR>> {
+        if self.full.borrow().is_some() || !self.got_shape.get() {
+            return None;
+        }
+        let host = HWND(self.host.get() as *mut _);
+        let (px, py, ..) = self.panel.get();
+        let (sx, sy) = self.panel_scale.get();
+        let mut at = POINT::default();
+        // SAFETY: plain queries on our own window.
+        unsafe {
+            GetCursorPos(&mut at).ok()?;
+            windows::Win32::Graphics::Gdi::ScreenToClient(host, &mut at).ok().ok()?;
+        }
+        let app = self.app.try_borrow().ok()?;
+        if app.captured || !app.forwarding() {
+            return None;
+        }
+        let (_, _, pw, ph) = self.panel.get();
+        if at.x < px || at.y < py || at.x >= px + pw || at.y >= py + ph {
+            return None;
+        }
+        let (x, y) = ((at.x - px) as f32 / sx.max(0.01), (at.y - py) as f32 / sy.max(0.01));
+        if !matches!(app.pointer(x, y), crate::app::Pointer::Theirs) {
+            return None;
+        }
+        if app.session.as_ref().is_some_and(|s| s.shared.cursor_gone.load(Ordering::Relaxed)) {
+            return Some(None);
+        }
+        Some(self.cursor.get())
+    }
+
+    /// Put the app's window's pointer right now, if it is over the picture.
+    fn wear_now(&self) {
+        if let Some(cursor) = self.windowed_cursor() {
+            // SAFETY: a cursor that lives on (it is let go of seconds after it is replaced).
+            unsafe { SetCursor(cursor) };
+        }
+    }
+
+    /// WinUI chooses the pointer in its own child windows (the island's), so those are
+    /// subclassed to answer WM_SETCURSOR with the computer's cursor over the picture.
+    fn wear_in_children(&self) {
+        let host = self.host.get();
+        if host == 0 {
+            return;
+        }
+        // SAFETY: windows of this thread; the subclass procedure is a plain function and
+        // setting it again on the same window is harmless.
+        unsafe {
+            let _ = SetWindowSubclass(HWND(host as *mut _), Some(worn), 0x524d43, 0);
+            let _ = EnumChildWindows(Some(HWND(host as *mut _)), Some(subclass_child), LPARAM(0));
         }
     }
 
@@ -966,6 +1053,13 @@ impl Engine {
         let front = self.front();
         let want = front && !self.released.get() && self.app.borrow().forwarding() && self.app.borrow().store.settings.capture && self.panel.get().2 > 0;
         self.hold_pointer(want);
+        // Controllers: the computer's while its window is in front (full screen included).
+        let pads_to = {
+            let app = self.app.borrow();
+            let takes = front && FEATURES.gamepad && app.forwarding() && app.store.settings.gamepad && app.session.as_ref().is_some_and(|s| s.offers("gamepad"));
+            app.client().cloned().filter(|_| takes)
+        };
+        self.pads.update(pads_to);
         if self.deadline.get().is_some_and(|d| Instant::now() >= d) {
             self.deadline.set(None);
             self.app.borrow_mut().time_up();
@@ -1419,7 +1513,7 @@ fn state_of(app: &App) -> Value {
         "folder": app.store.receive_folder().display().to_string(),
         "controls": options(app, &Choice::Controls), "default_quality": options(app, &Choice::DefaultQuality),
         "scroll": options(app, &Choice::Scroll), "windows_key": options(app, &Choice::WindowsKey), "pointer": options(app, &Choice::Pointer),
-        "touch": st.touch, "allow_microphone": st.allow_microphone, "allow_camera": st.allow_camera,
+        "touch": st.touch, "gamepad": st.gamepad, "allow_microphone": st.allow_microphone, "allow_camera": st.allow_camera,
     });
     // The drop-downs of one computer: the one whose page is open, or the session's.
     let address = match &app.screen {
@@ -1437,7 +1531,7 @@ fn state_of(app: &App) -> Value {
     let session = app.session.as_ref().map(|s| {
         let f = &app.figures;
         json!({
-            "address": s.target.address, "name": s.target.name, "os": s.os, "features": s.features,
+            "address": s.target.address, "name": s.target.name, "os": s.os, "features": s.features, "view_only": s.view_only(),
             "placement": placement_key(s.display.placement), "quality": s.quality.key(), "bitrate": s.bitrate,
             "bitrate_step": crate::app::BITRATES.iter().position(|b| *b == s.bitrate).unwrap_or(crate::app::BITRATES.len() - 1),
             "sound": s.sound_on, "clipboard": s.clipboard_on, "second": s.second_on,
@@ -1478,7 +1572,7 @@ fn state_of(app: &App) -> Value {
             "files": FEATURES.files, "folder_choice": FEATURES.folder_choice, "hdr": FEATURES.hdr, "variable_refresh": FEATURES.variable_refresh,
             "refresh_choice": FEATURES.refresh_choice, "follow_window": FEATURES.follow_window, "sharp_text": FEATURES.sharp_text,
             "pointer_capture": FEATURES.pointer_capture, "ctrl_as_command": FEATURES.ctrl_as_command, "scroll_direction": FEATURES.scroll_direction,
-            "touch": FEATURES.touch, "system_shortcuts": FEATURES.system_shortcuts, "key_mapping": FEATURES.key_mapping,
+            "touch": FEATURES.touch, "gamepad": FEATURES.gamepad, "system_shortcuts": FEATURES.system_shortcuts, "key_mapping": FEATURES.key_mapping,
             "release_shortcut": FEATURES.release_shortcut, "second_display": FEATURES.second_display, "mirror": FEATURES.mirror, "way_in": FEATURES.way_in,
         },
         "not_yet": crate::features::NOT_YET,

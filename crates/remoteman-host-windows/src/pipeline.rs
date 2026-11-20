@@ -22,14 +22,20 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
 use windows::Win32::System::Performance::QueryPerformanceCounter;
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
 
+use windows::Win32::Graphics::Direct3D11::ID3D11ShaderResourceView;
+
 use crate::capture::{Gpu, Source, Take};
 use crate::convert::{self, Converter, Output};
 use crate::display;
+use crate::mirror::Duplication;
 use crate::encode;
 use crate::vdd::{Driver, Metadata};
 
 pub struct Settings {
     pub driver: Arc<Driver>,
+    /// Stream this screen of the PC (Windows' name for it, `\.\DISPLAY1`) as it is, through
+    /// Desktop Duplication, instead of the driver's monitor.
+    pub duplicate: Option<String>,
     /// The driver's number for the monitor to stream.
     pub monitor: u32,
     /// The modes the client decodes and this host encodes, the client's favourite first. The
@@ -190,13 +196,45 @@ impl Drop for Pipeline {
     }
 }
 
+/// Where the frames come from: the driver's channel, or one of the PC's screens.
+enum Frames {
+    Driver(Source),
+    Screen(Duplication),
+}
+
+impl Frames {
+    fn meta(&self) -> Metadata {
+        match self {
+            Frames::Driver(s) => s.meta,
+            Frames::Screen(d) => d.meta,
+        }
+    }
+
+    fn take<R>(&mut self, gpu: &Gpu, again: bool, read: impl FnOnce(&ID3D11ShaderResourceView, &Metadata) -> R) -> Result<Take<R>> {
+        match self {
+            Frames::Driver(s) => s.take(gpu, again, read),
+            // (Waits for the desktop to change, a few milliseconds at most, so that the
+            // thread's other business is seen to soon.)
+            Frames::Screen(d) => d.take(gpu, again, Duration::from_millis(8), read),
+        }
+    }
+
+    /// The driver's counts, or the frames taken of a screen.
+    fn counts(&self) -> Option<(u64, u64, u64, u64)> {
+        match self {
+            Frames::Driver(s) => s.counts(),
+            Frames::Screen(d) => Some((d.frames(), 0, 0, 0)),
+        }
+    }
+}
+
 /// Everything one picture is made with. In this order because they are dropped in it: the
 /// encoder before the texture it reads, and all of them before the device.
 struct Picture {
     encoder: Box<dyn FrameEncoder>,
     recovery: Recovery,
     converter: Converter,
-    source: Source,
+    source: Frames,
     gpu: Gpu,
     mode: Mode,
     width: u32,
@@ -272,6 +310,14 @@ fn build(gpu: &Gpu, meta: &Metadata, s: &Settings, bitrate: u32) -> Result<(Conv
 
 impl Picture {
     fn open(s: &Settings) -> Result<Self> {
+        if let Some(device) = &s.duplicate {
+            let gpu = Gpu::on_adapter(crate::mirror::adapter_of(device)?)?;
+            let screen = Duplication::open(&gpu, device)?;
+            let meta = screen.meta;
+            let (converter, encoder, mode, hdr) = build(&gpu, &meta, s, s.bitrate)?;
+            let recovery = Recovery::new(encoder.short_term(), encoder.long_term(), s.fps);
+            return Ok(Self { encoder, recovery, converter, gpu, mode, width: meta.width, height: meta.height, hdr, source: Frames::Screen(screen), have: false, again: true });
+        }
         let channel = wait_for_channel(s, Duration::from_secs(6))?;
         let meta = channel.snapshot().context("the frame channel's metadata isn't readable (never whole, or not this driver's)")?;
         tracing::info!(
@@ -289,20 +335,31 @@ impl Picture {
         let source = Source::open(&gpu, channel)?;
         let (converter, encoder, mode, hdr) = build(&gpu, &source.meta, s, s.bitrate)?;
         let recovery = Recovery::new(encoder.short_term(), encoder.long_term(), s.fps);
-        Ok(Self { encoder, recovery, converter, gpu, mode, width: source.meta.width, height: source.meta.height, hdr, source, have: false, again: true })
+        Ok(Self { encoder, recovery, converter, gpu, mode, width: source.meta.width, height: source.meta.height, hdr, source: Frames::Driver(source), have: false, again: true })
     }
 
     /// The channel in hand is dead (or may be): take the driver's current one. If the picture
     /// is another size or format now, the stream starts afresh as that. False: the driver has
     /// no channel at the moment (between two modes); try again later.
     fn reopen(&mut self, s: &Settings, link: &Link, bitrate: u32) -> Result<bool> {
-        let Some(channel) = display::channel(&s.driver, s.monitor)? else { return Ok(false) };
-        let source = Source::open(&self.gpu, channel)?;
-        let (old, new) = (self.source.meta, source.meta);
+        let source = match &s.duplicate {
+            Some(device) => match Duplication::open(&self.gpu, device) {
+                Ok(d) => Frames::Screen(d),
+                Err(e) => {
+                    tracing::debug!("the screen can't be duplicated yet: {e:#}");
+                    return Ok(false);
+                }
+            },
+            None => {
+                let Some(channel) = display::channel(&s.driver, s.monitor)? else { return Ok(false) };
+                Frames::Driver(Source::open(&self.gpu, channel)?)
+            }
+        };
+        let (old, new) = (self.source.meta(), source.meta());
         if (old.width, old.height, old.format, old.is_hdr) != (new.width, new.height, new.format, new.is_hdr) {
             tracing::info!(from = format!("{}x{}", old.width, old.height), to = format!("{}x{}", new.width, new.height), format = new.format, hdr = new.is_hdr, "the monitor changed; the picture starts afresh");
             // Only this mode: the client has its decoder set up for it.
-            let only = Settings { driver: s.driver.clone(), monitor: s.monitor, modes: vec![self.mode], fps: s.fps, bitrate, nudge_at: s.nudge_at, expect: None, held: false, status: false, hdr: s.hdr, pointer: None, sdr_white: s.sdr_white, resized: Box::new(|_, _| {}) };
+            let only = Settings { driver: s.driver.clone(), duplicate: s.duplicate.clone(), monitor: s.monitor, modes: vec![self.mode], fps: s.fps, bitrate, nudge_at: s.nudge_at, expect: None, held: false, status: false, hdr: s.hdr, pointer: None, sdr_white: s.sdr_white, resized: Box::new(|_, _| {}) };
             let (converter, encoder, mode, hdr) = build(&self.gpu, &new, &only, bitrate)?;
             // The old encoder goes before the texture it reads from.
             self.encoder = encoder;
@@ -335,6 +392,23 @@ fn age_us(meta: &Metadata) -> u64 {
     if us > 100_000 { 0 } else { us }
 }
 
+/// Static refinement (`--refine`): when the picture has been still this long, it is encoded once
+/// more with room for [`REFINE_FACTOR`] times the bits, so text and fine detail stop being as
+/// soft as the last frame of motion. The next ordinary frame has the rate back.
+pub static REFINE: AtomicBool = AtomicBool::new(true);
+const REFINE_AFTER: Duration = Duration::from_millis(400);
+const REFINE_FACTOR: u32 = 8;
+/// The constant quantiser of the refining frame: finer for small pictures, coarser for large ones
+/// so the one frame stays within a couple of megabytes even for a page of dense text (measured on
+/// a worst-case 720p text pattern: QP 24 is 450 kB, 28 is 360 kB, 16 is 630 kB).
+fn refine_qp(width: u32, height: u32) -> u32 {
+    match width as u64 * height as u64 {
+        0..=2_200_000 => 24,
+        2_200_001..=4_500_000 => 28,
+        _ => 32,
+    }
+}
+
 fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<()> {
     let mut rate = s.bitrate;
     let (mut frames, mut keys, mut repeats) = (0u64, 0u64, 0u64);
@@ -352,6 +426,7 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
     let (mut quiet_since, mut checked) = (Instant::now(), Instant::now());
     // The stream must begin with a keyframe after it starts afresh.
     let mut afresh = false;
+    let mut last_nudge = Instant::now();
     let mut wait_failed = false;
     // No more frames a second than the client was told (a monitor that is mirrored, or that
     // doesn't offer the client's rate, shows more): a frame that comes too soon is held back
@@ -361,19 +436,28 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
     let mut last_sent = Instant::now() - interval;
     let mut held_back = None::<u64>;
     let mut told_rate = false;
+    // The still picture has had its refining frame (until the next new picture).
+    let mut refined = false;
+    let mut refines = 0u64;
     // The pointer's last change drawn in (none yet).
     let mut pointer_seen = u64::MAX;
     loop {
         let held = control.held.load(Ordering::Relaxed);
         if !p.again || held {
             // Held back: wait for the word only, and leave the driver's frames where they are.
-            let handles = [control.wake.0, p.source.channel().ready];
+            let ready = match &p.source {
+                Frames::Driver(source) => Some(source.channel().ready),
+                Frames::Screen(_) => None,
+            };
+            let handles = [control.wake.0, ready.unwrap_or_default()];
             // SAFETY: live events. The timeout is for the housekeeping below.
             let patience = match held_back {
                 Some(_) => interval.saturating_sub(last_sent.elapsed()).as_millis().clamp(1, 100) as u32,
                 None => 100,
             };
-            let waited = unsafe { WaitForMultipleObjects(&handles[..if held { 1 } else { 2 }], false, patience) };
+            // A screen has no event to wait on: asking for its frames waits.
+            let patience = if ready.is_none() && !held { 0 } else { patience };
+            let waited = unsafe { WaitForMultipleObjects(&handles[..if held || ready.is_none() { 1 } else { 2 }], false, patience) };
             if waited == WAIT_FAILED {
                 // Not to become a loop that eats a core in silence.
                 if !std::mem::replace(&mut wait_failed, true) {
@@ -429,6 +513,7 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         let stamp = match taken {
             Take::Frame(us) => {
                 p.have = true;
+                refined = false;
                 quiet_since = Instant::now();
                 taken_at = Some(before);
                 Some(us)
@@ -452,16 +537,23 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         // Windows gives the monitor a new swap chain on a mode change and at other times of its
         // own choosing, and the driver then makes a new channel without a word in the old one.
         // So when frames stop, ask now and then whether the channel is still the driver's.
-        if stamp.is_none() && quiet_since.elapsed() > Duration::from_secs(1) && checked.elapsed() > Duration::from_secs(1) {
+        if stamp.is_none() && matches!(p.source, Frames::Driver(_)) && quiet_since.elapsed() > Duration::from_secs(1) && checked.elapsed() > Duration::from_secs(1) {
             checked = Instant::now();
             match display::channel(&s.driver, s.monitor) {
-                Ok(Some(current)) if !current.same_as(p.source.channel()) => {
+                Ok(Some(current)) if !matches!(&p.source, Frames::Driver(d) if current.same_as(d.channel())) => {
                     drop(current);
                     afresh |= p.reopen(s, link, rate)?;
                 }
                 Ok(_) => {}
                 Err(e) => tracing::debug!("asking after the frame channel: {e:#}"),
             }
+        }
+        // A screen that doesn't change gives no first picture (Desktop Duplication shows what
+        // changes): make Windows draw something, as is done for the driver's monitor.
+        if !p.have && matches!(p.source, Frames::Screen(_)) && last_nudge.elapsed() > Duration::from_millis(700) && quiet_since.elapsed() > Duration::from_millis(300) {
+            last_nudge = Instant::now();
+            tracing::info!("no first picture of the screen yet; making the desktop draw");
+            display::nudge(s.nudge_at);
         }
         if afresh && p.have {
             control.keyframe.store(true, Ordering::Relaxed);
@@ -485,24 +577,35 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
             }
             other => other,
         };
+        // Still for a moment, nobody asking for anything, no frame waiting its turn: the last
+        // picture once more, finer. Once per still period.
+        let refining = stamp.is_none() && !asked && !refined && held_back.is_none() && REFINE.load(Ordering::Relaxed) && quiet_since.elapsed() >= REFINE_AFTER && p.encoder.can_refine();
         let capture_us = match stamp {
             Some(us) => us,
             None if asked => {
                 repeats += 1;
                 link.now_us()
             }
+            None if refining => link.now_us(),
             None => continue,
         };
+        if refining {
+            refined = true;
+        }
         let idr = control.keyframe.swap(false, Ordering::Relaxed);
         let reported = control.lost.lock().unwrap().take();
-        let (p_mode, p_hdr) = (p.mode, p.hdr.is_some());
+        let (p_mode, p_hdr, p_size) = (p.mode, p.hdr.is_some(), (p.width, p.height));
         let Picture { encoder, recovery, .. } = &mut p;
         let n = recovery.number();
         let plan = recovery.plan(idr, reported, &mut |t| encoder.invalidate(t).inspect_err(|e| tracing::debug!(t, "invalidate: {e:#}")));
         if reported.is_some() {
             tracing::debug!(?reported, n, ?plan, "loss report");
         }
-        let made = encoder.encode_how(0, n, plan.how).context("encode")?;
+        let made = if refining { encoder.encode_refined(0, n, plan.how, REFINE_FACTOR, refine_qp(p_size.0, p_size.1)) } else { encoder.encode_how(0, n, plan.how) }.context("encode")?;
+        if refining {
+            refines += 1;
+            tracing::info!(bytes = made.data.len(), qp = made.qp, "refined the still picture");
+        }
         if let Some(at) = taken_at.take() {
             took.push(at.elapsed().as_secs_f32() * 1000.0);
         }
@@ -544,6 +647,7 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         frames,
         keyframes = keys,
         encoded_again = repeats,
+        refined = refines,
         seconds = began.elapsed().as_secs(),
         kilobytes = bytes / 1000,
         mbit_per_s = format!("{:.1}", bytes as f64 * 8.0 / 1e6 / began.elapsed().as_secs_f64().max(0.001)),

@@ -82,7 +82,7 @@ impl Pipeline {
         let skipped_r = skipped.clone();
         let encoder =std::thread::Builder::new().name("encode".into()).spawn(move || {
             let opened = (|| {
-                opener.open(&Config { codec, chroma444: chroma == Chroma::C444, width, height, fps, bitrate, preset: 1, long_term: refs.map_or(2, |r| r.1), short_term: refs.map(|r| r.0) })
+                opener.open(&Config { codec, chroma444: chroma == Chroma::C444, width, height, fps, bitrate, preset: 1, long_term: refs.map_or(2, |r| r.1), short_term: refs.map(|r| r.0), slices: 0 })
             })();
             let mut enc = match opened {
                 Ok(e) => {

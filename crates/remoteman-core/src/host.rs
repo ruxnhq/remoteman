@@ -18,6 +18,8 @@ use remoteman_proto::video::{CursorAt, Reassembler, fragment};
 use remoteman_transport::{Connection, Identity, RecvStream, Trust, listen, peer_fingerprint, read_message, write_message};
 
 use crate::blob::{self, BlobEvent, BlobSender, Chunk};
+pub use crate::permissions::{ConnectionEvent, Permissions};
+use crate::permissions::{ConnectionLog, PermissionStore};
 use crate::rate::RateController;
 use crate::{CursorShape, Display, Mode};
 
@@ -121,6 +123,10 @@ pub trait HostHandler: Send + 'static {
     fn blob(&mut self, _event: &BlobEvent) {}
     /// The client is gone (or was replaced): stop the picture and take the display away.
     fn left(&mut self);
+    /// Something the host's owner may want to be told of: a device `paired`, `connected` or
+    /// was `refused` (see [`Host::connections`]). Called on the handler's thread, in turn with
+    /// everything else, so the core never waits for it; keep it short anyway.
+    fn notice(&mut self, _event: &ConnectionEvent) {}
 }
 
 /// One encoded frame on its way to the client.
@@ -268,6 +274,42 @@ enum Call {
     /// With what holds the sender back until the handler has dealt with it.
     Blob(BlobEvent, Option<tokio::sync::OwnedSemaphorePermit>),
     Left,
+    Notice(ConnectionEvent),
+}
+
+/// The permissions and the log, shared by the host's tasks. A [`Gate`] asks them about one
+/// device.
+struct State {
+    perms: PermissionStore,
+    log: ConnectionLog,
+    /// Called, on the handler's thread, with each notice (see [`Host::set_notice_hook`]).
+    notice: Mutex<Option<Box<dyn FnMut(&ConnectionEvent) + Send>>>,
+}
+
+/// What the device being served may do, asked again at each use so a change applies at once.
+#[derive(Clone)]
+struct Gate {
+    state: Arc<State>,
+    fingerprint: String,
+}
+
+impl Gate {
+    fn get(&self) -> Permissions {
+        self.state.perms.get(&self.fingerprint)
+    }
+}
+
+/// Whether a message from the client is one its permissions let through. Asking for a thing
+/// to start is what is refused; saying it stopped always goes through.
+fn message_allowed(m: &Message, p: &Permissions) -> bool {
+    match m {
+        Message::Sound { on } => !on || p.sound,
+        Message::Mic { on, .. } => !on || p.mic,
+        Message::Camera { on, .. } => !on || p.camera,
+        Message::Clipboard { on } => !on || p.clipboard,
+        Message::FileResult { .. } => p.files,
+        _ => true,
+    }
 }
 
 /// What a host program that isn't a [`HostHandler`] with its own `bitrate` gives the core to
@@ -385,6 +427,7 @@ pub struct Host {
     who: Who,
     /// What this host can do, as the next hello will say it.
     features: Arc<Mutex<Vec<String>>>,
+    state: Arc<State>,
     calls: Mutex<mpsc::Sender<Call>>,
     /// Told once the handler thread has ended and let go of everything it held.
     handler_done: Mutex<mpsc::Receiver<()>>,
@@ -413,9 +456,10 @@ impl Host {
         let (done, handler_done) = mpsc::channel::<()>();
         let link: Arc<Mutex<Option<Link>>> = Arc::default();
         let hook: Arc<Mutex<Option<BitrateHook>>> = Arc::default();
-        let (thread_link, thread_hook) = (link.clone(), hook.clone());
+        let state = Arc::new(State { perms: PermissionStore::load(&options.state.join("host/permissions.json")), log: ConnectionLog::open(&options.state.join("connections.log")), notice: Mutex::default() });
+        let (thread_link, thread_hook, thread_state) = (link.clone(), hook.clone(), state.clone());
         std::thread::Builder::new().name("remoteman host".into()).spawn(move || {
-            let (link, hook) = (thread_link, thread_hook);
+            let (link, hook, state) = (thread_link, thread_hook, thread_state);
             let clock = Instant::now();
             let mut follow = Follow::default();
             loop {
@@ -456,6 +500,12 @@ impl Host {
                         handler.blob(&event);
                         drop(held);
                     }
+                    Call::Notice(event) => {
+                        handler.notice(&event);
+                        if let Some(f) = state.notice.lock().unwrap().as_mut() {
+                            f(&event);
+                        }
+                    }
                     Call::Left => {
                         handler.left();
                         follow = Follow::default();
@@ -473,8 +523,8 @@ impl Host {
         let who = Who::default();
         let features = Arc::new(Mutex::new(with_parity(options.features.clone())));
         let confirm = Arc::new(Confirm { own: identity.fingerprint.clone(), ..Confirm::default() });
-        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone(), confirm.clone()));
-        Ok(Self { confirm, runtime: Some(runtime), endpoint, trust, link, hook, who, features, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
+        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone(), confirm.clone(), state.clone()));
+        Ok(Self { confirm, runtime: Some(runtime), endpoint, trust, link, hook, who, features, state, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
     }
 
     /// Let the next unknown device in (it is remembered and pairing turns itself off), or stop
@@ -514,10 +564,66 @@ impl Host {
     /// to ignore.
     pub fn set_features(&self, features: Vec<String>) {
         let features = with_parity(features);
-        *self.features.lock().unwrap() = features.clone();
-        if let Some(link) = self.link() {
+        *self.features.lock().unwrap() = features;
+        self.send_features();
+    }
+
+    /// Tell the connected client what it may use now: the host's features less what its
+    /// permissions take away.
+    fn send_features(&self) {
+        let fingerprint = self.who.lock().unwrap().as_ref().map(|(fp, _)| fp.clone());
+        if let (Some(link), Some(fp)) = (self.link(), fingerprint) {
+            let features = self.state.perms.get(&fp).filter(&self.features.lock().unwrap());
             link.send_message(Message::Features { features });
         }
+    }
+
+    /// What a device may do (everything, for one nobody has restricted).
+    pub fn permissions(&self, fingerprint: &str) -> Permissions {
+        self.state.perms.get(fingerprint)
+    }
+
+    /// Change what a device may do. Kept across restarts. If it is the connected one it is
+    /// told at once with a `features` message, and the handler is told to switch off what was
+    /// taken away (sound, microphone, camera and clipboard sharing, as if the client had
+    /// stopped them); input, files and the rest are dropped by the core from this moment.
+    pub fn set_permissions(&self, fingerprint: &str, permissions: Permissions) -> Result<()> {
+        let before = self.state.perms.get(fingerprint);
+        self.state.perms.set(fingerprint, permissions)?;
+        let connected = self.who.lock().unwrap().as_ref().is_some_and(|(fp, _)| fp == fingerprint);
+        if connected {
+            self.send_features();
+            if before.sound && !permissions.sound {
+                self.tell_handler(Message::Sound { on: false });
+            }
+            if before.mic && !permissions.mic {
+                self.tell_handler(Message::Mic { on: false, codec: String::new(), rate: 0, channels: 0, frame_us: 0 });
+            }
+            if before.camera && !permissions.camera {
+                self.tell_handler(Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 });
+            }
+            if before.clipboard && !permissions.clipboard {
+                self.tell_handler(Message::Clipboard { on: false });
+            }
+        }
+        Ok(())
+    }
+
+    /// For a host program whose handler doesn't implement [`HostHandler::notice`] (the C
+    /// interface): `notice` is called, on the handler's thread, with each event the handler's
+    /// own `notice` would get.
+    pub fn set_notice_hook(&self, notice: impl FnMut(&ConnectionEvent) + Send + 'static) {
+        *self.state.notice.lock().unwrap() = Some(Box::new(notice));
+    }
+
+    /// Take the hook of [`Self::set_notice_hook`] away.
+    pub fn clear_notice_hook(&self) {
+        *self.state.notice.lock().unwrap() = None;
+    }
+
+    /// The last `n` lines of the connection log, oldest first.
+    pub fn connections(&self, n: usize) -> Vec<ConnectionEvent> {
+        self.state.log.last(n)
     }
 
     /// Make the core lower and raise the picture's bitrate with the network for a host program
@@ -547,6 +653,7 @@ impl Host {
     /// on until it is paired again. Says whether it was trusted.
     pub fn revoke(&self, fingerprint: &str) -> Result<bool> {
         let was = self.trust.remove(fingerprint)?;
+        let _ = self.state.perms.forget(fingerprint);
         let who = self.who.lock().unwrap();
         if let Some((fp, conn)) = who.as_ref() {
             if fp == fingerprint {
@@ -619,7 +726,7 @@ impl Drop for Host {
 pub const CLOSE_DROPPED: u32 = 2;
 pub const CLOSE_REVOKED: u32 = 3;
 
-async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>, who: Who, features: Arc<Mutex<Vec<String>>>, confirm: Arc<Confirm>) {
+async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>, who: Who, features: Arc<Mutex<Vec<String>>>, confirm: Arc<Confirm>, state: Arc<State>) {
     let options = Arc::new(options);
     let mut current: Option<(tokio::task::JoinHandle<()>, Connection)> = None;
     while let Some(incoming) = endpoint.accept().await {
@@ -629,12 +736,14 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
         // Only reachable while pairing: a device nobody knows. It is trusted here and now,
         // or held until the host's owner has confirmed it (in `serve`, once it has said its name).
         let mut held = None;
+        let mut fresh = false;
         if !trust.contains(&fingerprint) {
             trust.set_pairing(false);
             if confirm.wanted.load(std::sync::atomic::Ordering::Relaxed) {
                 held = Some(confirm.clone());
             } else {
                 let _ = trust.add(&fingerprint, &conn.remote_address().ip().to_string());
+                fresh = true;
             }
         }
         // The newest client takes over. The old session is closed and left to finish by
@@ -650,10 +759,10 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
         if held.is_none() && !trust.contains(&fingerprint) {
             conn.close(CLOSE_REVOKED.into(), b"this device is no longer trusted here");
         }
-        let (who, trust) = (who.clone(), trust.clone());
+        let (who, trust, state) = (who.clone(), trust.clone(), state.clone());
         let offered = features.lock().unwrap().clone();
         current = Some((tokio::spawn(async move {
-            let started = serve(&conn, fingerprint, &options, &calls, &current_link, &trust, offered, held).await;
+            let started = serve(&conn, fingerprint, &options, &calls, &current_link, &trust, &state, offered, held, fresh).await;
             {
                 let mut who = who.lock().unwrap();
                 if who.as_ref().is_some_and(|(_, c)| c.stable_id() == conn.stable_id()) {
@@ -677,6 +786,27 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
     }
 }
 
+/// Writes the `left` line of the connection log when a session ends, however it ends.
+struct LeftLog {
+    state: Arc<State>,
+    conn: Connection,
+    name: String,
+    fingerprint: String,
+    address: String,
+    since: Instant,
+}
+
+impl Drop for LeftLog {
+    fn drop(&mut self) {
+        let mut event = ConnectionEvent::new("left", &self.name, &self.fingerprint, &self.address);
+        event.duration = Some(self.since.elapsed().as_secs());
+        if let Some(reason) = self.conn.close_reason() {
+            event.reason = reason.to_string();
+        }
+        self.state.log.append(&event);
+    }
+}
+
 /// A frame that nothing has followed for this long is sent once more. On a desktop where
 /// nothing moves no later frame comes, and a later frame is the only way a client notices that
 /// one went missing: without this, whatever the network lost of the last frame before the
@@ -685,8 +815,17 @@ const REPEAT_AFTER: Duration = Duration::from_millis(100);
 
 /// One client's session. The flag in the result says whether the handler's `connected` ran (and
 /// so whether `left` is owed).
-async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, trust: &Trust, features: Vec<String>, held: Option<Arc<Confirm>>) -> Result<bool, (bool, anyhow::Error)> {
+async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, trust: &Trust, state: &Arc<State>, features: Vec<String>, held: Option<Arc<Confirm>>, fresh: bool) -> Result<bool, (bool, anyhow::Error)> {
     let no = |e: anyhow::Error| (false, e);
+    let gate = Gate { state: state.clone(), fingerprint: fingerprint.clone() };
+    let address = conn.remote_address().to_string();
+    // Writes the event to the log and tells the handler (which may show a notice).
+    let record = |event: ConnectionEvent| {
+        state.log.append(&event);
+        if event.event != "left" {
+            let _ = calls.send(Call::Notice(event));
+        }
+    };
     let clock = Instant::now();
     let (mut send, mut recv) = conn.accept_bi().await.context("control stream").map_err(no)?;
     let Some(Message::ClientHello { proto, name, display, decoders, cursor, unlock, way_in, parity }) = read_message(&mut recv).await.map_err(no)? else {
@@ -711,9 +850,15 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             }
         }
         match decision {
-            Some(true) => trust.add(&fingerprint, name.trim()).map_err(no)?,
+            Some(true) => {
+                trust.add(&fingerprint, name.trim()).map_err(no)?;
+                record(ConnectionEvent::new("paired", name.trim(), &fingerprint, &address));
+            }
             other => {
                 let message = if other.is_some() { "pairing was declined on the computer" } else { "nobody confirmed the pairing on the computer in time" };
+                let mut event = ConnectionEvent::new("refused", name.trim(), &fingerprint, &address);
+                event.reason = message.into();
+                record(event);
                 let _ = write_message(&mut send, &Message::Error { code: "not_paired".into(), message: message.into() }).await;
                 let _ = send.finish();
                 // (Time for the reason to arrive before the connection goes.)
@@ -723,6 +868,11 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             }
         }
     }
+    if fresh {
+        record(ConnectionEvent::new("paired", name.trim(), &fingerprint, &address));
+    }
+    // What this device may do: its features are the host's less what it isn't allowed.
+    let features = gate.get().filter(&features);
     // Parity only where both sides said so.
     let parity = parity && features.iter().any(|f| f == "parity");
     write_message(&mut send, &Message::HostHello { proto: remoteman_proto::PROTO, name: options.name.clone(), os: options.os.clone(), features }).await.map_err(no)?;
@@ -740,6 +890,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     let (cursor_tx, mut cursor_rx) = tokio::sync::mpsc::unbounded_channel::<CursorMsg>();
     let link = Link { frames: frame_tx, cursor: cursor_tx, clock, second: false };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let client_name = name.trim().to_owned();
     let info = ClientInfo { name, fingerprint, display, decoders, cursor, unlock, attach_only: way_in.as_deref() == Some("attach") };
     // Reachable through `Host::link` before the handler hears of the client, so nothing it
     // sends from the start is lost.
@@ -761,11 +912,17 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                 ("failed", message.as_str())
             };
             let _ = write_message(&mut send, &Message::Error { code: code.into(), message: said.to_owned() }).await;
+            let mut event = ConnectionEvent::new("refused", &client_name, &gate.fingerprint, &address);
+            event.reason = message.clone();
+            record(event);
             // The handler refused, so it holds nothing for this client.
             return Err(no(anyhow::anyhow!(message)));
         }
         Err(_) => return Err(no(anyhow::anyhow!("the host is shutting down"))),
     };
+    record(ConnectionEvent::new("connected", &client_name, &gate.fingerprint, &address));
+    // However this session ends, it is logged once as having left.
+    let _left = LeftLog { state: state.clone(), conn: conn.clone(), name: client_name, fingerprint: gate.fingerprint.clone(), address: address.clone(), since: Instant::now() };
     let yes = |e: anyhow::Error| (true, e);
     // Counts up each time the picture starts afresh.
     let epoch = std::sync::atomic::AtomicU32::new(1);
@@ -894,7 +1051,10 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                 }
                 Message::Ping { id, client_us } => write_message(&mut *send.lock().await, &Message::Pong { id, client_us, host_us: clock.elapsed().as_micros() as u64 }).await?,
                 m @ (Message::Sound { .. } | Message::Mic { .. } | Message::Camera { .. } | Message::Configure { .. } | Message::Clipboard { .. } | Message::FileResult { .. } | Message::Display { .. } | Message::DisplayKeyframe { .. }) => {
-                    let _ = calls.send(Call::Message(m));
+                    // What the device isn't allowed is dropped here, whatever it was told.
+                    if message_allowed(&m, &gate.get()) {
+                        let _ = calls.send(Call::Message(m));
+                    }
                 }
                 _ => {}
             }
@@ -940,7 +1100,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         loop {
             let mut stream = conn.accept_uni().await?;
             blob_id = blob_id.wrapping_add(1);
-            let (calls, room, id) = (calls.clone(), room.clone(), blob_id);
+            let (calls, room, id, gate) = (calls.clone(), room.clone(), blob_id, gate.clone());
             // Each stream is read by a task of its own from its very first byte: a stream is
             // announced as soon as a later one carries data, so the input stream can turn up
             // here long before the client has typed anything.
@@ -950,6 +1110,12 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     return;
                 }
                 if first[0] >= media::BLOB_FIRST {
+                    // A clipboard or a file the device isn't allowed to send is turned away.
+                    let p = gate.get();
+                    if (first[0] == media::BLOB_CLIPBOARD && !p.clipboard) || (first[0] == media::BLOB_FILE && !p.files) {
+                        let _ = stream.stop(2u32.into());
+                        return;
+                    }
                     blob::receive(stream, first[0], id, move |event| {
                         let (calls, room) = (calls.clone(), room.clone());
                         async move {
@@ -959,7 +1125,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     })
                     .await;
                 } else {
-                    let _ = read_input(stream, first[0], &calls).await;
+                    let _ = read_input(stream, first[0], &calls, &gate).await;
                 }
             });
         }
@@ -974,6 +1140,8 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         loop {
             let d = conn.read_datagram().await?;
             match d.first() {
+                Some(&media::KIND_MIC) if !gate.get().mic => {}
+                Some(&media::KIND_CAMERA) if !gate.get().camera => {}
                 Some(&media::KIND_MIC) => {
                     if let Ok(packet) = Packet::parse(&d) {
                         let _ = calls.send(Call::Mic(packet));
@@ -1043,14 +1211,20 @@ fn take_events(buf: &mut Vec<u8>, mut sink: impl FnMut(Event)) -> Result<()> {
     result
 }
 
-async fn read_input(mut stream: RecvStream, first: u8, calls: &mpsc::Sender<Call>) -> Result<()> {
+async fn read_input(mut stream: RecvStream, first: u8, calls: &mpsc::Sender<Call>, gate: &Gate) -> Result<()> {
     // `first` was read off the stream to see what it was.
     let mut buf = vec![first];
     let mut chunk = [0u8; 4096];
     while let Some(n) = stream.read(&mut chunk).await? {
         buf.extend_from_slice(&chunk[..n]);
         let mut gone = false;
-        take_events(&mut buf, |event| gone |= calls.send(Call::Input(event)).is_err())?;
+        // A view-only device's events (of every kind) are read and thrown away.
+        let input = gate.get().input;
+        take_events(&mut buf, |event| {
+            if input {
+                gone |= calls.send(Call::Input(event)).is_err();
+            }
+        })?;
         if gone {
             bail!("the host is shutting down");
         }
