@@ -39,12 +39,14 @@ SetupLogging=yes
 Source: "stage\remoteman-host.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "stage\setup.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "stage\driver\*"; DestDir: "{app}\driver"; Flags: ignoreversion recursesubdirs
+Source: "stage\vcam\*"; DestDir: "{app}\vcam"; Flags: ignoreversion
 
 [UninstallDelete]
 ; What setup.ps1 writes beside itself, and the catalog it makes.
 Type: files; Name: "{app}\installed.json"
 Type: files; Name: "{app}\setup.log"
 Type: files; Name: "{app}\driver\pkg\RemotemanDisplay.cat"
+Type: dirifempty; Name: "{app}\vcam"
 Type: dirifempty; Name: "{app}\driver\pkg"
 Type: dirifempty; Name: "{app}\driver"
 Type: dirifempty; Name: "{app}"
