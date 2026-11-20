@@ -440,6 +440,8 @@ impl Engine {
     fn attach(&self, panel: *mut c_void, window: isize) -> Result<()> {
         anyhow::ensure!(!panel.is_null(), "no panel");
         self.host.set(window);
+        // Before anything connects: the hello says whether this monitor is in HDR.
+        self.watch_monitor();
         let (gpu, scene) = {
             let app = self.app.borrow();
             (app.gpu.clone(), app.scene.clone())
@@ -586,8 +588,11 @@ impl Engine {
             say!("screen: {} (Windows says {}){}", if hdr { "HDR" } else { "SDR" }, if found { "HDR" } else { "SDR" }, if hdr { format!(", headroom {headroom:.1}") } else { String::new() });
         }
         app.scene.headroom.store(headroom.to_bits().max(1), Ordering::Relaxed);
-        let (.., hz, _, _) = crate::window::monitor_of(host);
+        let (mw, mh, hz, _, _) = crate::window::monitor_of(host);
         app.scene.refresh_hz.store(hz, Ordering::Relaxed);
+        // (Also before the panel has a size: what a computer named on the command line is
+        // asked for.)
+        app.monitor = (mw, mh, hz);
         *app.scene.vrr_range.lock().unwrap() = crate::monitor::vrr_of(host);
         if changed {
             app.follow_hdr();

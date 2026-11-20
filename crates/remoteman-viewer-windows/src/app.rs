@@ -737,7 +737,7 @@ impl App {
             attach_only: false,
         };
         *shared.folder.lock().unwrap() = self.store.receive_folder();
-        say!("connecting to {} for {}x{} at {} Hz", target.address, display.width, display.height, display.refresh);
+        say!("connecting to {} for {}x{} at {} Hz{}", target.address, display.width, display.height, display.refresh, if display.hdr { format!(", HDR (headroom {:.1})", display.headroom) } else { String::new() });
         let (id, tx, scene) = (self.attempt_id, self.results.0.clone(), self.scene.clone());
         let _ = std::thread::Builder::new().name("connect".into()).spawn(move || {
             let result = Client::connect(options, feed).map_err(|e| format!("{e:#}"));
