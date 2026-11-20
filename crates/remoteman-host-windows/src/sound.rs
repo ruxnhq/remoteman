@@ -109,8 +109,20 @@ impl Drop for Speaker {
     }
 }
 
+/// An output to record instead of the default one: set while the PC's speakers are switched to
+/// Steam's for a device that listens (`speakers.rs`), so the recording doesn't depend on what
+/// Windows says the default is for this process.
+pub static RECORD_FROM: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn record_from() -> Option<String> {
+    RECORD_FROM.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// The default output's id, to notice when the user picks another.
 fn default_output() -> Option<String> {
+    if let Some(id) = record_from() {
+        return Some(id);
+    }
     // SAFETY: COM calls on this thread's own objects; the id is read and freed.
     unsafe {
         let device = enumerator().ok()?.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
@@ -126,7 +138,10 @@ fn open_loopback() -> Result<(IAudioClient, IAudioCaptureClient, String, String)
     // SAFETY: COM calls as documented, on this thread's own objects; the format outlives the
     // call that reads it.
     unsafe {
-        let device = enumerator()?.GetDefaultAudioEndpoint(eRender, eConsole).context("this computer has no sound output to record from")?;
+        let device = match record_from() {
+            Some(id) => enumerator()?.GetDevice(&windows::core::HSTRING::from(id)).context("the sound output to record has gone")?,
+            None => enumerator()?.GetDefaultAudioEndpoint(eRender, eConsole).context("this computer has no sound output to record from")?,
+        };
         let name = name_of(&device);
         let id = device.GetId().ok().and_then(|i| {
             let t = i.to_string().ok();

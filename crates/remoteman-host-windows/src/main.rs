@@ -44,6 +44,10 @@
 #[cfg(windows)]
 mod advertise;
 #[cfg(windows)]
+mod awake;
+#[cfg(windows)]
+mod speakers;
+#[cfg(windows)]
 mod capture;
 #[cfg(windows)]
 mod clipboard;
@@ -385,11 +389,15 @@ mod windows_main {
         // for this run.
         let allowed = crate::control::Allowed::default();
         let saved = crate::control::load(&state);
-        allowed.files.store(allow.0 || saved.0, Ordering::Relaxed);
-        allowed.clipboard.store(allow.1 || saved.1, Ordering::Relaxed);
-        allowed.paused.store(saved.2, Ordering::Relaxed);
+        allowed.files.store(allow.0 || saved.files, Ordering::Relaxed);
+        allowed.clipboard.store(allow.1 || saved.clipboard, Ordering::Relaxed);
+        allowed.paused.store(saved.paused, Ordering::Relaxed);
+        allowed.lock_on_leave.store(saved.lock_on_leave, Ordering::Relaxed);
+        allowed.speakers_follow.store(saved.speakers_follow, Ordering::Relaxed);
         allowed.real_screens.store(screen.pc(), Ordering::Relaxed);
-        if saved.2 {
+        // A host that died while a device listened left the speakers switched: put them back.
+        crate::speakers::init(&state);
+        if saved.paused {
             tracing::info!("sharing is switched off (remembered): devices are turned away until `ctl sharing on`");
         }
         let _ = crate::control::NAME.set(name.clone());

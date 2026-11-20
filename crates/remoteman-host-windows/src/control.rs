@@ -52,6 +52,10 @@ pub struct Now {
 pub struct Allowed {
     pub files: Arc<AtomicBool>,
     pub clipboard: Arc<AtomicBool>,
+    /// Lock the PC when a device's session ends (off unless the owner says so).
+    pub lock_on_leave: Arc<AtomicBool>,
+    /// Make Steam's speakers the default output while a device listens, so the PC's own go quiet (on unless the owner says otherwise).
+    pub speakers_follow: Arc<AtomicBool>,
     /// A device this host can play a client's microphone into was found.
     pub microphone: Arc<AtomicBool>,
     /// The driver has a second monitor to give a device as its own.
@@ -112,17 +116,54 @@ fn saved_path(state: &Path) -> PathBuf {
     state.join("allowed.json")
 }
 
-/// What the owner switched earlier: (files, clipboard, sharing off).
-pub fn load(state: &Path) -> (bool, bool, bool) {
-    let saved = std::fs::read_to_string(saved_path(state)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    let is = |key: &str| saved.as_ref().and_then(|v| v.get(key)).and_then(|v| v.as_bool()).unwrap_or(false);
-    (is("files"), is("clipboard"), is("paused"))
+/// What the owner switched earlier.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub files: bool,
+    pub clipboard: bool,
+    /// Sharing off.
+    pub paused: bool,
+    pub lock_on_leave: bool,
+    pub speakers_follow: bool,
+}
+
+pub fn load(state: &Path) -> Saved {
+    parse(std::fs::read_to_string(saved_path(state)).ok().as_deref())
+}
+
+fn parse(text: Option<&str>) -> Saved {
+    let saved = text.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    let is = |key: &str, otherwise: bool| saved.as_ref().and_then(|v| v.get(key)).and_then(|v| v.as_bool()).unwrap_or(otherwise);
+    Saved { files: is("files", false), clipboard: is("clipboard", false), paused: is("paused", false), lock_on_leave: is("lock_on_leave", false), speakers_follow: is("speakers_follow", true) }
 }
 
 fn save(state: &Path, allowed: &Allowed) -> std::io::Result<()> {
-    let saved = serde_json::json!({ "files": allowed.files.load(Ordering::Relaxed), "clipboard": allowed.clipboard.load(Ordering::Relaxed), "paused": allowed.paused.load(Ordering::Relaxed) });
+    let on = |b: &Arc<AtomicBool>| b.load(Ordering::Relaxed);
+    let saved = serde_json::json!({
+        "files": on(&allowed.files), "clipboard": on(&allowed.clipboard), "paused": on(&allowed.paused),
+        "lock_on_leave": on(&allowed.lock_on_leave), "speakers_follow": on(&allowed.speakers_follow),
+    });
     std::fs::create_dir_all(state)?;
     std::fs::write(saved_path(state), saved.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_default_and_round_trip() {
+        // Nothing saved: files, clipboard, pause and lock are off; the speakers follow.
+        assert_eq!(parse(None), Saved { files: false, clipboard: false, paused: false, lock_on_leave: false, speakers_follow: true });
+        // A file from before these settings existed.
+        assert_eq!(parse(Some(r#"{"files":true,"clipboard":false,"paused":true}"#)), Saved { files: true, clipboard: false, paused: true, lock_on_leave: false, speakers_follow: true });
+        let dir = std::env::temp_dir().join(format!("remoteman-settings-{}", std::process::id()));
+        let allowed = Allowed::default();
+        allowed.lock_on_leave.store(true, Ordering::Relaxed);
+        save(&dir, &allowed).unwrap();
+        assert_eq!(load(&dir), Saved { files: false, clipboard: false, paused: false, lock_on_leave: true, speakers_follow: false });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 pub fn pipe_name(port: u16) -> String {
@@ -322,6 +363,8 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "name": host_name(),
                 "clipboard": allowed.clipboard.load(Ordering::Relaxed),
                 "files": allowed.files.load(Ordering::Relaxed),
+                "lock_on_leave": allowed.lock_on_leave.load(Ordering::Relaxed),
+                "speakers_follow": allowed.speakers_follow.load(Ordering::Relaxed),
                 "microphone": allowed.microphone.load(Ordering::Relaxed),
                 "client": client,
                 "sent": sent,
@@ -388,6 +431,17 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
-        _ => "status | pair on|off|accept|decline | allow clipboard|files on|off | drop | revoke FINGERPRINT | send PATH | sharing on|off\n".into(),
+        // Host settings: lock the PC when a device's session ends; Steam's speakers as the
+        // default output while a device listens.
+        (Some("set"), Some(what @ ("lock" | "speakers")), Some(word @ ("on" | "off"))) => {
+            let on = word == "on";
+            if what == "lock" { &allowed.lock_on_leave } else { &allowed.speakers_follow }.store(on, Ordering::Relaxed);
+            tracing::info!(setting = what, on, "setting switched by the owner");
+            match save(state, allowed) {
+                Ok(()) => "ok\n".into(),
+                Err(e) => format!("done, but it won't be remembered: {e}\n"),
+            }
+        }
+        _ => "status | pair on|off|accept|decline | allow clipboard|files on|off | set lock|speakers on|off | drop | revoke FINGERPRINT | send PATH | sharing on|off\n".into(),
     }
 }
