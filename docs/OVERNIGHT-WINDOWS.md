@@ -231,3 +231,8 @@ screen mode" in the NVIDIA Control Panel (not tried; the owner's setting).
   notice, game controllers in the viewers; checked on its own loopback. The tests against this
   PC need the owner: switching the second factor on here was stopped by this session's permission
   check (it changes who can sign in); the half-started setup was discarded (status off).
+- "It watches" against this PC (09:43, the owner set it): the test client led in mirror; the Mac
+  viewer joined for 18 s, got the lead's 3840x2160 AV1 stream, hello without `input` ("View
+  only"), the lead undisturbed. It counted 464 frames lost at the join (the lead's frames before
+  it came): fixed in the reassembler (losses count from the first frame seen, edef240, 5f59877).
+  The second factor: the owner chose not to test it here. The test client is unpaired again.
