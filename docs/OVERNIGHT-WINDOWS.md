@@ -149,3 +149,14 @@ target build. The Mac host follows the bitrate (a 5 Mbit/s ceiling followed on l
 the host leaves `input` out. Installed on the everyday Mac host, the test host 7803, the iPad and
 the iPhone. Not yet on the Apple side: game controllers, the second factor's prompt, more than one
 device, permissions UI. Not run: rate cuts and parity under real loss, the pen end to end.
+
+## The iPad's black picture (08:16-08:23)
+The owner's first test: the iPad (the Mac session's 9667a3e app) connected as an extra display,
+input worked, the picture stayed black. The host's log showed frames going out whole with real
+content (no loss reported, no keyframe asked for). The Mac viewer, pointed at this host at 08:22,
+decoded the same AV1 10-bit HDR stream (metadata OBUs, parity, refinement) with VideoToolbox and
+real values: the host's stream is fine. The fault is the iOS app's HDR drawing (a 16-bit float,
+extended linear BT.2020 layer), which had never run on an iPad. At 08:23 the Mac session made the
+iPad and iPhone apps ask for SDR until that is fixed. Also seen: connecting waited 8 s for Windows
+to list the 3200x2400@120 mode on the freshly plugged monitor before going on (it came up at that
+mode anyway); to look at.
