@@ -269,7 +269,19 @@ fn moved(e: &Engine, full: &Full, x: i32, y: i32) {
         return;
     }
     let scale = full.scale();
-    let taken = event(e, |app| app.mouse_move(x as f32 / scale, y as f32 / scale)).unwrap_or(true);
+    // The state is looked at again only if the move changed something of the bar's: a mouse
+    // that reports 8000 times a second would otherwise have this thread rebuild it thousands of
+    // times a second (measured: a quarter of its time).
+    let (taken, changed) = match e.app.try_borrow_mut() {
+        Ok(mut app) => {
+            let taken = app.mouse_move(x as f32 / scale, y as f32 / scale);
+            (taken, app.dirty || !app.effects.is_empty())
+        }
+        Err(_) => (true, false),
+    };
+    if changed {
+        e.publish();
+    }
     // A button held on the picture keeps the pointer the computer's, wherever it goes.
     if e.buttons.get() != 0 || (!taken && e.forwarding()) {
         e.pointer(x, y);

@@ -92,6 +92,65 @@ pub(crate) struct Engine {
     fingers: RefCell<crate::touch::Fingers>,
     /// How busy this thread is with input and the state (`Busy`).
     pub(crate) busy: RefCell<Busy>,
+    /// The pointer's places, paced (`Pacer`).
+    pacer: Arc<Pacer>,
+}
+
+/// The pointer's place goes to the computer at most once a millisecond. A mouse that reports
+/// 8000 times a second makes Windows hand the full-screen window thousands of moves a second,
+/// and each went to the computer, which makes a mouse event of each: a Mac host's log showed
+/// up to 3100 a second during window drags from full screen, against 600 to 950 from the
+/// app's window (WinUI coalesces), and window drags lagged in full screen only. The newest
+/// place waits here, and a thread of its own sends it at once if nothing went in the last
+/// millisecond, else when that has passed (so it is never more than about a millisecond late,
+/// and only places in between are left out). Anything else sent to the computer sends a waiting
+/// place first, so a press, a scroll or a change of display is never ahead of the pointer.
+pub(crate) struct Pacer {
+    next: std::sync::Mutex<Option<(Arc<remoteman_core::Client>, f32, f32)>>,
+    ready: std::sync::Condvar,
+    /// How many places went to the computer (for `Busy`'s line).
+    sent: std::sync::atomic::AtomicU32,
+}
+
+const PACE: Duration = Duration::from_millis(1);
+
+impl Pacer {
+    fn start() -> Arc<Self> {
+        let pacer = Arc::new(Self { next: std::sync::Mutex::new(None), ready: std::sync::Condvar::new(), sent: Default::default() });
+        let p = pacer.clone();
+        let _ = std::thread::Builder::new().name("pointer".into()).spawn(move || {
+            loop {
+                {
+                    let mut next = p.next.lock().unwrap();
+                    while next.is_none() {
+                        next = p.ready.wait(next).unwrap();
+                    }
+                    // Sent while held, so a place sent by the window's thread can't cross it.
+                    if let Some((client, x, y)) = next.take() {
+                        client.send(Event::PointerTo { x, y });
+                        p.sent.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                std::thread::sleep(PACE);
+            }
+        });
+        pacer
+    }
+
+    /// The pointer is here now: sent within about a millisecond.
+    fn put(&self, client: Arc<remoteman_core::Client>, x: f32, y: f32) {
+        *self.next.lock().unwrap() = Some((client, x, y));
+        self.ready.notify_one();
+    }
+
+    /// Send a waiting place now, before something that must come after it.
+    fn flush(&self) {
+        let mut next = self.next.lock().unwrap();
+        if let Some((client, x, y)) = next.take() {
+            client.send(Event::PointerTo { x, y });
+            self.sent.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// For finding what holds this thread up during a session (with `--stats` or `--watch-vblank`),
@@ -351,6 +410,7 @@ fn start_engine(words: Vec<String>, notify: Notify) -> Result<()> {
         watched: Cell::new(None),
         fingers: RefCell::new(crate::touch::Fingers::default()),
         busy: RefCell::new(Busy::default()),
+        pacer: Pacer::start(),
     });
     ENGINE.with(|x| *x.borrow_mut() = Some(e.clone()));
     // The Windows key, Alt+Tab and the like, while a session has the keyboard.
@@ -662,6 +722,8 @@ impl Engine {
     }
 
     pub(crate) fn send(&self, event: Event) {
+        // Whatever it is, it comes after the pointer's newest place.
+        self.pacer.flush();
         let Ok(app) = self.app.try_borrow() else { return };
         if let Some(client) = app.client().cloned() {
             drop(app);
@@ -690,9 +752,15 @@ impl Engine {
     pub(crate) fn pointer(&self, x: i32, y: i32) {
         self.busy.borrow_mut().pointers += 1;
         self.point_at(0);
-        let at = self.app.borrow().fraction(x as f32, y as f32);
-        if let Some((x, y)) = at {
-            self.send(Event::PointerTo { x, y });
+        let (at, client) = {
+            let app = self.app.borrow();
+            (app.fraction(x as f32, y as f32), app.client().cloned())
+        };
+        match (at, client) {
+            (Some((x, y)), Some(client)) => self.pacer.put(client, x, y),
+            // (A played session has no computer: `send` logs it.)
+            (Some((x, y)), None) => self.send(Event::PointerTo { x, y }),
+            (None, _) => {}
         }
     }
 
@@ -927,9 +995,10 @@ impl Engine {
             return;
         }
         let wanted = self.app.try_borrow().is_ok_and(|a| a.session.is_some() && (a.args.stats || a.scene.measure.load(Ordering::Relaxed)));
+        let sent = self.pacer.sent.swap(0, Ordering::Relaxed);
         if wanted && busy.pointers > 0 {
             say!(
-                "input: {} pointer moves sent in {:.1} s ({}); the state looked at {} times, {:.1} ms in all, {:.2} at most; the app told {} times",
+                "input: {} pointer moves in {:.1} s ({}), {sent} places sent to the computer; the state looked at {} times, {:.1} ms in all, {:.2} at most; the app told {} times",
                 busy.pointers,
                 since.elapsed().as_secs_f64(),
                 if self.full.borrow().is_some() { "full screen" } else { "in the window" },
