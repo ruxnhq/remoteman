@@ -124,3 +124,12 @@ card, the Mac's cursor worn, the window's size followed (1478x956), ~150 picture
 lost, about 5 ms old. Installed over `%LOCALAPPDATA%\Programs\remoteman`; the previous viewer is
 in `C:\rm\viewer-app-backup-2026-11-20` (copy it back to undo). The Mac test host has no `parity`
 yet (its core is older), so parity wasn't exercised.
+
+## The new host, installed by the owner (07:57)
+Its log: the PC's three screens put back from `screens.txt` (3 of 3), then "unplugged the
+driver's monitors indices=[0, 1, 2] took_ms=24": the new driver's `DESTROYMONITOR` works; Windows'
+monitor list now has only the PC's three. It offers video, input, cursor, configure, mirror,
+sound, pen, placement, displays, hdr and camera (the camera's class is registered). Sharing is
+still off (the owner turns it on). The same log explains the morning: after the 00:09 restart the
+OLD host tried to put the screens back with `ChangeDisplaySettingsEx` and Windows refused every
+call (-1, -2), so the driver's monitor stayed the main display.
