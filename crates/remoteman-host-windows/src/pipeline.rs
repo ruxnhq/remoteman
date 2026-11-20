@@ -392,6 +392,23 @@ fn age_us(meta: &Metadata) -> u64 {
     if us > 100_000 { 0 } else { us }
 }
 
+/// Static refinement (`--refine`): when the picture has been still this long, it is encoded once
+/// more with room for [`REFINE_FACTOR`] times the bits, so text and fine detail stop being as
+/// soft as the last frame of motion. The next ordinary frame has the rate back.
+pub static REFINE: AtomicBool = AtomicBool::new(true);
+const REFINE_AFTER: Duration = Duration::from_millis(400);
+const REFINE_FACTOR: u32 = 8;
+/// The constant quantiser of the refining frame: finer for small pictures, coarser for large ones
+/// so the one frame stays within a couple of megabytes even for a page of dense text (measured on
+/// a worst-case 720p text pattern: QP 24 is 450 kB, 28 is 360 kB, 16 is 630 kB).
+fn refine_qp(width: u32, height: u32) -> u32 {
+    match width as u64 * height as u64 {
+        0..=2_200_000 => 24,
+        2_200_001..=4_500_000 => 28,
+        _ => 32,
+    }
+}
+
 fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<()> {
     let mut rate = s.bitrate;
     let (mut frames, mut keys, mut repeats) = (0u64, 0u64, 0u64);
@@ -419,6 +436,9 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
     let mut last_sent = Instant::now() - interval;
     let mut held_back = None::<u64>;
     let mut told_rate = false;
+    // The still picture has had its refining frame (until the next new picture).
+    let mut refined = false;
+    let mut refines = 0u64;
     // The pointer's last change drawn in (none yet).
     let mut pointer_seen = u64::MAX;
     loop {
@@ -493,6 +513,7 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         let stamp = match taken {
             Take::Frame(us) => {
                 p.have = true;
+                refined = false;
                 quiet_since = Instant::now();
                 taken_at = Some(before);
                 Some(us)
@@ -556,24 +577,35 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
             }
             other => other,
         };
+        // Still for a moment, nobody asking for anything, no frame waiting its turn: the last
+        // picture once more, finer. Once per still period.
+        let refining = stamp.is_none() && !asked && !refined && held_back.is_none() && REFINE.load(Ordering::Relaxed) && quiet_since.elapsed() >= REFINE_AFTER && p.encoder.can_refine();
         let capture_us = match stamp {
             Some(us) => us,
             None if asked => {
                 repeats += 1;
                 link.now_us()
             }
+            None if refining => link.now_us(),
             None => continue,
         };
+        if refining {
+            refined = true;
+        }
         let idr = control.keyframe.swap(false, Ordering::Relaxed);
         let reported = control.lost.lock().unwrap().take();
-        let (p_mode, p_hdr) = (p.mode, p.hdr.is_some());
+        let (p_mode, p_hdr, p_size) = (p.mode, p.hdr.is_some(), (p.width, p.height));
         let Picture { encoder, recovery, .. } = &mut p;
         let n = recovery.number();
         let plan = recovery.plan(idr, reported, &mut |t| encoder.invalidate(t).inspect_err(|e| tracing::debug!(t, "invalidate: {e:#}")));
         if reported.is_some() {
             tracing::debug!(?reported, n, ?plan, "loss report");
         }
-        let made = encoder.encode_how(0, n, plan.how).context("encode")?;
+        let made = if refining { encoder.encode_refined(0, n, plan.how, REFINE_FACTOR, refine_qp(p_size.0, p_size.1)) } else { encoder.encode_how(0, n, plan.how) }.context("encode")?;
+        if refining {
+            refines += 1;
+            tracing::info!(bytes = made.data.len(), qp = made.qp, "refined the still picture");
+        }
         if let Some(at) = taken_at.take() {
             took.push(at.elapsed().as_secs_f32() * 1000.0);
         }
@@ -615,6 +647,7 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         frames,
         keyframes = keys,
         encoded_again = repeats,
+        refined = refines,
         seconds = began.elapsed().as_secs(),
         kilobytes = bytes / 1000,
         mbit_per_s = format!("{:.1}", bytes as f64 * 8.0 / 1e6 / began.elapsed().as_secs_f64().max(0.001)),

@@ -3,7 +3,7 @@
 //!
 //!     remoteman-host [--listen ADDR:PORT] [--state DIR] [--pair] [--name NAME] [--log FILE]
 //!                    [--bitrate MBIT] [--mode keep|listed|any] [--allow files,clipboard]
-//!                    [--encoder auto|nvenc|mf] [--seconds N]
+//!                    [--encoder auto|nvenc|mf] [--refine yes|no] [--seconds N]
 //!     remoteman-host --probe | --probe-picture [--log FILE]
 //!     remoteman-host ctl [--port PORT] WORDS
 //!
@@ -244,6 +244,13 @@ mod windows_main {
                     },
                     Ordering::Relaxed,
                 ),
+                // Static refinement: one finer frame once the picture has been still for a
+                // moment (on by default; NVENC only).
+                "--refine" => match value()?.as_str() {
+                    "yes" | "on" => crate::pipeline::REFINE.store(true, Ordering::Relaxed),
+                    "no" | "off" => crate::pipeline::REFINE.store(false, Ordering::Relaxed),
+                    other => anyhow::bail!("--refine {other}: yes or no"),
+                },
                 "--allow" => {
                     for what in value()?.split(',') {
                         match what.trim() {
