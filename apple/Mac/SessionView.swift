@@ -669,7 +669,16 @@ enum SessionMenus {
                 "Sharp Text (4:4:4)", hint: ViewerPrefs.sharp && facts.codec != "–" ? "\(facts.codec) now" : "HEVC, uses more data",
                 checked: ViewerPrefs.sharp, enabled: Features.pictureQuality, width: width
             ) { quality("sharp") })
-        menu.addItem(ActionItem("HDR", hint: "Mirror an HDR monitor first", enabled: Features.hdr, width: width) {})
+        // HDR is asked for by itself when this Mac's screen can show it; this turns that off or on
+        // (the next connection follows it).
+        let canHDR = ViewerSession.screenHeadroom > 1.05
+        menu.addItem(
+            ActionItem(
+                "HDR", hint: session.streamHDR ? "on now" : canHDR ? "next connection" : "this screen can't show it",
+                checked: ViewerPrefs.hdr && canHDR, enabled: canHDR, width: width
+            ) {
+                UserDefaults.standard.set(!ViewerPrefs.hdr, forKey: ViewerPrefs.hdrKey)
+            })
         menu.addItem(.separator())
         menu.header("Refresh rate")
         let top = NSScreen.main?.maximumFramesPerSecond ?? 60
