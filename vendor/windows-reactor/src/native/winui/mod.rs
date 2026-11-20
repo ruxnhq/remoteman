@@ -651,8 +651,19 @@ impl Default for WinUiAdapter {
 impl Drop for WinUiAdapter {
     fn drop(&mut self) {
         let hide = self.event_queue.content_dialogs.borrow_mut().reset();
-        for dialog in hide {
-            _ = dialog.Hide();
+        // remoteman patch: an open dialog is hidden only while its window is still there. The
+        // content of a closed window is torn down after WinUI's window has gone, and
+        // ContentDialog::Hide then crashed the process in Microsoft.ui.xaml.dll.
+        let window_open = self
+            .windows
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|window| !window.is_closed());
+        if window_open {
+            for dialog in hide {
+                _ = dialog.Hide();
+            }
         }
         self.event_queue.events.borrow_mut().clear();
         self.observations.clear();

@@ -381,6 +381,22 @@ use bindings::*;
 pub(super) struct ActiveBackdrop {
     controller: ISystemBackdropControllerWithTargets,
     configuration: SystemBackdropConfiguration,
+    /// remoteman patch: the controller is let go of when the window closes, while WinUI's window
+    /// is still whole (as the WinUI Gallery's backdrop sample does in `Closed`). Let go of later,
+    /// after the window was torn down, it crashed the process in Microsoft.ui.xaml.dll.
+    released: std::rc::Rc<std::cell::Cell<bool>>,
+    _closed: windows_core::EventRevoker,
+}
+
+/// remoteman patch: take the backdrop off its window and close the controller, once.
+fn release(controller: &ISystemBackdropControllerWithTargets, released: &std::cell::Cell<bool>) {
+    if released.replace(true) {
+        return;
+    }
+    let _ = controller.RemoveAllSystemBackdropTargets();
+    if let Ok(closable) = controller.cast::<IClosable>() {
+        let _ = closable.Close();
+    }
 }
 
 impl ActiveBackdrop {
@@ -406,9 +422,17 @@ impl ActiveBackdrop {
         };
         controller.SetSystemBackdropConfiguration(&configuration)?;
         controller.AddSystemBackdropTarget(&window.cast::<ICompositionSupportsSystemBackdrop>()?)?;
+        let released = std::rc::Rc::new(std::cell::Cell::new(false));
+        let closed = {
+            let controller = controller.clone();
+            let released = released.clone();
+            window.Closed(super::local::handler(move |_, _| release(&controller, &released)))?
+        };
         Ok(Self {
             controller,
             configuration,
+            released,
+            _closed: closed,
         })
     }
 
@@ -419,10 +443,7 @@ impl ActiveBackdrop {
 
 impl Drop for ActiveBackdrop {
     fn drop(&mut self) {
-        let _ = self.controller.RemoveAllSystemBackdropTargets();
-        if let Ok(closable) = self.controller.cast::<IClosable>() {
-            let _ = closable.Close();
-        }
+        release(&self.controller, &self.released);
     }
 }
 

@@ -38,6 +38,11 @@ pub(super) struct NativeWindowState {
 }
 
 impl NativeWindowState {
+    /// remoteman patch: WinUI's window has closed (see WinUiAdapter's Drop).
+    pub(in crate::native::winui) fn is_closed(&self) -> bool {
+        self.closed.get()
+    }
+
     fn initialize_focus(&self) -> windows_core::Result<()> {
         if !self.shown.get()
             || self.closed.get()
