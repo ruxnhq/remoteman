@@ -96,7 +96,10 @@ final class VideoDecoder {
             payload.reserveCapacity(bytes.count)
             for o in obus {
                 switch o.type {
-                case 2, 8, 15: continue  // temporal delimiter, tile list, padding: not in a sample
+                // Temporal delimiter, tile list, padding: not in a sample. Metadata (HDR mastering
+                // display and light levels) neither: the iPad's decoder gives no picture for a sample
+                // that carries it (2026-11-20), and the light levels also come as stream_light.
+                case 2, 5, 8, 15: continue
                 case 1:
                     let whole = Array(UnsafeBufferPointer(rebasing: bytes[o.whole]))
                     if whole != formatKey {

@@ -46,7 +46,12 @@ fragment float4 rm_fragment_hdr(VOut in [[stage_in]], texture2d<float> luma [[te
     float3 e = saturate(float3(y + 1.4746 * c.y, y - 0.16455 * c.x - 0.57135 * c.y, y + 1.8814 * c.x));
     float3 p = pow(e, float3(1.0 / 78.84375));
     float3 nits = 10000.0 * pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), float3(1.0 / 0.1593017578125));
-    float3 v = nits / l.sdrWhite;
+    // BT.2020 to Display P3 primaries (linear light): an extended-range P3 layer is what iOS draws
+    // with headroom (it doesn't take an extended BT.2020 one), and macOS takes it too.
+    const float3x3 toP3 = float3x3(float3(1.3435783, -0.0652975, 0.0028218),
+                                   float3(-0.2821797, 1.0757879, -0.0195985),
+                                   float3(-0.0613986, -0.0104905, 1.0167767));
+    float3 v = toP3 * (nits / l.sdrWhite);
     float m = max(v.r, max(v.g, v.b));
     float room = max(l.headroom - 1.0, 0.001);
     if (m > 1.0) { v *= (1.0 + room * (1.0 - exp(-(m - 1.0) / room))) / m; }
@@ -68,6 +73,7 @@ final class VideoRenderer {
     private let queue: MTLCommandQueue
     private let library: MTLLibrary
     private var pipelines: [String: MTLRenderPipelineState] = [:]
+    private var reportedNoDrawable = false, reportedNoPipeline = false
     /// The stream is HDR (BT.2020, PQ): drawn into a float layer in which 1.0 is SDR white.
     private(set) var hdr = false
     /// Where SDR white sits in the HDR signal, in nits (the host says; 203 if it doesn't).
@@ -82,7 +88,7 @@ final class VideoRenderer {
         hdr = on
         if #available(iOS 16.0, macOS 10.11, *) { layer.wantsExtendedDynamicRangeContent = on }
         layer.pixelFormat = on ? .rgba16Float : sdrFormat
-        layer.colorspace = CGColorSpace(name: on ? CGColorSpace.extendedLinearITUR_2020 : CGColorSpace.sRGB)
+        layer.colorspace = CGColorSpace(name: on ? CGColorSpace.extendedLinearDisplayP3 : CGColorSpace.sRGB)
         setNeedsRedraw()
     }
 
@@ -310,6 +316,10 @@ final class VideoRenderer {
         pass.colorAttachments[0].storeAction = .store
         guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return [] }
         var keep: [Any] = []
+        if pb != nil, pipeline(format, hdr: hdr) == nil, !reportedNoPipeline {
+            reportedNoPipeline = true
+            print("remoteman: no pipeline for format \(format.rawValue), HDR \(hdr)")
+        }
         if let pb, let (ty, tc, ky, kc) = textures(pb), let p = pipeline(format, hdr: hdr) {
             let tw = Double(target.width), th = Double(target.height)
             let vw = Double(CVPixelBufferGetWidth(pb)), vh = Double(CVPixelBufferGetHeight(pb))
@@ -350,7 +360,10 @@ final class VideoRenderer {
             let size = frame == nil ? CGSize(width: 16, height: 16) : drawableSize
             if size.width >= 1, size.height >= 1, layer.drawableSize != size { layer.drawableSize = size }
         }
-        guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return }
+        guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else {
+            if !reportedNoDrawable { reportedNoDrawable = true; print("remoteman: the layer gave no drawable (format \(layer.pixelFormat.rawValue))") }
+            return
+        }
         if let fresh {
             // When the screen really showed it, against when it came.
             let came = fresh.receivedNs

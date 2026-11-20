@@ -105,6 +105,7 @@ final class ViewerSession: ObservableObject {
     /// What the hello and configure say about HDR: asked for when the screen can show it and
     /// the person hasn't switched it off.
     static var hdrAsk: Float? {
+        if let f = forcedHeadroom { return f > 1.05 ? f : nil }  // a test asking as if it had this headroom
         let h = screenHeadroom
         return ViewerPrefs.hdr && h > 1.05 ? h : nil
     }
