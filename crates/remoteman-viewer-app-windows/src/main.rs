@@ -41,11 +41,13 @@ pub struct Options {
     pub pos: Option<(i32, i32)>,
     pub theme: windows_reactor::WindowTheme,
     pub engine: Vec<String>,
+    /// This is the second window of full screen: only the session's bar (it has no engine of its own).
+    pub bar: bool,
 }
 
 #[cfg(windows)]
 fn options() -> Options {
-    let mut o = Options { window: None, pos: None, theme: windows_reactor::WindowTheme::System, engine: Vec::new() };
+    let mut o = Options { window: None, pos: None, theme: windows_reactor::WindowTheme::System, engine: Vec::new(), bar: false };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {

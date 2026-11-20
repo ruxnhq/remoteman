@@ -172,6 +172,8 @@ pub enum Effect {
     Maximise,
     Close,
     Fullscreen(bool),
+    /// The pointer reached the top edge of full screen: the app brings out its bar.
+    BarEdge,
     Title(String),
     /// Let go of every key the other computer was told is down.
     ReleaseKeys,
@@ -352,6 +354,11 @@ pub struct App {
     /// in again; and how far out it is drawn (0 to 1).
     pub bar_out: bool,
     bar_until: Option<Instant>,
+    /// Full screen's bar and menus are the app's WinUI ones (in a window of their own at the top
+    /// edge) rather than the kit's: the kit draws none of them, and the pointer reaching the top edge
+    /// is told to the app (`Effect::BarEdge`). `edge`: it is at the top edge now.
+    pub native_bar: bool,
+    edge: bool,
     pub bar_slide: f32,
     pub figures: Figures,
     last_second: Instant,
@@ -435,6 +442,8 @@ impl App {
             reach: HashMap::new(),
             bar_out: false,
             bar_until: None,
+            native_bar: false,
+            edge: false,
             bar_slide: 0.0,
             figures: Figures::default(),
             last_second: now,
@@ -1449,7 +1458,17 @@ impl App {
                     Flag::VariableRefresh => &mut s.variable_refresh,
                 };
                 *field = !*field;
+                let now = *field;
                 self.store.save_settings();
+                say!("setting: {} is {}", match flag {
+                    Flag::MatchRefresh => "match refresh",
+                    Flag::CtrlAsCommand => "Ctrl as Command",
+                    Flag::Shortcuts => "system shortcuts",
+                    Flag::Sound => "sound",
+                    Flag::Clipboard => "clipboard",
+                    Flag::Hdr => "HDR",
+                    Flag::VariableRefresh => "variable refresh rate",
+                }, if now { "on" } else { "off" });
                 if flag == Flag::Hdr {
                     self.follow_hdr();
                 }
@@ -1846,6 +1865,15 @@ impl App {
     /// A hidden bar comes out when the pointer reaches the top edge and goes two seconds after
     /// the pointer has left it.
     fn bar_watch(&mut self, y: f32, over: bool) {
+        if self.native_bar && self.fullscreen {
+            // The app's bar does the rest (it comes out, and goes when it is let go of).
+            let at = y < 2.0;
+            if at && !self.edge {
+                self.effects.push(Effect::BarEdge);
+            }
+            self.edge = at;
+            return;
+        }
         if !self.bar_out && y < 2.0 {
             self.bar_out = true;
             self.dirty = true;
@@ -1857,6 +1885,7 @@ impl App {
 
     pub fn mouse_leave(&mut self) {
         self.mouse = (-1.0, -1.0);
+        self.edge = false;
         if self.input.hot != 0 {
             self.input.hot = 0;
             self.tip = None;

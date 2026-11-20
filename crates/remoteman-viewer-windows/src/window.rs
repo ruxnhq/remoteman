@@ -527,6 +527,7 @@ impl Win {
                     let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                 }
                 Effect::Fullscreen(on) => self.fullscreen(on),
+                Effect::BarEdge => {}
                 Effect::Title(title) => {
                     let _ = SetWindowTextW(hwnd, &windows::core::HSTRING::from(title));
                 }

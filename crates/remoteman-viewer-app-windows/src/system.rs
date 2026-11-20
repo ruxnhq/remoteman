@@ -125,3 +125,75 @@ pub fn scancode_of(vk: u32) -> u32 {
     // SAFETY: a plain conversion.
     unsafe { MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) }
 }
+
+/// Full screen's bar: a window of its own over the top of the full-screen window, that takes no
+/// focus (the keyboard stays with the picture's window), is out of the taskbar and Alt+Tab, and
+/// has no frame. Hidden until it is wanted.
+pub fn bar_style(h: isize) {
+    // SAFETY: calls on our own window.
+    unsafe {
+        let style = WS_POPUP.0 as isize;
+        SetWindowLongPtrW(hwnd(h), GWL_STYLE, style);
+        let ex = GetWindowLongPtrW(hwnd(h), GWL_EXSTYLE) | (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) as isize;
+        SetWindowLongPtrW(hwnd(h), GWL_EXSTYLE, ex);
+        let _ = SetWindowPos(hwnd(h), Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        let _ = ShowWindow(hwnd(h), SW_HIDE);
+    }
+}
+
+/// Bring the bar out at the top, in the middle of the full-screen window `full` (`rect`: its
+/// left, top, width and height in pixels), `width` by `height` in the app's units, without taking
+/// the keyboard from it.
+pub fn bar_show(h: isize, full: isize, rect: [i32; 4], width: f64, height: f64) -> String {
+    // SAFETY: calls on our own windows.
+    unsafe {
+        // Onto that monitor first, so that the window has the monitor's scale (and the content
+        // with it) before it is given its size.
+        let _ = SetWindowPos(hwnd(h), Some(HWND_TOPMOST), rect[0] + rect[2] / 2, rect[1], 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
+        let scale = GetDpiForWindow(hwnd(h)).max(96) as f64 / 96.0;
+        let w = ((width * scale).round() as i32).min(rect[2] - 16);
+        let ht = (height * scale).round() as i32;
+        let x = rect[0] + (rect[2] - w) / 2;
+        let y = rect[1] + (8.0 * scale).round() as i32;
+        let _ = SetWindowPos(hwnd(h), Some(HWND_TOPMOST), x, y, w, ht, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        // (The keyboard stays with the picture's window: this one takes no focus.)
+        if GetForegroundWindow() == hwnd(h) && full != 0 {
+            let _ = SetForegroundWindow(hwnd(full));
+        }
+        format!("at {x},{y}, {w}x{ht} px, {:.0} % scaling", scale * 100.0)
+    }
+}
+
+/// Take the bar away, and give the keyboard back to the picture's window if the bar had it.
+pub fn bar_hide(h: isize, full: isize) {
+    // SAFETY: calls on our own windows.
+    unsafe {
+        let _ = ShowWindow(hwnd(h), SW_HIDE);
+        if full != 0 && IsWindow(Some(hwnd(full))).as_bool() {
+            let _ = SetForegroundWindow(hwnd(full));
+        }
+    }
+}
+
+/// Whether a flyout of this thread's is open: WinUI puts its menus in windows of their own.
+pub fn popup_open(except: &[isize]) -> bool {
+    use std::cell::Cell;
+    unsafe extern "system" fn each(w: HWND, l: LPARAM) -> windows::core::BOOL {
+        // SAFETY: `l` is the address of the state `popup_open` keeps alive through the call.
+        let state = unsafe { &*(l.0 as *const (Cell<bool>, Vec<isize>)) };
+        let mut name = [0u16; 128];
+        // SAFETY: plain queries on a window of this thread.
+        let (n, visible) = unsafe { (GetClassNameW(w, &mut name), IsWindowVisible(w).as_bool()) };
+        let name = String::from_utf16_lossy(&name[..n.max(0) as usize]);
+        if visible && name.contains("Popup") && !state.1.contains(&(w.0 as isize)) {
+            state.0.set(true);
+        }
+        true.into()
+    }
+    let state = (Cell::new(false), except.to_vec());
+    // SAFETY: the state outlives the enumeration, which runs on this thread.
+    unsafe {
+        let _ = EnumThreadWindows(windows::Win32::System::Threading::GetCurrentThreadId(), Some(each), LPARAM(&state as *const _ as isize));
+    }
+    state.0.get()
+}

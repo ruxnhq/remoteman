@@ -3,7 +3,7 @@
 //! (docs/design/windows); what each control does is the engine's to decide, through its
 //! commands (`kit::cmd`) and the picture's typed calls (`picture.rs`).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Duration;
@@ -24,7 +24,35 @@ pub fn exit_code() -> i32 {
 /// The mark from the design boards.
 const LOGO_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><rect width="16" height="16" rx="3.5" fill="#2458F5"/><rect x="6" y="5" width="7" height="5" rx="1.2" fill="none" stroke="#fff" stroke-width="1.2"/><path d="M2.5 6h2M2 7.8h2.5M3 9.5h1.5" stroke="#fff" stroke-width="1.1" stroke-linecap="round"/></svg>"##;
 
+// Full screen's bar: the engine's full-screen window is the picture's, and this window (a
+// second `Viewer`, with only the session's bar in it) hangs at its top edge. The two share what is
+// here, the app's thread being the only one that touches it.
+thread_local! {
+    /// The state the main window last took (what the bar window shows).
+    static STATE: RefCell<Value> = const { RefCell::new(Value::Null) };
+    /// The full-screen window (its handle) and where it is (left, top, width, height), or 0.
+    static FULL: Cell<(isize, [i32; 4])> = const { Cell::new((0, [0; 4])) };
+    /// The bar window, once it has been asked for, and a way to tell it things.
+    static BAR: RefCell<Option<LocalSender<Msg>>> = const { RefCell::new(None) };
+    static BAR_ASKED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The bar window's size, in the app's units.
+const BAR_WIDTH: f64 = 1030.0;
+const BAR_HEIGHT: f64 = 44.0;
+
+fn tell_bar(m: Msg) {
+    BAR.with(|b| {
+        if let Some(b) = b.borrow().as_ref() {
+            let _ = b.send(m);
+        }
+    });
+}
+
 pub struct Viewer {
+    /// This is full screen's bar window, not the app's.
+    pub bar_role: bool,
+    options: Options,
     /// Why the engine didn't start, if it didn't.
     failed: Option<String>,
     pub state: Value,
@@ -95,6 +123,10 @@ pub enum Msg {
     OverBar(bool),
     Scheme(ColorScheme),
     Bitrate(f64),
+    /// The bar window: bring it out, take it away, close it (the app is closing).
+    BarShow,
+    BarHide,
+    Shut,
 }
 
 impl Component for Viewer {
@@ -102,6 +134,9 @@ impl Component for Viewer {
     type Message = Msg;
 
     fn create(options: &Options, context: &ComponentContext<Self>) -> Self {
+        if options.bar {
+            return Self::create_bar(options, context);
+        }
         let pending = Rc::new(Cell::new(false));
         let sender = context.sender();
         let flag = pending.clone();
@@ -125,6 +160,8 @@ impl Component for Viewer {
             None => "window: made, engine started".into(),
         });
         let mut viewer = Self {
+            bar_role: false,
+            options: options.clone(),
             failed,
             state: Value::Null,
             hwnd: 0,
@@ -160,9 +197,56 @@ impl Component for Viewer {
 
     fn update(&mut self, message: Msg, context: &ComponentContext<Self>) {
         match message {
+            Msg::Changed if self.bar_role => {
+                self.state = STATE.with(|s| s.borrow().clone());
+                if !self.state.b("fullscreen") && self.bar_peek {
+                    self.bar_peek = false;
+                    self.bar_timer = None;
+                    crate::system::bar_hide(self.hwnd, FULL.get().0);
+                }
+            }
             Msg::Changed => {
                 self.pending.set(false);
                 self.refresh(context);
+            }
+            Msg::Hwnd(hwnd) if self.bar_role => {
+                self.hwnd = hwnd;
+                crate::system::bar_style(hwnd);
+                crate::system::bar_hide(hwnd, FULL.get().0);
+                remoteman_engine::say("full screen bar: its window is made, out of sight");
+            }
+            Msg::BarShow => {
+                if self.state.b("fullscreen") {
+                    let (full, rect) = FULL.get();
+                    let placed = crate::system::bar_show(self.hwnd, full, rect, BAR_WIDTH, BAR_HEIGHT);
+                    if !self.bar_peek {
+                        remoteman_engine::say(&format!("full screen bar: out, {placed}"));
+                    }
+                    self.bar_peek = true;
+                    self.bar_timer = Some(context.set_local_timeout(Duration::from_secs(2), || Msg::BarAway));
+                }
+            }
+            Msg::BarHide => {
+                if self.bar_peek {
+                    self.bar_peek = false;
+                    self.bar_timer = None;
+                    crate::system::bar_hide(self.hwnd, FULL.get().0);
+                }
+            }
+            Msg::Shut => {
+                let _ = context.close_window();
+            }
+            Msg::BarAway if self.bar_role => {
+                // Not while the pointer is on it or one of its menus is open.
+                let full = FULL.get().0;
+                if self.over_bar || crate::system::popup_open(&[self.hwnd, full]) {
+                    self.bar_timer = Some(context.set_local_timeout(Duration::from_secs(2), || Msg::BarAway));
+                } else {
+                    self.bar_peek = false;
+                    self.bar_timer = None;
+                    crate::system::bar_hide(self.hwnd, full);
+                    remoteman_engine::say("full screen bar: away");
+                }
             }
             Msg::Hwnd(hwnd) => {
                 self.hwnd = hwnd;
@@ -269,6 +353,14 @@ impl Component for Viewer {
     }
 
     fn view(&self, _: &Options, context: &mut ViewContext<Self>) -> View {
+        if self.bar_role {
+            context.window_title("remoteman: session bar");
+            context.window_visuals(WindowVisuals::new().client_size(BAR_WIDTH, BAR_HEIGHT).backdrop(WindowBackdrop::Acrylic).theme(WindowTheme::Dark).always_on_top(true).minimizable(false));
+            if self.state.o("session").s("name").is_empty() {
+                return Grid::new().into();
+            }
+            return Grid::new().children((crate::session::pill(self, context),)).into();
+        }
         context.window_title(self.title.clone());
         let mut visuals = WindowVisuals::new().client_size(self.window_size.0, self.window_size.1).backdrop(WindowBackdrop::Mica).theme(self.theme);
         if let Some((x, y)) = self.pos {
@@ -341,6 +433,13 @@ impl Component for Viewer {
 
 impl Drop for Viewer {
     fn drop(&mut self) {
+        if self.bar_role {
+            BAR.with(|b| *b.borrow_mut() = None);
+            BAR_ASKED.set(false);
+            return;
+        }
+        // Its bar window goes with it, or the app would not end.
+        tell_bar(Msg::Shut);
         let code = remoteman_engine::stop();
         remoteman_engine::say(&format!("window: closed, leaving with {code}"));
         CODE.store(code, Ordering::Relaxed);
@@ -349,7 +448,47 @@ impl Drop for Viewer {
 
 impl Viewer {
     /// Hand the engine's state to the window: do what only the window can do, and keep it.
+    fn create_bar(options: &Options, context: &ComponentContext<Self>) -> Self {
+        let _ = context.run_window(|window| Msg::Hwnd(window.as_raw() as isize));
+        BAR.with(|b| *b.borrow_mut() = Some(context.sender()));
+        Self {
+            bar_role: true,
+            options: options.clone(),
+            failed: None,
+            state: STATE.with(|s| s.borrow().clone()),
+            hwnd: 0,
+            title: "remoteman".into(),
+            panel: ElementRef::<SwapChainPanel>::new(),
+            _surface: ElementRef::<SwapChainPanel>::new().observe_surface_metrics(|_| {}),
+            binding: None,
+            metrics: None,
+            attached: true,
+            picture: crate::picture::Picture::new(context.sender()),
+            pair_text: None,
+            address_text: None,
+            password: String::new(),
+            remember: None,
+            name_text: None,
+            dialog_key: String::new(),
+            dialog_hidden: None,
+            bar_peek: false,
+            bar_timer: None,
+            over_bar: false,
+            captionless: false,
+            session_view: true,
+            pending: Rc::new(Cell::new(false)),
+            theme: WindowTheme::Dark,
+            walk: None,
+            window_size: (BAR_WIDTH, BAR_HEIGHT),
+            pos: None,
+        }
+    }
+
     fn refresh(&mut self, context: &ComponentContext<Self>) {
+        if self.bar_role {
+            // The main window takes what the engine says (and carries out its effects).
+            return;
+        }
         if let Some(state) = remoteman_engine::state() {
             self.take(state, context);
         }
@@ -388,6 +527,8 @@ impl Viewer {
             self.dialog_hidden = None;
         }
         self.state = state;
+        STATE.with(|s| *s.borrow_mut() = self.state.clone());
+        tell_bar(Msg::Changed);
         // No title bar of Windows' own during a session in a window: the pill has the buttons.
         let captionless = self.session_view;
         if captionless != self.captionless && self.hwnd != 0 {
@@ -410,7 +551,24 @@ impl Viewer {
             "title" => self.title = e.s("text").to_owned(),
             "size" => crate::system::resize_client(self.hwnd, e.n("width"), e.n("height")),
             // Full screen is the engine's own window over the monitor (it hides this one).
-            "fullscreen" => {}
+            "fullscreen" => {
+                let on = e.b("on");
+                let rect = e.a("rect");
+                let at = |i: usize| rect.get(i).and_then(Value::as_i64).unwrap_or(0) as i32;
+                FULL.set(if on { (e.n("hwnd") as isize, [at(0), at(1), at(2), at(3)]) } else { (0, [0; 4]) });
+                if on && e.b("bar") && !BAR_ASKED.replace(true) {
+                    let bar = Options { bar: true, ..self.options.clone() };
+                    if !context.open_window::<Viewer>(bar) {
+                        BAR_ASKED.set(false);
+                        remoteman_engine::say("full screen bar: the window can't be opened");
+                    }
+                }
+                if !on {
+                    tell_bar(Msg::BarHide);
+                }
+            }
+            // The pointer reached full screen's top edge.
+            "bar-edge" => tell_bar(Msg::BarShow),
             _ => {}
         }
     }

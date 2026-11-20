@@ -19,6 +19,8 @@ pub struct Args {
     pub decoders: Vec<Mode>,
     pub seconds: Option<u64>,
     pub fullscreen: bool,
+    /// Full screen draws its bar and menus with the old kit (selectable; the app's WinUI bar is the default).
+    pub kit_bar: bool,
     pub shot: Option<PathBuf>,
     pub stats: bool,
     pub input_demo: bool,
@@ -96,6 +98,7 @@ pub fn parse_from(words: Vec<String>) -> Result<Args> {
         decoders: vec![mode("av1").unwrap(), mode("hevc").unwrap(), mode("hevc444").unwrap()],
         seconds: None,
         fullscreen: false,
+        kit_bar: false,
         shot: None,
         stats: false,
         input_demo: false,
@@ -134,6 +137,7 @@ pub fn parse_from(words: Vec<String>) -> Result<Args> {
             }
             "--seconds" => args.seconds = Some(value()?.parse()?),
             "--fullscreen" => args.fullscreen = true,
+            "--kit-bar" => args.kit_bar = true,
             "--shot" => args.shot = Some(value()?.into()),
             "--stats" => args.stats = true,
             "--input-demo" => args.input_demo = true,
