@@ -12,9 +12,10 @@ $iscc = @("C:\rm\pkgtools\inno\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6
   Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw "Inno Setup 6 is not installed (https://jrsoftware.org/isdl.php)" }
 Remove-Item -Recurse -Force stage, out -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force stage\driver\pkg | Out-Null
+New-Item -ItemType Directory -Force stage\driver\pkg, stage\vcam | Out-Null
 Copy-Item native\remoteman-host.exe, setup.ps1 stage\
 Copy-Item native\RemotemanDisplay.dll, native\RemotemanDisplay.inf stage\driver\pkg\
+Copy-Item native\remoteman_vcam_windows.dll stage\vcam\
 Copy-Item native\vdd_settings.xml, native\LICENSE, native\LICENSE-MS-PL stage\driver\
 & $iscc /Q "/DAppVersion=$Version" remoteman-host.iss
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }

@@ -74,9 +74,10 @@ function Driver-Packages { (& pnputil.exe /enum-drivers) -join "`n" | Select-Str
 # What install made, kept across installs over an earlier one: written after each step, so that a
 # failure part way still leaves uninstall knowing what to take away.
 function Load-Record {
-  $r = [ordered]@{ driverInfs = @(); deviceMade = $false; settingsMade = $false; sasSet = $false; sasBefore = $null }
+  $r = [ordered]@{ driverInfs = @(); deviceMade = $false; settingsMade = $false; sasSet = $false; sasBefore = $null; vcamMade = $false }
   if (Test-Path $record) {
     $old = Get-Content $record -Raw | ConvertFrom-Json
+    if ($old.PSObject.Properties.Name -contains 'vcamMade') { $r.vcamMade = [bool]$old.vcamMade }
     $r.driverInfs = @($old.driverInfs | Where-Object { $_ })
     $r.deviceMade = [bool]$old.deviceMade
     $r.settingsMade = [bool]$old.settingsMade
@@ -86,6 +87,35 @@ function Load-Record {
   $r
 }
 function Save-Record($r) { $r | ConvertTo-Json | Set-Content $record }
+
+# The camera: a device's camera shown to the PC's programs as a camera (Windows 11's virtual
+# camera). The host makes the camera when a device turns its camera on; Windows' Frame Server
+# then loads vcam\remoteman_vcam_windows.dll, a COM in-process server, by this class id (the
+# same as CLSID_VCAM in crates/remoteman-vcam-windows/src/lib.rs). Registered under HKLM, where
+# the Frame Server (a service) looks; it is not per user. The host offers "camera" only when
+# this key is there.
+$vcamClsid = '{B3F1C4A2-6D5E-4F87-9A21-7C0E3D5B8A64}'
+$vcamKey = "HKLM:\SOFTWARE\Classes\CLSID\$vcamClsid"
+$vcamFolder = Join-Path $env:ProgramData 'remoteman\vcam'  # the ring file, where a section can't be
+
+function Register-Camera($made) {
+  $dll = Join-Path $app 'vcam\remoteman_vcam_windows.dll'
+  if (-not (Test-Path $dll)) { Say "no camera driver in this install ($dll): the device's camera won't be shown"; return }
+  New-Item -Path "$vcamKey\InprocServer32" -Force | Out-Null
+  Set-ItemProperty -Path $vcamKey -Name '(default)' -Value 'remoteman camera'
+  Set-ItemProperty -Path "$vcamKey\InprocServer32" -Name '(default)' -Value $dll
+  Set-ItemProperty -Path "$vcamKey\InprocServer32" -Name 'ThreadingModel' -Value 'Both'
+  $made.vcamMade = $true
+  Save-Record $made
+  Say "camera registered: $vcamClsid -> $dll"
+}
+
+function Unregister-Camera($made) {
+  # Whatever is there under our class id goes (the key is ours alone), made by this install or an
+  # earlier one.
+  if (Test-Path $vcamKey) { Remove-Item -Path $vcamKey -Recurse -Force; Say "camera unregistered" }
+  Remove-Item -Recurse -Force $vcamFolder -ErrorAction SilentlyContinue
+}
 
 function Install {
   Say "install from $app"
@@ -181,6 +211,8 @@ function Install {
     Say "SoftwareSASGeneration set (was $(if ($null -eq $sas) { 'not set' } else { $sas }))"
   }
 
+  Register-Camera $made
+
   # The service: from boot, as SYSTEM, it keeps the host running in the console's session
   # (the sign-in screen's, the lock screen's, whoever is signed in), with these options.
   # New devices are asked about by the owner's app (Remoteman Host) when it is installed beside
@@ -238,6 +270,7 @@ function Uninstall {
   Get-Process -Name remoteman-host -ErrorAction SilentlyContinue | Where-Object Path -eq $exe |
     ForEach-Object { Stop-Process -Id $_.Id -Force }
   Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+  Unregister-Camera $made
 
   if ($made -and $made.deviceMade) {
     foreach ($d in Our-Devices) { $out = & pnputil.exe /remove-device $d.InstanceId; Say "removed device $($d.InstanceId): $($out | Select-Object -Last 1)" }

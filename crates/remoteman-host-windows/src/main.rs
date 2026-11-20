@@ -44,6 +44,8 @@
 #[cfg(windows)]
 mod advertise;
 #[cfg(windows)]
+mod camera;
+#[cfg(windows)]
 mod awake;
 #[cfg(windows)]
 mod speakers;

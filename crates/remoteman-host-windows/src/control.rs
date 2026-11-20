@@ -100,6 +100,11 @@ pub fn features(allowed: &Allowed) -> Vec<String> {
     if allowed.microphone.load(Ordering::Relaxed) {
         features.push("mic".into());
     }
+    // The device's camera as a camera on this PC: where the installer registered the media
+    // source (a camera driver of remoteman's own).
+    if crate::camera::available() {
+        features.push("camera".into());
+    }
     if allowed.files.load(Ordering::Relaxed) {
         features.push("files".into());
     }
