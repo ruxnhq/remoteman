@@ -75,6 +75,10 @@ mod ccd;
 mod dpi;
 #[cfg(windows)]
 mod encode;
+#[cfg(windows)]
+mod d3d12enc;
+#[cfg(all(windows, test))]
+mod d3d12test;
 #[cfg(all(windows, test))]
 mod enctest;
 #[cfg(windows)]
@@ -245,7 +249,8 @@ mod windows_main {
                         "auto" => crate::encode::AUTO,
                         "nvenc" => crate::encode::NVENC,
                         "mf" => crate::encode::ANY_MAKERS,
-                        other => anyhow::bail!("--encoder {other}: auto, nvenc, mf"),
+                        "d3d12" => crate::encode::D3D12,
+                        other => anyhow::bail!("--encoder {other}: auto, nvenc, mf, d3d12"),
                     },
                     Ordering::Relaxed,
                 ),

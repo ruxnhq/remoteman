@@ -50,7 +50,7 @@ pub struct Settings {
 /// Foundation's encoders are not told (not built), so their pictures stay SDR.
 pub fn can_hdr(gpu: &Gpu) -> bool {
     match WHICH.load(std::sync::atomic::Ordering::Relaxed) {
-        NVENC => true,
+        NVENC | D3D12 => true,
         ANY_MAKERS => false,
         _ => gpu.vendor == NVIDIA,
     }
@@ -75,6 +75,11 @@ pub fn hdr_light(meta: &crate::vdd::Metadata, sdr_white: f32) -> remoteman_encod
 /// R'G'B' that NVENC converts with the matrix the stream says: BT.709, or BT.2020 for HDR). The input's index for `encode_how` is 0.
 pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<Box<dyn FrameEncoder>> {
     anyhow::ensure!(MODES.contains(&settings.mode), "this host doesn't encode {:?}", settings.mode);
+    if WHICH.load(std::sync::atomic::Ordering::Relaxed) == D3D12 {
+        let e = crate::d3d12enc::Encoder::open(gpu, input, settings).with_context(|| format!("Direct3D 12 Video Encode on {}", gpu.adapter))?;
+        tracing::info!(note = e.note(), "encoder");
+        return Ok(Box::new(e));
+    }
     if settings.mode.chroma == Chroma::C444 || settings.hdr {
         // Only NVENC: Media Foundation's encoders are given 4:2:0 SDR alone.
         return match WHICH.load(std::sync::atomic::Ordering::Relaxed) {
@@ -101,6 +106,9 @@ const NVIDIA: u32 = 0x10de;
 pub const AUTO: u8 = 0;
 pub const NVENC: u8 = 1;
 pub const ANY_MAKERS: u8 = 2;
+/// Direct3D 12 Video Encode (`d3d12enc.rs`): any maker's GPU, with loss recovery and live
+/// rate changes. Asked for with `--encoder d3d12`; not yet the default anywhere.
+pub const D3D12: u8 = 3;
 /// Which encoder `--encoder` asked for; the card's own by default.
 pub static WHICH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(AUTO);
 
