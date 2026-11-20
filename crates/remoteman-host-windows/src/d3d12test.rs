@@ -46,6 +46,13 @@ fn gpu() -> Option<Gpu> {
     Gpu::on_adapter(luid).ok()
 }
 
+/// A GPU without a Direct3D 12 encoder skips the test, unless the test was told which GPU to run
+/// on (`REMOTEMAN_D3D12_VENDOR`): then that is a failure.
+fn no_encoder(e: &anyhow::Error) {
+    assert!(std::env::var_os("REMOTEMAN_D3D12_VENDOR").is_none(), "no Direct3D 12 encoder on the GPU asked for: {e:?}");
+    eprintln!("no Direct3D 12 encoder: {e:?}");
+}
+
 fn ffmpeg() -> PathBuf {
     std::env::var_os("REMOTEMAN_FFMPEG").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ffmpeg\bin\ffmpeg.exe"))
 }
@@ -228,13 +235,14 @@ fn plain_stream() {
     let Some((gpu, dir, keep)) = setup() else { return eprintln!("no GPU: skipped") };
     let srcp = dir.join("src.p010");
     let mut w = std::io::BufWriter::new(std::fs::File::create(&srcp).unwrap());
-    let (frames, note) = match run(&gpu, frames_wanted(), 20_000_000, |_| None, |_| None, Some(&mut w)) {
+    let bitrate = std::env::var("REMOTEMAN_TEST_BITRATE").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000_000);
+    let (frames, note) = match run(&gpu, frames_wanted(), bitrate, |_| None, |_| None, Some(&mut w)) {
         Ok(x) => x,
-        Err(e) => return eprintln!("no Direct3D 12 encoder: {e:?}"),
+        Err(e) => return no_encoder(&e),
     };
     w.flush().unwrap();
     eprintln!("{note}");
-    stats("plain", &frames, 20_000_000);
+    stats("plain", &frames, bitrate);
     let stream = dir.join("plain.h265");
     std::fs::write(&stream, join(&frames, 1000..=1000)).unwrap();
     let (err, n) = decode(&stream, &dir.join("plain.yuv"));
@@ -252,7 +260,7 @@ fn live_rate_change() {
     let Some((gpu, dir, keep)) = setup() else { return eprintln!("no GPU: skipped") };
     let (frames, _) = match run(&gpu, 120, 20_000_000, |_| None, |f| (f == 60).then_some(5_000_000), None) {
         Ok(x) => x,
-        Err(e) => return eprintln!("no Direct3D 12 encoder: {e:?}"),
+        Err(e) => return no_encoder(&e),
     };
     let avg = |a: usize, b: usize| frames[a..b].iter().map(|f| f.data.len()).sum::<usize>() / (b - a);
     eprintln!("rate change at 60: bytes/frame 30..60 {} (20 Mbit/s = {}), 90..120 {} (5 Mbit/s = {})", avg(30, 60), 20_000_000 / 8 / FPS, avg(90, 120), 5_000_000 / 8 / FPS);
@@ -276,7 +284,7 @@ fn recovery_without_a_keyframe() {
     // Frames 60 to 62 are lost; the report reaches the host before frame 63.
     let (frames, _) = match run(&gpu, 120, 20_000_000, |f| (f == 63).then_some((60, 62)), |_| None, None) {
         Ok(x) => x,
-        Err(e) => return eprintln!("no Direct3D 12 encoder: {e:?}"),
+        Err(e) => return no_encoder(&e),
     };
     let t63 = nal_types(&frames[63].data);
     eprintln!("frame 63: key {} recovery {} NAL types {t63:?}, {} bytes (frame 62: {})", frames[63].key, frames[63].recovery, frames[63].data.len(), frames[62].data.len());
