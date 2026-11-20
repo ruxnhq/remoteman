@@ -37,6 +37,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::DataExchange::{AddClipboardFormatListener, GetClipboardSequenceNumber};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Interface, w};
 
@@ -176,6 +177,28 @@ pub(crate) fn engine() -> Option<Rc<Engine>> {
     ENGINE.with(|e| e.borrow().clone())
 }
 
+// The computer's cursor over the picture in the app's window.
+
+unsafe extern "system" fn worn(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    if msg == WM_SETCURSOR && (l.0 & 0xFFFF) as u32 == HTCLIENT {
+        if let Some(cursor) = engine().and_then(|e| e.windowed_cursor()) {
+            // SAFETY: as in `wear_now`.
+            unsafe { SetCursor(cursor) };
+            return LRESULT(1);
+        }
+    }
+    // SAFETY: the next procedure in the chain.
+    unsafe { DefSubclassProc(hwnd, msg, w, l) }
+}
+
+unsafe extern "system" fn subclass_child(hwnd: HWND, _: LPARAM) -> windows::core::BOOL {
+    // SAFETY: as in `wear_in_children`.
+    unsafe {
+        let _ = SetWindowSubclass(hwnd, Some(worn), 0x524d43, 0);
+    }
+    true.into()
+}
+
 // The interface.
 
 /// Start the engine: `words` are the command line's words, as the old program takes them;
@@ -221,6 +244,7 @@ pub fn panel(x: i32, y: i32, width: i32, height: i32, scale_x: f32, scale_y: f32
     let Some(e) = engine() else { return };
     e.panel.set((x, y, width, height));
     e.panel_scale.set((scale_x, scale_y));
+    e.wear_in_children();
     e.resync(scale_x, scale_y);
     e.publish();
 }
@@ -936,6 +960,7 @@ impl Engine {
         let old = self.cursor.replace(made);
         self.got_shape.set(true);
         crate::full::set_cursor(self);
+        self.wear_now();
         if let Some(old) = old {
             // The window may still be wearing it for a moment: it is let go a little later.
             let old = old.0 as isize;
@@ -946,6 +971,63 @@ impl Engine {
                     let _ = DestroyCursor(HCURSOR(old as *mut _));
                 }
             });
+        }
+    }
+
+    /// In the app's window: what the cursor should be if the pointer is over the computer's
+    /// picture right now. `None`: not ours to say (the app's own cursors apply); `Some(None)`:
+    /// no cursor (the host says it has none here).
+    fn windowed_cursor(&self) -> Option<Option<HCURSOR>> {
+        if self.full.borrow().is_some() || !self.got_shape.get() {
+            return None;
+        }
+        let host = HWND(self.host.get() as *mut _);
+        let (px, py, ..) = self.panel.get();
+        let (sx, sy) = self.panel_scale.get();
+        let mut at = POINT::default();
+        // SAFETY: plain queries on our own window.
+        unsafe {
+            GetCursorPos(&mut at).ok()?;
+            windows::Win32::Graphics::Gdi::ScreenToClient(host, &mut at).ok().ok()?;
+        }
+        let app = self.app.try_borrow().ok()?;
+        if app.captured || !app.forwarding() {
+            return None;
+        }
+        let (_, _, pw, ph) = self.panel.get();
+        if at.x < px || at.y < py || at.x >= px + pw || at.y >= py + ph {
+            return None;
+        }
+        let (x, y) = ((at.x - px) as f32 / sx.max(0.01), (at.y - py) as f32 / sy.max(0.01));
+        if !matches!(app.pointer(x, y), crate::app::Pointer::Theirs) {
+            return None;
+        }
+        if app.session.as_ref().is_some_and(|s| s.shared.cursor_gone.load(Ordering::Relaxed)) {
+            return Some(None);
+        }
+        Some(self.cursor.get())
+    }
+
+    /// Put the app's window's pointer right now, if it is over the picture.
+    fn wear_now(&self) {
+        if let Some(cursor) = self.windowed_cursor() {
+            // SAFETY: a cursor that lives on (it is let go of seconds after it is replaced).
+            unsafe { SetCursor(cursor) };
+        }
+    }
+
+    /// WinUI chooses the pointer in its own child windows (the island's), so those are
+    /// subclassed to answer WM_SETCURSOR with the computer's cursor over the picture.
+    fn wear_in_children(&self) {
+        let host = self.host.get();
+        if host == 0 {
+            return;
+        }
+        // SAFETY: windows of this thread; the subclass procedure is a plain function and
+        // setting it again on the same window is harmless.
+        unsafe {
+            let _ = SetWindowSubclass(HWND(host as *mut _), Some(worn), 0x524d43, 0);
+            let _ = EnumChildWindows(Some(HWND(host as *mut _)), Some(subclass_child), LPARAM(0));
         }
     }
 
