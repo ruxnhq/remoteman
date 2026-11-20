@@ -167,3 +167,13 @@ and HDR is back on the iPad and iPhone (checked from the iPad against this host:
 drawn, values at the middle 0.434/0.332/0.057 of SDR white; HDR now drawn in extended linear
 Display P3). The host stops sending AV1 metadata OBUs too (c14640e, not installed yet), so older
 iPad apps don't go black; `REMOTEMAN_AV1_HDR_METADATA=1` sends them.
+
+## The owner's device test (08:16-08:45)
+- Extra display: works (after the iPad's HDR fix); disconnect puts the screens back and unplugs
+  the driver's monitor in 5 ms.
+- Mirror: works (DISPLAY1 3840x2160 captured in HDR, about 7 ms a picture); the pointer didn't
+  show until the PC's own mouse moved (Windows had hidden it after typing or touch). Fixed:
+  the host nudges the pointer a pixel and back when a session starts (b16b20d).
+- Pencil: not tried (no Pencil).
+- `C:\rm\installer-2026-11-20-013\remoteman-host-setup-0.1.3.exe` (b16b20d): 0.1.2 plus the pointer
+  nudge and no AV1 metadata OBUs.
