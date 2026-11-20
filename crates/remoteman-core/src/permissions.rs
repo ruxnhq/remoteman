@@ -116,11 +116,14 @@ pub struct ConnectionEvent {
     /// Why it left or was refused, if known.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
+    /// The device joined another device's session (docs/PROTOCOL.md, "More than one device").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub joined: bool,
 }
 
 impl ConnectionEvent {
     pub fn new(event: &str, name: &str, fingerprint: &str, address: &str) -> Self {
-        Self { time: utc_now(), event: event.into(), name: name.into(), fingerprint: fingerprint.into(), address: address.into(), duration: None, reason: String::new() }
+        Self { time: utc_now(), event: event.into(), name: name.into(), fingerprint: fingerprint.into(), address: address.into(), duration: None, reason: String::new(), joined: false }
     }
 }
 
