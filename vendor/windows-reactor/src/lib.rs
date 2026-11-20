@@ -51,7 +51,7 @@ pub use declaration::{
     FlyoutPlacement, FocusEventInfo, FontWeight, GridLength, Icon, ImageSource, InputModifiers,
     IntoPayloadCallback, IntoUnitCallback, IntoViews, Key, KeyAccelerator, KeyAccelerators,
     KeyEventInfo, KeyedView, Menu, MenuExt, MenuItem, NavigationViewDisplayMode, PhysicalKeyStatus,
-    PointerCallback, PointerEventInfo, ResourceOverrides, ResourceValue, RichText,
+    PointerCallback, PointerDevice, PointerEventInfo, ResourceOverrides, ResourceValue, RichText,
     RichTextHyperlink, RichTextInline, RichTextParagraph, RichTextRun, RoutedCallback, ThemeBrush,
     ThemeTransition, Thickness, Tooltip, TooltipExt, TooltipPlacement, View, VirtualKey,
     VirtualSource, keyed,

@@ -1595,6 +1595,23 @@ pub struct PointerEventInfo {
     pub is_left_button_pressed: bool,
     pub is_right_button_pressed: bool,
     pub is_middle_button_pressed: bool,
+    // remoteman patch (VENDORED.md, patch 7).
+    /// What the pointer is: a mouse, a finger or a pen.
+    pub device: PointerDevice,
+    /// For `on_pointer_wheel_changed`: how far the wheel turned, 120 a notch (positive away
+    /// from the user, or to the right), and whether it is the sideways wheel.
+    pub wheel_delta: i32,
+    pub is_horizontal_wheel: bool,
+}
+
+// remoteman patch (VENDORED.md, patch 7).
+/// The kind of device behind a pointer event.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PointerDevice {
+    #[default]
+    Mouse,
+    Touch,
+    Pen,
 }
 
 /// A queued pointer callback or a synchronous routed handler.

@@ -231,6 +231,9 @@ struct GeneratedBorder {
     _pointer_entered: Option<GeneratedRevoker>,
     pointer_exited: Rc<RefCell<NativePointerEventInfoEvent>>,
     _pointer_exited: Option<GeneratedRevoker>,
+    // remoteman patch (VENDORED.md, patch 7).
+    pointer_wheel_changed: Rc<RefCell<NativePointerEventInfoEvent>>,
+    _pointer_wheel_changed: Option<GeneratedRevoker>,
     pointer_released: Rc<RefCell<NativePointerEventInfoEvent>>,
     _pointer_released: Option<GeneratedRevoker>,
     pointer_capture_lost: Rc<RefCell<NativeUnitEvent>>,
@@ -747,6 +750,8 @@ impl GeneratedHandle {
                 let _pointer_entered = None;
                 let pointer_exited = Rc::new(RefCell::new(NativePointerEventInfoEvent::default()));
                 let _pointer_exited = None;
+                let pointer_wheel_changed = Rc::new(RefCell::new(NativePointerEventInfoEvent::default()));
+                let _pointer_wheel_changed = None;
                 let pointer_released =
                     Rc::new(RefCell::new(NativePointerEventInfoEvent::default()));
                 let _pointer_released = None;
@@ -789,6 +794,8 @@ impl GeneratedHandle {
                     _pointer_entered,
                     pointer_exited,
                     _pointer_exited,
+                    pointer_wheel_changed,
+                    _pointer_wheel_changed,
                     pointer_released,
                     _pointer_released,
                     pointer_capture_lost,
@@ -4724,6 +4731,9 @@ impl GeneratedHandle {
                 if clear.contains(&EventId::PointerExited) {
                     object.pointer_exited.borrow_mut().set(None);
                 }
+                if clear.contains(&EventId::PointerWheelChanged) {
+                    object.pointer_wheel_changed.borrow_mut().set(None);
+                }
                 if clear.contains(&EventId::PointerReleased) {
                     object.pointer_released.borrow_mut().set(None);
                 }
@@ -4792,6 +4802,13 @@ impl GeneratedHandle {
                                 .borrow_mut()
                                 .set(Some(callback.clone()));
                             object.subscribe_pointer_exited(object_id, context)?;
+                        }
+                        (EventId::PointerWheelChanged, EventValue::PointerEventInfo(callback)) => {
+                            object
+                                .pointer_wheel_changed
+                                .borrow_mut()
+                                .set(Some(callback.clone()));
+                            object.subscribe_pointer_wheel_changed(object_id, context)?;
                         }
                         (EventId::PointerReleased, EventValue::PointerEventInfo(callback)) => {
                             object
@@ -6190,6 +6207,47 @@ impl GeneratedBorder {
             },
         ))?;
         self._pointer_exited = Some(GeneratedRevoker::Event(revoker));
+        Ok(())
+    }
+    // remoteman patch (VENDORED.md, patch 7).
+    fn subscribe_pointer_wheel_changed(
+        &mut self,
+        object: ObjectId,
+        context: EventContext,
+    ) -> Result<(), WinUiError> {
+        if self._pointer_wheel_changed.is_some() {
+            return Ok(());
+        }
+        let value = &self.value;
+        let event_for_callback = Rc::clone(&self.pointer_wheel_changed);
+        let event_queue_pointer_wheel_changed = Rc::clone(context.event_queue);
+        let source_pointer_wheel_changed = value.cast::<native::UIElement>()?;
+        let pending_focus_states_pointer_wheel_changed = Rc::clone(context.pending_focus_states);
+        let revoker = source_pointer_wheel_changed.clone().PointerWheelChanged(local::handler(
+            move |_, args: windows_core::InRef<'_, native::PointerRoutedEventArgs>| {
+                let args = args.unwrap();
+                let value = WinUiAdapter::pointer_event_info(
+                    object,
+                    &source_pointer_wheel_changed,
+                    args,
+                    None,
+                    false,
+                    false,
+                    &pending_focus_states_pointer_wheel_changed,
+                )
+                .unwrap();
+                if WinUiAdapter::dispatch_pointer(
+                    &event_for_callback,
+                    &event_queue_pointer_wheel_changed,
+                    object,
+                    EventId::PointerWheelChanged,
+                    value,
+                ) {
+                    args.SetHandled(true).unwrap();
+                }
+            },
+        ))?;
+        self._pointer_wheel_changed = Some(GeneratedRevoker::Event(revoker));
         Ok(())
     }
     fn subscribe_pointer_released(

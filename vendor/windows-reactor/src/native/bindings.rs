@@ -13982,9 +13982,38 @@ windows_core::imp::define_winrt_interface!(
     IPointer_Vtbl,
     0x1f9afbf5_11a3_5e68_aa1b_72febfa0ab23
 );
+// remoteman patch (VENDORED.md, patch 7): the pointer's device and the wheel, from windows-bindgen.
+impl IPointer {
+    pub(crate) fn PointerDeviceType(&self) -> windows_core::Result<PointerDeviceType> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).PointerDeviceType)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+}
 #[repr(C)]
 pub struct IPointer_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
+    PointerId: usize,
+    pub PointerDeviceType: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut PointerDeviceType,
+    ) -> windows_core::HRESULT,
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PointerDeviceType(pub i32);
+impl PointerDeviceType {
+    pub const Touch: Self = Self(0);
+    pub const Pen: Self = Self(1);
+    pub const Mouse: Self = Self(2);
+}
+impl windows_core::imp::TypeKind for PointerDeviceType {
+    type TypeKind = windows_core::imp::CopyType;
 }
 windows_core::imp::define_winrt_interface!(
     IPointerPoint,
@@ -14044,6 +14073,27 @@ windows_core::imp::define_winrt_interface!(
     0xd760ed77_4b10_57a5_b3cc_d9bf3413e996
 );
 impl IPointerPointProperties {
+    // remoteman patch (VENDORED.md, patch 7).
+    pub(crate) fn IsHorizontalMouseWheel(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).IsHorizontalMouseWheel)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub(crate) fn MouseWheelDelta(&self) -> windows_core::Result<i32> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).MouseWheelDelta)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
     pub(crate) fn IsLeftButtonPressed(&self) -> windows_core::Result<bool> {
         unsafe {
             let mut result__ = core::mem::zeroed();
@@ -14082,7 +14132,9 @@ pub struct IPointerPointProperties_Vtbl {
     IsBarrelButtonPressed: usize,
     IsCanceled: usize,
     IsEraser: usize,
-    IsHorizontalMouseWheel: usize,
+    // remoteman patch (VENDORED.md, patch 7): typed, and the slots up to MouseWheelDelta.
+    pub IsHorizontalMouseWheel:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
     IsInRange: usize,
     IsInverted: usize,
     pub IsLeftButtonPressed:
@@ -14092,6 +14144,10 @@ pub struct IPointerPointProperties_Vtbl {
     IsPrimary: usize,
     pub IsRightButtonPressed:
         unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    IsXButton1Pressed: usize,
+    IsXButton2Pressed: usize,
+    pub MouseWheelDelta:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut i32) -> windows_core::HRESULT,
 }
 windows_core::imp::define_winrt_interface!(
     IPointerRoutedEventArgs,
@@ -19791,6 +19847,41 @@ impl IUIElement {
             ))
         }
     }
+    // remoteman patch (VENDORED.md, patch 7).
+    pub(crate) fn PointerWheelChanged<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<windows_core::IInspectable>,
+                windows_core::Ref<PointerRoutedEventArgs>,
+            ) + Send
+            + Sync
+            + 'static,
+    {
+        let handler: PointerEventHandler = {
+            let com = windows_core::imp::DelegateBox::<PointerEventHandler, F>::new(
+                &PointerEventHandlerBox::<F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).PointerWheelChanged)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemovePointerWheelChanged,
+            ))
+        }
+    }
     pub(crate) fn PointerCaptureLost<F>(
         &self,
         handler: F,
@@ -20243,8 +20334,14 @@ pub struct IUIElement_Vtbl {
     ) -> windows_core::HRESULT,
     pub RemovePointerCanceled:
         unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
-    PointerWheelChanged: usize,
-    RemovePointerWheelChanged: usize,
+    // remoteman patch (VENDORED.md, patch 7).
+    pub PointerWheelChanged: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemovePointerWheelChanged:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
     Tapped: usize,
     RemoveTapped: usize,
     pub DoubleTapped: unsafe extern "system" fn(

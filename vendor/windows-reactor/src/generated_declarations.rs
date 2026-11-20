@@ -2592,6 +2592,14 @@ impl Border {
         );
         self
     }
+    // remoteman patch (VENDORED.md, patch 7): the wheel, with `PointerEventInfo::wheel_delta`.
+    pub fn on_pointer_wheel_changed(mut self, callback: impl Into<PointerCallback>) -> Self {
+        self.0 = self.0.event(
+            EventId::PointerWheelChanged,
+            EventValue::PointerEventInfo(callback.into()),
+        );
+        self
+    }
     pub fn on_pointer_released(mut self, callback: impl Into<PointerCallback>) -> Self {
         self.0 = self.0.event(
             EventId::PointerReleased,

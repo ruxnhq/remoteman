@@ -49,6 +49,18 @@ comment ("Spike patch" for blurman's, "remoteman patch" for ours).
    `put_Icon` and `put_KeyboardAcceleratorTextOverride` (typed in `src/native/bindings.rs`) are
    windows-bindgen's output over this commit's winmd, not written by hand.
 
+7. **The wheel and the pointer's device** (remoteman, for the viewer's picture): `Border::
+   on_pointer_wheel_changed` (WinUI's `PointerWheelChanged`; `EventId::PointerWheelChanged` in
+   `src/generated.rs`, its subscription in `src/native/generated.rs` copied from
+   `PointerExited`'s, the setter in `src/generated_declarations.rs`), and three fields of
+   `PointerEventInfo` (`src/declaration.rs`, filled in `src/native/winui/events.rs`): `device`
+   (`PointerDevice::Mouse`, `Touch` or `Pen`, from the pointer's `PointerDeviceType`),
+   `wheel_delta` and `is_horizontal_wheel`. The bindings typed in `src/native/bindings.rs`
+   (`IUIElement`'s wheel event, `IPointerPointProperties`' `MouseWheelDelta` and
+   `IsHorizontalMouseWheel`, `IPointer`'s `PointerDeviceType` and that enum) are
+   windows-bindgen's output. Upstream's pointer events had neither, and the viewer sends the
+   wheel to the other computer and tells fingers from the mouse.
+
 Cargo.toml: the `[lints]` and docs.rs sections are gone (with `[lints.rust]` set here instead)
 and the dependencies name the git commit instead of the windows-rs workspace. `public-api.txt` is
 upstream's and does not list the patches.

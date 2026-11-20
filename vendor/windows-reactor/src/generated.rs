@@ -335,6 +335,8 @@ pub enum EventId {
     PointerMoved,
     PointerPressed,
     PointerReleased,
+    // remoteman patch (VENDORED.md, patch 7).
+    PointerWheelChanged,
     PreviewKeyDown,
     SelectedDateChanged,
     SelectedDatesChanged,
@@ -595,6 +597,11 @@ pub fn event_contracts(kind: ObjectType) -> &'static [EventContract] {
         ObjectType::Border => &[
             EventContract {
                 id: EventId::PointerPressed,
+                value: ValueType::PointerEventInfo,
+            },
+            // remoteman patch (VENDORED.md, patch 7).
+            EventContract {
+                id: EventId::PointerWheelChanged,
                 value: ValueType::PointerEventInfo,
             },
             EventContract {

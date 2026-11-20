@@ -309,6 +309,14 @@ impl WinUiAdapter {
             is_left_button_pressed: properties.IsLeftButtonPressed()?,
             is_right_button_pressed: properties.IsRightButtonPressed()?,
             is_middle_button_pressed: properties.IsMiddleButtonPressed()?,
+            // remoteman patch (VENDORED.md, patch 7).
+            device: match pointer.PointerDeviceType()? {
+                native::PointerDeviceType::Touch => PointerDevice::Touch,
+                native::PointerDeviceType::Pen => PointerDevice::Pen,
+                _ => PointerDevice::Mouse,
+            },
+            wheel_delta: properties.MouseWheelDelta()?,
+            is_horizontal_wheel: properties.IsHorizontalMouseWheel()?,
         })
     }
 
