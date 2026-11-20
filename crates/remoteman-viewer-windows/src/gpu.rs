@@ -41,9 +41,19 @@ fn adapter() -> Option<(IDXGIAdapter1, String)> {
 
 impl Gpu {
     pub fn open() -> Result<Self> {
-        let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
         // Video support for the decoder, BGRA for whatever draws an interface on it later.
-        let flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+        Self::with(D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT)
+    }
+
+    /// A device on the same card that only presents (full screen's, `draw.rs`): a swap chain on
+    /// the device that decodes, or that presents into another swap chain, was measured not to
+    /// make a monitor vary its refresh.
+    pub fn presenter() -> Result<Self> {
+        Self::with(D3D11_CREATE_DEVICE_BGRA_SUPPORT)
+    }
+
+    fn with(flags: D3D11_CREATE_DEVICE_FLAG) -> Result<Self> {
+        let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
         let (mut device, mut context) = (None, None);
         let chosen = adapter();
         // SAFETY: the out pointers are valid for the call.

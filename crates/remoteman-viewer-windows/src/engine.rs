@@ -216,6 +216,7 @@ pub fn stop() -> i32 {
         app.closing();
         app.scene.clone()
     };
+    scene.quit.store(true, Ordering::Relaxed);
     e.stop_drawing(&scene);
     let app = e.app.borrow();
     if let Some(s) = &app.summary {
@@ -389,7 +390,6 @@ impl Engine {
             let app = self.app.borrow();
             (app.gpu.clone(), app.scene.clone(), app.args.shot.clone())
         };
-        scene.quit.store(false, Ordering::Relaxed);
         let drawing = crate::draw::start_on(gpu, scene, move || {
             let swap = swap;
             crate::draw::Surface::Panel(swap.0)
@@ -400,11 +400,12 @@ impl Engine {
 
     /// Stop the draw thread there is (the panel's or full screen's), and wait for it.
     pub(crate) fn stop_drawing(&self, scene: &Scene) {
-        scene.quit.store(true, Ordering::Relaxed);
+        scene.stop_draw.store(true, Ordering::Relaxed);
         scene.poke();
         if let Some(drawing) = self.drawing.borrow_mut().take() {
             let _ = drawing.join();
         }
+        scene.stop_draw.store(false, Ordering::Relaxed);
     }
 
     /// The panel's size and scale, told to the draw thread and the app again (after full

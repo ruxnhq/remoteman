@@ -55,6 +55,9 @@ pub struct Scene {
     pub hwnd: AtomicIsize,
     /// Set when it is time to leave.
     pub quit: AtomicBool,
+    /// Set to stop the draw thread alone (the engine moves drawing between the app's panel and
+    /// its full-screen window); what else watches quit goes on.
+    pub stop_draw: AtomicBool,
     /// A picture of the window to save once the frame numbered so has been drawn, and how
     /// many have been saved.
     pub shot: Mutex<Option<(PathBuf, u64)>>,

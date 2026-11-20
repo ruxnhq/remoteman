@@ -146,6 +146,62 @@ pub enum Surface {
     Full(HWND),
 }
 
+/// Full screen's presenting: the window's swap chain is on a device of its own, which does
+/// nothing but present (measured: on the device that decodes, or that also presents into the
+/// panel's swap chain, the desktop shows it as an overlay at the monitor's fixed rate, and the
+/// monitor doesn't vary its refresh). The picture is drawn on the engine's device into `stage`,
+/// which both devices open; each holds its keyed mutex while it uses it (key 0: the engine
+/// draws, key 1: it is copied into the window's back buffer).
+struct Presenter {
+    gpu: Gpu,
+    stage: ID3D11Texture2D,
+    stage_lock: IDXGIKeyedMutex,
+    shared: ID3D11Texture2D,
+    shared_lock: IDXGIKeyedMutex,
+}
+
+impl Presenter {
+    /// The stage, `width`×`height` in `format`, made on the engine's device and opened on the
+    /// presenting one.
+    fn stage(engine: &Gpu, presenter: Gpu, width: u32, height: u32, format: DXGI_FORMAT) -> Result<Self> {
+        // SAFETY: Direct3D calls on interfaces held here, with a description that lives through
+        // each call.
+        unsafe {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: format,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX.0 as u32,
+            };
+            let mut stage = None;
+            engine.device.CreateTexture2D(&desc, None, Some(&mut stage)).context("the picture's stage")?;
+            let stage: ID3D11Texture2D = stage.context("no stage")?;
+            let handle = stage.cast::<IDXGIResource>()?.GetSharedHandle()?;
+            let mut shared: Option<ID3D11Texture2D> = None;
+            presenter.device.OpenSharedResource(handle, &mut shared).context("open the stage on the presenting device")?;
+            let shared = shared.context("no stage on the presenting device")?;
+            Ok(Self { stage_lock: stage.cast()?, shared_lock: shared.cast()?, stage, shared, gpu: presenter })
+        }
+    }
+
+    /// Copy the stage into the swap chain's back buffer, on the presenting device.
+    fn copy(&self, swap: &IDXGISwapChain1) -> Result<()> {
+        // SAFETY: calls on interfaces held here; the keyed mutex is taken and given back.
+        unsafe {
+            self.shared_lock.AcquireSync(1, 1000).context("the stage's turn")?;
+            let back: ID3D11Texture2D = swap.GetBuffer(0)?;
+            self.gpu.context.CopyResource(&back, &self.shared);
+            self.shared_lock.ReleaseSync(0)?;
+        }
+        Ok(())
+    }
+}
 /// The window's layers above the picture, and the compositor's side (none for a panel).
 struct Layers {
     painter: Painter,
@@ -197,6 +253,8 @@ struct Drawer {
     flags: DXGI_SWAP_CHAIN_FLAG,
     tears: bool,
     cadence: Cadence,
+    /// Full screen's own presenting device and the stage the picture is drawn into.
+    presenter: Option<Presenter>,
 }
 
 /// Whether DXGI lets this device's swap chains present with tearing allowed, which variable
@@ -216,6 +274,7 @@ pub fn tearing_supported(gpu: &Gpu) -> bool {
 /// measured not to make a monitor vary its refresh even in full screen with tearing allowed
 /// (an RTX 5090 and an ASUS XG32UCWMG at 240 Hz: its vertical blanks stayed 4.17 ms apart for
 /// pictures presented 100 a second, where an HWND swap chain's followed them, 10 ms apart).
+/// Full screen's HWND swap chain (`Surface::Full`) is made on its own, and may tear.
 fn chain_flags(_gpu: &Gpu) -> DXGI_SWAP_CHAIN_FLAG {
     WAITABLE
 }
@@ -352,6 +411,7 @@ impl Drawer {
         // SAFETY: Direct3D and DXGI calls on interfaces held here, with structures that live
         // through each call.
         unsafe {
+            let mut full = None::<Presenter>;
             let (swap, layers) = match surface {
                 Surface::Panel(swap) => (swap, None),
                 Surface::Window(hwnd) => {
@@ -389,7 +449,8 @@ impl Drawer {
                     (swap, Some(Layers { painter, ui_swap, ui_target: None, dcomp, _target: target, video_visual: Some(video_visual), root, ui_visual, ui_on: true }))
                 }
                 Surface::Full(hwnd) => {
-                    let factory: IDXGIFactory2 = gpu.device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
+                    let presenting = Gpu::presenter()?;
+                    let factory: IDXGIFactory2 = presenting.device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
                     let mut client = windows::Win32::Foundation::RECT::default();
                     let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
                     let (width, height) = (client.right.max(8) as u32, client.bottom.max(8) as u32);
@@ -411,16 +472,18 @@ impl Drawer {
                         Flags: (WAITABLE.0 | if tears { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 } else { 0 }) as u32,
                         ..Default::default()
                     };
-                    let swap = match factory.CreateSwapChainForHwnd(&gpu.device, hwnd, &desc, None, None) {
+                    let swap = match factory.CreateSwapChainForHwnd(&presenting.device, hwnd, &desc, None, None) {
                         Ok(swap) => swap,
                         Err(e) => {
                             say!("no 10-bit swap chain for the window ({e}): 8-bit");
                             desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-                            factory.CreateSwapChainForHwnd(&gpu.device, hwnd, &desc, None, None).context("create the full-screen swap chain")?
+                            factory.CreateSwapChainForHwnd(&presenting.device, hwnd, &desc, None, None).context("create the full-screen swap chain")?
                         }
                     };
                     // Alt+Enter is no business of DXGI's here.
                     let _ = factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+                    full = Some(Presenter::stage(&gpu, presenting, width, height, desc.Format)?);
+                    let factory: IDXGIFactory2 = gpu.device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
                     let ui_desc = DXGI_SWAP_CHAIN_DESC1 {
                         Width: width,
                         Height: height,
@@ -448,10 +511,17 @@ impl Drawer {
                 }
             };
             let now = swap.GetDesc1()?;
-            let latency: IDXGISwapChain2 = swap.cast()?;
-            latency.SetMaximumFrameLatency(1)?;
-            let room = latency.GetFrameLatencyWaitableObject();
-            anyhow::ensure!(!room.is_invalid(), "the swap chain has nothing to wait on");
+            let room = if now.Flags & WAITABLE.0 as u32 != 0 {
+                let latency: IDXGISwapChain2 = swap.cast()?;
+                latency.SetMaximumFrameLatency(1)?;
+                let room = latency.GetFrameLatencyWaitableObject();
+                anyhow::ensure!(!room.is_invalid(), "the swap chain has nothing to wait on");
+                room
+            } else {
+                // (A swap chain made without the waitable object, for measuring: presenting
+                // waits instead.)
+                HANDLE::default()
+            };
 
             let (vs_code, ps_code) = (compile(windows::core::s!("vs"), windows::core::s!("vs_5_0"))?, compile(windows::core::s!("ps"), windows::core::s!("ps_5_0"))?);
             let (mut vs, mut ps, mut sampler, mut constants) = (None, None, None, None);
@@ -499,6 +569,7 @@ impl Drawer {
                 flags,
                 tears,
                 cadence: Cadence::default(),
+                presenter: full,
             })
         }
     }
@@ -606,6 +677,10 @@ impl Drawer {
         unsafe {
             self.gpu.context.OMSetRenderTargets(None, None);
             self.swap.ResizeBuffers(0, to.0, to.1, DXGI_FORMAT_UNKNOWN, self.flags).context("resize the swap chain")?;
+            if let Some(p) = self.presenter.take() {
+                let format = self.swap.GetDesc1()?.Format;
+                self.presenter = Some(Presenter::stage(&self.gpu, p.gpu, to.0, to.1, format)?);
+            }
             if let Some(layers) = &self.layers {
                 layers.ui_swap.ResizeBuffers(0, to.0, to.1, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG(0)).context("resize the interface's swap chain")?;
             }
@@ -691,6 +766,7 @@ impl Drawer {
             return Ok(());
         }
         layers.ui_on = on;
+        say!("full screen: the interface's layer {}", if on { "hung over the picture" } else { "taken away" });
         // SAFETY: calls on interfaces held here.
         unsafe {
             if on {
@@ -713,10 +789,17 @@ impl Drawer {
         // SAFETY: Direct3D calls on interfaces held here; everything bound outlives the draw.
         unsafe {
             if self.target.is_none() {
-                let back: ID3D11Texture2D = self.swap.GetBuffer(0)?;
+                // Full screen's picture is drawn into its stage; anyone else's into the back buffer.
+                let back: ID3D11Texture2D = match &self.presenter {
+                    Some(p) => p.stage.clone(),
+                    None => self.swap.GetBuffer(0)?,
+                };
                 let mut target = None;
                 self.gpu.device.CreateRenderTargetView(&back, None, Some(&mut target))?;
                 self.target = target;
+            }
+            if let Some(p) = &self.presenter {
+                p.stage_lock.AcquireSync(0, 1000).context("the stage's turn to be drawn")?;
             }
             let target = self.target.clone().context("no render target")?;
             let ctx = &self.gpu.context;
@@ -764,16 +847,39 @@ impl Drawer {
             }
             // Direct2D draws with the same context: leave nothing of ours bound to it.
             ctx.OMSetRenderTargets(None, None);
+            if let Some(p) = &self.presenter {
+                p.stage_lock.ReleaseSync(1)?;
+            }
         }
         Ok(())
     }
 
     /// A swap chain's back buffer copied down: its size and its pixels as they lie in memory.
     fn read(&self, swap: &IDXGISwapChain1) -> Result<(usize, usize, DXGI_FORMAT, Vec<u8>)> {
+        // SAFETY: a call on the swap chain.
+        self.read_texture(&unsafe { swap.GetBuffer::<ID3D11Texture2D>(0) }?)
+    }
+
+    /// The picture as it is about to be shown: the stage in full screen (it is the copied turn's
+    /// until it has been copied), the back buffer otherwise.
+    fn read_picture(&self) -> Result<(usize, usize, DXGI_FORMAT, Vec<u8>)> {
+        match &self.presenter {
+            Some(p) => {
+                // SAFETY: the keyed mutex is taken and given back with the key it had.
+                unsafe { p.stage_lock.AcquireSync(1, 1000)? };
+                let read = self.read_texture(&p.stage);
+                unsafe { p.stage_lock.ReleaseSync(1)? };
+                read
+            }
+            None => self.read(&self.swap),
+        }
+    }
+
+    fn read_texture(&self, back: &ID3D11Texture2D) -> Result<(usize, usize, DXGI_FORMAT, Vec<u8>)> {
         // SAFETY: the staging texture is mapped for reading and unmapped again; rows are read
         // within the mapped pitch and height.
         unsafe {
-            let back: ID3D11Texture2D = swap.GetBuffer(0)?;
+            let back = back.clone();
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             back.GetDesc(&mut desc);
             let d = D3D11_TEXTURE2D_DESC { Usage: D3D11_USAGE_STAGING, BindFlags: 0, CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32, MiscFlags: 0, ..desc };
@@ -797,7 +903,7 @@ impl Drawer {
     /// picture where its layer shows (if `picture`), `backdrop` elsewhere, the interface over
     /// both. The only place pixels come to CPU memory.
     fn shot(&self, path: &std::path::Path, backdrop: crate::ui::Color, picture: bool) -> Result<()> {
-        let under = if picture || self.layers.is_none() { Some(self.read(&self.swap)?) } else { None };
+        let under = if picture || self.layers.is_none() { Some(self.read_picture()?) } else { None };
         let (w, h, _, ui) = match &self.layers {
             Some(layers) => self.read(&layers.ui_swap)?,
             // A panel has no interface of ours over it: nothing on top.
@@ -861,7 +967,7 @@ pub fn start_on(gpu: Gpu, scene: Arc<Scene>, surface: impl FnOnce() -> Surface +
     Ok(std::thread::Builder::new().name("draw".into()).spawn(move || {
         if let Err(e) = run(gpu, &scene, surface(), shot) {
             // (The window going is how it ends; what fails after that is nothing.)
-            if scene.quit.load(Ordering::Relaxed) {
+            if scene.quit.load(Ordering::Relaxed) || scene.stop_draw.load(Ordering::Relaxed) {
                 return;
             }
             say!("drawing stopped: {e:#}");
@@ -882,7 +988,7 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
     // The interface that is in the sheet now, and the session whose picture is kept.
     let mut drawn = None::<Arc<crate::ui::Frame>>;
     let mut of = 0usize;
-    while !scene.quit.load(Ordering::Relaxed) {
+    while !scene.quit.load(Ordering::Relaxed) && !scene.stop_draw.load(Ordering::Relaxed) {
         if !room {
             // Not for ever: a window that is covered may never be given room.
             // SAFETY: the handle is the swap chain's and lives as long as it.
@@ -969,15 +1075,18 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
         if draws {
             // For the next refresh of the display (there is room, so this doesn't wait); or,
             // with variable refresh, at once with tearing allowed, so that a monitor that varies
-            // its refresh shows the picture now. Never so far: the swap chains made here are for
-            // composition and aren't allowed to tear (`chain_flags`), since that was measured
-            // not to make the monitor vary its refresh; what does (an activated window with an
-            // 8-bit HWND swap chain, `probe.rs`) isn't built.
+            // its refresh shows the picture now. Only full screen's swap chain may tear (the
+            // composition ones aren't, `chain_flags`): measured with `--watch-vblank` on a 240 Hz
+            // monitor, 100 pictures a second, its vertical blanks followed them 10.00 ms apart
+            // in 8-bit, 10-bit and PQ.
             let tear = drawer.tears && scene.variable_refresh.load(Ordering::Relaxed);
             if scene.tearing.swap(tear, Ordering::Relaxed) != tear {
                 say!("presenting: {}", if tear { "each picture as it arrives, tearing allowed (variable refresh)" } else { "at the display's refresh" });
             }
             // SAFETY: a call on the swap chain.
+            if let Some(p) = &drawer.presenter {
+                p.copy(&drawer.swap)?;
+            }
             let presented = unsafe { if tear { drawer.swap.Present(0, DXGI_PRESENT_ALLOW_TEARING) } else { drawer.swap.Present(1, DXGI_PRESENT(0)) } };
             room = false;
             presented.ok().context("present")?;

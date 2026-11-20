@@ -186,11 +186,18 @@ pub fn watch_vblanks(hwnd: isize, scene: std::sync::Arc<crate::stream::Scene>) {
             // Which window has the keyboard: a monitor varies its refresh only for the activated
             // one (and not for long when another window comes in front).
             let front = {
-                use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow};
+                use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId};
                 let mut class = [0u16; 64];
+                let mut pid = 0u32;
                 // SAFETY: plain queries into a buffer of the size given.
-                let n = unsafe { GetClassNameW(GetForegroundWindow(), &mut class) }.max(0) as usize;
-                String::from_utf16_lossy(&class[..n])
+                let n = unsafe {
+                    let front = GetForegroundWindow();
+                    GetWindowThreadProcessId(front, Some(&mut pid));
+                    GetClassNameW(front, &mut class)
+                }
+                .max(0) as usize;
+                let whose = if pid == std::process::id() { "this process".to_owned() } else { format!("process {pid}") };
+                format!("{} of {whose}", String::from_utf16_lossy(&class[..n]))
             };
             say!(
                 "vblank: {} in {every} s, {mean:.2} ms apart on average, {longest:.2} at most; {fixed} one fixed refresh ({period:.2} ms) apart; {}; in front: {front}",

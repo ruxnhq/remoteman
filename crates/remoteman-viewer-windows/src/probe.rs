@@ -185,6 +185,42 @@ pub fn run(gpu: &crate::gpu::Gpu, seconds: u64) -> Result<()> {
                 }
             );
             crate::monitor::watch_vblanks(hwnd.0 as isize, scene.clone());
+            if has("thread") {
+                // Presenting from another thread than the window's (as the app's draw thread
+                // does), this thread only pumping the window's messages.
+                struct Parts(IDXGISwapChain1, windows::Win32::Graphics::Direct3D11::ID3D11RenderTargetView, windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext);
+                // SAFETY: used by the other thread alone until it ends.
+                unsafe impl Send for Parts {}
+                let parts = Parts(swap.clone(), target.clone(), gpu.context.clone());
+                say!("probe: presenting from another thread");
+                let presenter = std::thread::spawn(move || {
+                    let parts = parts;
+                    let started = Instant::now();
+                    let mut n = 0u64;
+                    while started.elapsed() < Duration::from_secs(seconds) {
+                        let g = if n % 2 == 0 { 0.10 } else { 0.11 };
+                        // (Calls on the parts this thread holds, in the unsafe block around.)
+                        parts.2.OMSetRenderTargets(Some(&[Some(parts.1.clone())]), None);
+                        parts.2.ClearRenderTargetView(&parts.1, &[g, g, g, 1.0]);
+                        let _ = if tear { parts.0.Present(0, DXGI_PRESENT_ALLOW_TEARING) } else { parts.0.Present(1, DXGI_PRESENT(0)) };
+                        n += 1;
+                        let due = started + Duration::from_millis(10 * n);
+                        std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                    }
+                    n
+                });
+                while !presenter.is_finished() {
+                    let mut msg = MSG::default();
+                    while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                say!("probe: {} presented from another thread", presenter.join().unwrap_or(0));
+                scene.quit.store(true, Ordering::Relaxed);
+                return Ok(());
+            }
             let started = Instant::now();
             let mut n = 0u64;
             let mut modes = std::collections::BTreeMap::<i32, u32>::new();

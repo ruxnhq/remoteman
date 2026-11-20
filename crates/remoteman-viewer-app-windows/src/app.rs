@@ -69,7 +69,6 @@ pub enum Msg {
     Changed,
     Hwnd(isize),
     Surface(SwapChainPanelEvent),
-    Attached(Result<(), IntegrationError>),
     /// A command for the engine.
     Do(Value),
     /// A menu item: its key is the engine's command, as JSON (or the view's own word).
@@ -180,11 +179,6 @@ impl Component for Viewer {
                 self.try_attach();
             }
             Msg::Surface(SwapChainPanelEvent::Rendering) => {}
-            Msg::Attached(result) => {
-                if let Err(e) = result {
-                    remoteman_engine::say(&format!("the panel refused its swap chain: {e:?}"));
-                }
-            }
             Msg::Do(v) => self.command(&v, context),
             Msg::Menu(key) => {
                 if let Some(text) = key.as_str() {
@@ -356,7 +350,12 @@ impl Viewer {
             self.password.clear();
             self.remember = None;
         }
-        self.session_view = kind == "session";
+        let session = kind == "session";
+        if session && !self.session_view {
+            // The picture takes the keyboard when the session's picture comes.
+            self.picture.focus();
+        }
+        self.session_view = session;
         // The dialog: a new one, or the same with something new to say, comes out again.
         let key = crate::dialogs::key(&state);
         if key != self.dialog_key {

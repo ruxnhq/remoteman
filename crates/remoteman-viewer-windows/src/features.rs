@@ -33,11 +33,12 @@ pub struct Features {
     pub folder_choice: bool,
     /// HDR pictures.
     pub hdr: bool,
-    /// Each frame shown when it arrives, where the monitor can. Off: measured on an RTX 5090
-    /// with a 240 Hz VRR monitor, neither the app's `SwapChainPanel` nor a window of the
-    /// engine's own that doesn't take the keyboard makes the monitor vary its refresh; an
-    /// activated window with an 8-bit HWND swap chain does (`probe.rs`, `draw.rs`).
-    #[allow(dead_code)]
+    /// Each frame shown when it arrives, where the monitor can: in full screen, which is a
+    /// window of the engine's own with the keyboard and an HWND swap chain that may tear
+    /// (`full.rs`, `draw.rs`). Measured on an RTX 5090 with a 240 Hz VRR monitor (`probe.rs`,
+    /// and that window with `--watch-vblank`); the app's `SwapChainPanel` never makes the
+    /// monitor vary its refresh, so in a window it stays at the monitor's rate.
+    #[allow(dead_code)] // (The old program's window doesn't present that way.)
     pub variable_refresh: bool,
     /// A choice of whether the stream follows this monitor's refresh rate (it always does).
     pub refresh_choice: bool,
@@ -81,7 +82,7 @@ pub const FEATURES: Features = Features {
     files: true,
     folder_choice: true,
     hdr: true,
-    variable_refresh: false,
+    variable_refresh: true,
     refresh_choice: true,
     follow_window: true,
     sharp_text: true,
