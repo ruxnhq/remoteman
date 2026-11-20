@@ -14,6 +14,9 @@
 //!   --ui STEPS --shots DIR [--dark|--light]
 //!                        pictures of the screens named (`walk.rs`; `all` for every one), with
 //!                        a made-up list and no network
+//!   --profiles           the card's Direct3D 11 decoder profiles, and leave
+//!   --vrr-probe SECONDS  the variable refresh control (`probe.rs`), and leave
+//! (the engine also takes --watch-vblank, --screen-hdr and --play with its --play-* words)
 //!
 //! Who does what:
 //! - the main thread owns the window and the app's state: what is on the window, what each

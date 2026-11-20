@@ -38,8 +38,8 @@ pub struct Scene {
     /// The range of refresh rates the monitor under the window varies within, if it can.
     #[allow(dead_code)]
     pub vrr_range: Mutex<Option<(u32, u32)>>,
-    /// Said by the draw thread: its swap chain was made so that it may tear (DXGI allows it),
-    /// and the last picture was presented that way.
+    /// Said by the draw thread: DXGI allows presenting with tearing on this device, and the
+    /// last picture was presented that way (never so far: see `draw.rs`).
     pub tearing_allowed: AtomicBool,
     pub tearing: AtomicBool,
     /// Said by the draw thread: how an HDR stream is shown: 0 there is none, 1 passed through
@@ -47,8 +47,8 @@ pub struct Scene {
     pub hdr_shown: AtomicU8,
     /// The display's refresh rate, for the draw thread's figures (0: not known).
     pub refresh_hz: AtomicU32,
-    /// The draw thread's last word on how its pictures reach the screen.
-    pub presenting: Mutex<String>,
+    /// For tests (`--watch-vblank`): the draw thread logs how its pictures reach the screen.
+    pub measure: AtomicBool,
     /// A panel's scale, x in the high half, each an f32's bits (0: none, a window's own).
     pub panel_scale: AtomicU64,
     /// The window, for waking it from other threads (0 until there is one).
@@ -406,8 +406,10 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
     let mut in_step = 0u32;
     let mut asked: Option<std::time::Instant> = None;
     // Pictures decoded since `since`, the time they took in all and the longest (with the
-    // upload, for pictures decoded on the processor), for a line in the log every few seconds.
+    // upload, for pictures decoded on the processor), for a line in the log every few seconds;
+    // and the bytes they came in.
     let mut took_all: (u32, u64, u32, std::time::Instant) = (0, 0, 0, std::time::Instant::now());
+    let mut bytes_all = 0u64;
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Stream(i) => {
@@ -463,15 +465,22 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
                 }
                 let took = t.elapsed().as_micros() as u32;
                 took_all = (took_all.0 + 1, took_all.1 + took as u64, took_all.2.max(took), took_all.3);
+                bytes_all += data.len() as u64;
                 if took_all.3.elapsed() >= Duration::from_secs(5) {
                     let (n, all, most, since) = took_all;
-                    say!("decoding: {n} pictures in {:.1} s, {:.2} ms each on average, {:.2} at most ({})", since.elapsed().as_secs_f64(), all as f64 / n as f64 / 1000.0, most as f64 / 1000.0, s.decoder.lock().unwrap());
-                    if i.mode.chroma == remoteman_core::Chroma::C444 && crate::decode::mode_in_software(i.mode) && n >= 60 {
+                    let pixels = picture.width as u64 * picture.height as u64;
+                    let bits_a_pixel = bytes_all as f64 * 8.0 / (pixels * n as u64).max(1) as f64;
+                    say!("decoding: {n} pictures in {:.1} s, {:.2} ms each on average, {:.2} at most, {bits_a_pixel:.3} bits a pixel ({})", since.elapsed().as_secs_f64(), all as f64 / n as f64 / 1000.0, most as f64 / 1000.0, s.decoder.lock().unwrap());
+                    // Only a busy picture says how fast the processor is: a still desktop
+                    // decodes many times faster than one that moves (0.4 bits a pixel is 50
+                    // Mbit/s at 1920x1080 and 60 a second).
+                    if i.mode.chroma == remoteman_core::Chroma::C444 && crate::decode::mode_in_software(i.mode) && n >= 60 && bits_a_pixel >= 0.1 {
                         // Pixels a microsecond are millions a second.
-                        let rate = (picture.width as u64 * picture.height as u64 * n as u64 / all.max(1)) as u32;
+                        let rate = (pixels * n as u64 / all.max(1)) as u32;
                         s.cpu_444_rate.store(rate.max(1), Ordering::Relaxed);
                     }
                     took_all = (0, 0, 0, std::time::Instant::now());
+                    bytes_all = 0;
                 }
                 s.decode_us_max.fetch_max(took, Ordering::Relaxed);
                 s.decoded.fetch_add(1, Ordering::Relaxed);

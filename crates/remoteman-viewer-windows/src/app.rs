@@ -571,9 +571,11 @@ impl App {
 
     /// HDR is asked for while the switch is on and this monitor is in HDR. When that changes in
     /// a session (the switch, Windows' own HDR switch, the window taken to another monitor),
-    /// the computer is asked again with `configure`, and its picture starts afresh.
+    /// the computer is asked again with `configure`, and its picture starts afresh. Not while
+    /// there is a second display: a display made afresh takes it away; the change waits until
+    /// it is gone (this is looked at once a second).
     pub fn follow_hdr(&mut self) {
-        let Some(s) = &self.session else { return };
+        let Some(s) = self.session.as_ref().filter(|s| !s.second_on) else { return };
         let (address, placement) = (s.target.address.clone(), s.display.placement);
         let fresh = self.display_for(Some(&address), placement);
         let s = self.session.as_mut().unwrap();

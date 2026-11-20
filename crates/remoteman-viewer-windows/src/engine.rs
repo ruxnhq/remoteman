@@ -478,7 +478,9 @@ impl Engine {
         }
         say!("engine: the panel shows the picture");
         if self.app.borrow().args.watch_vblank {
-            crate::monitor::watch_vblanks(window, self.app.borrow().scene.clone());
+            let scene = self.app.borrow().scene.clone();
+            scene.measure.store(true, Ordering::Relaxed);
+            crate::monitor::watch_vblanks(window, scene);
         }
         // (Taken out first: the app mustn't stay borrowed while the player starts.)
         let play = self.app.borrow().args.play.clone();
@@ -595,8 +597,14 @@ impl Engine {
         app.monitor = (mw, mh, hz);
         *app.scene.vrr_range.lock().unwrap() = crate::monitor::vrr_of(host);
         if changed {
-            app.follow_hdr();
             app.scene.poke();
+        }
+        // In a session, the computer is asked again if that changed what is asked of it (or
+        // when a second display that held the change back has gone).
+        app.follow_hdr();
+        let took = self.watched.get().map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+        if took > 2.0 {
+            say!("screen: looking at the monitor took {took:.1} ms");
         }
         drop(app);
         self.decide_refresh();
@@ -1240,8 +1248,7 @@ fn picture_state(app: &App) -> Value {
         },
         "variable_refresh": {
             "on": st.variable_refresh, "range": range.map(|(lo, hi)| json!([lo, hi])), "tearing_allowed": tearing_allowed,
-            "active": vrr_active, "tearing": scene.tearing.load(Ordering::Relaxed), "why": vrr_why,
-            "presenting": scene.presenting.lock().unwrap().clone(),
+            "active": vrr_active, "why": vrr_why,
         },
         "sharp_text": {
             "decoder": match full { None => "none", Some(m) if crate::decode::mode_in_software(*m) => "processor", Some(_) => "card" },

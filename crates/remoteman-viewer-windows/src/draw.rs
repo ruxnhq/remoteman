@@ -16,8 +16,11 @@
 //! is never seen. The waiting is done on the handle and not inside `Present`, which would hold
 //! the device's lock all the while and keep the decoder out: decoding would then go at the
 //! display's rate instead of the stream's (seen: 60 a second decoded of a 120 Hz stream).
-//! The picture is two planes (Y, and CbCr interleaved) of one slice of the decoder's texture;
-//! a pixel shader turns limited-range BT.709 into RGB.
+//! The picture is two planes (Y, and CbCr interleaved) of one slice of the decoder's texture,
+//! or, for a picture decoded on the CPU, three textures of its own (Y, Cb, Cr); a pixel shader
+//! turns limited-range BT.709 into RGB, or BT.2020 PQ into PQ (an HDR screen) or into SDR.
+//! Presenting is always at the display's refresh: variable refresh was measured not to work
+//! for the swap chains made here (see `chain_flags`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -282,10 +285,10 @@ impl Cadence {
         }
     }
 
-    /// Every few seconds: a line for the log, and how the pictures reach the screen for the
-    /// app (the gaps are the log's only: for a picture drawn by the compositor they are the
-    /// times of presenting, not of showing), and start again.
-    fn report(&mut self, swap: &IDXGISwapChain1, refresh_hz: u32, tearing: bool) -> Option<(String, String)> {
+    /// Every few seconds: a line for the log, and start again. (The gaps are only worth
+    /// anything for a picture shown by itself: for one drawn by the compositor they are the
+    /// times of presenting, not of showing. `monitor::watch_vblanks` is what to go by.)
+    fn report(&mut self, swap: &IDXGISwapChain1, refresh_hz: u32, tearing: bool) -> Option<String> {
         if self.since.is_none_or(|s| s.elapsed() < Duration::from_secs(5)) {
             return None;
         }
@@ -321,7 +324,7 @@ impl Cadence {
         );
         self.shown.clear();
         self.presents = 0;
-        Some((line, mode))
+        Some(line)
     }
 }
 
@@ -886,12 +889,12 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
             let presented = unsafe { if tear { drawer.swap.Present(0, DXGI_PRESENT_ALLOW_TEARING) } else { drawer.swap.Present(1, DXGI_PRESENT(0)) } };
             room = false;
             presented.ok().context("present")?;
-            if new {
+            // For tests: how the pictures reach the screen, in the log every few seconds.
+            if new && scene.measure.load(Ordering::Relaxed) {
                 drawer.cadence.note(&drawer.swap);
-            }
-            if let Some((line, mode)) = drawer.cadence.report(&drawer.swap, scene.refresh_hz.load(Ordering::Relaxed), tear) {
-                say!("presenting: {line}");
-                *scene.presenting.lock().unwrap() = mode;
+                if let Some(line) = drawer.cadence.report(&drawer.swap, scene.refresh_hz.load(Ordering::Relaxed), tear) {
+                    say!("presenting: {line}");
+                }
             }
             if (presented == DXGI_STATUS_OCCLUDED) != occluded {
                 occluded = !occluded;
