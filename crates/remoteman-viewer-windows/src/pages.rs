@@ -536,7 +536,7 @@ fn settings(app: &App, ui: &mut Ui) {
             ),
             row("set.release", "Release the keyboard", "Ctrl+Alt+Shift, pressed together, gives shortcuts back to this PC, and takes them again", Ctl::None, gate(FEATURES.release_shortcut)),
             row("set.command", "On a Mac, Ctrl acts as Command", "Ctrl+C on this keyboard copies on a Mac, as it does here", Ctl::Toggle(s.ctrl_as_command, Some(Msg::Toggle(Flag::CtrlAsCommand, None))), gate(FEATURES.ctrl_as_command)),
-            row("set.winkey", "Windows key", "Opens the overview on a Linux computer, Spotlight's key on a Mac", fixed("Super / Command"), gate(FEATURES.key_mapping)),
+            row("set.winkey", "Windows key", "Opens the overview on a Linux computer, Spotlight's key on a Mac. Another key can act as it too", chosen(app, Choice::WindowsKey), gate(FEATURES.key_mapping)),
         ],
     );
     y = group(
@@ -626,7 +626,7 @@ fn computer(app: &App, ui: &mut Ui, address: &str) {
             row("computer.name", "Name", "", Ctl::Field, ON),
             row("computer.address", "Address", short(address), Ctl::Button("Edit address…", Look::Plain, Some(Msg::EditAddress(a()))), ON),
             row("computer.wake", "Wake it over the network", "When it is asleep and on the same network", Ctl::Toggle(c.wake, Some(Msg::Set("wake", Some(a())))), gate(FEATURES.wake)),
-            row("computer.way", "Getting in", "Joins your session there if you are logged in, otherwise shows its login screen", fixed("The computer decides"), gate(FEATURES.way_in)),
+            row("computer.way", "Getting in", "Joins your session there if you are logged in, otherwise shows its login screen. A computer with one way in takes no notice", chosen(app, Choice::WayIn(a())), gate(FEATURES.way_in)),
         ],
     );
     let sits = PLACEMENT_NAMES.iter().find(|p| p.0 == c.placement).map_or("", |p| p.2);

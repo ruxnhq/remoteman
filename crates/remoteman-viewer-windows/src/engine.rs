@@ -1235,12 +1235,14 @@ impl Engine {
                     "controls" => Choice::Controls,
                     "default-quality" => Choice::DefaultQuality,
                     "scroll" => Choice::Scroll,
+                    "windows-key" => Choice::WindowsKey,
                     "pointer" => Choice::Pointer,
                     "placement" => Choice::Placement(address),
                     "quality" => Choice::Quality(address),
                     "bitrate" => Choice::Bitrate(address),
                     "size" => Choice::Size(address),
                     "side" => Choice::Side(address),
+                    "way-in" => Choice::WayIn(address),
                     _ => return false,
                 };
                 Msg::Choose(choice, n("index"))
@@ -1416,7 +1418,7 @@ fn state_of(app: &App) -> Value {
         "hdr": st.hdr, "variable_refresh": st.variable_refresh,
         "folder": app.store.receive_folder().display().to_string(),
         "controls": options(app, &Choice::Controls), "default_quality": options(app, &Choice::DefaultQuality),
-        "scroll": options(app, &Choice::Scroll), "pointer": options(app, &Choice::Pointer),
+        "scroll": options(app, &Choice::Scroll), "windows_key": options(app, &Choice::WindowsKey), "pointer": options(app, &Choice::Pointer),
         "touch": st.touch, "allow_microphone": st.allow_microphone, "allow_camera": st.allow_camera,
     });
     // The drop-downs of one computer: the one whose page is open, or the session's.
@@ -1429,7 +1431,7 @@ fn state_of(app: &App) -> Value {
             "address": a,
             "placement": options(app, &Choice::Placement(a.clone())), "quality": options(app, &Choice::Quality(a.clone())),
             "bitrate": options(app, &Choice::Bitrate(a.clone())), "size": options(app, &Choice::Size(a.clone())),
-            "side": options(app, &Choice::Side(a.clone())),
+            "side": options(app, &Choice::Side(a.clone())), "way_in": options(app, &Choice::WayIn(a.clone())),
         })
     });
     let session = app.session.as_ref().map(|s| {

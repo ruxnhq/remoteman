@@ -79,6 +79,10 @@ pub enum Choice {
     /// How large a picture to ask a computer for.
     Size(String),
     Scroll,
+    /// The key that acts as the Windows key (Super, Command) besides the Windows key itself.
+    WindowsKey,
+    /// How a computer with more than one way in is entered.
+    WayIn(String),
     /// Which side of the computer's displays a second display goes.
     Side(String),
     /// The pointer follows this one, or is captured.
@@ -754,7 +758,8 @@ impl App {
             cursor: true,
             // Used once: a password that didn't work is typed again.
             unlock: self.unlock.take(),
-            attach_only: false,
+            // "Getting in": only a session already running, never a login screen.
+            attach_only: self.store.find(&target.address).is_some_and(|c| c.attach_only),
         };
         *shared.folder.lock().unwrap() = self.store.receive_folder();
         say!("connecting to {} for {}x{} at {} Hz{}", target.address, display.width, display.height, display.refresh, if display.hdr { format!(", HDR (headroom {:.1})", display.headroom) } else { String::new() });
@@ -1566,6 +1571,8 @@ impl App {
                 (SIZES.iter().map(|s| (s.1.to_owned(), true)).collect(), SIZES.iter().position(|s| s.0 == now).unwrap_or(0))
             }
             Choice::Scroll => (vec![("Same as this PC".into(), true), ("Reversed".into(), true)], self.store.settings.scroll_reversed as usize),
+            Choice::WindowsKey => (crate::store::Stand::ALL.iter().map(|s| (s.2.to_owned(), true)).collect(), crate::store::Stand::ALL.iter().position(|s| s.0 == self.store.settings.super_key).unwrap_or(0)),
+            Choice::WayIn(address) => (vec![("The computer decides".into(), true), ("Only a session that is already running".into(), true)], self.store.find(address).is_some_and(|c| c.attach_only) as usize),
             Choice::Pointer => (vec![("Follows this pointer".into(), true), ("Captured".into(), true)], self.store.settings.capture as usize),
             Choice::Side(address) => {
                 let now = self.store.find(address).map_or(remoteman_core::Side::Right, |c| c.second_side);
@@ -1605,6 +1612,11 @@ impl App {
                 self.store.settings.scroll_reversed = n == 1;
                 self.store.save_settings();
             }
+            Choice::WindowsKey => {
+                self.store.settings.super_key = crate::store::Stand::ALL[n.min(3)].0;
+                self.store.save_settings();
+            }
+            Choice::WayIn(address) => self.store.update(&address, |c| c.attach_only = n == 1),
             Choice::Pointer => {
                 self.store.settings.capture = n == 1;
                 self.store.save_settings();
