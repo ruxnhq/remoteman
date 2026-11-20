@@ -153,6 +153,9 @@ pub fn watch_vblanks(hwnd: isize, scene: std::sync::Arc<crate::stream::Scene>) {
             None
         }
     };
+    // A line every five seconds, or as often as REMOTEMAN_VBLANK_SECONDS says (for a timeline
+    // of a mode that holds only for a while).
+    let every = std::env::var("REMOTEMAN_VBLANK_SECONDS").ok().and_then(|s| s.parse::<u64>().ok()).filter(|s| *s > 0).unwrap_or(5);
     let _ = std::thread::Builder::new().name("vblank".into()).spawn(move || {
         while !scene.quit.load(Ordering::Relaxed) {
             let Some(out) = output() else {
@@ -160,7 +163,7 @@ pub fn watch_vblanks(hwnd: isize, scene: std::sync::Arc<crate::stream::Scene>) {
                 continue;
             };
             let (start, mut last, mut gaps) = (Instant::now(), None::<Instant>, Vec::new());
-            while start.elapsed() < Duration::from_secs(5) {
+            while start.elapsed() < Duration::from_secs(every) {
                 // SAFETY: a call on the output.
                 if unsafe { out.WaitForVBlank() }.is_err() {
                     std::thread::sleep(Duration::from_millis(100));
@@ -181,7 +184,7 @@ pub fn watch_vblanks(hwnd: isize, scene: std::sync::Arc<crate::stream::Scene>) {
             let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
             let longest = gaps.iter().cloned().fold(0.0, f64::max);
             say!(
-                "vblank: {} in 5 s, {mean:.2} ms apart on average, {longest:.2} at most; {fixed} one fixed refresh ({period:.2} ms) apart; {}",
+                "vblank: {} in {every} s, {mean:.2} ms apart on average, {longest:.2} at most; {fixed} one fixed refresh ({period:.2} ms) apart; {}",
                 gaps.len() + 1,
                 if scene.tearing.load(Ordering::Relaxed) { "presenting with tearing allowed" } else { "presenting at the refresh" }
             );
