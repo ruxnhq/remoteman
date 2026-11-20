@@ -70,6 +70,8 @@ mod display;
 #[cfg(windows)]
 mod ccd;
 #[cfg(windows)]
+mod dpi;
+#[cfg(windows)]
 mod encode;
 #[cfg(all(windows, test))]
 mod enctest;

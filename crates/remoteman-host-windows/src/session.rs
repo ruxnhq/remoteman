@@ -158,8 +158,8 @@ impl Host {
         if screen.width % 2 != 0 || screen.height % 2 != 0 || screen.width < 64 || screen.height < 64 || screen.width > 8192 || screen.height > 8192 {
             return Err("display sizes must be even, from 64 to 8192".into());
         }
-        // The client's scale (how large the desktop is drawn) isn't acted on: Windows has no
-        // documented way to set a monitor's scale for the user.
+        // The client's scale (how large the desktop is drawn) is given to the device's monitor
+        // as Windows' scale once it is on the desktop (`dpi.rs`).
         let want = display::Mode { width: screen.width, height: screen.height, refresh: screen.refresh.clamp(1, 240) };
         // A device that asks to mirror is shown the monitor as it is, no faster than it asked.
         // Not on a PC with screens of its own: the driver's monitor isn't one of them, so there
@@ -218,6 +218,10 @@ impl Host {
         if hdr.is_some() {
             // Windows takes a moment to give the monitor its wide surface.
             std::thread::sleep(std::time::Duration::from_millis(700));
+        }
+        // The device's own monitor gets the Windows scale the device asked for (never a PC screen).
+        if !mirror && mirrored.is_none() {
+            crate::dpi::apply(self.screen.device(), screen.scale);
         }
         let sdr_white = crate::hdr::sdr_white(&output);
         let area = Arc::new(Mutex::new(at));
