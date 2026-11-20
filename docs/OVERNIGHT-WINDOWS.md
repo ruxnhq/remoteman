@@ -197,3 +197,10 @@ s each, several times over). Now one query of the device list (0.3 s, 4be7f07), 
 restarted after the step so it finds Steam's microphone (it looks only at start; 331dcb5).
 `C:\rm\installer-2026-11-20-015\remoteman-host-setup-0.1.5.exe`. Also removed: two leftover tray
 entries in Settings from test copies of the tray app (a worktree's and `C:\rm\hostapp-rust`'s).
+Tested from this PC with the test client as the device (mirror, nothing saved; 09:11): the
+microphone works (the client's 1 kHz tone came out of "Microphone (Steam Streaming Microphone)"
+at -11.6 dB peak, its level); the sound stream came clean (1724 packets, none missing; the test
+tone was too quiet for the client's level gate); the mute did NOT happen: the host wrote its
+note while acting as the user and the state folder refused it. Fixed in fc11e56 (looked up and
+muted as the user, written by the host). `C:\rm\installer-2026-11-20-016\remoteman-host-setup-0.1.6.exe`.
+The test client is paired as "testclient" (to be revoked after testing).
