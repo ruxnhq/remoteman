@@ -236,3 +236,7 @@ screen mode" in the NVIDIA Control Panel (not tried; the owner's setting).
   only"), the lead undisturbed. It counted 464 frames lost at the join (the lead's frames before
   it came): fixed in the reassembler (losses count from the first frame seen, edef240, 5f59877).
   The second factor: the owner chose not to test it here. The test client is unpaired again.
+- 10:00: the Mac session installed e5d3856 (the Apple side of the new features, on the pushed
+  core) on the owner's everyday Mac host (restarted on 7791, same key, "it takes over"), the iPad
+  and the iPhone; the Mac viewer runs from its build folder, already this build. All new settings
+  start at the old behaviour.
