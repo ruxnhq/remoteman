@@ -21,6 +21,8 @@ public static unsafe partial class Engine
     [LibraryImport(Dll)] public static partial void remoteman_wheel(float notches, [MarshalAs(UnmanagedType.U1)] bool horizontal);
     [LibraryImport(Dll)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool remoteman_key(uint scancode, [MarshalAs(UnmanagedType.U1)] bool extended, [MarshalAs(UnmanagedType.U1)] bool down, [MarshalAs(UnmanagedType.U1)] bool repeat);
     [LibraryImport(Dll)] public static partial void remoteman_focus([MarshalAs(UnmanagedType.U1)] bool focused);
+    // phase: 0 down, 1 move, 2 up (or cancelled, or capture lost); true when it went as a touch.
+    [LibraryImport(Dll)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool remoteman_touch(uint id, int phase, int x, int y);
     [LibraryImport(Dll)] public static partial nint remoteman_cursor(out uint serial);
     [LibraryImport(Dll)] private static partial int remoteman_stop();
 
