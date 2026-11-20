@@ -98,3 +98,20 @@ connected and sharing off, the PC's three screens left of it: Windows had rebuil
 the 00:09 restart (the XG32UCWMGs asleep and disconnected then), and the installed (old) host
 doesn't take the driver's monitors off. `C:m	oolsix-screens.ps1` put DISPLAY1 back at 0,0 as
 the main screen. The new host's watch between devices does this by itself.
+
+## Installing the new host (for the owner)
+`C:\rm\installer-2026-11-20-main\remoteman-host-setup-0.1.1.exe`, built from a9d240e (host 0.1.1,
+the display driver 0.1.1.0 that unplugs its monitors between devices, the virtual camera's DLL).
+One UAC prompt.
+1. With all three screens on, run it.
+2. Settings > System > Display should list only the PC's three screens (no remoteman display).
+3. Turn sharing on in Remoteman Host (the tray app).
+4. From the iPad: an extra display (the default placement); the picture comes; disconnect; the
+   screens are as before and Settings still lists only the three.
+5. From the iPad: Mirror shows the PC's main screen as it is.
+6. Not yet "Main display" or "Only display": the layout test (`--layout-test main`, `back`) runs
+   first with all three screens on.
+7. If the screens go wrong: Win+R, `powershell -ExecutionPolicy Bypass -File C:\rm\tools\fix-screens.ps1`.
+New in the tray: per-device switches (view only, clipboard, files, sound, microphone, camera),
+recent connections and a notice when a device connects, "Lock this PC when a device disconnects"
+(off), "Silence this PC's speakers while a device listens" (needs Steam's sound devices).
