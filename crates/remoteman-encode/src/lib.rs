@@ -33,6 +33,7 @@ struct Cfg {
     hdr_min_lum: u32,
     hdr_max_cll: u32,
     hdr_max_fall: u32,
+    slices: u32,
 }
 
 /// What an HDR stream (BT.2020 PQ) says about the picture's light, as the mastering display
@@ -106,6 +107,8 @@ pub struct Config {
     /// large HEVC pictures three, so the stream's level stays where decoders expect it. Said
     /// outright, both numbers are taken as they are.
     pub short_term: Option<u32>,
+    /// HEVC: cut each picture into this many slices (0: one), so a software decoder can use threads.
+    pub slices: u32,
 }
 
 /// How to encode one frame.
@@ -192,6 +195,7 @@ impl Config {
             hdr_min_lum: 0,
             hdr_max_cll: 0,
             hdr_max_fall: 0,
+            slices: self.slices,
         }
     }
 }

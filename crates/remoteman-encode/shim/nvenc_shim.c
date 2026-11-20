@@ -37,6 +37,7 @@ typedef struct rm_nvenc_cfg {
     uint32_t hdr_light;
     uint32_t hdr_chroma[8];
     uint32_t hdr_max_lum, hdr_min_lum, hdr_max_cll, hdr_max_fall;
+    uint32_t slices;      // HEVC: pictures cut into this many slices (0 or 1: one), so a decoder can use threads
 } rm_nvenc_cfg;
 
 typedef struct rm_nvenc {
@@ -308,6 +309,7 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
         h->hevcVUIParameters.transferCharacteristics = trc;
         h->hevcVUIParameters.colourMatrix = mat;
         if (e->hdr_sei) { h->outputMasteringDisplay = 1; h->outputMaxCll = 1; }
+        if (cfg->slices > 1) { h->sliceMode = 3; h->sliceModeData = cfg->slices; }
         if (!cfg->chroma444) {
             // The conversion averages each 2x2 block, so chroma sits in the block's centre.
             h->hevcVUIParameters.chromaSampleLocationFlag = 1;
