@@ -176,6 +176,45 @@ struct Drawer {
     flags: DXGI_SWAP_CHAIN_FLAG,
     tears: bool,
     cadence: Cadence,
+    /// While variable refresh is on: the picture's own window and swap chain.
+    flip: Option<Flip>,
+}
+
+/// The window of the engine's own over the whole monitor that the picture goes to while
+/// variable refresh is on, and its HWND flip swap chain: a swap chain for composition (the
+/// panel's) doesn't make a monitor vary its refresh, this one does (measured: vertical blanks
+/// 10 ms apart for pictures presented 100 a second on a 240 Hz monitor).
+struct Flip {
+    hwnd: isize,
+    swap: IDXGISwapChain1,
+    room: HANDLE,
+    target: Option<ID3D11RenderTargetView>,
+    size: (u32, u32),
+    pq: bool,
+}
+
+const FLIP_FLAGS: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG(DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0);
+
+/// Set a swap chain's colour space: PQ BT.2020 or sRGB. Whether it is PQ now.
+fn colour_space(swap: &IDXGISwapChain1, pq: bool) -> bool {
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020};
+    let space = if pq { DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 } else { DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 };
+    // SAFETY: calls on the swap chain.
+    let done = unsafe {
+        swap.cast::<IDXGISwapChain3>().and_then(|s3| {
+            let support = s3.CheckColorSpaceSupport(space)?;
+            if support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT.0 as u32 == 0 {
+                return Err(windows::core::Error::new(windows::core::HRESULT(-1), "not supported for presenting"));
+            }
+            s3.SetColorSpace1(space)
+        })
+    };
+    let ok = done.is_ok();
+    match done {
+        Ok(()) => say!("swap chain: {}", if pq { "PQ BT.2020 (HDR10), passed through" } else { "sRGB" }),
+        Err(e) => say!("swap chain: no {} colour space ({e}); tone-mapped to SDR instead", if pq { "PQ" } else { "sRGB" }),
+    }
+    pq && ok
 }
 
 /// Whether DXGI lets this device's swap chains present with tearing allowed, which variable
@@ -420,6 +459,7 @@ impl Drawer {
                 flags,
                 tears,
                 cadence: Cadence::default(),
+                flip: None,
             })
         }
     }
@@ -548,27 +588,63 @@ impl Drawer {
 
     /// The swap chain's colour space: PQ BT.2020 for an HDR stream on an HDR screen, sRGB else.
     fn set_pq(&mut self, pq: bool) {
-        if pq == self.pq {
-            return;
+        if pq != self.pq {
+            self.pq = colour_space(&self.swap, pq);
         }
-        use windows::Win32::Graphics::Dxgi::Common::{DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020};
-        let space = if pq { DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 } else { DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 };
-        // SAFETY: calls on the swap chain.
-        let done = unsafe {
-            self.swap.cast::<IDXGISwapChain3>().and_then(|s3| {
-                let support = s3.CheckColorSpaceSupport(space)?;
-                if support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT.0 as u32 == 0 {
-                    return Err(windows::core::Error::new(windows::core::HRESULT(-1), "not supported for presenting"));
-                }
-                s3.SetColorSpace1(space)
-            })
-        };
-        let ok = done.is_ok();
-        match done {
-            Ok(()) => say!("swap chain: {}", if pq { "PQ BT.2020 (HDR10), passed through" } else { "sRGB" }),
-            Err(e) => say!("swap chain: no {} colour space ({e}); tone-mapped to SDR instead", if pq { "PQ" } else { "sRGB" }),
+        if let Some(flip) = self.flip.as_mut().filter(|f| f.pq != pq) {
+            flip.pq = colour_space(&flip.swap, pq);
+            self.pq = flip.pq;
         }
-        self.pq = pq && ok;
+    }
+
+    /// The window of the engine's own that the picture goes to while variable refresh is on:
+    /// an HWND flip swap chain the size of its client area, allowed to tear, in 10 bits.
+    fn flip_chain(&self, hwnd: isize) -> Result<Flip> {
+        let hwnd = HWND(hwnd as *mut _);
+        let mut client = windows::Win32::Foundation::RECT::default();
+        // SAFETY: DXGI calls on interfaces held here, with a description that lives through it.
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+            let factory: IDXGIFactory2 = self.gpu.device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
+            let desc = DXGI_SWAP_CHAIN_DESC1 {
+                Width: client.right.max(8) as u32,
+                Height: client.bottom.max(8) as u32,
+                Format: DXGI_FORMAT_R10G10B10A2_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                BufferCount: 2,
+                Scaling: DXGI_SCALING_STRETCH,
+                SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                Flags: (FLIP_FLAGS).0 as u32,
+                ..Default::default()
+            };
+            let swap = factory.CreateSwapChainForHwnd(&self.gpu.device, hwnd, &desc, None, None).context("an HWND swap chain for variable refresh")?;
+            let _ = factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+            let latency: IDXGISwapChain2 = swap.cast()?;
+            latency.SetMaximumFrameLatency(1)?;
+            let room = latency.GetFrameLatencyWaitableObject();
+            Ok(Flip { hwnd: hwnd.0 as isize, swap, room, target: None, size: (desc.Width, desc.Height), pq: false })
+        }
+    }
+
+    /// Follow the flip window's size (the monitor's).
+    fn resize_flip(&mut self) -> Result<bool> {
+        let Some(flip) = self.flip.as_mut() else { return Ok(false) };
+        let mut client = windows::Win32::Foundation::RECT::default();
+        // SAFETY: calls on a window and a swap chain held here.
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetClientRect(HWND(flip.hwnd as *mut _), &mut client);
+            let to = (client.right.max(8) as u32, client.bottom.max(8) as u32);
+            if to == flip.size {
+                return Ok(false);
+            }
+            flip.target = None;
+            self.gpu.context.OMSetRenderTargets(None, None);
+            flip.swap.ResizeBuffers(0, to.0, to.1, DXGI_FORMAT_UNKNOWN, FLIP_FLAGS).context("resize the variable refresh swap chain")?;
+            flip.size = to;
+        }
+        Ok(true)
     }
 
     /// Draw the interface into its layer's back buffer.
@@ -610,13 +686,18 @@ impl Drawer {
         };
         // SAFETY: Direct3D calls on interfaces held here; everything bound outlives the draw.
         unsafe {
-            if self.target.is_none() {
-                let back: ID3D11Texture2D = self.swap.GetBuffer(0)?;
+            // The flip window's swap chain while variable refresh is on, else the panel's.
+            let (swap, held) = match self.flip.as_mut() {
+                Some(flip) => (flip.swap.clone(), &mut flip.target),
+                None => (self.swap.clone(), &mut self.target),
+            };
+            if held.is_none() {
+                let back: ID3D11Texture2D = swap.GetBuffer(0)?;
                 let mut target = None;
                 self.gpu.device.CreateRenderTargetView(&back, None, Some(&mut target))?;
-                self.target = target;
+                *held = target;
             }
-            let target = self.target.clone().context("no render target")?;
+            let target = held.clone().context("no render target")?;
             let ctx = &self.gpu.context;
             // Everything is set each time: the flip model unbinds the back buffer at every
             // present, and Direct2D leaves the context as it pleases.
@@ -778,8 +859,9 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
     while !scene.quit.load(Ordering::Relaxed) {
         if !room {
             // Not for ever: a window that is covered may never be given room.
+            let handle = drawer.flip.as_ref().map_or(drawer.room, |f| f.room);
             // SAFETY: the handle is the swap chain's and lives as long as it.
-            let _ = unsafe { WaitForSingleObject(drawer.room, 100) };
+            let _ = unsafe { WaitForSingleObject(handle, 100) };
             room = true;
         }
         // Wait for a picture or a change to the interface, but not for ever: the window may
@@ -795,6 +877,26 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
             drawer.views.clear();
             changed = true;
         }
+        // Variable refresh: the picture goes to the engine's own window over the monitor (and
+        // back to the panel when that goes).
+        let flip_to = scene.flip_hwnd.load(Ordering::Relaxed);
+        if flip_to != drawer.flip.as_ref().map_or(0, |f| f.hwnd) {
+            drawer.flip = None;
+            // SAFETY: a call on the context; nothing may hold the old swap chain's buffers.
+            unsafe { drawer.gpu.context.OMSetRenderTargets(None, None) };
+            if flip_to != 0 {
+                match drawer.flip_chain(flip_to) {
+                    Ok(flip) => {
+                        say!("variable refresh: the picture is in a window of its own over the monitor ({}x{}), presented as it arrives with tearing allowed", flip.size.0, flip.size.1);
+                        drawer.flip = Some(flip);
+                    }
+                    Err(e) => say!("variable refresh: no swap chain for its window ({e:#})"),
+                }
+            }
+            changed = true;
+            room = true;
+        }
+        changed |= drawer.resize_flip()?;
         let fresh = session.as_ref().and_then(|s| s.picture.lock().unwrap().take());
         changed |= drawer.resize(unpack(scene.client_size.load(Ordering::Relaxed)))?;
         drawer.set_scale(crate::stream::unpack_scale(scene.panel_scale.load(Ordering::Relaxed)))?;
@@ -835,7 +937,9 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
         scene.hdr_shown.store(if !colour.0 || session.is_none() { 0 } else if drawer.pq { 1 } else { 2 }, Ordering::Relaxed);
         if draws {
             let _alone = DRAWING.lock().unwrap();
-            drawer.draw(picture.as_ref(), video, colour)?;
+            // In the flip window the picture has all of it.
+            let area = drawer.flip.as_ref().map_or(video, |f| Some((0, 0, f.size.0 as i32, f.size.1 as i32)));
+            drawer.draw(picture.as_ref(), area, colour)?;
         }
         let backdrop = frame.as_ref().map_or(crate::ui::Color(0.0, 0.0, 0.0, 1.0), |f| f.backdrop);
         if early {
@@ -862,18 +966,19 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
             // For the next refresh of the display (there is room, so this doesn't wait); or,
             // with variable refresh, at once with tearing allowed: a monitor that varies its
             // refresh then shows the picture now, and the next when it comes.
-            let tear = drawer.tears && scene.variable_refresh.load(Ordering::Relaxed);
+            let swap = drawer.flip.as_ref().map_or(drawer.swap.clone(), |f| f.swap.clone());
+            let tear = drawer.flip.is_some();
             if scene.tearing.swap(tear, Ordering::Relaxed) != tear {
                 say!("presenting: {}", if tear { "each picture as it arrives, tearing allowed (variable refresh)" } else { "at the display's refresh" });
             }
             // SAFETY: a call on the swap chain.
-            let presented = unsafe { if tear { drawer.swap.Present(0, DXGI_PRESENT_ALLOW_TEARING) } else { drawer.swap.Present(1, DXGI_PRESENT(0)) } };
+            let presented = unsafe { if tear { swap.Present(0, DXGI_PRESENT_ALLOW_TEARING) } else { swap.Present(1, DXGI_PRESENT(0)) } };
             room = false;
             presented.ok().context("present")?;
             if new {
-                drawer.cadence.note(&drawer.swap);
+                drawer.cadence.note(&swap);
             }
-            if let Some((line, mode)) = drawer.cadence.report(&drawer.swap, scene.refresh_hz.load(Ordering::Relaxed), tear) {
+            if let Some((line, mode)) = drawer.cadence.report(&swap, scene.refresh_hz.load(Ordering::Relaxed), tear) {
                 say!("presenting: {line}");
                 *scene.presenting.lock().unwrap() = mode;
             }

@@ -33,6 +33,9 @@ public sealed partial class MainWindow : Window
             _barAway.Stop();
             Floating.Visibility = Visibility.Collapsed;
         };
+        // The engine puts its own window over the picture for variable refresh, except while
+        // the bar (and so its menus) is out.
+        Floating.RegisterPropertyChangedCallback(UIElement.VisibilityProperty, (_, _) => Engine.Do("overlay", new { on = Floating.Visibility == Visibility.Visible }));
         Floating.PointerEntered += (_, _) => { _overBar = true; _barAway.Stop(); };
         Floating.PointerExited += (_, _) => { _overBar = false; _barAway.Start(); };
         Engine.Changed += Refresh;
