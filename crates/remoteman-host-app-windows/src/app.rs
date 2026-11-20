@@ -84,6 +84,8 @@ pub enum AppMessage {
     Share(bool),
     Clipboard(bool),
     Files(bool),
+    LockOnLeave(bool),
+    Speakers(bool),
     Answer(ContentDialogResult),
     NewsClosed,
     SendFile,
@@ -303,6 +305,16 @@ impl Application for HostApp {
                     self.tell(format!("allow files {}", if on { "on" } else { "off" }));
                 }
             }
+            AppMessage::LockOnLeave(on) => {
+                if matches!(&self.status, Ok(s) if s.lock_on_leave != on) {
+                    self.tell(format!("set lock {}", if on { "on" } else { "off" }));
+                }
+            }
+            AppMessage::Speakers(on) => {
+                if matches!(&self.status, Ok(s) if s.speakers_follow != on) {
+                    self.tell(format!("set speakers {}", if on { "on" } else { "off" }));
+                }
+            }
             AppMessage::Answer(result) => {
                 // Taken away (answered elsewhere, or its minute is up): nothing to say.
                 if let Some(p) = self.asking.take() {
@@ -359,6 +371,8 @@ impl Application for HostApp {
                 share: context.callback(AppMessage::Share),
                 clipboard: context.callback(AppMessage::Clipboard),
                 files: context.callback(AppMessage::Files),
+                lock_on_leave: context.callback(AppMessage::LockOnLeave),
+                speakers: context.callback(AppMessage::Speakers),
                 answer: context.callback(AppMessage::Answer),
                 news_closed: context.callback(|()| AppMessage::NewsClosed),
                 send_file: context.callback(|()| AppMessage::SendFile),

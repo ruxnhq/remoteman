@@ -46,6 +46,8 @@ pub struct Callbacks {
     pub share: Callback<bool>,
     pub clipboard: Callback<bool>,
     pub files: Callback<bool>,
+    pub lock_on_leave: Callback<bool>,
+    pub speakers: Callback<bool>,
     /// The pairing question was answered (or taken away).
     pub answer: Callback<ContentDialogResult>,
     pub news_closed: Callback<()>,
@@ -236,6 +238,18 @@ impl HostWindow {
             Some(switch(s.is_some_and(|s| s.clipboard), s.is_some(), "Share the clipboard with devices", input.on.clipboard.clone())),
         ));
         page.push(row("Receive files from devices", Some("Into Downloads, never over an existing file"), Some(switch(s.is_some_and(|s| s.files), s.is_some(), "Receive files from devices", input.on.files.clone()))));
+
+        page.push(heading("While a device is connected"));
+        page.push(row(
+            "Lock this PC when a device disconnects",
+            Some("The PC is kept awake while a device is connected, and locked once the last one leaves"),
+            Some(switch(s.is_some_and(|s| s.lock_on_leave), s.is_some(), "Lock this PC when a device disconnects", input.on.lock_on_leave.clone())),
+        ));
+        page.push(row(
+            "Silence this PC's speakers while a device listens",
+            Some("Needs Steam's Streaming Speakers: they become the default output meanwhile, and the sound goes to the device"),
+            Some(switch(s.is_some_and(|s| s.speakers_follow), s.is_some(), "Silence this PC's speakers while a device listens", input.on.speakers.clone())),
+        ));
 
         page.push(heading("Address and key"));
         let reach = s.map(|s| crate::system::reach(&s.address));

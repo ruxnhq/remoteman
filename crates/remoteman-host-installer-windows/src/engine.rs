@@ -28,6 +28,7 @@ pub enum StepId {
     Files,
     Register,
     Setup,
+    Steam,
     App,
     // Uninstalling.
     CloseApp,
@@ -45,6 +46,7 @@ impl StepId {
             StepId::Register => "register",
             StepId::Setup | StepId::Unsetup => "setup",
             StepId::App => "app",
+            StepId::Steam => "steam",
             StepId::Entries => "entries",
         }
     }
@@ -150,6 +152,7 @@ pub fn plan(ctx: &Ctx, facts: &Facts) -> Vec<StepInfo> {
                 ),
                 step(StepId::Files, "Files", &format!("Into {dir}")),
                 step(StepId::Setup, "Driver, firewall and service", "setup.ps1 signs remoteman's display driver with a certificate made on this PC, lets in UDP port 7791, and starts the service"),
+                step(StepId::Steam, "Steam's sound devices", "Looks for Steam's Streaming Microphone and Streaming Speakers, which a device's microphone and a quiet PC speaker need; nothing is installed or changed"),
             ];
             if facts.has_app {
                 steps.push(step(StepId::App, "Remoteman Host at sign-in", "Started for everyone who signs in to this PC, with a shortcut in Start"));
@@ -268,6 +271,7 @@ impl Run<'_> {
             StepId::Register => self.register(),
             StepId::Setup => self.setup("install", id),
             StepId::App => self.app(),
+            StepId::Steam => self.steam(),
             StepId::CloseApp => self.close_app(),
             StepId::Unsetup => self.setup("uninstall", id),
             StepId::Delete => self.delete(),
@@ -575,6 +579,15 @@ impl Run<'_> {
             _ => format!("setup.ps1 ended with {code}"),
         };
         Err(reason)
+    }
+
+    /// Looks for Steam's sound devices and says what it found (src/steam.rs); changes nothing, and
+    /// never fails the install.
+    fn steam(&mut self) -> StepResult {
+        let found = crate::steam::detect(crate::steam::registry_steam_dir(), &crate::steam::driver_store());
+        log::say(&format!("  Steam: {:?}", found));
+        let (word, line) = crate::steam::say(&found);
+        Ok((word, Some(line)))
     }
 
     fn app(&mut self) -> StepResult {
