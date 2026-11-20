@@ -33,13 +33,30 @@ pub fn run(gpu: &crate::gpu::Gpu, seconds: u64) -> Result<()> {
         let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance.into(), lpszClassName: w!("remoteman-vrr-probe"), hCursor: LoadCursorW(None, IDC_ARROW)?, ..Default::default() };
         RegisterClassW(&class);
         let (w, h) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
-        let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), w!("remoteman-vrr-probe"), w!("remoteman variable refresh probe"), WS_POPUP | WS_VISIBLE, 0, 0, w, h, None, None, Some(instance.into()), None).context("the probe's window")?;
+        // Variations, to find what keeps a window from being shown by itself:
+        // REMOTEMAN_PROBE=noactivate,tool,owned,10bit (owned: by a second, plain window).
+        let how = std::env::var("REMOTEMAN_PROBE").unwrap_or_default();
+        let has = |w: &str| how.split(',').any(|x| x == w);
+        let mut ex = WINDOW_EX_STYLE(0);
+        if has("noactivate") {
+            ex |= WS_EX_NOACTIVATE;
+        }
+        if has("tool") {
+            ex |= WS_EX_TOOLWINDOW;
+        }
+        let owner = if has("owned") { CreateWindowExW(WINDOW_EX_STYLE(0), w!("remoteman-vrr-probe"), w!("probe owner"), WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 800, 600, None, None, Some(instance.into()), None).ok() } else { None };
+        let style = if has("noactivate") { WS_POPUP } else { WS_POPUP | WS_VISIBLE };
+        let hwnd = CreateWindowExW(ex, w!("remoteman-vrr-probe"), w!("remoteman variable refresh probe"), style, 0, 0, w, h, owner, None, Some(instance.into()), None).context("the probe's window")?;
+        if has("noactivate") {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        say!("probe: variations {how:?}");
         let factory: IDXGIFactory2 = gpu.device.cast::<IDXGIDevice>()?.GetAdapter()?.GetParent()?;
         let tears = crate::draw::tearing_supported(gpu);
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: w as u32,
             Height: h as u32,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Format: if has("10bit") { DXGI_FORMAT_R10G10B10A2_UNORM } else { DXGI_FORMAT_B8G8R8A8_UNORM },
             SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
             BufferCount: 2,
@@ -50,6 +67,10 @@ pub fn run(gpu: &crate::gpu::Gpu, seconds: u64) -> Result<()> {
             ..Default::default()
         };
         let swap = factory.CreateSwapChainForHwnd(&gpu.device, hwnd, &desc, None, None).context("an HWND swap chain")?;
+        if has("pq") {
+            let s3: IDXGISwapChain3 = swap.cast()?;
+            s3.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020).context("PQ")?;
+        }
         let _ = factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
         let back: ID3D11Texture2D = swap.GetBuffer(0)?;
         let mut target = None;
@@ -89,6 +110,9 @@ pub fn run(gpu: &crate::gpu::Gpu, seconds: u64) -> Result<()> {
         scene.quit.store(true, Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(200));
         let _ = DestroyWindow(hwnd);
+        if let Some(owner) = owner {
+            let _ = DestroyWindow(owner);
+        }
         Ok(())
     }
 }
