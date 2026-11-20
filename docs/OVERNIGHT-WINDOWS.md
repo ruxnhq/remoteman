@@ -38,7 +38,7 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 ### Windows host
 | Item | State |
 |---|---|
-| Mirroring the PC's own screens | not started |
+| Mirroring the PC's own screens | in work |
 | HDR mastering and light-level metadata; HEVC 4:4:4 in HDR | not started |
 | The driver unplugs a device's monitor when it leaves (`DESTROYMONITOR`) | not started (build only) |
 | A display scale for the device's monitor | not started |
@@ -49,8 +49,8 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 ### Every host (the shared core, `remoteman-core`)
 | Item | State |
 |---|---|
-| Bitrate following the network | not started |
-| Parity for lost fragments | not started |
+| Bitrate following the network | in work |
+| Parity for lost fragments | in work |
 | Static refinement of a still picture | not started |
 | Per-device permissions, view-only | not started |
 | A log of connections, and a notice | not started |
@@ -60,6 +60,16 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 | More than one viewer at once | not started |
 
 ### Apple (the Mac session)
-Asked at 03:35 PST: the Mac host's loss recovery without a keyframe; the Mac and iPad viewers
-presenting each frame as it arrives; the Mac viewer's HDR menu item; Apple Pencil (a pen event in
-the protocol, the Windows host injecting it). Its share of the budget: about 5 points.
+Asked at 03:35 PST; its share of the budget about 5 points. Its answer:
+- The Mac host's loss recovery without a keyframe (long-term references): **left as measured**.
+  VideoToolbox gives them only under its low-latency rate control, which costs 5.7-15 ms on
+  every frame to save a keyframe on the rare loss; parity covers loss more cheaply.
+- The Mac and iPad viewers presenting each frame as it arrives: **built and measured earlier,
+  no faster** (iPad median 15.0 against 14.3 ms); the next idea (CAMetalDisplayLink) was put
+  "later" by the owner (docs/OVERNIGHT-APPLE.md).
+- The Mac viewer's HDR menu item: **done** on `apple/phase1-client` (6b1e619).
+- Apple Pencil: its proposed format (feature `pen`, input event 9: phase, buttons, x, y,
+  pressure, tilt x and y, twist) goes into PROTOCOL.md and the core here; the Mac host can post
+  tablet events once the core has it; the Windows host injects it as pen input.
+- Also on its list: a quick reconnect refused after 15 s, and a harmless error after resizes
+  (Mac host).
