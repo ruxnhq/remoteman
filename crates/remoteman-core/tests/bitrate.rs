@@ -43,7 +43,7 @@ impl Handler for Screen {
     fn closed(&mut self, _reason: &str) {}
 }
 
-/// A client that throws away every other datagram it gets, so that frames of several datagrams
+/// A client that throws away every third datagram it gets, so that frames of several datagrams
 /// are given up (parity can mend one lost datagram of a group, not two).
 fn run(follows: bool) -> (Vec<u32>, Vec<Option<u32>>) {
     let dir = std::env::temp_dir().join(format!("remoteman-bitrate-{follows}-{}", std::process::id()));
@@ -60,7 +60,7 @@ fn run(follows: bool) -> (Vec<u32>, Vec<Option<u32>>) {
             pair: true,
             display: Display { width: 640, height: 480, scale: 1.0, refresh: 60, placement: Default::default(), hdr: false, headroom: 0.0 },
             decoders: vec![MODE],
-            test_drop_one_in: Some(2),
+            test_drop_one_in: Some(3),
             test_delay_lost_ms: None,
             cursor: false,
             unlock: None,
