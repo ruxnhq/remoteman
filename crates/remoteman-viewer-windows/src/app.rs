@@ -252,6 +252,13 @@ impl Session {
     pub fn offers(&self, feature: &str) -> bool {
         self.features.iter().any(|f| f == feature)
     }
+
+    /// The computer left `input` out of what it offers this device: the owner allows it to see
+    /// the screen and nothing more. Nothing is sent to control it then (a made-up or played
+    /// session has no computer and is never view-only).
+    pub fn view_only(&self) -> bool {
+        self.client.is_some() && !self.offers("input")
+    }
 }
 
 /// A password on its way to a locked computer.
@@ -478,6 +485,16 @@ impl App {
 
     pub fn client(&self) -> Option<&Arc<Client>> {
         self.session.as_ref().and_then(|s| s.client.as_ref())
+    }
+
+    /// The client to send input to: none when the computer allows this device to view only.
+    pub fn input_client(&self) -> Option<&Arc<Client>> {
+        if self.session.as_ref().is_some_and(|s| s.view_only()) { None } else { self.client() }
+    }
+
+    /// The session is view only (see [`Session::view_only`]).
+    pub fn view_only(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.view_only())
     }
 
     /// The session's bar is not part of the window but comes out over the picture.
@@ -953,6 +970,16 @@ impl App {
         if s.clipboard_on && !s.offers("clipboard") {
             s.clipboard_on = false;
         }
+        let (mic, camera) = (s.mic_on && !s.offers("mic"), s.camera_on && !s.offers("camera"));
+        // The window says whether this device may control the computer.
+        let title = format!("{}{} - remoteman", s.target.name, if s.view_only() { " (view only)" } else { "" });
+        if mic {
+            self.set_microphone(false);
+        }
+        if camera {
+            self.set_camera(false);
+        }
+        self.effects.push(Effect::Title(title));
     }
 
     /// Play the computer's sound here, or stop.
@@ -1222,7 +1249,8 @@ impl App {
         *self.scene.session.lock().unwrap() = Some(s.shared.clone());
         self.scene.poke();
         self.effects.push(Effect::ForgetCursor);
-        self.effects.push(Effect::Title(format!("{name} - remoteman")));
+        let view_only = self.session.as_ref().is_some_and(|s| s.view_only());
+        self.effects.push(Effect::Title(format!("{name}{} - remoteman", if view_only { " (view only)" } else { "" })));
         // Room for the picture, if the list's window was small.
         if !self.maximised && !self.fullscreen && self.args.host.is_none() && (self.size.0 < 1224.0 || self.size.1 < 744.0) && self.front_size.is_none() {
             self.front_size = Some(self.size);
@@ -1466,7 +1494,7 @@ impl App {
             Msg::Disconnect => self.stop(None),
             Msg::SendKeys(codes) => {
                 self.menu = None;
-                if let Some(client) = self.client() {
+                if let Some(client) = self.input_client() {
                     let usages: Vec<u16> = codes.iter().filter_map(|c| keys::linux_to_hid(*c)).collect();
                     for usage in &usages {
                         client.send(Event::Key { usage: *usage, down: true });

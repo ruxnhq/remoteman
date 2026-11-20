@@ -282,6 +282,8 @@ enum Call {
 struct State {
     perms: PermissionStore,
     log: ConnectionLog,
+    /// Called, on the handler's thread, with each notice (see [`Host::set_notice_hook`]).
+    notice: Mutex<Option<Box<dyn FnMut(&ConnectionEvent) + Send>>>,
 }
 
 /// What the device being served may do, asked again at each use so a change applies at once.
@@ -454,9 +456,10 @@ impl Host {
         let (done, handler_done) = mpsc::channel::<()>();
         let link: Arc<Mutex<Option<Link>>> = Arc::default();
         let hook: Arc<Mutex<Option<BitrateHook>>> = Arc::default();
-        let (thread_link, thread_hook) = (link.clone(), hook.clone());
+        let state = Arc::new(State { perms: PermissionStore::load(&options.state.join("host/permissions.json")), log: ConnectionLog::open(&options.state.join("connections.log")), notice: Mutex::default() });
+        let (thread_link, thread_hook, thread_state) = (link.clone(), hook.clone(), state.clone());
         std::thread::Builder::new().name("remoteman host".into()).spawn(move || {
-            let (link, hook) = (thread_link, thread_hook);
+            let (link, hook, state) = (thread_link, thread_hook, thread_state);
             let clock = Instant::now();
             let mut follow = Follow::default();
             loop {
@@ -497,7 +500,12 @@ impl Host {
                         handler.blob(&event);
                         drop(held);
                     }
-                    Call::Notice(event) => handler.notice(&event),
+                    Call::Notice(event) => {
+                        handler.notice(&event);
+                        if let Some(f) = state.notice.lock().unwrap().as_mut() {
+                            f(&event);
+                        }
+                    }
                     Call::Left => {
                         handler.left();
                         follow = Follow::default();
@@ -515,7 +523,6 @@ impl Host {
         let who = Who::default();
         let features = Arc::new(Mutex::new(with_parity(options.features.clone())));
         let confirm = Arc::new(Confirm { own: identity.fingerprint.clone(), ..Confirm::default() });
-        let state = Arc::new(State { perms: PermissionStore::load(&options.state.join("host/permissions.json")), log: ConnectionLog::open(&options.state.join("connections.log")) });
         runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone(), confirm.clone(), state.clone()));
         Ok(Self { confirm, runtime: Some(runtime), endpoint, trust, link, hook, who, features, state, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
     }
@@ -600,6 +607,18 @@ impl Host {
             }
         }
         Ok(())
+    }
+
+    /// For a host program whose handler doesn't implement [`HostHandler::notice`] (the C
+    /// interface): `notice` is called, on the handler's thread, with each event the handler's
+    /// own `notice` would get.
+    pub fn set_notice_hook(&self, notice: impl FnMut(&ConnectionEvent) + Send + 'static) {
+        *self.state.notice.lock().unwrap() = Some(Box::new(notice));
+    }
+
+    /// Take the hook of [`Self::set_notice_hook`] away.
+    pub fn clear_notice_hook(&self) {
+        *self.state.notice.lock().unwrap() = None;
     }
 
     /// The last `n` lines of the connection log, oldest first.

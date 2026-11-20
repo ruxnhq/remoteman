@@ -47,6 +47,8 @@ pub fn pill(v: &Viewer, context: &ViewContext<Viewer>) -> View {
             StackPanel::new().orientation(Orientation::Horizontal).spacing(10.0).vertical_alignment(VerticalAlignment::Center).children((
                 kit::strong(s.s("name")).text_trimming(TextTrimming::CharacterEllipsis).vertical_alignment(VerticalAlignment::Center),
                 caption(&format).vertical_alignment(VerticalAlignment::Center),
+                // The computer allows this device to see the screen and nothing more.
+                caption(if s.b("view_only") { "View only" } else { "" }).vertical_alignment(VerticalAlignment::Center),
             )),
         );
     let menus = context.callback(Msg::Menu);
@@ -83,7 +85,7 @@ pub fn pill(v: &Viewer, context: &ViewContext<Viewer>) -> View {
     let more = kit::square(glyph::MORE, "More", None).menu(Menu::new(more_menu(st), menus.clone()));
     let full = kit::square(glyph::FULL_SCREEN, "Full screen (F11)", Some(act(context, "fullscreen", Value::Null))).tooltip("Full screen (F11)");
     let off = kit::button("Disconnect", act(context, "disconnect", Value::Null), false, Some(glyph::CLOSE));
-    let keys = drop_down(glyph::KEYBOARD, "Send keys").menu(Menu::new(keys_menu(st), menus.clone()));
+    let keys = drop_down(glyph::KEYBOARD, "Send keys").is_enabled(!s.b("view_only")).menu(Menu::new(keys_menu(st), menus.clone()));
     let display = drop_down(glyph::DISPLAY, "Display").menu(Menu::new(display_menu(st), menus.clone()));
     let picture = drop_down(glyph::PICTURE, "Picture").flyout_with(Flyout::rich(picture_flyout(st, context)).placement(FlyoutPlacement::Bottom));
     let window_button = |g: &str, name: &'static str, what: &'static str| -> View {

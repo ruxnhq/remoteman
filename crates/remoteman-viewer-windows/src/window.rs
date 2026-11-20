@@ -694,7 +694,7 @@ impl Win {
     // To the other computer.
 
     fn send(&self, event: Event) {
-        if let Some(Some(client)) = self.ask(|app| app.client().cloned()) {
+        if let Some(Some(client)) = self.ask(|app| app.input_client().cloned()) {
             client.send(event);
         }
     }
