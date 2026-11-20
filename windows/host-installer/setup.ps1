@@ -280,9 +280,9 @@ function Steam-Folder {
 }
 
 function Steam-Device([string]$id) {
-  Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {
-    (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_HardwareIds -ErrorAction SilentlyContinue).Data -contains $id
-  } | Select-Object -First 1
+  # The hardware ids come with the device list (Win32_PnPEntity's HardwareID): asking each device
+  # for its property instead took minutes on a PC with 300 devices (2026-11-20).
+  Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains $id } | Select-Object -First 1
 }
 
 function Steam-InStore([string]$inf) { ((& pnputil.exe /enum-drivers) -join "`n") -match "(?im)^\s*Original Name:\s*$([regex]::Escape($inf))\s*$" }
