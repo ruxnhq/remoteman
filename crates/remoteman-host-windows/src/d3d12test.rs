@@ -19,6 +19,9 @@ use crate::convert::{Converter, Input, Output};
 use crate::d3d12enc::Encoder;
 use crate::encode::Settings;
 
+/// The tests share one folder for their streams and one encoder's worth of the card: one at a time.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const W: u32 = 1920;
 const H: u32 = 1080;
 const FPS: u32 = 60;
@@ -221,6 +224,7 @@ fn stats(label: &str, frames: &[Frame], bitrate: u32) {
 
 #[test]
 fn plain_stream() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let Some((gpu, dir, keep)) = setup() else { return eprintln!("no GPU: skipped") };
     let srcp = dir.join("src.p010");
     let mut w = std::io::BufWriter::new(std::fs::File::create(&srcp).unwrap());
@@ -244,6 +248,7 @@ fn plain_stream() {
 
 #[test]
 fn live_rate_change() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let Some((gpu, dir, keep)) = setup() else { return eprintln!("no GPU: skipped") };
     let (frames, _) = match run(&gpu, 120, 20_000_000, |_| None, |f| (f == 60).then_some(5_000_000), None) {
         Ok(x) => x,
@@ -266,6 +271,7 @@ fn live_rate_change() {
 
 #[test]
 fn recovery_without_a_keyframe() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let Some((gpu, dir, keep)) = setup() else { return eprintln!("no GPU: skipped") };
     // Frames 60 to 62 are lost; the report reaches the host before frame 63.
     let (frames, _) = match run(&gpu, 120, 20_000_000, |f| (f == 63).then_some((60, 62)), |_| None, None) {
