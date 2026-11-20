@@ -57,6 +57,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var bitrate = 0
         /// Fill the virtual display with moving test content while a client is on.
         var testWindow = false
+        var testPen = false
         /// Offer this Mac's sound (--sound no leaves it out).
         var sound = true
         /// Silence this Mac's own speakers while a device plays its sound, so that it is heard in
@@ -986,6 +987,20 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.stats() }
         if cursorApart { startCursor() }
         if options.testWindow { testWindow.show(on: id) }
+        // For testing the pen without a device that sends one: a stroke across the middle, pressing
+        // harder and tilting as it goes.
+        if options.testPen {
+            for i in 0...40 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5 + Double(i) * 0.02) { [self] in
+                    // Where the display is now: a new display is moved beside the others after it appears.
+                    let b = CGDisplayBounds(id)
+                    let f = Float(i) / 40
+                    let p = CGPoint(x: b.minX + b.width * CGFloat(0.3 + 0.4 * f), y: b.midY)
+                    input.pen(phase: i == 0 ? 0 : i == 40 ? 2 : 1, buttons: 0, at: p, pressure: 0.1 + 0.8 * f, tiltX: 30 * f, tiltY: -20 * f, twist: 90 * f)
+                    if i == 40 { input.pen(phase: 4, buttons: 0, at: p, pressure: 0, tiltX: 0, tiltY: 0, twist: 0) }
+                }
+            }
+        }
         firstFrame(d, width: width, height: height, cursorApart: cursorApart, gen: gen)
         hostLog("host: sending \(width)×\(height) at \(fps) Hz, HEVC \(options.tenBit ? "Main10" : "Main (8-bit)") 4:2:0\(hdr ? " HDR (BT.2020, PQ)" : ""), \(bitrate / 1000) kbit/s, capture \(options.tenBit ? options.capture : "420v"), cursor \(cursorApart ? "apart" : "in the picture"), \(width * height * fps / 1_000_000) megapixels a second")
         return nil

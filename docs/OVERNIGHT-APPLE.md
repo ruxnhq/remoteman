@@ -119,6 +119,14 @@ own so that it can't collide with the main session's edits to `docs/PLAN.md`.
 
 ## Mac host, open (2026-11-19 night)
 
+- Pen (Apple Pencil) on the Mac host: written, not yet proven. `HostInput.pen` posts a tablet
+  proximity event and then mouse events with the tablet-point subtype carrying pressure, tilt and
+  rotation; `--test-pen yes` draws a stroke into the test window, which logs what it receives. The
+  only run came while the Mac was locked, so the lock screen took the events. To run with the Mac
+  unlocked; the core's input type 9 (agreed with the main session) is still to come.
+- Picture size, tested on loopback: "Up to 1440 lines" turns a 3840×2160 at 1.25 hello into
+  2560×1440 at 0.83, "Up to 1080 lines" into 1920×1080 at 0.625.
+
 - A quick reconnect was refused once: the Windows viewer's new connection came the same
   millisecond its old one left (21:20:47), and the host gave up after 15 s ("starting the display
   timed out"); its next try worked. Not reproduced: seven back-to-back 4K HDR sessions on loopback,

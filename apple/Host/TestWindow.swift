@@ -18,6 +18,12 @@ private final class TestView: NSView {
         note("left down", e)
     }
     override func mouseUp(with e: NSEvent) { note("left up", e) }
+    override func mouseDragged(with e: NSEvent) {
+        guard e.subtype == .tabletPoint else { return }
+        let p = convert(e.locationInWindow, from: nil)
+        hostLog(String(format: "test window: pen at %.3f, %.3f pressure %.2f tilt %.2f, %.2f rotation %.0f", p.x / bounds.width, 1 - p.y / bounds.height, e.pressure, e.tilt.x, e.tilt.y, e.rotation))
+    }
+    override func tabletProximity(with e: NSEvent) { hostLog("test window: pen \(e.isEnteringProximity ? "near" : "gone"), \(e.pointingDeviceType == .eraser ? "eraser" : "pen")") }
     override func rightMouseDown(with e: NSEvent) { note("right down", e) }
     override func scrollWheel(with e: NSEvent) { hostLog(String(format: "test window: scroll %.1f, %.1f", e.scrollingDeltaX, e.scrollingDeltaY)) }
     override func keyDown(with e: NSEvent) { hostLog("test window: key down code \(e.keyCode) characters \"\(e.characters ?? "")\" flags \(e.modifierFlags.intersection(.deviceIndependentFlagsMask).rawValue)") }

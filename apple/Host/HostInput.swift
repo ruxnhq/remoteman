@@ -173,6 +173,63 @@ final class HostInput {
         }
     }
 
+    // MARK: Pen (input type 9, when the core has it)
+
+    /// The pen is in range of the device's screen (hovering or touching).
+    private var penNear = false
+
+    /// A pen event: phase 0 down, 1 move in contact, 2 up, 3 hover move, 4 left range. Pressure 0 to 1;
+    /// tilt in degrees (−90 to 90, x to the right, y towards the user); twist in degrees.
+    /// macOS takes it as mouse events carrying tablet fields, after a proximity event that says a
+    /// pen has come near; programs that know tablets read pressure and tilt from them.
+    func pen(phase: UInt8, buttons: UInt8, at p: CGPoint, pressure: Float, tiltX: Float, tiltY: Float, twist: Float) {
+        queue.async { [self] in
+            if phase != 4, !penNear {
+                proximity(true, eraser: buttons & 2 != 0)
+                penNear = true
+            }
+            let type: CGEventType
+            switch phase {
+            case 0: type = .leftMouseDown
+            case 1: type = .leftMouseDragged
+            case 2: type = .leftMouseUp
+            case 3: type = .mouseMoved
+            default:
+                if penNear { proximity(false, eraser: false) }
+                penNear = false
+                return
+            }
+            if phase == 0 { if !pressed.contains(.left) { pressed.append(.left) } }
+            if phase == 2 { pressed.removeAll { $0 == .left } }
+            last = p
+            movedAt = ProcessInfo.processInfo.systemUptime
+            guard let e = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: p, mouseButton: .left) else {
+                return hostLog("pen: no event for phase \(phase)")
+            }
+            e.setIntegerValueField(.mouseEventSubtype, value: Int64(CGEventMouseSubtype.tabletPoint.rawValue))
+            e.setDoubleValueField(.mouseEventPressure, value: Double(phase == 2 || phase == 3 ? 0 : pressure))
+            e.setDoubleValueField(.tabletEventPointPressure, value: Double(phase == 2 || phase == 3 ? 0 : pressure))
+            // Tilt as macOS has it: −1 to 1 for −90 to 90 degrees.
+            e.setDoubleValueField(.tabletEventTiltX, value: Double(max(-90, min(90, tiltX)) / 90))
+            e.setDoubleValueField(.tabletEventTiltY, value: Double(max(-90, min(90, tiltY)) / 90))
+            e.setDoubleValueField(.tabletEventRotation, value: Double(twist))
+            e.setIntegerValueField(.tabletEventPointButtons, value: Int64(phase == 0 || phase == 1 ? 1 : 0) | Int64(buttons & 1 != 0 ? 2 : 0))
+            e.setIntegerValueField(.tabletEventDeviceID, value: 1)
+            post(e)
+        }
+    }
+
+    private func proximity(_ near: Bool, eraser: Bool) {
+        guard let e = CGEvent(source: source) else { return }
+        e.type = .tabletProximity
+        e.setIntegerValueField(.tabletProximityEventEnterProximity, value: near ? 1 : 0)
+        e.setIntegerValueField(.tabletProximityEventDeviceID, value: 1)
+        e.setIntegerValueField(.tabletProximityEventPointerType, value: eraser ? 3 : 1)  // 1 pen, 3 eraser
+        e.setIntegerValueField(.tabletProximityEventCapabilityMask, value: 0x0400 | 0x0040 | 0x0020 | 0x0080)  // pressure, tilt x/y, rotation
+        e.setIntegerValueField(.tabletProximityEventSystemTabletID, value: 1)
+        post(e)
+    }
+
     private func move(to p: CGPoint) {
         last = p
         movedAt = ProcessInfo.processInfo.systemUptime
