@@ -38,7 +38,7 @@ thread_local! {
 }
 
 /// The bar window's size, in the app's units.
-const BAR_WIDTH: f64 = 1030.0;
+const BAR_WIDTH: f64 = 1180.0;
 const BAR_HEIGHT: f64 = 44.0;
 
 fn tell_bar(m: Msg) {
