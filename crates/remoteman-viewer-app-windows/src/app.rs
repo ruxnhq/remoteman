@@ -246,7 +246,9 @@ impl Component for Viewer {
                 if let Some(w) = &mut self.walk {
                     if !step.is_empty() && step != w.1 {
                         w.1 = step.clone();
-                        self.command(&cmd("walk", json!({"step": step})), context);
+                        // A step's name, or an engine command as JSON (`{"do": "fullscreen"}`).
+                        let v = if step.starts_with('{') { serde_json::from_str(&step).unwrap_or(Value::Null) } else { cmd("walk", json!({"step": step})) };
+                        self.command(&v, context);
                     }
                 }
                 if let Some(w) = &mut self.walk {

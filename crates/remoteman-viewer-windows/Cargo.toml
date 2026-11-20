@@ -5,13 +5,13 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# remoteman for Windows: a Win32 window and Direct3D 11 on the shared core. Everything it needs
+# The Windows viewer's engine, and the old program on it (remoteman-windows.exe: a Win32 window
+# with an interface drawn by itself, Direct3D 11 on the shared core; kept for its tests,
+# --vrr-probe among them). The app people use is crates/remoteman-viewer-app-windows (WinUI 3
+# through windows-reactor), which links the engine and ships as remoteman.exe. Everything here
 # is Windows-only, so on other systems the crate is an empty program and the workspace builds as
-# before.
-# Not "remoteman": the Linux viewer's program has that name, and Cargo refuses two programs of
-# one name in a workspace build (on Linux both would land in target/release, the empty one
-# perhaps on top of the real one). The app ships as remoteman.exe (decided 2026-11-18): whatever
-# packages it copies remoteman-windows.exe to that name, as the tests in the VM do.
+# before. Not "remoteman": the Linux viewer's program has that name, and Cargo refuses two
+# programs of one name in a workspace build.
 # The engine behind the app (crates/remoteman-viewer-app-windows, WinUI 3 through
 # windows-reactor), which links it as a Rust library: sessions, decode, presentation, input,
 # sound, clipboard, files, the store, behind the interface in src/engine.rs. On other systems

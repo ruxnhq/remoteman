@@ -1153,6 +1153,14 @@ impl Engine {
                 say!("walk: {}", s("step"));
                 return true;
             }
+            // For tests too: a picture of what the draw thread shows now (the picture and, in
+            // full screen, the bar over it), saved once it has drawn the window as it now is.
+            "shot" if app.args.ui.is_some() => {
+                let serial = app.build();
+                *app.scene.shot.lock().unwrap() = Some((s("path").into(), serial));
+                app.scene.poke();
+                return true;
+            }
             other => {
                 say!("a command nobody knows: {other}");
                 return false;

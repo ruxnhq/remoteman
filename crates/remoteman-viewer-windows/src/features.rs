@@ -53,7 +53,7 @@ pub struct Features {
     pub ctrl_as_command: bool,
     /// A choice of scroll direction.
     pub scroll_direction: bool,
-    /// Touchscreen touches sent as touches (`touch.rs`, `remoteman_touch`).
+    /// Touchscreen touches sent as touches (`touch.rs`, `engine::touch`).
     pub touch: bool,
     /// Alt+Tab, the Windows key and the like sent to the other computer.
     pub system_shortcuts: bool,

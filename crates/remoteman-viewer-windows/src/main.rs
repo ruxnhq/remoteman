@@ -84,7 +84,7 @@ mod sound;
 #[cfg(windows)]
 mod status;
 #[cfg(windows)]
-#[allow(dead_code)] // The engine's alone (`remoteman_touch`).
+#[allow(dead_code)] // The engine's alone (`engine::touch`).
 mod touch;
 #[cfg(windows)]
 mod store;
