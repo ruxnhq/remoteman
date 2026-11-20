@@ -32,7 +32,7 @@ use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateMutexW, GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
     QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
 };
-use windows::Win32::UI::Shell::{FOLDERID_CommonPrograms, FOLDERID_ProgramFiles, IShellLinkW, KF_FLAG_DEFAULT, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SHGetKnownFolderPath, ShellExecuteExW, ShellLink};
+use windows::Win32::UI::Shell::{FOLDERID_CommonPrograms, FOLDERID_ProgramFiles, IShellLinkW, KF_FLAG_DEFAULT, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NOZONECHECKS, SHELLEXECUTEINFOW, SHGetKnownFolderPath, ShellExecuteExW, ShellLink};
 use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW, SW_SHOWNORMAL};
 use windows::core::{GUID, HSTRING, Interface, PCWSTR, PWSTR, w};
 
@@ -256,13 +256,15 @@ impl Drop for OwnedProcess {
     }
 }
 
-/// Starts `exe` through the shell: `runas` asks for elevation (the UAC prompt), `open` doesn't.
+/// Starts `exe`, this program's own file (or its copy), again through the shell: `runas` asks
+/// for elevation (the UAC prompt), `open` doesn't. With no zone check: a downloaded file the
+/// user has just opened would otherwise be asked about a second time, before the UAC prompt.
 pub fn shell_start(exe: &Path, args: &[String], verb: &str, dir: &Path) -> io::Result<Launched> {
     let params = args.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ");
     let (verb, file, params, dir) = (HSTRING::from(verb), HSTRING::from(exe.as_os_str()), HSTRING::from(params), HSTRING::from(dir.as_os_str()));
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_NOZONECHECKS,
         lpVerb: PCWSTR(verb.as_ptr()),
         lpFile: PCWSTR(file.as_ptr()),
         lpParameters: PCWSTR(params.as_ptr()),

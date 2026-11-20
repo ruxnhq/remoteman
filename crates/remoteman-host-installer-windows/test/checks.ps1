@@ -118,4 +118,8 @@ foreach ($case in @(@{ d = $with; name = 'with' }, @{ d = $without; name = 'with
   Ui-Say ("   exit code {0}; its log: {1}" -f $q.ExitCode, ((Get-Content $l -ErrorAction SilentlyContinue) -join ' | '))
   if ($case.name -eq 'with') { Check $opened "a copy of the pages' folder opens the window" } else { Check (-not $opened) "without Microsoft.ui.xaml.dll the window doesn't open" }
 }
+# Tidy up: the copies of the pages' folder, the dry run's folder, and what the uninstaller moved
+# out of its folder into %TEMP% (deleted at restart only when it is elevated).
+Remove-Item -Recurse -Force $with, $without -ErrorAction SilentlyContinue
+Get-ChildItem $env:TEMP -Directory -Filter 'remoteman-host-setup-*' | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Ui-Say "checks done"

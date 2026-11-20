@@ -139,12 +139,16 @@ pub fn plan(ctx: &Ctx, facts: &Facts) -> Vec<StepInfo> {
         Mode::Install => {
             let mut steps = vec![
                 step(StepId::Stop, "The running host", if facts.app_installed { "Stopped first, with Remoteman Host, so that their files can be replaced" } else { "Stopped first, so that its files can be replaced" }),
-                step(StepId::Files, "Files", &format!("Into {dir}")),
                 step(
                     StepId::Register,
                     "Settings > Apps",
-                    if facts.installed.as_ref().is_some_and(|i| i.inno) { "An entry to remove it again, in place of the earlier installer's" } else { "An entry to remove it again" },
+                    if facts.installed.as_ref().is_some_and(|i| i.inno) {
+                        "An entry to remove it again, in place of the earlier installer's: first, so that whatever happens next can be undone"
+                    } else {
+                        "An entry to remove it again: first, so that whatever happens next can be undone"
+                    },
                 ),
+                step(StepId::Files, "Files", &format!("Into {dir}")),
                 step(StepId::Setup, "Driver, firewall and service", "setup.ps1 signs remoteman's display driver with a certificate made on this PC, lets in UDP port 7791, and starts the service"),
             ];
             if facts.has_app {
@@ -334,18 +338,14 @@ impl Run<'_> {
         })
     }
 
+    /// The files to install, over what is there.
     fn files(&mut self) -> StepResult {
         let archive = Archive::open(&self.ctx.source).map_err(|e| e.to_string())?;
         let dir = self.ctx.dir.clone();
         if self.ctx.dry_run {
             self.would(&format!("copy the files into {} (they are unpacked into {} instead)", self.ctx.real_dir.display(), dir.display()));
-            // A dry run starts from an empty folder of its own.
-            let _ = std::fs::remove_dir_all(&dir);
         }
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        log::also(Some(dir.join("setup.log")));
-        self.setup_log = true;
-        log::say(&format!("remoteman host setup {}: the files into {}", archive.index.version, dir.display()));
 
         // Remoteman Host's folder holds only this version's files: what an earlier one had and
         // this one doesn't is deleted (the rest of the install folder is left, installed.json
@@ -376,8 +376,6 @@ impl Run<'_> {
                 }
             })
             .map_err(|e| e.to_string())?;
-        let uninstaller = dir.join("uninstall.exe");
-        archive.write_uninstaller(&uninstaller).map_err(|e| format!("{}: {e}", uninstaller.display()))?;
         // Read back: every file there, its size and SHA-256 those of the index.
         self.detail(StepId::Files, "Checking each file");
         let mut bytes = 0u64;
@@ -388,18 +386,35 @@ impl Run<'_> {
             }
             bytes += size;
         }
-        let check = Archive::open(&uninstaller).map_err(|e| format!("the uninstaller: {e}"))?;
-        if check.index.ui.len() != archive.index.ui.len() {
-            return Err("the uninstaller is incomplete".into());
-        }
-        let line = format!("{} files, {:.1} MB, each checked; and uninstall.exe", unpacked.len(), bytes as f64 / 1_048_576.0);
+        let line = format!("{} files, {:.1} MB, each checked", unpacked.len(), bytes as f64 / 1_048_576.0);
         log::say(&format!("  {line}"));
         Ok(("Copied".into(), Some(line)))
     }
 
+    /// The first change: the install folder, the uninstaller in it and the Settings > Apps
+    /// entry, so that whatever fails after this, what is there can be taken away again.
     fn register(&mut self) -> StepResult {
+        let archive = Archive::open(&self.ctx.source).map_err(|e| e.to_string())?;
+        let dir = self.ctx.dir.clone();
+        if self.ctx.dry_run {
+            // A dry run starts from an empty folder of its own.
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        log::also(Some(dir.join("setup.log")));
+        self.setup_log = true;
+        log::say(&format!("remoteman host setup {} into {}", archive.index.version, dir.display()));
+        let written = dir.join("uninstall.exe");
+        archive.write_uninstaller(&written).map_err(|e| format!("{}: {e}", written.display()))?;
+        let check = Archive::open(&written).map_err(|e| format!("the uninstaller: {e}"))?;
+        if check.index.ui.len() != archive.index.ui.len() {
+            return Err("the uninstaller is incomplete".into());
+        }
+
         let real = &self.ctx.real_dir;
-        let size_kb = walk(&self.ctx.dir).iter().filter_map(|f| f.metadata().ok()).map(|m| m.len()).sum::<u64>() / 1024;
+        let sizes: std::collections::HashMap<&str, u64> = archive.index.streams.iter().flat_map(|s| &s.blobs).map(|b| (b.sha256.as_str(), b.size)).collect();
+        let payload: u64 = archive.index.payload.iter().filter_map(|e| sizes.get(e.sha256.as_str())).sum();
+        let size_kb = (payload + std::fs::metadata(&written).map(|m| m.len()).unwrap_or(0)) / 1024;
         let uninstaller = real.join("uninstall.exe");
         let strings = [
             ("DisplayName", "remoteman host".to_string()),
@@ -453,7 +468,10 @@ impl Run<'_> {
                 }
             }
         }
-        Ok(("Added".into(), took_over.then(|| "In place of the earlier installer's entry, whose uninstaller is gone".to_string())))
+        Ok((
+            "Added".into(),
+            Some(if took_over { "uninstall.exe and the entry, in place of the earlier installer's, whose uninstaller is gone" } else { "uninstall.exe and the entry" }.to_string()),
+        ))
     }
 
     /// setup.ps1 install or uninstall, as the Inno installer ran it: hidden PowerShell,
@@ -518,10 +536,12 @@ impl Run<'_> {
         });
         let started = Instant::now();
         let code = loop {
-            for line in new_lines(&setup_log, &mut from) {
+            let ended = child.try_wait();
+            // Its lines so far (after it ended: its last ones too).
+            for line in new_lines(&setup_log, &mut from).into_iter().filter(|l| !ours(l)) {
                 self.detail(id, strip_stamp(&line));
             }
-            if let Ok(Some(status)) = child.try_wait() {
+            if let Ok(Some(status)) = ended {
                 break status.code().unwrap_or(1);
             }
             if started.elapsed() > Duration::from_secs(15 * 60) {
@@ -533,12 +553,13 @@ impl Run<'_> {
         for r in readers {
             output.push_str(&r.join().unwrap_or_default());
         }
+        // setup.ps1's last line, read before this program writes to setup.log again (and its
+        // own lines there are passed over in any case).
+        let reason = last_reason(&setup_log);
         let output = output.trim();
         if !output.is_empty() {
             log::say(&format!("  PowerShell said: {output}"));
         }
-        // The last line, read before this program writes again.
-        let reason = last_reason(&setup_log);
         if code == 0 {
             return Ok((if verb == "install" { "Installed" } else { "Removed" }.into(), None));
         }
@@ -621,10 +642,10 @@ impl Run<'_> {
         // and when Windows restarts.
         let trash = system::private_dir(!self.ctx.dry_run).ok();
         let removed = system::remove_dir(&dir, trash.as_deref()).map_err(|e| e.to_string());
-        if let Some(trash) = &trash {
-            if std::fs::remove_dir(trash).is_err() {
-                let _ = system::delete_at_restart(trash);
-            }
+        if let Some(trash) = &trash
+            && std::fs::remove_dir(trash).is_err()
+        {
+            let _ = system::delete_at_restart(trash);
         }
         let removed = removed?;
         self.at_restart = removed.at_restart.len();
@@ -705,18 +726,136 @@ fn strip_stamp(line: &str) -> String {
     rest.strip_prefix("setup.exe: ").unwrap_or(rest).to_string()
 }
 
-/// setup.ps1's reason for failing: the last line of setup.log, without its time and "FAILED:".
+/// A line this program wrote to setup.log (log.rs marks them), not setup.ps1.
+fn ours(line: &str) -> bool {
+    line.split_once(' ').is_some_and(|(_, rest)| rest.starts_with("setup.exe: "))
+}
+
+/// setup.ps1's reason for failing: its last line in setup.log, without its time and "FAILED:".
 fn last_reason(file: &Path) -> Option<String> {
     let text = std::fs::read(file).ok()?;
     let text = String::from_utf8_lossy(&text);
-    let last = text.lines().rev().find(|l| !l.trim().is_empty())?;
-    let line = strip_stamp(last.trim());
+    let last = text.lines().map(str::trim).rev().find(|l| !l.is_empty() && !ours(l))?;
+    let line = strip_stamp(last);
     Some(line.strip_prefix("FAILED: ").unwrap_or(&line).to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tests that set log.rs's global (the install folder's setup.log) one at a time.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A new, empty folder for a test, standing in for the install folder.
+    fn folder(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rm-engine-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Not a dry run: what only a real install runs, in a folder of the test's own.
+    fn real_in(dir: &Path, source: PathBuf) -> Ctx {
+        Ctx { mode: Mode::Install, dry_run: false, fail_at: None, source, real_dir: dir.to_path_buf(), dir: dir.to_path_buf() }
+    }
+
+    fn facts() -> Facts {
+        Facts { version: "9.9.9".into(), has_app: true, installed: None, app_installed: false }
+    }
+
+    /// setup.ps1 as the installer runs it (hidden PowerShell, -ExecutionPolicy Bypass, in the
+    /// folder), with a stand-in that writes to setup.log as the real one does, prints a warning
+    /// and some output, and fails: the reason is its FAILED line, though this program writes to
+    /// setup.log too; its lines are shown as they come; exit 0 is done.
+    #[test]
+    fn setup_ps1_is_run_and_its_reason_read() {
+        let _serial = SERIAL.lock().unwrap();
+        let dir = folder("setup");
+        std::fs::write(
+            dir.join("setup.ps1"),
+            "param([string]$Verb)\r\n\
+             $log = Join-Path $PSScriptRoot 'setup.log'\r\n\
+             function Say([string]$l) { Add-Content -Path $log -Value \"$(Get-Date -Format s) $l\" }\r\n\
+             Say \"$Verb from $PSScriptRoot\"\r\n\
+             Say 'driver signed by ABC'\r\n\
+             Write-Warning 'a warning, as Stop-Service gives one'\r\n\
+             Write-Output 'some output'\r\n\
+             if ($Verb -eq 'install') { Say 'FAILED: pnputil did not take the driver'; exit 1 }\r\n\
+             Say 'uninstalled'; exit 0\r\n",
+        )
+        .unwrap();
+        log::also(Some(dir.join("setup.log")));
+        let (ctx, facts) = (real_in(&dir, PathBuf::new()), facts());
+        let mut events = Vec::new();
+        let mut emit = |e: Event| events.push(e);
+        let mut run = Run { ctx: &ctx, facts: &facts, emit: &mut emit, at_restart: 0, setup_log: true };
+        let failed = run.setup("install", StepId::Setup);
+        let removed = run.setup("uninstall", StepId::Unsetup);
+        log::also(None);
+        assert_eq!(failed, Err("pnputil did not take the driver".to_string()));
+        assert_eq!(removed, Ok(("Removed".to_string(), None)));
+        let lines: Vec<&str> = events.iter().filter_map(|e| if let Event::Detail(_, l) = e { Some(l.as_str()) } else { None }).collect();
+        assert!(lines.contains(&"driver signed by ABC"), "{lines:?}");
+        assert!(lines.contains(&"uninstalled"), "{lines:?}");
+        // This program's own lines in setup.log (the warning PowerShell printed) are not shown
+        // as setup.ps1's.
+        assert!(!lines.iter().any(|l| l.contains("PowerShell said")), "{lines:?}");
+        let text = std::fs::read_to_string(dir.join("setup.log")).unwrap();
+        assert!(text.contains("setup.exe:   PowerShell said:"), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Installing over an install: the files are replaced, installed.json (what the earlier
+    /// install made, which setup.ps1 reads) is left, and what an earlier Remoteman Host had and
+    /// this one doesn't is deleted.
+    #[test]
+    fn files_go_over_an_install() {
+        let _serial = SERIAL.lock().unwrap();
+        let dir = folder("files");
+        let build = folder("files-build");
+        let write = |root: &Path, rel: &str, bytes: &[u8]| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, bytes).unwrap();
+        };
+        write(&build, r"runtime\a.dll", b"runtime dll");
+        write(&build, r"payload\setup.ps1", b"param()");
+        write(&build, r"payload\remoteman-host.exe", b"new host");
+        write(&build, r"payload\app\a.dll", b"runtime dll");
+        write(&build, r"payload\app\remoteman-host-app.exe", b"new app");
+        write(&build, "stub.exe", b"MZ stub");
+        let source = build.join("setup.exe");
+        crate::archive::pack(&build.join("stub.exe"), &build.join("runtime"), &build.join("payload"), "9.9.9", &source).unwrap();
+        write(&dir, "installed.json", b"{\"driverInfs\":[\"oem42.inf\"]}");
+        write(&dir, "remoteman-host.exe", b"old host");
+        write(&dir, r"app\old.dll", b"an earlier runtime's");
+        write(&dir, r"app\remoteman-host-app.exe", b"old app");
+
+        let (ctx, facts) = (real_in(&dir, source), facts());
+        let mut emit = |_: Event| {};
+        let mut run = Run { ctx: &ctx, facts: &facts, emit: &mut emit, at_restart: 0, setup_log: false };
+        let done = run.files();
+        assert!(done.is_ok(), "{done:?}");
+        assert_eq!(std::fs::read(dir.join("installed.json")).unwrap(), b"{\"driverInfs\":[\"oem42.inf\"]}");
+        assert_eq!(std::fs::read(dir.join("remoteman-host.exe")).unwrap(), b"new host");
+        assert_eq!(std::fs::read(dir.join(r"app\remoteman-host-app.exe")).unwrap(), b"new app");
+        assert_eq!(std::fs::read(dir.join(r"app\a.dll")).unwrap(), b"runtime dll");
+        assert!(!dir.join(r"app\old.dll").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&build).unwrap();
+    }
+
+    /// The Start menu's shortcut, written into a folder of the test's own.
+    #[test]
+    fn shortcuts_are_written() {
+        let dir = folder("shortcut");
+        let link = dir.join("Remoteman Host.lnk");
+        let target = system::windows_dir().join(r"System32\notepad.exe");
+        system::make_shortcut(&link, &target, "a test").unwrap();
+        assert!(std::fs::metadata(&link).unwrap().len() > 100);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn stamps_come_off() {

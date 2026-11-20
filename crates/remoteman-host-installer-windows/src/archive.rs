@@ -337,8 +337,11 @@ pub struct PackReport {
 
 /// Packs `runtime` (the pages' Windows App Runtime) and `payload` (the install folder's files)
 /// onto `exe`, as `out`.
+/// A blob to pack: its size, a file that has it, and that file's name.
+type Source = (u64, PathBuf, String);
+
 pub fn pack(exe: &Path, runtime: &Path, payload: &Path, version: &str, out: &Path) -> io::Result<PackReport> {
-    let mut blobs: BTreeMap<String, (u64, PathBuf, String)> = BTreeMap::new(); // sha -> (size, a source, its name)
+    let mut blobs: BTreeMap<String, Source> = BTreeMap::new(); // by SHA-256
     let mut collect = |root: &Path| -> io::Result<Vec<Entry>> {
         let mut entries = Vec::new();
         for rel in files_under(root)? {
@@ -357,9 +360,9 @@ pub fn pack(exe: &Path, runtime: &Path, payload: &Path, version: &str, out: &Pat
     }
     let in_ui: std::collections::HashSet<&str> = ui.iter().map(|e| e.sha256.as_str()).collect();
     // Alike files together: by name, then by where they come from.
-    let mut order: Vec<(&String, &(u64, PathBuf, String))> = blobs.iter().collect();
+    let mut order: Vec<(&String, &Source)> = blobs.iter().collect();
     order.sort_by(|a, b| (&a.1.2, &a.1.1).cmp(&(&b.1.2, &b.1.1)));
-    let groups: [Vec<(&String, &(u64, PathBuf, String))>; 2] = [
+    let groups: [Vec<(&String, &Source)>; 2] = [
         order.iter().filter(|(sha, _)| in_ui.contains(sha.as_str())).cloned().collect(),
         order.iter().filter(|(sha, _)| !in_ui.contains(sha.as_str())).cloned().collect(),
     ];

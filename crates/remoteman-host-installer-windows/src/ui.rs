@@ -431,8 +431,8 @@ impl Installer {
             "Settings > Apps > remoteman host tries again.".to_string()
         } else if done(StepId::Register) || start.facts.installed.is_some() {
             "What was installed so far can be removed in Settings > Apps > remoteman host.".to_string()
-        } else if done(StepId::Files) {
-            format!("Its files were copied into {}; installing again replaces them.", start.ctx.real_dir.display())
+        } else if outcome.and_then(|o| o.failed.as_ref()).is_some_and(|(id, _)| *id == StepId::Register) {
+            format!("{} may be left on this PC; installing again replaces it.", start.ctx.real_dir.display())
         } else {
             "Nothing was installed.".to_string()
         };

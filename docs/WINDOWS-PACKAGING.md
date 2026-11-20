@@ -262,16 +262,17 @@ and `.inf`, `driver\vdd_settings.xml` and the two licences, `app\`), builds the 
 packs it: `target\installer\remoteman-host-setup-VERSION.exe`. `-Payload FOLDER` packs a folder
 gathered by hand instead of building the host, driver and app.
 
-**One file, 19.4 MB** (20,362,184 bytes, with the app; 18.7 MB without `app\`): the program
-4.2 MB, the Windows App Runtime 2.6.4 its pages need 12.6 MB (205 files, 57.3 MB unpacked), the
-rest 2.5 MB (the host, Remoteman Host's exe, setup.ps1, the driver: 9.9 MB unpacked). The archive
-is appended to the exe (`src/archive.rs`): each file's content once, however many paths have it,
-so the runtime beside Remoteman Host in `app\` is the pages' runtime, carried once; two XZ
-streams (LZMA2 preset 9 behind the x86 branch filter, `lzma-rust2`, pure Rust, Apache-2.0), the
-first with the runtime only; a JSON index with each file's SHA-256, checked as each file is
-written and read back after. The uninstaller, `uninstall.exe` in the install folder, is the
-program and the first stream (16.8 MB). The archive ends 8-byte aligned before a trailer that is
-found before an appended code signature, so the file can still be signed (not tried).
+**One file, 19.4 MB** with the app (18.7 MB without `app\`): the program 4.2 MB, the Windows App
+Runtime 2.6.4 its pages need 12.6 MB (205 files, 57.3 MB unpacked), the rest 2.5 MB (the host,
+Remoteman Host's exe, setup.ps1, the driver: 9.9 MB unpacked). The archive is appended to the
+exe (`src/archive.rs`): each file's content once, however many paths have it, so the runtime
+beside Remoteman Host in `app\` is the pages' runtime, carried once; two XZ streams (LZMA2 preset
+9 behind the x86 branch filter, `lzma-rust2`, pure Rust, Apache-2.0), the first with the runtime
+only; a JSON index with each file's SHA-256, checked as each file is written and read back
+after. The uninstaller, `uninstall.exe` in the install folder, is the program and the first
+stream (16.8 MB), so installed the runtime is there twice: unpacked in `app\` (64 MB) and packed
+in `uninstall.exe`. The archive ends 8-byte aligned before a trailer that is found before an
+appended code signature, so the file can still be signed (not tried).
 
 **A run is three processes of the one exe** (`src/main.rs`, `src/launch.rs`): what the user
 opened asks Windows to run the same file elevated (the one UAC prompt, before the first page),
@@ -291,15 +292,16 @@ the install folder (the uninstaller), the first copies itself to %TEMP% and hand
    logon task (`schtasks /End`), any `remoteman-host.exe` left from the install folder and
    `app\remoteman-host-app.exe` (which holds its runtime's files) ended by pid, as the Inno
    installer's PrepareToInstall did;
-2. the files into `C:\Program Files\remoteman host`, over what is there (files of an earlier
-   `app\` that this one doesn't have are deleted; nothing else is, `installed.json` above all),
-   and `uninstall.exe`; each file read back and checked;
-3. the Settings > Apps entry, `HKLM\...\Uninstall\remoteman host` (DisplayName, DisplayVersion,
-   Publisher "remoteman", DisplayIcon, InstallLocation, UninstallString
+2. the first change: the install folder `C:\Program Files\remoteman host`, `uninstall.exe` in it,
+   and the Settings > Apps entry, `HKLM\...\Uninstall\remoteman host` (DisplayName,
+   DisplayVersion, Publisher "remoteman", DisplayIcon, InstallLocation, UninstallString
    `"...\uninstall.exe" --uninstall`, QuietUninstallString, InstallDate, EstimatedSize, NoModify,
    NoRepair); the Inno installer's entry (`{6A0F3C2E-...}_is1`) and `unins000.*` deleted (never
-   run: its uninstaller would delete the host's state). This comes before setup.ps1, not after
-   it as first asked, so that an install that fails in setup.ps1 can still be uninstalled;
+   run: its uninstaller would delete the host's state). This comes before the files and
+   setup.ps1, not after setup.ps1 as first asked, so that an install that fails at any later
+   step can still be uninstalled;
+3. the files, over what is there (files of an earlier `app\` that this one doesn't have are
+   deleted; nothing else is, `installed.json` above all); each file read back and checked;
 4. `setup.ps1 install`, as the Inno installer ran it: hidden PowerShell, `-NoProfile
    -ExecutionPolicy Bypass -File`, in the install folder; setup.log's new lines are shown as
    they come; exit code 0, or 1 with the reason as setup.log's last line;
@@ -336,9 +338,19 @@ itself out of the folder (silent and with its pages) and the folder and the copy
 pages' DLLs: all 17 of the runtime's that load come from the pages' own folder, none from the
 Windows App Runtime packages installed on this PC (`WindowsApps`, `SystemApps`), and with
 `Microsoft.ui.xaml.dll` taken out of a copy of that folder the window doesn't open at all
-(`0x8007007E`, no fallback). **Not tested:** a real install, upgrade or uninstall, the UAC
-prompt, Settings > Apps running the uninstaller, a PC that never had the runtime (the check
-above is the stand-in), a second administrator's credentials at the prompt.
+(`0x8007007E`, no fallback). `cargo test` runs what only a real install runs, in folders of its
+own: setup.ps1 started as above (a stand-in that writes setup.log as the real one does, warns
+and fails: the reason read is its `FAILED` line, its lines shown as they come, exit 0 done),
+the files written over an install (`installed.json` left, an earlier `app\` file gone), the
+Start menu shortcut, and the archive packed, unpacked, cut down to the uninstaller and found
+damaged. **Never run at all:** a real install, upgrade or uninstall; the UAC prompt; the
+registry writes and deletes; the service stopped and a SYSTEM process ended; the folder under
+`C:\Windows\Temp` with its ACL; delete-at-restart; Settings > Apps running the uninstaller;
+Explorer opening Remoteman Host when the first process is itself elevated; Notepad opened from
+the elevated pages; a second administrator's credentials at the prompt; a PC that never had the
+runtime (the module check is the stand-in); a downloaded file (with its zone mark), whose
+relaunch skips the zone check (`SEE_MASK_NOZONECHECKS`) so that it is not asked about twice:
+the first thing to watch in the real test.
 
 **What Reactor couldn't do, and how it is done instead:** no closing event, so the steps can't
 veto a close: the window's procedure is wrapped (`SetWindowLongPtrW`) and `WM_CLOSE` is refused
