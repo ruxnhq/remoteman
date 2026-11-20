@@ -35,10 +35,36 @@ final class HostInput {
         0xE4: .maskControl, 0xE5: .maskShift, 0xE6: .maskAlternate, 0xE7: .maskCommand,
     ]
 
-    /// Count as user activity: wakes a dimmed or sleeping display.
+    /// Count as user activity: wakes a dimmed or sleeping display. At most once a second: each is a
+    /// call to the power manager, and a fast mouse sends thousands of events a second.
+    private static let wakeLock = NSLock()
+    private static var wokenAt = 0.0
     static func wake() {
+        let now = ProcessInfo.processInfo.systemUptime
+        wakeLock.lock()
+        let due = now - wokenAt >= 1
+        if due { wokenAt = now }
+        wakeLock.unlock()
+        guard due else { return }
         var id: IOPMAssertionID = 0
         IOPMAssertionDeclareUserActivity("remoteman input" as CFString, kIOPMUserActiveLocal, &id)
+    }
+
+    /// A pointer move waiting in the queue. Moves that come while it waits only change where it goes,
+    /// so the queue can't fall behind a fast mouse; anything else seals it, so that a click lands
+    /// where the pointer was when the click was made.
+    private final class Move {
+        var x: Float, y: Float
+        init(_ x: Float, _ y: Float) { self.x = x; self.y = y }
+    }
+    private let moveLock = NSLock()
+    private var waitingMove: Move?
+    /// The longest an event waited in the queue, and how many moves were merged, since last asked.
+    private var longestWait = 0.0, merged = 0
+    func takeQueueFigures() -> (longestWaitMs: Double, merged: Int) {
+        moveLock.lock()
+        defer { longestWait = 0; merged = 0; moveLock.unlock() }
+        return (longestWait * 1000, merged)
     }
 
     enum Event {
@@ -53,7 +79,38 @@ final class HostInput {
 
     func handle(_ e: Event) {
         HostInput.wake()
-        queue.async { [self] in
+        let queued = ProcessInfo.processInfo.systemUptime
+        moveLock.lock()
+        if case .pointerTo(let x, let y) = e {
+            if let m = waitingMove {
+                m.x = x
+                m.y = y
+                merged += 1
+                moveLock.unlock()
+                return
+            }
+            let m = Move(x, y)
+            waitingMove = m
+            moveLock.unlock()
+            queue.async { [self] in
+                moveLock.lock()
+                if waitingMove === m { waitingMove = nil }
+                moveLock.unlock()
+                run(.pointerTo(m.x, m.y), queued: queued)
+            }
+            return
+        }
+        waitingMove = nil
+        moveLock.unlock()
+        queue.async { [self] in run(e, queued: queued) }
+    }
+
+    private func run(_ e: Event, queued: TimeInterval) {
+        let waited = ProcessInfo.processInfo.systemUptime - queued
+        moveLock.lock()
+        longestWait = max(longestWait, waited)
+        moveLock.unlock()
+        do {
             guard let (b, scale) = display() else { return }
             func at(_ x: Float, _ y: Float) -> CGPoint {
                 CGPoint(
