@@ -1788,6 +1788,7 @@ dependencies = [
  "anyhow",
  "ffmpeg-sys-next",
  "png",
+ "remoteman-audio",
  "remoteman-core",
  "serde_json",
  "windows",

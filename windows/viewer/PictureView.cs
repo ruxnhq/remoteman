@@ -25,10 +25,12 @@ public sealed class PictureView : UserControl
         Panel.SizeChanged += (_, _) => Tell();
         Panel.CompositionScaleChanged += (_, _) => Tell();
         Panel.LayoutUpdated += (_, _) => TellIfMoved();
-        Panel.PointerMoved += (_, e) => Pointer(e);
-        Panel.PointerPressed += (_, e) => { Focus(FocusState.Pointer); Panel.CapturePointer(e.Pointer); Pointer(e); e.Handled = true; };
-        Panel.PointerReleased += (_, e) => { Pointer(e); Panel.ReleasePointerCapture(e.Pointer); e.Handled = true; };
-        Panel.PointerCanceled += (_, e) => Pointer(e);
+        // The number is a finger's phase, for touches (0 down, 1 move, 2 up).
+        Panel.PointerMoved += (_, e) => Pointer(e, 1);
+        Panel.PointerPressed += (_, e) => { Focus(FocusState.Pointer); Panel.CapturePointer(e.Pointer); Pointer(e, 0); e.Handled = true; };
+        Panel.PointerReleased += (_, e) => { Pointer(e, 2); Panel.ReleasePointerCapture(e.Pointer); e.Handled = true; };
+        Panel.PointerCanceled += (_, e) => Pointer(e, 2);
+        Panel.PointerCaptureLost += (_, e) => { if (e.Pointer.PointerDeviceType == PointerDeviceType.Touch) Touch(e, 2); };
         Panel.PointerWheelChanged += (_, e) =>
         {
             var p = e.GetCurrentPoint(Panel).Properties;
@@ -79,8 +81,19 @@ public sealed class PictureView : UserControl
 
     uint _buttons;
 
-    void Pointer(PointerRoutedEventArgs e)
+    /// A finger: the engine sends it as a touch if that is wanted, otherwise it is the pointer.
+    bool Touch(PointerRoutedEventArgs e, int phase)
     {
+        var pt = e.GetCurrentPoint(Panel);
+        int x = (int)Math.Round(pt.Position.X * Panel.CompositionScaleX), y = (int)Math.Round(pt.Position.Y * Panel.CompositionScaleY);
+        if (!Engine.remoteman_touch(e.Pointer.PointerId, phase, x, y)) return false;
+        e.Handled = true;
+        return true;
+    }
+
+    void Pointer(PointerRoutedEventArgs e, int phase)
+    {
+        if (e.Pointer.PointerDeviceType == PointerDeviceType.Touch && Touch(e, phase)) return;
         var pt = e.GetCurrentPoint(Panel);
         PointerAt?.Invoke(pt.Position.Y);
         int x = (int)Math.Round(pt.Position.X * Panel.CompositionScaleX), y = (int)Math.Round(pt.Position.Y * Panel.CompositionScaleY);

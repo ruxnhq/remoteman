@@ -78,8 +78,8 @@ fn pieces(app: &App, s: &Session, floating: bool) -> Vec<Piece> {
         menu("bar.picture", "Picture", Icon::Sliders, MenuKind::Picture),
         Piece::Sep,
         toggle("bar.sound", Icon::Sound, s.sound_on, sound, if s.sound_on { "Sound, on" } else { "Sound, off" }, Msg::ToggleSound),
-        toggle("bar.mic", Icon::Microphone, false, gate(FEATURES.microphone), "Microphone", Msg::CloseMenu),
-        toggle("bar.camera", Icon::Camera, false, gate(FEATURES.camera), "Camera", Msg::CloseMenu),
+        toggle("bar.mic", Icon::Microphone, s.mic_on, crate::media::microphone_allowed(app).map_or_else(off, |_| ON), if s.mic_on { "Microphone, on" } else { "Microphone, off" }, Msg::ToggleMicrophone),
+        toggle("bar.camera", Icon::Camera, s.camera_on, crate::media::camera_allowed(app).map_or_else(off, |_| ON), if s.camera_on { "Camera, on" } else { "Camera, off" }, Msg::ToggleCamera),
         Piece::Button { id: id("bar.share"), label: "", icon: Some(Icon::Folder), chevron: false, bad: false, on: open(&MenuKind::Share), en: ON, tip: "Clipboard and files", msg: None, menu: Some(MenuKind::Share) },
         if floating { Piece::Sep } else { Piece::Flex },
         if app.fullscreen {

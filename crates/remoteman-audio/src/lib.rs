@@ -10,18 +10,26 @@
 //! Everything is 48 kHz in 10 ms frames: stereo for the speaker, mono for the microphone. Each
 //! node runs a PipeWire loop on a thread of its own, and is gone from the graph when it is
 //! dropped.
+//!
+//! On Windows there is no PipeWire: only the Opus half builds ([`Encoder`], [`Decoder`],
+//! [`Framer`], [`JitterBuffer`]), which the Windows viewer feeds from WASAPI.
 
 mod codec;
+#[cfg(not(windows))]
 mod default;
 mod frame;
 mod jitter;
+#[cfg(not(windows))]
 mod node;
 #[doc(hidden)]
 pub mod testing;
 
 pub use codec::{Decoder, Encoder};
+#[cfg(not(windows))]
 pub use default::{DefaultSink, default_sink};
+pub use frame::Framer;
 pub use jitter::{JITTER_FRAMES, JitterBuffer, JitterStats};
+#[cfg(not(windows))]
 pub use node::{MicCapture, MicSource, Node, Player, SpeakerSink};
 
 /// Samples per second, the only rate used.

@@ -41,5 +41,9 @@
     <rescap:Capability Name="runFullTrust" />
     <Capability Name="internetClient" />
     <Capability Name="privateNetworkClientServer" />
+    <!-- This PC's microphone and camera, lent to a computer in a session: a packaged app gets
+         them (and Windows' prompt for them) only when it says so here. Not tried packaged. -->
+    <DeviceCapability Name="microphone" />
+    <DeviceCapability Name="webcam" />
   </Capabilities>
 </Package>

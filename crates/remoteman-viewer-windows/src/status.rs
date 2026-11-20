@@ -4,9 +4,10 @@
 /// What is known of a computer before it is tried.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reach {
-    /// Nothing can tell yet (`Features::presence`).
-    #[allow(dead_code)]
+    /// Its key is advertised on this network now (`nearby.rs`).
     Online,
+    /// Nothing tells it yet: one that isn't seen may be asleep or off, so a computer that
+    /// didn't answer and can be woken is offered waking instead.
     Asleep,
     /// It didn't answer when it was last tried.
     Unreachable,
@@ -17,7 +18,7 @@ pub enum Reach {
 pub enum Problem {
     /// Nothing answered; with what came of the attempt.
     Unreachable(String),
-    /// Known to be asleep and wakeable. Nothing can tell yet (`Features::presence`).
+    /// Known to be asleep and wakeable. Nothing tells it yet (see `Reach::Asleep`).
     Asleep,
     /// The computer doesn't trust this PC, or this PC has no key for it.
     NotPaired,

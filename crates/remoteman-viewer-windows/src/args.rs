@@ -53,9 +53,15 @@ pub struct Args {
     /// For tests, the old program only: the variable refresh control (`probe.rs`), for so
     /// many seconds.
     pub vrr_probe: Option<u64>,
+    /// For tests: what the made-up session's computer says it can do besides `video`
+    /// (`--play-features mic,camera`), so those controls can be tried with no computer.
+    pub play_features: Vec<String>,
+    /// For tests: browse for this DNS-SD service instead of remoteman's (`_name._udp.local`),
+    /// so what a test advertises shows as nearby without a remoteman host on the network.
+    pub browse: Option<String>,
 }
 
-const USAGE: &str = "usage: remoteman [HOST:PORT] [--pair] [--state DIR] [--size WxH] [--refresh HZ] [--decoders av1,hevc] [--seconds N] [--fullscreen] [--shot FILE.png] [--stats] [--input-demo] [--log FILE] [--sound] [--ui STEPS --shots DIR [--dark|--light]] [--profiles] [--vrr-probe SECONDS] [--watch-vblank] [--screen-hdr yes|no] [--play FILE [--play-colour bt709|bt2020-pq] [--play-mode hevc|hevc444] [--play-rate N]]";
+const USAGE: &str = "usage: remoteman [HOST:PORT] [--pair] [--state DIR] [--size WxH] [--refresh HZ] [--decoders av1,hevc] [--seconds N] [--fullscreen] [--shot FILE.png] [--stats] [--input-demo] [--log FILE] [--sound] [--ui STEPS --shots DIR [--dark|--light]] [--profiles] [--vrr-probe SECONDS] [--watch-vblank] [--screen-hdr yes|no] [--play FILE [--play-colour bt709|bt2020-pq] [--play-mode hevc|hevc444] [--play-rate N] [--play-features mic,camera]] [--browse _name._udp.local]";
 
 fn mode(word: &str) -> Option<Mode> {
     // 4:4:4 is decoded on the processor (this FFmpeg's HEVC decoder has no D3D11VA path for
@@ -108,6 +114,8 @@ pub fn parse_from(words: Vec<String>) -> Result<Args> {
         profiles: false,
         watch_vblank: false,
         vrr_probe: None,
+        play_features: Vec::new(),
+        browse: None,
     };
     while let Some(arg) = words.next() {
         let mut value = || words.next().ok_or_else(|| anyhow!("{arg} needs a value"));
@@ -148,6 +156,8 @@ pub fn parse_from(words: Vec<String>) -> Result<Args> {
             "--profiles" => args.profiles = true,
             "--watch-vblank" => args.watch_vblank = true,
             "--vrr-probe" => args.vrr_probe = Some(value()?.parse()?),
+            "--browse" => args.browse = Some(value()?),
+            "--play-features" => args.play_features = value()?.split(',').map(str::to_owned).filter(|f| !f.is_empty()).collect(),
             other => bail!("unknown option {other}\n{USAGE}"),
         }
     }

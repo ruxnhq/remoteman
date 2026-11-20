@@ -55,7 +55,9 @@ the app's name reserved there, whose identity (`Identity Name`, `Publisher`,
 age-rating questionnaire (IARC); a privacy policy URL (the app talks to other computers and keeps
 paired computers' keys); Store listing text, screenshots and logos; a justification for
 `runFullTrust` (the low-level keyboard hook, raw mouse input, Credential Manager, files to
-Downloads, the engine's DLLs); and the certification itself.
+Downloads, the engine's DLLs); and the certification itself. The manifest also declares the
+`microphone` and `webcam` device capabilities (the viewer lends both to a computer in a
+session); the privacy policy should say so. Not tried in a package yet.
 
 ## The viewer: an MSIX
 
@@ -96,8 +98,11 @@ the Store installs with the app. Trimming done:
   CRT every Windows 10 and 11 has (checked: neither imports `VCRUNTIME140`).
 
 What would shrink it most next: an FFmpeg built with only the decoders the engine uses (HEVC,
-AV1, and the hardware-acceleration glue) instead of the full LGPL build; `avcodec` would go from
-94 MB to a few. Not done.
+AV1, and the hardware-acceleration glue), the Opus decoder for the computer's sound, and the
+camera's H.264 encoders (`h264_nvenc`, `h264_mf`, OpenH264, which this LGPL build links in:
+no other DLL is needed for them) instead of the full LGPL build; `avcodec` would go from 94 MB
+to a few. Not done. (The microphone's Opus encoder is libopus built into the engine by
+`opusic-c`, not FFmpeg's.)
 
 **Tested in the VM** (Windows 11 build 26300, RTX 5090 by GPU-PV), with the throwaway Linux host
 `RM_AGENT_ARGS=--keep-output scripts/headless-host.sh` on this PC:

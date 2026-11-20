@@ -128,6 +128,14 @@ pub struct Shared {
     pub folder: Mutex<PathBuf>,
     /// Plays the computer's sound, while that is on.
     pub sound: Mutex<Option<crate::sound::Player>>,
+    /// This PC's microphone and camera, while the computer is lent them (`media.rs`); the
+    /// camera's changes of mind, counted; whether the computer was told it is on; and why it
+    /// couldn't be opened, until the window says so.
+    pub microphone: Mutex<Option<crate::mic::Capture>>,
+    pub camera: Mutex<Option<crate::camera::Camera>>,
+    pub camera_turn: AtomicU32,
+    pub camera_told: AtomicBool,
+    pub camera_failed: Mutex<Option<String>>,
     /// The decoder was given frames and gave no picture: the window asks the computer for a
     /// keyframe (nothing was lost on the way, so nothing else will).
     pub stuck: AtomicBool,
@@ -189,6 +197,11 @@ impl Shared {
             received: Mutex::default(),
             folder: Mutex::default(),
             sound: Mutex::default(),
+            microphone: Mutex::default(),
+            camera: Mutex::default(),
+            camera_turn: AtomicU32::default(),
+            camera_told: AtomicBool::default(),
+            camera_failed: Mutex::default(),
             stuck: AtomicBool::default(),
             copy_seq: AtomicU32::default(),
             file_seq: AtomicU32::default(),
@@ -297,6 +310,12 @@ impl Handler for Feed {
             Message::FileResult { ok, message, .. } => {
                 self.shared.results.lock().unwrap().push((*ok, message.clone()));
                 self.wake_window();
+            }
+            // The computer lost a frame of this PC's camera: the next one is a keyframe.
+            Message::CameraKeyframe => {
+                if let Some(camera) = self.shared.camera.lock().unwrap().as_ref() {
+                    camera.keyframe();
+                }
             }
             _ => {}
         }

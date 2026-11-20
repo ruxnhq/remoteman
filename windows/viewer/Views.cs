@@ -67,6 +67,7 @@ public sealed class Views
 public sealed class ComputersPage : UserControl
 {
     readonly Grid _cards = new() { ColumnSpacing = 12, RowSpacing = 12 };
+    readonly StackPanel _nearby = new();
     readonly StackPanel _full = new() { Spacing = 20, Padding = new Thickness(32, 12, 32, 28) };
     readonly StackPanel _empty = new() { Spacing = 12, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, MaxWidth = 420 };
     readonly Grid _root = new();
@@ -89,6 +90,13 @@ public sealed class ComputersPage : UserControl
         paired.Children.Add(new TextBlock { Text = "Paired computers", Style = Ui.Style("BodyStrongTextBlockStyle") });
         paired.Children.Add(_cards);
         _full.Children.Add(paired);
+        // Computers running remoteman on this network that this PC isn't paired with.
+        var nearby = new StackPanel { Spacing = 8 };
+        nearby.Children.Add(new TextBlock { Text = "Nearby", Style = Ui.Style("BodyStrongTextBlockStyle") });
+        var nearbyCard = Ui.Card(_nearby);
+        nearbyCard.Padding = new Thickness(0);
+        nearby.Children.Add(nearbyCard);
+        _full.Children.Add(nearby);
         _full.Children.Add(new TextBlock { Text = "A computer that is not listed can be paired by its address.", Style = Ui.Style("CaptionTextBlockStyle"), Foreground = Theme.Secondary });
 
         _empty.Children.Add(new FontIcon { Glyph = "", FontSize = 40, Foreground = Theme.Secondary });
@@ -111,10 +119,33 @@ public sealed class ComputersPage : UserControl
     public void Update(JsonObject state)
     {
         var list = state.A("computers");
-        string key = list.ToJsonString();
+        var found = state.A("nearby");
+        string key = list.ToJsonString() + found.ToJsonString();
         if (key == _shown) return;
         _shown = key;
-        bool none = list.Count == 0;
+        bool none = list.Count == 0 && found.Count == 0;
+        _nearby.Children.Clear();
+        foreach (var near in found)
+        {
+            string address = near!.S("address"), about = string.Join(" · ", new[] { near.S("os_name"), "on this network", "not paired" }.Where(x => x.Length > 0));
+            var words = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            words.Children.Add(new TextBlock { Text = near.S("name") });
+            words.Children.Add(new TextBlock { Text = about, Style = Ui.Style("CaptionTextBlockStyle"), Foreground = Theme.Secondary });
+            var pair = Ui.Button("Pair…", () => Engine.Do("pair", new { address }));
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(pair, $"Pair {near.S("name")}");
+            var row = new Grid { ColumnSpacing = 14, Padding = new Thickness(16, 10, 16, 10), MinHeight = 60 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var icon = Ui.Icon("");
+            icon.VerticalAlignment = VerticalAlignment.Center;
+            row.Children.Add(icon);
+            Grid.SetColumn(words, 1); row.Children.Add(words);
+            Grid.SetColumn(pair, 2); pair.VerticalAlignment = VerticalAlignment.Center; row.Children.Add(pair);
+            _nearby.Children.Add(row);
+        }
+        if (found.Count == 0)
+            _nearby.Children.Add(new TextBlock { Text = "None found. A computer shows here while its remoteman host is on and it is on this network.", Style = Ui.Style("CaptionTextBlockStyle"), Foreground = Theme.Secondary, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(16, 12, 16, 12) });
         ((UIElement)_root.Children[0]).Visibility = none ? Visibility.Collapsed : Visibility.Visible;
         ((UIElement)_root.Children[1]).Visibility = _empty.Visibility = none ? Visibility.Visible : Visibility.Collapsed;
         _cards.Children.Clear();
@@ -151,7 +182,9 @@ public sealed class ComputersPage : UserControl
         var words = new StackPanel();
         words.Children.Add(new TextBlock { Text = c.S("name"), Style = Ui.Style("BodyStrongTextBlockStyle"), TextTrimming = TextTrimming.CharacterEllipsis });
         words.Children.Add(Ui.Row(6, dot, new TextBlock { Text = line, Style = Ui.Style("CaptionTextBlockStyle"), Foreground = Theme.Secondary }));
-        var connect = Ui.Button("Connect", () => Engine.Do("connect", new { address }), accent: true);
+        // One that didn't answer and can be sent the waking packet is offered that.
+        bool wake = reach == "unreachable" && c.B("wakeable");
+        var connect = wake ? Ui.Button("Wake and connect", () => Engine.Do("wake", new { address })) : Ui.Button("Connect", () => Engine.Do("connect", new { address }), accent: true);
         connect.HorizontalAlignment = HorizontalAlignment.Stretch;
         var more = Ui.Square("", $"More for {c.S("name")}", null);
         var menu = new MenuFlyout();
@@ -244,14 +277,17 @@ public sealed class StatusPage : UserControl
                 _title.Text = $"Can't reach {name}";
                 _words.Text = $"{said} at {host}. It may be off, on another network, or its firewall may be closed to remoteman.";
                 Act("Try again", () => Engine.Do("connect", new { address }), true);
+                if (state.A("computers").Any(x => x.S("address") == address && x.B("wakeable")))
+                    Act("Wake and connect", () => Engine.Do("wake", new { address }));
                 Act("Edit address…", () => Engine.Do("edit-address", new { address }));
                 Act("Back", () => Engine.Do("back"));
                 break;
             case "asleep":
                 Sign("", Theme.Warn);
                 _title.Text = $"{name} is asleep";
-                _words.Text = "Waking it over the network isn't available yet.";
-                Act("Back", () => Engine.Do("back"), true);
+                _words.Text = "Waking it over the network takes a few seconds.";
+                Act("Wake and connect", () => Engine.Do("wake", new { address }), true);
+                Act("Back", () => Engine.Do("back"));
                 break;
             case "not-paired":
                 Sign("", Theme.Warn);
@@ -418,12 +454,13 @@ public sealed class SettingsPage : RowsPage
         g = Group("Pointer and touch");
         Row(g, "Pointer", "Captured sends raw movement, which games and 3D apps need. Ctrl+Alt+Shift lets it go", Choice(s.O("pointer"), i => Choose("pointer", i)), f.B("pointer_capture"));
         Row(g, "Scroll direction", "", Choice(s.O("scroll"), i => Choose("scroll", i)), f.B("scroll_direction"));
-        Row(g, "Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", Toggle(false, () => { }), f.B("touch"));
+        void Set(string what) => Engine.Do("set", new { what });
+        Row(g, "Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", Toggle(s.B("touch"), () => Set("touch")), f.B("touch"));
 
         g = Group("Sound, microphone and camera");
         Row(g, "Play the computer's sound here", "For computers paired from now on; each has its own switch", Toggle(s.B("sound"), () => Flag("sound")), f.B("sound"));
-        Row(g, "Let computers use this microphone", "Still switched on by you in each session", Toggle(false, () => { }), f.B("microphone"));
-        Row(g, "Let computers use this camera", "For calls made on the other computer", Toggle(false, () => { }), f.B("camera"));
+        Row(g, "Let computers use this microphone", "Still switched on by you in each session", Toggle(s.B("allow_microphone"), () => Set("allow-microphone")), f.B("microphone"));
+        Row(g, "Let computers use this camera", "For calls made on the other computer", Toggle(s.B("allow_camera"), () => Set("allow-camera")), f.B("camera"));
 
         g = Group("Sharing");
         Row(g, "Share the clipboard", "Text and images copied on either side can be pasted on the other. For computers paired from now on", Toggle(s.B("clipboard"), () => Flag("clipboard")), f.B("clipboard"));
@@ -470,7 +507,7 @@ public sealed class ComputerPage : RowsPage
         _name.KeyDown += (_, e) => { if (e.Key == Windows.System.VirtualKey.Enter) Engine.Do("rename", new { address, name = _name.Text }); };
         Row(g, "Name", "", _name);
         Row(g, "Address", c.S("short"), Ui.Button("Edit address…", () => Engine.Do("edit-address", new { address })));
-        Row(g, "Wake it over the network", "When it is asleep and on the same network", Toggle(false, () => { }), f.B("wake"));
+        Row(g, "Wake it over the network", "When it is asleep and on the same network", Toggle(c.B("wake"), () => Engine.Do("set", new { what = "wake", address })), f.B("wake"));
         Row(g, "Getting in", "Joins your session there if you are logged in, otherwise shows its login screen", Fixed("The computer decides"), f.B("way_in"));
 
         g = Group("Display");
@@ -508,6 +545,8 @@ public sealed class SessionBar : UserControl
     readonly TextBlock _name = new() { Style = Ui.Style("BodyStrongTextBlockStyle"), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
     readonly TextBlock _format = new() { Style = Ui.Style("CaptionTextBlockStyle"), Foreground = Theme.Secondary, VerticalAlignment = VerticalAlignment.Center };
     readonly ToggleButton _sound = new() { Width = 36, Height = 32, Padding = new Thickness(0), Content = Ui.Icon("") };
+    readonly ToggleButton _mic = new() { Width = 36, Height = 32, Padding = new Thickness(0), Content = Ui.Icon("") };
+    readonly ToggleButton _camera = new() { Width = 36, Height = 32, Padding = new Thickness(0), Content = Ui.Icon("") };
     readonly Button _share = Ui.Square("", "Clipboard and files", null);
     JsonObject _state = new();
     bool _quiet;
@@ -523,6 +562,10 @@ public sealed class SessionBar : UserControl
         ToolTipService.SetToolTip(_sound, "Play the computer's sound here");
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_sound, "Play the computer's sound here");
         _sound.Click += (_, _) => { if (!_quiet) Engine.Do("sound"); };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_mic, "Microphone");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_camera, "Camera");
+        _mic.Click += (_, _) => { if (!_quiet) Engine.Do("mic", new { on = _mic.IsChecked == true }); };
+        _camera.Click += (_, _) => { if (!_quiet) Engine.Do("camera", new { on = _camera.IsChecked == true }); };
         _share.Flyout = Ui.Lazy(ShareMenu);
         var more = Ui.Square("", "More", null);
         more.Flyout = Ui.Lazy(MoreMenu);
@@ -541,7 +584,7 @@ public sealed class SessionBar : UserControl
         var close = Ui.Square("\uE8BB", "Close", () => App.Window?.WindowCommand("close"));
         foreach (var b in new[] { min, max, close }) b.Background = new SolidColorBrush(Colors.Transparent);
         WindowButtons = Ui.Row(0, min, max, close);
-        var tools = Ui.Row(4, off, keys, display, picture, _sound, _share, more, full, WindowButtons);
+        var tools = Ui.Row(4, off, keys, display, picture, _sound, _mic, _camera, _share, more, full, WindowButtons);
         tools.VerticalAlignment = VerticalAlignment.Center;
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         row.Children.Add(DragArea);
@@ -560,6 +603,13 @@ public sealed class SessionBar : UserControl
         _quiet = true;
         _sound.IsChecked = s.B("sound");
         _sound.IsEnabled = Offers("sound") && state.O("features").B("sound");
+        // The engine says whether each may be lent and, if not, why (the tip).
+        _mic.IsChecked = s.B("mic");
+        _mic.IsEnabled = s.B("mic_can") || s.B("mic");
+        ToolTipService.SetToolTip(_mic, s.S("mic_why") is { Length: > 0 } micWhy ? micWhy : s.B("mic") ? $"Microphone, on: {s.S("mic_device")}" : "Microphone, off");
+        _camera.IsChecked = s.B("camera");
+        _camera.IsEnabled = s.B("camera_can") || s.B("camera");
+        ToolTipService.SetToolTip(_camera, s.S("camera_why") is { Length: > 0 } camWhy ? camWhy : s.B("camera") ? "Camera, on" : "Camera, off");
         _share.IsEnabled = Offers("clipboard") || Offers("files");
         _quiet = false;
     }
@@ -862,7 +912,7 @@ static class Dialogs
         {
             case "pair":
             {
-                var box = new TextBox { Header = "Address", PlaceholderText = "workshop.local or 192.168.1.20", Width = 360 };
+                var box = new TextBox { Header = "Address", PlaceholderText = "workshop.local or 192.168.1.20", Width = 360, Text = d.S("address") };
                 var col = new StackPanel { Spacing = 12 };
                 col.Children.Add(new TextBlock { Text = "Put the other computer in pairing mode, then enter its address here.", TextWrapping = TextWrapping.Wrap });
                 col.Children.Add(box);

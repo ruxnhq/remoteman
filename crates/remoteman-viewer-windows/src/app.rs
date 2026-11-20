@@ -153,6 +153,13 @@ pub enum Msg {
     ToggleRemember,
     /// Choose where files from a computer go.
     PickFolder,
+    /// Lend the computer this PC's microphone or camera, or stop (`media.rs`).
+    ToggleMicrophone,
+    ToggleCamera,
+    /// Flip a switch `App::set_option` knows (with an address: one computer's).
+    Set(&'static str, Option<String>),
+    /// Send this computer the waking packet, then connect (`nearby.rs`).
+    Wake(String),
 }
 
 /// What only the window can do.
@@ -221,6 +228,9 @@ pub struct Session {
     pub clipboard_on: bool,
     /// There is a second display, in a window of its own.
     pub second_on: bool,
+    /// The computer is lent this PC's microphone, and its camera (`media.rs`).
+    pub mic_on: bool,
+    pub camera_on: bool,
     /// The text that last came from the computer's clipboard: not to be sent back. And the
     /// text last sent: Windows says "the clipboard changed" several times for one copy.
     from_computer: Option<String>,
@@ -233,7 +243,7 @@ pub struct Session {
 impl Session {
     #[allow(clippy::too_many_arguments)]
     pub fn new(client: Option<Arc<Client>>, shared: Arc<Shared>, target: Target, features: Vec<String>, display: Display, quality: Quality, bitrate: u32, os: String) -> Self {
-        Self { client, shared, target, features, display, quality, bitrate, began: Instant::now(), os, sound_on: false, clipboard_on: false, second_on: false, from_computer: None, sent_copy: None, asked: None, wanted: (0, 0) }
+        Self { client, shared, target, features, display, quality, bitrate, began: Instant::now(), os, sound_on: false, clipboard_on: false, second_on: false, mic_on: false, camera_on: false, from_computer: None, sent_copy: None, asked: None, wanted: (0, 0) }
     }
 
     pub fn offers(&self, feature: &str) -> bool {
@@ -373,6 +383,8 @@ pub struct App {
     /// The picture has a place of its own (the WinUI 3 app's panel, `engine.rs`) and the
     /// size the window is said to have is that place's: the bar is not in it.
     pub panel: bool,
+    /// The computers seen on this network (`nearby.rs`).
+    pub sightings: crate::nearby::Sightings,
 }
 
 fn mode_word(mode: &Mode) -> &'static str {
@@ -437,6 +449,8 @@ impl App {
             toast: None,
             panel: false,
             shown_format: None,
+            // Not for pictures of the window: what is really nearby isn't to be in them.
+            sightings: crate::nearby::Sightings::start(args.ui.is_none().then(|| scene.clone()), args.browse.as_deref()),
             args,
             gpu,
             scene,
@@ -483,6 +497,10 @@ impl App {
 
     /// What is known of a computer before trying it, as far as this build may say.
     pub fn reach_of(&self, address: &str) -> Option<Reach> {
+        // Seen on this network now (DNS-SD): it is there, whatever the last try found.
+        if FEATURES.presence && self.seen(address).is_some() {
+            return Some(Reach::Online);
+        }
         self.reach.get(address).copied().filter(|r| FEATURES.presence || *r == Reach::Unreachable)
     }
 
@@ -1275,6 +1293,7 @@ impl App {
             ended: None,
         });
         *s.shared.sound.lock().unwrap() = None;
+        crate::media::stop_all(&s.shared);
         if s.second_on {
             if let Some(second) = &s.shared.second {
                 say!("second display: {} decoded, {} presented", second.decoded_total.load(Ordering::Relaxed), second.presented_total.load(Ordering::Relaxed));
@@ -1500,6 +1519,18 @@ impl App {
                 self.menu = None;
                 self.choose(choice, n);
             }
+            Msg::ToggleMicrophone => {
+                let on = self.session.as_ref().is_some_and(|s| s.mic_on);
+                self.set_microphone(!on);
+            }
+            Msg::ToggleCamera => {
+                let on = self.session.as_ref().is_some_and(|s| s.camera_on);
+                self.set_camera(!on);
+            }
+            Msg::Set(what, address) => {
+                self.set_option(what, None, address.as_deref());
+            }
+            Msg::Wake(address) => self.wake(&address),
         }
     }
 
@@ -2021,6 +2052,8 @@ impl App {
     }
 
     pub fn tick(&mut self) {
+        self.nearby_tick();
+        self.media_tick();
         let now = Instant::now();
         if self.animating() {
             let target = if self.bar_out { 1.0f32 } else { 0.0 };

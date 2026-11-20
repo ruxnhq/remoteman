@@ -42,6 +42,8 @@ mod log;
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod camera;
+#[cfg(windows)]
 mod args;
 #[cfg(windows)]
 mod creds;
@@ -60,9 +62,15 @@ mod gpu;
 #[cfg(windows)]
 mod keys;
 #[cfg(windows)]
+mod media;
+#[cfg(windows)]
 mod menus;
 #[cfg(windows)]
 mod monitor;
+#[cfg(windows)]
+mod mic;
+#[cfg(windows)]
+mod nearby;
 #[cfg(windows)]
 mod pages;
 #[cfg(windows)]
@@ -75,6 +83,9 @@ mod shot;
 mod sound;
 #[cfg(windows)]
 mod status;
+#[cfg(windows)]
+#[allow(dead_code)] // The engine's alone (`remoteman_touch`).
+mod touch;
 #[cfg(windows)]
 mod store;
 #[cfg(windows)]

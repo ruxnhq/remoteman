@@ -26,6 +26,9 @@ path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
 remoteman-core = { path = "../remoteman-core" }
+# The microphone: the Linux viewer's Opus settings and framer (on Windows that crate is its
+# Opus half only, with libopus built from the copy opusic-c carries).
+remoteman-audio = { path = "../remoteman-audio" }
 anyhow = "1"
 png = "0.18"
 serde_json = "1"
@@ -68,4 +71,15 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    # Finding computers (DNS-SD), waking them (each network's broadcast), the camera (Media
+    # Foundation) and touches (pointer input; injected in the tests).
+    "Win32_NetworkManagement_Dns",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_KernelStreaming",
+    "Win32_UI_Input_Pointer",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_UI_Shell_PropertiesSystem",
 ] }
