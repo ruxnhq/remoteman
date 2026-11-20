@@ -118,6 +118,7 @@ pub fn appended_zip_names(file: &mut (impl Read + Seek)) -> std::io::Result<Vec<
 
 /// The hardware ids an INF's models name: in each section `[Manufacturer]` leads to, the lines
 /// `%description% = install-section, HARDWAREID[, compatible id...]`; each once, in order.
+#[cfg_attr(not(test), allow(dead_code))] // setup.ps1 knows the two ids itself; this checks them against the INFs
 pub fn hardware_ids(inf: &str) -> Vec<String> {
     let lines: Vec<String> = inf.lines().map(|l| l.split(';').next().unwrap_or("").trim().to_string()).collect();
     let section = |name: &str| -> Vec<String> {
