@@ -64,6 +64,10 @@ pub fn classify(error: &str) -> Problem {
 
 /// Sort out why a session ended. `shown`: it had shown a picture by then.
 pub fn ended(reason: &str, shown: bool) -> Problem {
+    // The computer closed after too many wrong codes, or never got one: its words, as they are.
+    if let Some(words) = reason.strip_prefix("second_factor: ") {
+        return Problem::Refused(words.to_owned());
+    }
     // What the computer said as it closed: `closed by peer: WORDS (code N)`.
     let said = reason.split_once("closed by peer: ").map(|(_, m)| m.rsplit_once(" (code ").map_or(m, |(m, _)| m));
     match said {

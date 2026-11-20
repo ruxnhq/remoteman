@@ -816,6 +816,25 @@ pub fn dialog(app: &App, ui: &mut Ui, dialog: &Dialog) {
                 c.para(&format!("After pairing, this PC and {name} keep each other's key. Nothing else has to be typed again."), Font::Caption, t.t2);
             });
         }
+        Dialog::SecondFactor { name, left } => {
+            sheet(ui, Some(("Connect", Look::Accent, ON)), "Cancel", &|c| {
+                c.para("This computer asks for a code from your authenticator app", Font::Subtitle, t.tx);
+                c.gap(16.0);
+                c.para(&format!("Open the authenticator app and type the six digits it shows for {name}."), Font::Body, t.tx);
+                c.gap(16.0);
+                if let (Some(r), Some(field)) = (c.room(32.0), app.fields.get(&id("second.code"))) {
+                    c.ui.field(id("second.code"), r, field, ON);
+                }
+                c.gap(12.0);
+                if let Some(r) = c.room(24.0) {
+                    c.ui.toggle(id("second.remember"), r.x, r.y, app.remember, "Don't ask again on this device for 30 days", Msg::ToggleRemember, ON);
+                }
+                if let Some(n) = left {
+                    c.gap(12.0);
+                    c.para(&format!("That code didn't work ({n} {} left)", if *n == 1 { "try" } else { "tries" }), Font::Body, t.bad);
+                }
+            });
+        }
         Dialog::Paired { target, key } => {
             let name = &target.name;
             sheet(ui, Some(("Connect", Look::Accent, ON)), "Close", &|c| {

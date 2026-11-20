@@ -180,6 +180,16 @@ int32_t rm_client_pen(const rm_client *client, uint8_t phase, uint8_t buttons, f
 int32_t rm_client_gamepad(const rm_client *client, uint8_t pad, uint8_t flags, uint16_t buttons,
                           float lt, float rt, float lx, float ly, float rx, float ry);
 
+// The second factor, client side (docs/PROTOCOL.md, "Second factor"). A host that asks for a code
+// from an authenticator app (rm_client_second_factor_wanted) sends nothing more until it has
+// one. on_ask(ctx, left): -1 the first time, after a wrong code the tries left; it is called at
+// once if the host is already waiting, so set it right after rm_client_connect. Answer with
+// rm_client_second_factor (six digits; remember non-zero: don't ask this device for 30 days).
+// Too many wrong codes: the connection closes with "second_factor: ..." in on_closed.
+void rm_client_set_second_factor_callback(const rm_client *client, void (*on_ask)(void *ctx, int32_t left), void *ctx);
+int32_t rm_client_second_factor_wanted(const rm_client *client);
+int32_t rm_client_second_factor(const rm_client *client, const char *code, uint8_t remember);
+
 // Leave and free the client. `on_closed` is called before this returns or shortly after.
 void rm_client_close(rm_client *client);
 
@@ -324,6 +334,17 @@ void rm_string_free(char *s);
 // Called when a device is paired, connected or refused, with that event as JSON (as above),
 // valid only during the call, on the core's handler thread. NULL removes it.
 void rm_host_set_notice_callback(const rm_host *host, void (*on_notice)(void *ctx, const char *json), void *ctx);
+
+// The second factor, host side: devices must also give a code from an authenticator app.
+// rm_host_second_factor: -1 off, else how many devices are remembered. _enable makes a secret and
+// copies "secret<TAB>grouped<TAB>otpauth-uri" into out (0, or -1 if it is on already); it is
+// asked for only once _confirm has had a right code (1, else 0). _disable throws the secret and
+// remembered devices away; _forget_remembered asks everyone again (both 0 or -1).
+int32_t rm_host_second_factor(const rm_host *host);
+int32_t rm_host_enable_second_factor(const rm_host *host, char *out, size_t len);
+int32_t rm_host_confirm_second_factor(const rm_host *host, const char *code);
+int32_t rm_host_disable_second_factor(const rm_host *host);
+int32_t rm_host_forget_remembered(const rm_host *host);
 
 // Pairing: let the next unknown device in (it is remembered and pairing turns itself off).
 void rm_host_set_pairing(const rm_host *host, int32_t on);

@@ -20,6 +20,7 @@ use remoteman_transport::{Connection, Identity, RecvStream, Trust, listen, peer_
 use crate::blob::{self, BlobEvent, BlobSender, Chunk};
 pub use crate::permissions::{ConnectionEvent, Permissions};
 use crate::permissions::{ConnectionLog, PermissionStore};
+use crate::second_factor::{self, Check, SecondFactorStore};
 use crate::rate::RateController;
 use crate::{CursorShape, Display, Mode};
 
@@ -59,6 +60,24 @@ pub struct ClientInfo {
     /// It asked to be let in only into a session that is already running.
     #[serde(default)]
     pub attach_only: bool,
+}
+
+/// What [`Host::second_factor`] says when it is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecondFactorStatus {
+    /// Devices told "don't ask again" and not yet expired.
+    pub remembered: usize,
+}
+
+/// What the owner needs to put the second factor into an authenticator app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecondFactorSetup {
+    /// Base32.
+    pub secret: String,
+    /// The secret in groups of four, for typing in.
+    pub grouped: String,
+    /// `otpauth://totp/remoteman:<name>?secret=...&issuer=remoteman`, for a QR code or a link.
+    pub uri: String,
 }
 
 /// What the host will send, in answer to a client's hello.
@@ -284,6 +303,13 @@ struct State {
     log: ConnectionLog,
     /// Called, on the handler's thread, with each notice (see [`Host::set_notice_hook`]).
     notice: Mutex<Option<Box<dyn FnMut(&ConnectionEvent) + Send>>>,
+    /// The second factor (docs/PROTOCOL.md, "Second factor"): the secret, the devices that need
+    /// not be asked, the count of wrong codes.
+    factor: SecondFactorStore,
+    /// How long a device has to answer the host's ask for a code (60 s; [`Host::set_second_factor_wait`]).
+    factor_wait: std::sync::atomic::AtomicU64,
+    /// This computer's name, for the authenticator app's list.
+    name: String,
 }
 
 /// What the device being served may do, asked again at each use so a change applies at once.
@@ -415,6 +441,11 @@ struct Confirm {
     /// trusted as soon as it connects while pairing is open.
     wanted: std::sync::atomic::AtomicBool,
     waiting: Mutex<Option<(PendingDevice, Instant, tokio::sync::oneshot::Sender<bool>)>>,
+    /// When [`Host::pending`] was last asked: the sign that somebody (the owner's app) is there to
+    /// answer. With `approver_wait` (ms, 0: off) a device that waits that long with nobody having
+    /// asked is turned away at once instead of after the full minute.
+    last_look: Mutex<Option<Instant>>,
+    approver_wait: std::sync::atomic::AtomicU64,
 }
 
 pub struct Host {
@@ -456,7 +487,7 @@ impl Host {
         let (done, handler_done) = mpsc::channel::<()>();
         let link: Arc<Mutex<Option<Link>>> = Arc::default();
         let hook: Arc<Mutex<Option<BitrateHook>>> = Arc::default();
-        let state = Arc::new(State { perms: PermissionStore::load(&options.state.join("host/permissions.json")), log: ConnectionLog::open(&options.state.join("connections.log")), notice: Mutex::default() });
+        let state = Arc::new(State { perms: PermissionStore::load(&options.state.join("host/permissions.json")), log: ConnectionLog::open(&options.state.join("connections.log")), notice: Mutex::default(), factor: SecondFactorStore::load(&options.state.join("host/second_factor.json")), factor_wait: 60_000.into(), name: options.name.clone() });
         let (thread_link, thread_hook, thread_state) = (link.clone(), hook.clone(), state.clone());
         std::thread::Builder::new().name("remoteman host".into()).spawn(move || {
             let (link, hook, state) = (thread_link, thread_hook, thread_state);
@@ -543,8 +574,17 @@ impl Host {
         self.confirm.wanted.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// For a host that runs where nobody may be there to answer (a Windows service at the sign-in
+    /// screen): a new device that has waited this long without anybody having called [`Host::pending`]
+    /// since it came is refused, with "Nobody is signed in on this PC to accept the device", rather
+    /// than left waiting out the minute. The owner's app asks about once a second, so it is "there".
+    pub fn set_approver_wait(&self, wait: Option<Duration>) {
+        self.confirm.approver_wait.store(wait.map_or(0, |w| w.as_millis() as u64), std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// The device waiting to be confirmed, if there is one.
     pub fn pending(&self) -> Option<PendingDevice> {
+        *self.confirm.last_look.lock().unwrap() = Some(Instant::now());
         let waiting = self.confirm.waiting.lock().unwrap();
         let (device, since, _) = waiting.as_ref()?;
         Some(PendingDevice { seconds: CONFIRM_SECONDS.saturating_sub(since.elapsed().as_secs() as u32), ..device.clone() })
@@ -609,6 +649,41 @@ impl Host {
         Ok(())
     }
 
+    /// Whether devices must give a code from an authenticator app (`Some`, with how many are
+    /// remembered so as not to be asked), or not (`None`).
+    pub fn second_factor(&self) -> Option<SecondFactorStatus> {
+        self.state.factor.enabled().then(|| SecondFactorStatus { remembered: self.state.factor.remembered(second_factor::now()) })
+    }
+
+    /// Start turning the second factor on: a new secret, which the owner puts into an authenticator
+    /// app. It is asked for only after [`Host::confirm_second_factor`] has had a right code. Fails
+    /// if it is on already.
+    pub fn enable_second_factor(&self) -> Result<SecondFactorSetup> {
+        let secret = self.state.factor.enable()?;
+        Ok(SecondFactorSetup { uri: second_factor::otpauth_uri(&self.state.name, &secret), grouped: second_factor::grouped(&secret), secret })
+    }
+
+    /// The code the app shows for the secret of [`Host::enable_second_factor`]: if it is right the
+    /// second factor is on from now.
+    pub fn confirm_second_factor(&self, code: &str) -> bool {
+        self.state.factor.confirm(code, second_factor::now()).unwrap_or(false)
+    }
+
+    /// Turn the second factor off and throw the secret and the remembered devices away.
+    pub fn disable_second_factor(&self) -> Result<()> {
+        self.state.factor.disable()
+    }
+
+    /// Ask every device for a code again, even those told "don't ask again".
+    pub fn forget_remembered(&self) -> Result<()> {
+        self.state.factor.forget_remembered()
+    }
+
+    /// For tests: how long a device has to answer the ask for a code.
+    pub fn set_second_factor_wait(&self, wait: Duration) {
+        self.state.factor_wait.store(wait.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// For a host program whose handler doesn't implement [`HostHandler::notice`] (the C
     /// interface): `notice` is called, on the handler's thread, with each event the handler's
     /// own `notice` would get.
@@ -654,6 +729,7 @@ impl Host {
     pub fn revoke(&self, fingerprint: &str) -> Result<bool> {
         let was = self.trust.remove(fingerprint)?;
         let _ = self.state.perms.forget(fingerprint);
+        let _ = self.state.factor.forget_device(fingerprint);
         let who = self.who.lock().unwrap();
         if let Some((fp, conn)) = who.as_ref() {
             if fp == fingerprint {
@@ -786,6 +862,68 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
     }
 }
 
+/// Ends when a device that began waiting at `since` has waited the host's `approver_wait` with
+/// nobody having asked [`Host::pending`] since; never, when that is off or somebody did.
+async fn nobody_asks(confirm: &Confirm, since: Instant) {
+    let wait = Duration::from_millis(confirm.approver_wait.load(std::sync::atomic::Ordering::Relaxed));
+    if wait.is_zero() {
+        return std::future::pending().await;
+    }
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let looked = confirm.last_look.lock().unwrap().is_some_and(|l| l >= since);
+        if looked {
+            return std::future::pending().await;
+        }
+        if since.elapsed() >= wait {
+            return;
+        }
+    }
+}
+
+/// The second factor's turn at admission: wait for `second_factor` messages from the client until
+/// one is right (and then go on), or too many are wrong (error `second_factor`, the device refused
+/// for 10 minutes), or the time is up (a client that doesn't know the message never answers).
+async fn ask_second_factor(send: &mut remoteman_transport::SendStream, recv: &mut RecvStream, state: &State, fingerprint: &str, name: &str, address: &str, record: &(dyn Fn(ConnectionEvent) + Sync)) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(state.factor_wait.load(std::sync::atomic::Ordering::Relaxed));
+    let fail = |code: &str, message: &str, event: &str| {
+        let mut e = ConnectionEvent::new(event, name, fingerprint, address);
+        e.reason = message.into();
+        record(e);
+        Message::Error { code: code.into(), message: message.into() }
+    };
+    loop {
+        let message = match tokio::time::timeout_at(deadline, read_message(recv)).await {
+            Err(_) => {
+                let error = fail("second_factor", "This computer asks for a code from an authenticator app; update remoteman", "refused");
+                let _ = write_message(send, &error).await;
+                let _ = send.finish();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                bail!("no second-factor code came in time");
+            }
+            Ok(m) => m?.context("the client left before giving a code")?,
+        };
+        let Message::SecondFactor { code, remember } = message else { continue };
+        match state.factor.check(fingerprint, &code, remember, second_factor::now()) {
+            Check::Right => {
+                record(ConnectionEvent::new("second_factor_ok", name, fingerprint, address));
+                return Ok(());
+            }
+            Check::Wrong(left) => {
+                record(ConnectionEvent::new("second_factor_wrong", name, fingerprint, address));
+                write_message(send, &Message::SecondFactorWrong { left }).await?;
+            }
+            Check::Refused => {
+                let error = fail("second_factor", "Too many wrong codes. Try again in 10 minutes.", "second_factor_wrong");
+                let _ = write_message(send, &error).await;
+                let _ = send.finish();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                bail!("too many wrong second-factor codes");
+            }
+        }
+    }
+}
+
 /// Writes the `left` line of the connection log when a session ends, however it ends.
 struct LeftLog {
     state: Arc<State>,
@@ -838,9 +976,11 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         let (answer, answered) = tokio::sync::oneshot::channel::<bool>();
         *confirm.waiting.lock().unwrap() = Some((device, Instant::now(), answer));
         write_message(&mut send, &Message::Pairing { seconds: CONFIRM_SECONDS }).await.map_err(no)?;
+        let mut nobody = false;
         let decision = tokio::select! {
             said = tokio::time::timeout(Duration::from_secs(CONFIRM_SECONDS as u64), answered) => said.ok().and_then(|s| s.ok()),
             _ = conn.closed() => Some(false),
+            _ = nobody_asks(&confirm, Instant::now()) => { nobody = true; None }
         };
         // Whatever came of it, nobody is waiting any more (unless a newer device already is).
         {
@@ -855,7 +995,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                 record(ConnectionEvent::new("paired", name.trim(), &fingerprint, &address));
             }
             other => {
-                let message = if other.is_some() { "pairing was declined on the computer" } else { "nobody confirmed the pairing on the computer in time" };
+                let message = if other.is_some() { "pairing was declined on the computer" } else if nobody { "Nobody is signed in on this PC to accept the device" } else { "nobody confirmed the pairing on the computer in time" };
                 let mut event = ConnectionEvent::new("refused", name.trim(), &fingerprint, &address);
                 event.reason = message.into();
                 record(event);
@@ -872,10 +1012,23 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         record(ConnectionEvent::new("paired", name.trim(), &fingerprint, &address));
     }
     // What this device may do: its features are the host's less what it isn't allowed.
+    // A paired device must also give a code from an authenticator app, when that is on and the
+    // device was not told "don't ask again" (docs/PROTOCOL.md, "Second factor").
+    let factor = state.factor.required_for(&fingerprint, second_factor::now());
+    if factor && state.factor.is_refused(&fingerprint, second_factor::now()) {
+        let message = "Too many wrong codes. Try again in 10 minutes.";
+        let mut event = ConnectionEvent::new("refused", name.trim(), &fingerprint, &address);
+        event.reason = message.into();
+        record(event);
+        let _ = write_message(&mut send, &Message::Error { code: "second_factor".into(), message: message.into() }).await;
+        let _ = send.finish();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        return Err(no(anyhow::anyhow!("the device is refused for wrong second-factor codes")));
+    }
     let features = gate.get().filter(&features);
     // Parity only where both sides said so.
     let parity = parity && features.iter().any(|f| f == "parity");
-    write_message(&mut send, &Message::HostHello { proto: remoteman_proto::PROTO, name: options.name.clone(), os: options.os.clone(), features }).await.map_err(no)?;
+    write_message(&mut send, &Message::HostHello { proto: remoteman_proto::PROTO, name: options.name.clone(), os: options.os.clone(), features, second_factor: factor.then(|| "totp".to_owned()) }).await.map_err(no)?;
     // The list of trusted devices shows the name the device gives itself.
     if !name.trim().is_empty() {
         let _ = trust.rename(&fingerprint, name.trim());
@@ -884,6 +1037,11 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         let message = format!("this host speaks protocol {}", remoteman_proto::PROTO);
         let _ = write_message(&mut send, &Message::Error { code: "unsupported".into(), message }).await;
         return Err(no(anyhow::anyhow!("the client speaks protocol {proto}")));
+    }
+
+    // Nothing more is sent, and the handler hears nothing, until the code is right.
+    if factor {
+        ask_second_factor(&mut send, &mut recv, state, &gate.fingerprint, name.trim(), &address, &record).await.map_err(no)?;
     }
 
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Out>(4);
