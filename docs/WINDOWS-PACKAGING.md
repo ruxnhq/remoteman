@@ -276,18 +276,44 @@ below is from memory of how Windows 11 shows them, not looked up today:
 
 ## When the owner's app (Remoteman Host) lands
 
-From the host session's list (shared notes, `win-host-install.md`; branch
-`claude/win-host-rest-55f8f7`, app in `windows/host`, which is why the installer lives in
-`windows/host-installer`). The installer then also needs to:
+The app is `crates/remoteman-host-app-windows` (`remoteman-host-app.exe`): WinUI 3 written in
+Rust with Microsoft's windows-reactor (`vendor/windows-reactor`, pinned to a windows-rs commit;
+`vendor/windows-reactor/VENDORED.md`), no C# or .NET. It speaks to the host only over the host's
+control pipe. Its folder, built on Windows:
 
-- carry the app's publish folder (`scripts/win-host-app.sh`, self-contained, with
-  `Assets\*.ico`) into `{app}\app` and start `remoteman-host-app.exe --background` at sign-in,
-  not elevated (HKCU or HKLM `Run`), removed by the uninstaller;
+    powershell -File crates\remoteman-host-app-windows\stage.ps1 [-Out target\host-app]
+
+`remoteman-host-app.exe` (4 MB, the tray icons inside it, the static CRT) and the Windows App
+Runtime 2.6.4 beside it, self-contained (`windows-reactor-setup` embeds the manifest that finds
+the runtime there, so nothing is installed and no `VCRUNTIME140.dll` is needed): 31 files
+(`Microsoft.ui.xaml.dll`, `Microsoft.UI.Xaml.Controls.dll`, `Microsoft.WindowsAppRuntime.dll`,
+DWriteCore, the composition and input DLLs, three `.pri` resource indexes), the
+`Microsoft.UI.Xaml` folder, and 86 language folders of WinUI's own strings: 206 files,
+64,120,183 bytes in all. The layout is kept as it is (the DLLs beside the exe). The first build on
+a PC downloads the runtime from NuGet into `%LOCALAPPDATA%\windows-reactor-setup`; a build
+cross-compiled from Linux (cargo-xwin) stages nothing and would need the runtime installed.
+
+`crates/remoteman-host-app-windows/test/` drives it with no host: `fakehost.ps1` (a stand-in for
+the host's pipe that keeps state and logs every word), `walk.ps1` (every page, switch, menu item
+and dialog through UI Automation, with screenshots), `mica.ps1` (the backdrop with another window
+active), `notify.ps1` (the Windows notifications seen).
+
+From the host session's list (shared notes, `win-host-install.md`; branch
+`claude/win-host-rest-55f8f7`, which is why the installer lives in `windows/host-installer`). The
+installer then also needs to:
+
+- carry that folder into `{app}\app` and start `remoteman-host-app.exe --background` at sign-in,
+  not elevated, for every user who signs in (HKLM `...\CurrentVersion\Run`, or a Startup
+  shortcut in the common Start menu), removed by the uninstaller; a second start (the Start menu
+  shortcut while the icon is there) only opens the running app's window;
 - agree on the host's state folder: this installer gives the host
   `C:\ProgramData\remoteman\host` (Administrators and SYSTEM only, deleted on uninstall); the
   host session's list says `%LOCALAPPDATA%\remoteman\host`. The app talks to the host over its
   pipe, so either works; per-machine fits a host started for whoever logs on;
-- drop `--ask` from the task once the app asks about new devices.
+- drop `--ask` from the task: the app now asks about new devices (`status`'s `pending`, answered
+  with `pair accept` / `pair decline`);
+- keep the pipe open to the signed-in user's unelevated app: today `control.rs` grants the user
+  the host runs as, which is that user only while the host runs in their session.
 
 Its list also says the host needs the VC++ runtime: no longer, with this branch's
 `.cargo/config.toml` (static CRT; the host's imports were checked).
