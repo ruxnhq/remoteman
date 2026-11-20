@@ -23,7 +23,7 @@ use anyhow::{Context, Result, bail, ensure};
 use remoteman_encode::{FrameEncoder, HdrLight, How, Made};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device5, ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D};
+use windows::Win32::Graphics::Direct3D11::{D3D11_BOX, ID3D11Device5, ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_P010, DXGI_FORMAT_UNKNOWN, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory4};
@@ -416,7 +416,27 @@ fn check<T>(video: &ID3D12VideoDevice3, feature: D3D12_FEATURE_VIDEO, data: &mut
     unsafe { video.CheckFeatureSupport(feature, data as *mut T as *mut _, std::mem::size_of::<T>() as u32) }.map_err(|e| anyhow::anyhow!("CheckFeatureSupport({}): {e}", feature.0))
 }
 
-fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) -> Result<Chosen> {
+/// The multiples of the picture size the encoder asks for: AMD's encodes rows in groups of 16,
+/// and a 1080-row picture must be coded as 1088 rows and cropped (FFmpeg's encoder does the same).
+/// A driver that doesn't say asks for the smallest coding unit, 8.
+fn size_multiples(video: &ID3D12VideoDevice3, vendor: u32) -> (u32, u32) {
+    // The driver says 1 (no requirement) all the same. AMD's encoder codes whole coding tree
+    // blocks (64x64): a stream that says 1080 rows decodes wrongly in its last 56, and one that
+    // says 368 (a multiple of 16, not of 64) fails to parse in a picture of a few hundred
+    // (found by bisecting; 384 is clean over thousands). The picture is coded at the aligned size
+    // and cropped by the stream's parameter sets. NVIDIA's takes any multiple of the smallest
+    // coding unit.
+    let floor: u32 = std::env::var("REMOTEMAN_D3D12_ALIGN").ok().and_then(|v| v.parse().ok()).unwrap_or(if vendor == 0x1002 { 64 } else { 8 });
+    let mut r = D3D12_FEATURE_DATA_VIDEO_ENCODER_OUTPUT_RESOLUTION { Codec: D3D12_VIDEO_ENCODER_CODEC_HEVC, ..Default::default() };
+    let said = check(video, D3D12_FEATURE_VIDEO_ENCODER_OUTPUT_RESOLUTION, &mut r);
+    if env_flag("REMOTEMAN_D3D12_DEBUG", false) {
+        eprintln!("output resolution: {said:?} supported {} width multiple {} height multiple {} min {}x{} max {}x{}", r.IsSupported.as_bool(), r.ResolutionWidthMultipleRequirement, r.ResolutionHeightMultipleRequirement, r.MinResolutionSupported.Width, r.MinResolutionSupported.Height, r.MaxResolutionSupported.Width, r.MaxResolutionSupported.Height);
+    }
+    let multiple = |m: u32| if said.is_ok() && r.IsSupported.as_bool() && m.is_power_of_two() { m.max(floor) } else { floor };
+    (multiple(r.ResolutionWidthMultipleRequirement), multiple(r.ResolutionHeightMultipleRequirement))
+}
+
+fn choose(video: &ID3D12VideoDevice3, vendor: u32, w: u32, h: u32, fps: u32, bitrate: u32) -> Result<Chosen> {
     let mut profile = D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN10;
     let profile_ptr: *mut D3D12_VIDEO_ENCODER_PROFILE_HEVC = &mut profile;
     let profile_desc = || D3D12_VIDEO_ENCODER_PROFILE_DESC { DataSize: 4, Anonymous: D3D12_VIDEO_ENCODER_PROFILE_DESC_0 { pHEVCProfile: profile_ptr } };
@@ -443,13 +463,26 @@ fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) ->
     // The query takes the configuration we would like and says whether it is supported: try
     // from the biggest coding units down.
     let mut found = None;
-    for (max_cu, depth) in [(3, 3u8), (2, 3), (2, 2), (1, 2), (1, 1), (2, 1)] {
+    // What NVIDIA takes first, then every combination (another maker's driver may take only one).
+    let mut tries: Vec<(i32, i32, i32, i32, u8)> = [(3, 3u8), (2, 3), (2, 2), (1, 2), (1, 1), (2, 1)].into_iter().map(|(m, d)| (0, m, 0, 3.min(m + 1), d)).collect();
+    for max_cu in (0..=3).rev() {
+        for min_cu in 0..=max_cu {
+            for min_tu in 0..=3 {
+                for max_tu in min_tu..=3 {
+                    for depth in (0..=4u8).rev() {
+                        tries.push((min_cu, max_cu, min_tu, max_tu, depth));
+                    }
+                }
+            }
+        }
+    }
+    for (min_cu, max_cu, min_tu, max_tu, depth) in tries {
         let mut sup = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC {
             SupportFlags: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC_FLAG_NONE,
-            MinLumaCodingUnitSize: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_CUSIZE(0),
+            MinLumaCodingUnitSize: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_CUSIZE(min_cu),
             MaxLumaCodingUnitSize: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_CUSIZE(max_cu),
-            MinLumaTransformUnitSize: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_TUSIZE(0),
-            MaxLumaTransformUnitSize: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_TUSIZE(3.min(max_cu + 1)),
+            MinLumaTransformUnitSize: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_TUSIZE(min_tu),
+            MaxLumaTransformUnitSize: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_TUSIZE(max_tu),
             max_transform_hierarchy_depth_inter: depth,
             max_transform_hierarchy_depth_intra: depth,
         };
@@ -462,7 +495,11 @@ fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) ->
             },
             ..Default::default()
         };
-        if check(video, D3D12_FEATURE_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT, &mut cs).is_ok() && cs.IsSupported.as_bool() {
+        let said = check(video, D3D12_FEATURE_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT, &mut cs);
+        if std::env::var_os("REMOTEMAN_D3D12_DEBUG").is_some() && said.is_ok() && cs.IsSupported.as_bool() {
+            eprintln!("config query max_cu {max_cu} depth {depth}: {said:?} supported {} flags {} min_cu {} max_cu {} min_tu {} max_tu {} depth {}/{}", cs.IsSupported.as_bool(), sup.SupportFlags.0, sup.MinLumaCodingUnitSize.0, sup.MaxLumaCodingUnitSize.0, sup.MinLumaTransformUnitSize.0, sup.MaxLumaTransformUnitSize.0, sup.max_transform_hierarchy_depth_inter, sup.max_transform_hierarchy_depth_intra);
+        }
+        if said.is_ok() && cs.IsSupported.as_bool() {
             found = Some(sup);
             break;
         }
@@ -485,7 +522,13 @@ fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) ->
     // Our configuration: the smallest coding units the encoder allows up to 32x32 (64x64 where
     // it has no smaller maximum), its transform units, its hierarchy depths; no AMP, no SAO.
     let config = D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC {
-        ConfigurationFlags: if sup.SupportFlags.0 & D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC_FLAG_ASYMETRIC_MOTION_PARTITION_REQUIRED.0 != 0 { D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_USE_ASYMETRIC_MOTION_PARTITION } else { D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_NONE },
+        ConfigurationFlags: D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAGS(
+            (if sup.SupportFlags.0 & D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC_FLAG_ASYMETRIC_MOTION_PARTITION_REQUIRED.0 != 0 { D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_USE_ASYMETRIC_MOTION_PARTITION.0 } else { 0 })
+                // AMD's encoder uses asymmetric partitions whether it was asked to or not, and
+                // a stream whose SPS says it doesn't (the flag unset) fails to parse now and then
+                // (found as a CABAC error once in some hundreds of pictures). Say so.
+                | if sup.SupportFlags.0 & D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT_HEVC_FLAG_ASYMETRIC_MOTION_PARTITION_SUPPORT.0 != 0 && env_flag("REMOTEMAN_D3D12_AMP", vendor == 0x1002) { D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_USE_ASYMETRIC_MOTION_PARTITION.0 } else { 0 },
+        ),
         MinLumaCodingUnitSize: sup.MinLumaCodingUnitSize,
         MaxLumaCodingUnitSize: sup.MaxLumaCodingUnitSize,
         MinLumaTransformUnitSize: sup.MinLumaTransformUnitSize,
@@ -655,14 +698,15 @@ impl Encoder {
         // as a whole or not at all), so a size the smallest coding unit (8) doesn't divide is
         // left to the other encoders.
         ensure!(w % 8 == 0 && h % 8 == 0, "Direct3D 12 encoding here needs a picture size that 8 divides, not {w}x{h}");
-        let (cw, ch) = (w, h);
         // SAFETY: Direct3D 12 calls as documented, with live arguments and out-parameters.
         unsafe {
             let device = d3d12_device(gpu)?;
             let video: ID3D12VideoDevice3 = device.cast().context("ID3D12VideoDevice3 (no Direct3D 12 video on this GPU or driver)")?;
-            let chosen = choose(&video, w, h, fps, s.bitrate)?;
+            let (mw, mh) = size_multiples(&video, gpu.vendor);
+            let (cw, ch) = (w.next_multiple_of(mw), h.next_multiple_of(mh));
+            let chosen = choose(&video, gpu.vendor, cw, ch, fps, s.bitrate)?;
             let caps = chosen.caps.clone();
-            let vbv = caps.support_flags & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_VBV_SIZE_CONFIG_AVAILABLE.0 != 0;
+            let vbv = caps.support_flags & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_VBV_SIZE_CONFIG_AVAILABLE.0 != 0 && env_flag("REMOTEMAN_D3D12_VBV", true);
             let reconfigurable = caps.support_flags & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_RECONFIGURATION_AVAILABLE.0 != 0;
             let array = caps.support_flags & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RECONSTRUCTED_FRAMES_REQUIRE_TEXTURE_ARRAYS.0 != 0;
 
@@ -732,7 +776,7 @@ impl Encoder {
             let recon_slices = DPB + 1;
             let mut recon: Option<ID3D12Resource> = None;
             device
-                .CreateCommittedResource(&heap(D3D12_HEAP_TYPE_DEFAULT), D3D12_HEAP_FLAG_NONE, &texture_desc(cw, ch, recon_slices as u16, D3D12_RESOURCE_FLAG_NONE), D3D12_RESOURCE_STATE_COMMON, None, &mut recon)
+                .CreateCommittedResource(&heap(D3D12_HEAP_TYPE_DEFAULT), D3D12_HEAP_FLAG_NONE, &texture_desc(cw, ch, recon_slices as u16, if env_flag("REMOTEMAN_D3D12_REFONLY", true) { D3D12_RESOURCE_FLAGS(D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY.0 | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE.0) } else { D3D12_RESOURCE_FLAG_NONE }), D3D12_RESOURCE_STATE_COMMON, None, &mut recon)
                 .context("the reconstructed pictures")?;
             let _ = array;
 
@@ -769,8 +813,8 @@ impl Encoder {
                 max_cb_log2: 3 + config.MaxLumaCodingUnitSize.0 as u32,
                 min_tb_log2: 2 + config.MinLumaTransformUnitSize.0 as u32,
                 max_tb_log2: 2 + config.MaxLumaTransformUnitSize.0 as u32,
-                depth_inter: config.max_transform_hierarchy_depth_inter as u32,
-                depth_intra: config.max_transform_hierarchy_depth_intra as u32,
+                depth_inter: std::env::var("REMOTEMAN_D3D12_SPSDEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(config.max_transform_hierarchy_depth_inter as u32),
+                depth_intra: std::env::var("REMOTEMAN_D3D12_SPSDEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(config.max_transform_hierarchy_depth_intra as u32),
                 amp: config.ConfigurationFlags.0 & D3D12_VIDEO_ENCODER_CODEC_CONFIGURATION_HEVC_FLAG_USE_ASYMETRIC_MOTION_PARTITION.0 != 0,
                 sao: false,
                 hdr: s.hdr,
@@ -782,6 +826,11 @@ impl Encoder {
                 transform_skip: env_flag("REMOTEMAN_D3D12_TSKIP", false),
             };
             let note = format!("Direct3D 12 HEVC Main10 level idx {} on {}: {} refs/P, DPB {}, flags {:#x}, vbv {vbv}, reconfig {reconfigurable}", caps.level, gpu.adapter, caps.max_l0_refs, caps.max_dpb, caps.support_flags);
+            if std::env::var_os("REMOTEMAN_D3D12_DEBUG").is_some() {
+                eprintln!("{note}
+{caps:?}
+{config:?}");
+            }
             Ok(Self {
                 note,
                 params,
@@ -852,26 +901,37 @@ impl Encoder {
         // Copy the converter's picture into the shared texture and hand it over.
         // SAFETY: live interfaces of the device the converter works on and of the encoder's.
         unsafe {
-            self.gpu_context.CopyResource(&self.shared11, &self.input11);
+            if (self.params.coded_w, self.params.coded_h) == (self.params.width, self.params.height) {
+                self.gpu_context.CopyResource(&self.shared11, &self.input11);
+            } else {
+                // The picture is smaller than the size coded (rows or columns added for the
+                // encoder's alignment, cropped away again by the stream's parameter sets).
+                let area = D3D11_BOX { left: 0, top: 0, front: 0, right: self.params.width, bottom: self.params.height, back: 1 };
+                self.gpu_context.CopySubresourceRegion(&self.shared11, 0, 0, 0, 0, &self.input11, 0, Some(&area));
+            }
             self.shared_value += 1;
             self.gpu_context.Signal(&self.fence11, self.shared_value)?;
         }
 
-        let refs: Vec<usize> = if key { Vec::new() } else { (0..self.pics.len()).collect() };
+        // Newest first, so that each reference's distance grows along the list: the short-term
+        // reference picture set in a slice header is written in this order and has to be sorted
+        // so (AMD's driver writes it as given, and a decoder finds the wrong pictures otherwise).
+        let refs: Vec<usize> = if key { Vec::new() } else { (0..self.pics.len()).rev().collect() };
         let ref_i = self.pics.len().wrapping_sub(1); // the newest
         let mut textures: Vec<Option<ID3D12Resource>> = refs.iter().map(|_| Some(self.recon.clone())).collect();
         let mut subs: Vec<u32> = refs.iter().map(|&i| self.pics[i].slice as u32).collect();
         let mut descs: Vec<D3D12_VIDEO_ENCODER_REFERENCE_PICTURE_DESCRIPTOR_HEVC> = refs
             .iter()
-            .map(|&i| D3D12_VIDEO_ENCODER_REFERENCE_PICTURE_DESCRIPTOR_HEVC {
-                ReconstructedPictureResourceIndex: i as u32,
+            .enumerate()
+            .map(|(at, &i)| D3D12_VIDEO_ENCODER_REFERENCE_PICTURE_DESCRIPTOR_HEVC {
+                ReconstructedPictureResourceIndex: at as u32,
                 IsRefUsedByCurrentPic: BOOL::from(i == ref_i),
                 IsLongTermReference: BOOL::from(false),
                 PictureOrderCountNumber: self.pics[i].poc,
                 TemporalLayerIndex: 0,
             })
             .collect();
-        let mut list0 = [ref_i as u32];
+        let mut list0 = [0u32]; // the newest, first in the arrays above
         let mut data = D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC {
             Flags: D3D12_VIDEO_ENCODER_PICTURE_CONTROL_CODEC_DATA_HEVC_FLAG_NONE,
             FrameType: if key { D3D12_VIDEO_ENCODER_FRAME_TYPE_HEVC_IDR_FRAME } else { D3D12_VIDEO_ENCODER_FRAME_TYPE_HEVC_P_FRAME },
@@ -987,7 +1047,7 @@ impl Encoder {
                         }
                     }
                 }
-                return Err(e.into());
+                return Err(anyhow::Error::from(e).context("closing the encode command list (the driver refused the EncodeFrame arguments)"));
             }
 
             // Wait for the converter's copy, run, and wait for the end.
