@@ -85,6 +85,9 @@ pub fn features(allowed: &Allowed) -> Vec<String> {
             features.push("displays".into());
         }
     }
+    if crate::gamepad::available() {
+        features.push("gamepad".into());
+    }
     if allowed.hdr.load(Ordering::Relaxed) {
         features.push("hdr".into());
     }

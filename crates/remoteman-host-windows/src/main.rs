@@ -78,6 +78,7 @@ mod enctest;
 #[cfg(windows)]
 mod hdr;
 #[cfg(windows)]
+mod gamepad;
 mod input;
 #[cfg(windows)]
 mod mf;

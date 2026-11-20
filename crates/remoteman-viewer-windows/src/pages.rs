@@ -549,6 +549,7 @@ fn settings(app: &App, ui: &mut Ui) {
         &[
             row("set.pointer", "Pointer", "Captured sends raw movement, which games and 3D apps need. Ctrl+Alt+Shift lets it go", chosen(app, Choice::Pointer), gate(FEATURES.pointer_capture)),
             row("set.scroll", "Scroll direction", "", chosen(app, Choice::Scroll), gate(FEATURES.scroll_direction)),
+            row("set.gamepad", "Game controllers go to the computer", "A controller held here plays there while this window is in front", Ctl::Toggle(s.gamepad, Some(Msg::Set("game-controllers", None))), gate(FEATURES.gamepad)),
             row("set.touch", "Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", Ctl::Toggle(s.touch, Some(Msg::Set("touch", None))), gate(FEATURES.touch)),
         ],
     );

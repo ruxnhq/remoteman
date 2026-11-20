@@ -237,6 +237,8 @@ pub struct Settings {
     /// Touchscreen touches go to the computer as touches, not as the pointer (the Linux
     /// viewer's key, `touch`).
     pub touch: bool,
+    /// Game controllers go to the computer.
+    pub gamepad: bool,
     /// Computers may be lent this PC's microphone and camera; each is still switched on in a
     /// session by the person here.
     pub allow_microphone: bool,
@@ -268,7 +270,7 @@ impl Settings {
 /// The picture's own keys (this viewer's alone so far).
 const PICTURE_KEYS: [&str; 3] = ["hdr", "variable-refresh", "cpu-444"];
 
-const SETTINGS_KEYS: [&str; 17] = ["super-key", "capture-pointer", "placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder", "touch", "allow-microphone", "allow-camera"];
+const SETTINGS_KEYS: [&str; 18] = ["game-controllers", "super-key", "capture-pointer", "placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder", "touch", "allow-microphone", "allow-camera"];
 
 pub struct Store {
     dir: PathBuf,
@@ -322,6 +324,7 @@ impl Store {
             variable_refresh: yes("variable-refresh", true),
             cpu_444: get("cpu-444").and_then(|v| v.parse().ok()).unwrap_or(0),
             touch: yes("touch", false),
+            gamepad: yes("game-controllers", true),
             allow_microphone: yes("allow-microphone", false),
             allow_camera: yes("allow-camera", false),
             other: text.lines().filter_map(|l| l.split_once('=')).filter(|(k, _)| !SETTINGS_KEYS.contains(k) && !PICTURE_KEYS.contains(k)).map(|(k, v)| (k.to_owned(), v.to_owned())).collect(),
@@ -494,7 +497,7 @@ impl Store {
         let s = &self.settings;
         let yes = |b: bool| if b { "yes" } else { "no" };
         let mut out = format!(
-            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\nsuper-key={}\ncapture-pointer={}\nsound={}\nclipboard={}\nfolder={}\ntouch={}\nallow-microphone={}\nallow-camera={}\n",
+            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\nsuper-key={}\ncapture-pointer={}\nsound={}\nclipboard={}\nfolder={}\ntouch={}\nallow-microphone={}\nallow-camera={}\ngame-controllers={}\n",
             placement_key(s.placement),
             yes(s.hover_bar),
             yes(s.figures),
@@ -512,6 +515,7 @@ impl Store {
             yes(s.touch),
             yes(s.allow_microphone),
             yes(s.allow_camera),
+            yes(s.gamepad),
         );
         out += &format!("hdr={}\nvariable-refresh={}\ncpu-444={}\n", yes(s.hdr), yes(s.variable_refresh), s.cpu_444);
         for (key, value) in &s.other {

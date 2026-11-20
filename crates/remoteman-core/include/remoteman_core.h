@@ -170,6 +170,15 @@ void rm_client_text(const rm_client *client, const char *utf8);
 // rm_client_features (send touch or mouse instead), else 1.
 int32_t rm_client_pen(const rm_client *client, uint8_t phase, uint8_t buttons, float x, float y,
                       float pressure, float tilt_x, float tilt_y, float twist);
+// A game controller's whole state (docs/PROTOCOL.md, "Game controllers"): pad 0..3; flags bit 0
+// connected (clear: that pad was unplugged); buttons in XInput's order (DPAD_UP 0x1, DOWN 0x2,
+// LEFT 0x4, RIGHT 0x8, START 0x10, BACK 0x20, LEFT_THUMB 0x40, RIGHT_THUMB 0x80, LEFT_SHOULDER
+// 0x100, RIGHT_SHOULDER 0x200, GUIDE 0x400, A 0x1000, B 0x2000, X 0x4000, Y 0x8000); triggers
+// 0..1; sticks -1..1, up and right positive. Send on every change, and every 100 ms while
+// anything is off neutral. Returns 0 and sends nothing when the host doesn't list "gamepad" in
+// rm_client_features, else 1.
+int32_t rm_client_gamepad(const rm_client *client, uint8_t pad, uint8_t flags, uint16_t buttons,
+                          float lt, float rt, float lx, float ly, float rx, float ry);
 
 // Leave and free the client. `on_closed` is called before this returns or shortly after.
 void rm_client_close(rm_client *client);
@@ -229,6 +238,11 @@ typedef struct rm_input {
     float pressure;           // 0 to 1
     float tilt_x, tilt_y;     // degrees, -90 to 90
     float twist;              // degrees, 0 to 359
+    // Appended for kind 10 (game controller): slot the pad (0..3), down the flags (bit 0
+    // connected), usage the buttons (XInput's mask), x, y the left stick; these the right stick
+    // and the triggers. Zero for the other kinds.
+    float right_x, right_y;
+    float left_trigger, right_trigger;
 } rm_input;
 
 // All called on one thread of the core's, one at a time; they may block.
