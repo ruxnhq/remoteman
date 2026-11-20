@@ -75,7 +75,7 @@ pub struct Allowed {
 /// it is. `placement`: a device gets a monitor of its own, placed as it asks. `displays`: and a
 /// second one, where the driver has a third monitor.
 pub fn features(allowed: &Allowed) -> Vec<String> {
-    let mut features: Vec<String> = ["video", "input", "cursor", "configure", "sound"].map(String::from).to_vec();
+    let mut features: Vec<String> = ["video", "input", "cursor", "configure", "sound", "pen"].map(String::from).to_vec();
     if !allowed.real_screens.load(Ordering::Relaxed) {
         features.push("mirror".into());
     }

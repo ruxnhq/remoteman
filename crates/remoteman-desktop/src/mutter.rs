@@ -218,6 +218,7 @@ impl VirtualDisplay {
             // Which display the pointer is on is the caller's to keep track of: it picks the
             // display this is asked of.
             Event::Display(_) => {}
+            Event::Pen { .. } => {}
             Event::Button { button, down } => {
                 // Linux BTN_LEFT, BTN_RIGHT, BTN_MIDDLE.
                 let code: i32 = match button {

@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use remoteman_core::{Button, Event, TouchPhase};
+use remoteman_core::{Button, Event, PenPhase, TouchPhase};
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE,
@@ -22,12 +22,43 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_PAUSE,
 };
 use windows::Win32::UI::Input::Pointer::{
-    InitializeTouchInjection, InjectTouchInput, POINTER_FLAG_DOWN, POINTER_FLAG_INCONTACT, POINTER_FLAG_INRANGE, POINTER_FLAG_UP, POINTER_FLAG_UPDATE, POINTER_FLAGS, POINTER_INFO, POINTER_TOUCH_INFO,
+    InitializeTouchInjection, InjectSyntheticPointerInput, InjectTouchInput, POINTER_FLAG_FIRSTBUTTON, POINTER_FLAG_NEW, POINTER_FLAG_SECONDBUTTON, POINTER_PEN_INFO, POINTER_FLAG_DOWN, POINTER_FLAG_INCONTACT, POINTER_FLAG_INRANGE, POINTER_FLAG_UP, POINTER_FLAG_UPDATE, POINTER_FLAGS, POINTER_INFO, POINTER_TOUCH_INFO,
     TOUCH_FEEDBACK_NONE,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, PT_TOUCH, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, TOUCH_MASK_CONTACTAREA};
+use windows::Win32::UI::Controls::{CreateSyntheticPointerDevice, DestroySyntheticPointerDevice, HSYNTHETICPOINTERDEVICE, POINTER_FEEDBACK_DEFAULT, POINTER_TYPE_INFO};
+use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED, PEN_MASK_PRESSURE, PEN_MASK_ROTATION, PEN_MASK_TILT_X, PEN_MASK_TILT_Y, PT_PEN, PT_TOUCH, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, TOUCH_MASK_CONTACTAREA};
 
 use crate::display::Area;
+
+/// A synthetic pen device (`CreateSyntheticPointerDevice`), destroyed when dropped.
+struct PenDevice(HSYNTHETICPOINTERDEVICE);
+
+// SAFETY: the handle is only used through `&mut self` of the injector that owns it, and
+// Windows lets any thread of the process use it.
+unsafe impl Send for PenDevice {}
+
+impl PenDevice {
+    fn create() -> windows::core::Result<Self> {
+        // SAFETY: plain call: one pen, with Windows' own feedback (the pen cursor).
+        unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT) }.map(Self)
+    }
+}
+
+impl Drop for PenDevice {
+    fn drop(&mut self) {
+        // SAFETY: a device `create` made, destroyed once.
+        unsafe { DestroySyntheticPointerDevice(self.0) };
+    }
+}
+
+/// Where the pen is, as far as Windows has been told.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PenState {
+    /// Not in range of the screen.
+    Away,
+    Hovering,
+    Down,
+}
 
 /// How a key is given to Windows.
 #[derive(Clone, Copy)]
@@ -160,13 +191,17 @@ pub struct Injector {
     touches: BTreeMap<u8, POINT>,
     /// Whether touch injection could be set up; not tried until the first touch.
     touch: Option<bool>,
+    /// The synthetic pen device, made at the first pen event; and whether making it failed.
+    pen_device: Option<PenDevice>,
+    pen_failed: bool,
+    pen_state: PenState,
     /// Events Windows didn't take, and whether that has been said.
     refused: u32,
 }
 
 impl Injector {
     pub fn new(area: Arc<Mutex<Area>>) -> Self {
-        Self { area, keys: BTreeSet::new(), buttons: BTreeSet::new(), moved: (0.0, 0.0), scrolled: (0.0, 0.0), touches: BTreeMap::new(), touch: None, refused: 0 }
+        Self { area, keys: BTreeSet::new(), buttons: BTreeSet::new(), moved: (0.0, 0.0), scrolled: (0.0, 0.0), touches: BTreeMap::new(), touch: None, pen_device: None, pen_failed: false, pen_state: PenState::Away, refused: 0 }
     }
 
     fn send(&mut self, inputs: &[INPUT]) {
@@ -282,6 +317,7 @@ impl Injector {
                 }
             }
             Event::Touch { phase, slot, x, y } => self.touch(*phase, *slot, *x, *y),
+            Event::Pen { phase, buttons, x, y, pressure, tilt_x, tilt_y, twist } => self.pen(*phase, *buttons, *x, *y, *pressure, *tilt_x, *tilt_y, *twist),
             // This host gives a device one display, so there is nothing to choose between.
             Event::Display(_) => {}
         }
@@ -342,6 +378,98 @@ impl Injector {
         }
     }
 
+
+    /// The pen, through a synthetic pen device made at the first event. Hovering is "in range"
+    /// without "in contact"; leaving the range is an update without "in range". A lift is
+    /// made up when the client goes from down to hovering or away without saying so, and a
+    /// contact when a move comes for a pen that isn't down.
+    #[allow(clippy::too_many_arguments)]
+    fn pen(&mut self, phase: PenPhase, buttons: u8, x: f32, y: f32, pressure: f32, tilt_x: f32, tilt_y: f32, twist: f32) {
+        if self.pen_device.is_none() {
+            if self.pen_failed {
+                return;
+            }
+            // The desktop the device is made on is the one that takes input now.
+            crate::desk::follow();
+            match PenDevice::create() {
+                Ok(d) => self.pen_device = Some(d),
+                Err(e) => {
+                    self.pen_failed = true;
+                    tracing::warn!("pen events from the client can't be passed on (CreateSyntheticPointerDevice: {e}). Said once.");
+                    return;
+                }
+            }
+        }
+        let at = self.pixel(x, y);
+        // The steps to get the pen from where it is to where the client says.
+        let mut steps: Vec<(PenState, POINTER_FLAGS)> = Vec::new();
+        let was = self.pen_state;
+        let in_range = POINTER_FLAG_INRANGE;
+        let contact = POINTER_FLAG_INCONTACT | POINTER_FLAG_FIRSTBUTTON | POINTER_FLAG_INRANGE;
+        let new = if was == PenState::Away { POINTER_FLAG_NEW } else { POINTER_FLAGS(0) };
+        match phase {
+            PenPhase::Down | PenPhase::Move if was == PenState::Down => steps.push((PenState::Down, POINTER_FLAG_UPDATE | contact)),
+            PenPhase::Down | PenPhase::Move => steps.push((PenState::Down, POINTER_FLAG_DOWN | new | contact)),
+            PenPhase::Up if was == PenState::Down => steps.push((PenState::Hovering, POINTER_FLAG_UP | in_range)),
+            PenPhase::Up => return,
+            PenPhase::Hover => {
+                if was == PenState::Down {
+                    steps.push((PenState::Hovering, POINTER_FLAG_UP | in_range));
+                }
+                steps.push((PenState::Hovering, POINTER_FLAG_UPDATE | new | in_range));
+            }
+            PenPhase::Leave => {
+                if was == PenState::Away {
+                    return;
+                }
+                if was == PenState::Down {
+                    steps.push((PenState::Hovering, POINTER_FLAG_UP | in_range));
+                }
+                steps.push((PenState::Away, POINTER_FLAG_UPDATE));
+            }
+        }
+        let mut pen_flags = 0;
+        if buttons & 1 != 0 {
+            pen_flags |= PEN_FLAG_BARREL;
+        }
+        if buttons & 2 != 0 {
+            pen_flags |= PEN_FLAG_ERASER | PEN_FLAG_INVERTED;
+        }
+        let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
+        for (state, flags) in steps {
+            let mut flags = flags;
+            let touching = state == PenState::Down;
+            if buttons & 1 != 0 && touching {
+                flags |= POINTER_FLAG_SECONDBUTTON;
+            }
+            let info = POINTER_PEN_INFO {
+                pointerInfo: POINTER_INFO { pointerType: PT_PEN, pointerId: 0, pointerFlags: flags, ptPixelLocation: at, ..Default::default() },
+                penFlags: pen_flags,
+                penMask: PEN_MASK_PRESSURE | PEN_MASK_ROTATION | PEN_MASK_TILT_X | PEN_MASK_TILT_Y,
+                pressure: if touching { (finite(pressure).clamp(0.0, 1.0) * 1024.0).round() as u32 } else { 0 },
+                rotation: (finite(twist).round() as i32).rem_euclid(360) as u32,
+                tiltX: finite(tilt_x).clamp(-90.0, 90.0).round() as i32,
+                tiltY: finite(tilt_y).clamp(-90.0, 90.0).round() as i32,
+            };
+            let mut ti = POINTER_TYPE_INFO { r#type: PT_PEN, ..Default::default() };
+            ti.Anonymous.penInfo = info;
+            crate::desk::follow();
+            // SAFETY: one whole POINTER_TYPE_INFO, for the device this injector made.
+            let result = unsafe { InjectSyntheticPointerInput(self.pen_device.as_ref().unwrap().0, &[ti]) };
+            if let Err(e) = result {
+                self.refused += 1;
+                if self.refused == 1 {
+                    tracing::warn!("Windows didn't take a pen event ({e}); it may be on another desktop than the device was made on. Said once.");
+                }
+                // A new device (on the desktop that takes input now) at the next event.
+                self.pen_device = None;
+                self.pen_state = PenState::Away;
+                return;
+            }
+            self.pen_state = state;
+        }
+    }
+
     /// Let go of everything the client held down: nothing may stay pressed when it leaves.
     pub fn release_all(&mut self) {
         for usage in std::mem::take(&mut self.keys) {
@@ -354,11 +482,29 @@ impl Injector {
         for slot in self.touches.keys().copied().collect::<Vec<_>>() {
             self.touch(TouchPhase::Up, slot, 0.0, 0.0);
         }
+        if self.pen_state != PenState::Away {
+            self.pen(PenPhase::Leave, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        }
+        // The device goes with the session.
+        self.pen_device = None;
     }
 }
 
 impl Drop for Injector {
     fn drop(&mut self) {
         self.release_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Makes and destroys the synthetic pen device, and injects nothing.
+    #[test]
+    fn a_synthetic_pen_device_can_be_made_and_destroyed() {
+        let device = PenDevice::create().expect("CreateSyntheticPointerDevice(PT_PEN)");
+        assert!(!device.0.0.is_null());
+        drop(device);
     }
 }

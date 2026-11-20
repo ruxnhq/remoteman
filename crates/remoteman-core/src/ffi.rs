@@ -5,7 +5,7 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::PathBuf;
 
-use crate::{BlobEvent, BlobSender, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, Side, StreamInfo, TouchPhase};
+use crate::{BlobEvent, BlobSender, Button, Chroma, Client, Codec, CursorShape, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, PenPhase, Side, StreamInfo, TouchPhase};
 
 /// The app's callbacks. They are called from the core's threads, one at a time, with `ctx`.
 #[repr(C)]
@@ -445,6 +445,31 @@ input!(/// A key by USB HID usage (page 7), modifiers included.
 input!(/// A finger: phase 0 down, 1 move, 2 up; `slot` tells fingers apart.
     rm_client_touch(phase: u8, slot: u8, x: f32, y: f32) => Event::Touch { phase: match phase { 0 => TouchPhase::Down, 2 => TouchPhase::Up, _ => TouchPhase::Move }, slot, x, y });
 
+/// The pen (docs/PROTOCOL.md, "Pen"): `phase` 0 contact down, 1 move in contact, 2 contact up,
+/// 3 hover move, 4 left hover range; `buttons` bit 0 barrel button, bit 1 eraser end; `x`, `y`
+/// as fractions of the display; `pressure` 0 to 1; tilt in degrees -90 to 90; `twist` 0 to 359.
+/// Returns 0, and sends nothing, when the host doesn't list `pen` in its features (see
+/// `rm_client_features`): the caller sends touch or mouse then. Otherwise 1.
+///
+/// # Safety
+/// `client` must come from `rm_client_connect`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_client_pen(client: *const Client, phase: u8, buttons: u8, x: f32, y: f32, pressure: f32, tilt_x: f32, tilt_y: f32, twist: f32) -> i32 {
+    let client = unsafe { &*client };
+    if !client.host_has_pen() {
+        return 0;
+    }
+    let phase = match phase {
+        0 => PenPhase::Down,
+        1 => PenPhase::Move,
+        2 => PenPhase::Up,
+        3 => PenPhase::Hover,
+        _ => PenPhase::Leave,
+    };
+    client.send(Event::Pen { phase, buttons, x, y, pressure, tilt_x, tilt_y, twist });
+    1
+}
+
 input!(/// Which display the pointer events after this are on: 0 the first, 1 the second. Send
     /// it when the pointer goes from one picture to the other.
     rm_client_pointer_on(index: u8) => Event::Display(index));
@@ -542,7 +567,7 @@ pub struct RmAccept {
 #[repr(C)]
 pub struct RmInput {
     /// 1 pointer to (x, y as fractions), 2 pointer by (x, y in pixels), 3 button, 4 scroll
-    /// (x, y in pixels), 5 key, 6 touch (x, y as fractions), 7 text.
+    /// (x, y in pixels), 5 key, 6 touch (x, y as fractions), 7 text, 8 display, 9 pen.
     pub kind: u8,
     /// 0 left, 1 right, 2 middle.
     pub button: u8,
@@ -556,6 +581,13 @@ pub struct RmInput {
     pub y: f32,
     /// UTF-8, valid only during the call; null unless `kind` is 7.
     pub text: *const c_char,
+    /// Appended for kind 9 (pen): `phase` 0 contact down, 1 move, 2 up, 3 hover, 4 left range;
+    /// `button` the buttons byte (bit 0 barrel, bit 1 eraser); `x`, `y` fractions; `pressure`
+    /// 0 to 1; tilt in degrees; `twist` 0 to 359. Zero for every other kind.
+    pub pressure: f32,
+    pub tilt_x: f32,
+    pub tilt_y: f32,
+    pub twist: f32,
 }
 
 /// The host program's callbacks, all called on one thread of the core's, one at a time. They
@@ -628,7 +660,7 @@ impl HostHandler for RmHostCallbacks {
 
     fn input(&mut self, event: Event) {
         let Some(f) = self.on_input else { return };
-        let mut i = RmInput { kind: 0, button: 0, down: 0, phase: 0, slot: 0, usage: 0, x: 0.0, y: 0.0, text: std::ptr::null() };
+        let mut i = RmInput { kind: 0, button: 0, down: 0, phase: 0, slot: 0, usage: 0, x: 0.0, y: 0.0, text: std::ptr::null(), pressure: 0.0, tilt_x: 0.0, tilt_y: 0.0, twist: 0.0 };
         let mut text = None;
         match event {
             Event::PointerTo { x, y } => (i.kind, i.x, i.y) = (1, x, y),
@@ -637,6 +669,10 @@ impl HostHandler for RmHostCallbacks {
             Event::Scroll { dx, dy } => (i.kind, i.x, i.y) = (4, dx, dy),
             Event::Key { usage, down } => (i.kind, i.usage, i.down) = (5, usage, down as u8),
             Event::Touch { phase, slot, x, y } => (i.kind, i.phase, i.slot, i.x, i.y) = (6, phase as u8, slot, x, y),
+            Event::Pen { phase, buttons, x, y, pressure, tilt_x, tilt_y, twist } => {
+                (i.kind, i.phase, i.button, i.x, i.y) = (9, phase as u8, buttons, x, y);
+                (i.pressure, i.tilt_x, i.tilt_y, i.twist) = (pressure, tilt_x, tilt_y, twist);
+            }
             Event::Text(s) => {
                 i.kind = 7;
                 text = Some(CString::new(s.replace('\0', " ")).unwrap_or_default());
