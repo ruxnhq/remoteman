@@ -34,8 +34,8 @@ pub const EXIT_FAILED: i32 = 1;
 pub const EXIT_CANCELLED: i32 = 2;
 /// Done, and open Remoteman Host (its window).
 pub const EXIT_OPEN_APP: i32 = 10;
-/// Done, and start Remoteman Host again in the background (it was running before).
-pub const EXIT_RESTART_APP: i32 = 11;
+/// Done, and start Remoteman Host in the background, as at sign-in, so that its icon is there now.
+pub const EXIT_START_APP: i32 = 11;
 
 static EXIT: AtomicI32 = AtomicI32::new(EXIT_CANCELLED);
 /// The steps are running: the window stays open.
@@ -174,7 +174,7 @@ impl Component for Installer {
                     Err(e) => {
                         BUSY.store(false, Ordering::SeqCst);
                         self.page = Page::Failed;
-                        self.outcome = Some(Outcome { ok: false, failed: None, log: log::path(), app_was_running: false, at_restart: 0 });
+                        self.outcome = Some(Outcome { ok: false, failed: None, log: log::path(), at_restart: 0 });
                         log::say(&format!("pages: the steps couldn't start: {e}"));
                         return;
                     }
@@ -222,8 +222,8 @@ impl Component for Installer {
                         BUSY.store(false, Ordering::SeqCst);
                         self.close_refused = false;
                         self.page = if outcome.ok { Page::Done } else { Page::Failed };
-                        let code = match (outcome.ok, outcome.app_was_running && start.ctx.mode == Mode::Install && start.facts.has_app) {
-                            (true, true) => EXIT_RESTART_APP,
+                        let code = match (outcome.ok, start.ctx.mode == Mode::Install && start.facts.has_app) {
+                            (true, true) => EXIT_START_APP,
                             (true, false) => EXIT_DONE,
                             (false, _) => EXIT_FAILED,
                         };

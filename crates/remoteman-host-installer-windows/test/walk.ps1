@@ -41,9 +41,17 @@ foreach ($theme in $Themes) {
   $null = Ui-Wait "Open Remoteman Host" 60
   Ui-Shot "$Out\$theme-4-done.png"
   Check (Ui-Has "remoteman host is installed") "$theme install: done"
-  Ui-Invoke "Open Remoteman Host"
-  Ended $p 0 "$theme install"
-  Check ([bool](Select-String -Path "$Out\$theme-install.log" -SimpleMatch "would start" -Quiet)) "$theme install: the starter would open Remoteman Host as the user"
+  # Open Remoteman Host opens its window; Close starts it in the background, as at sign-in. Either
+  # is done by the starter, as the user, after the pages have closed.
+  if ($theme -eq "dark") {
+    Ui-Invoke "Open Remoteman Host"
+    Ended $p 0 "$theme install"
+    Check ([bool](Select-String -Path "$Out\$theme-install.log" -Pattern "would start .*remoteman-host-app\.exe $" -Quiet)) "$theme install: the starter would open Remoteman Host's window, as the user"
+  } else {
+    Ui-Invoke "Close"
+    Ended $p 0 "$theme install"
+    Check ([bool](Select-String -Path "$Out\$theme-install.log" -Pattern "would start .*remoteman-host-app\.exe --background" -Quiet)) "$theme install: the starter would start Remoteman Host in the background, as the user"
+  }
 
   # Installing, failing at setup.ps1.
   $p = Start-Setup $theme "install-fails" "--fail-at setup"

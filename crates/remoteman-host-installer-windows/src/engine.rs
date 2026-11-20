@@ -181,8 +181,6 @@ pub struct Outcome {
     pub failed: Option<(StepId, String)>,
     /// The log a failure points at.
     pub log: PathBuf,
-    /// Remoteman Host was running before and was stopped.
-    pub app_was_running: bool,
     /// Files that go when Windows restarts.
     pub at_restart: usize,
 }
@@ -191,7 +189,6 @@ struct Run<'a> {
     ctx: &'a Ctx,
     facts: &'a Facts,
     emit: &'a mut dyn FnMut(Event),
-    app_was_running: bool,
     at_restart: usize,
     /// This run writes to setup.log in the install folder too.
     setup_log: bool,
@@ -212,7 +209,7 @@ pub fn run(ctx: &Ctx, facts: &Facts, emit: &mut dyn FnMut(Event)) -> Outcome {
     if !ctx.dry_run {
         system::enable_debug_privilege();
     }
-    let mut run = Run { ctx, facts, emit, app_was_running: false, at_restart: 0, setup_log: false };
+    let mut run = Run { ctx, facts, emit, at_restart: 0, setup_log: false };
     if ctx.mode == Mode::Uninstall && ctx.dir.exists() {
         log::also(Some(ctx.dir.join("setup.log")));
         run.setup_log = true;
@@ -251,7 +248,6 @@ pub fn run(ctx: &Ctx, facts: &Facts, emit: &mut dyn FnMut(Event)) -> Outcome {
         ok: failed.is_none(),
         failed,
         log: if run.setup_log && setup_log.exists() { setup_log } else { log::path() },
-        app_was_running: run.app_was_running,
         at_restart: run.at_restart,
     };
     log::say(if outcome.ok { "finished" } else { "stopped at the failure" });
@@ -330,7 +326,6 @@ impl Run<'_> {
             stopped.push("the host");
         }
         if self.end(&dir.join(r"app\remoteman-host-app.exe"))? > 0 {
-            self.app_was_running = true;
             stopped.push("Remoteman Host");
         }
         Ok(match stopped.as_slice() {

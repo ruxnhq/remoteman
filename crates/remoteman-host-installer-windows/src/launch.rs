@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::archive::Archive;
 use crate::engine::{self, Ctx, Event};
-use crate::ui::{EXIT_CANCELLED, EXIT_DONE, EXIT_FAILED, EXIT_OPEN_APP, EXIT_RESTART_APP};
+use crate::ui::{EXIT_CANCELLED, EXIT_DONE, EXIT_FAILED, EXIT_OPEN_APP, EXIT_START_APP};
 use crate::{Args, log, system};
 
 /// What the user opened: hands over to the elevated part, waits, and does what is left to do
@@ -89,7 +89,7 @@ pub fn starter(args: &Args) -> i32 {
             open_app(&install_dir, false, args.dry_run);
             EXIT_DONE
         }
-        EXIT_RESTART_APP => {
+        EXIT_START_APP => {
             open_app(&install_dir, true, args.dry_run);
             EXIT_DONE
         }
@@ -98,8 +98,9 @@ pub fn starter(args: &Args) -> i32 {
     }
 }
 
-/// Remoteman Host, started as the user (this process is not elevated): its window, or (it was
-/// running before the install stopped it) in the background as at sign-in.
+/// Remoteman Host, started as the user (this process is not elevated), so that its icon is there
+/// now and not only from the next sign-in: its window (Open Remoteman Host), or in the
+/// background as at sign-in (Close).
 fn open_app(install_dir: &Path, background: bool, dry_run: bool) {
     let exe = install_dir.join(r"app\remoteman-host-app.exe");
     let args: &[&str] = if background { &["--background"] } else { &[] };
@@ -111,14 +112,18 @@ fn open_app(install_dir: &Path, background: bool, dry_run: bool) {
         log::say(&format!("{} isn't there", exe.display()));
         return;
     }
-    let started = if system::is_elevated() {
+    let started = if !system::is_elevated() {
+        system::start(&exe, args)
+    } else if !background {
         // Run as an administrator (from an elevated prompt, say), what is started here would be
-        // elevated too; Explorer starts it as the signed-in user instead. With no arguments, so
-        // the window opens either way.
+        // elevated too; Explorer starts it as the signed-in user instead (with no arguments, so
+        // its window opens).
         let explorer = system::windows_dir().join("explorer.exe");
         system::start(&explorer, &[&exe.to_string_lossy()])
     } else {
-        system::start(&exe, args)
+        // An elevated silent install (a deployment tool, SYSTEM perhaps): nobody's app to start.
+        log::say("not started from an elevated starter: it starts at the next sign-in");
+        return;
     };
     log::say(&format!("started {} {}: {started:?}", exe.display(), args.join(" ")));
 }
@@ -169,8 +174,8 @@ fn stage2_inner(args: &Args, me: &Path, elevated: bool) -> i32 {
             }
         };
         let outcome = engine::run(&ctx, &facts, &mut emit);
-        return match (outcome.ok, outcome.app_was_running && facts.has_app && ctx.mode == engine::Mode::Install) {
-            (true, true) => EXIT_RESTART_APP,
+        return match (outcome.ok, facts.has_app && ctx.mode == engine::Mode::Install) {
+            (true, true) => EXIT_START_APP,
             (true, false) => EXIT_DONE,
             (false, _) => EXIT_FAILED,
         };

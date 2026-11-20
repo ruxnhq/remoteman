@@ -41,6 +41,7 @@ Check ($bad -eq 0) "all $($want.Count) payload files arrived with their sizes an
 $extra = Get-ChildItem -Recurse -File $dry | ForEach-Object { $_.FullName.Substring($dry.Length + 1) } | Where-Object { $want -notcontains $_ }
 Check ((@($extra) -join ',') -eq 'setup.log,uninstall.exe') "beside them only setup.log and uninstall.exe ($(@($extra) -join ', '))"
 Check ([bool](Select-String -Path $log -SimpleMatch "each checked" -Quiet)) "the installer checked each file it wrote"
+Check ([bool](Select-String -Path $log -Pattern "would start .*remoteman-host-app\.exe --background" -Quiet)) "the starter would start Remoteman Host in the background, as the user"
 $would = @(Select-String -Path $log -SimpleMatch "  would ").Count
 Check ($would -ge 10) "what would be done is logged ($would lines)"
 Ui-Say "the would lines:"; Select-String -Path $log -SimpleMatch "  would " | ForEach-Object { Ui-Say ("   " + $_.Line.Substring($_.Line.IndexOf('would'))) }
