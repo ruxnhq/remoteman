@@ -93,7 +93,8 @@ pub const CLSID_VCAM_STRING: &str = "{B3F1C4A2-6D5E-4F87-9A21-7C0E3D5B8A64}";
 #[cfg(windows)]
 pub(crate) fn log(message: &str) {
     use std::io::Write;
-    let line = format!("[{}] {message}\n", shm::now_ms());
+    let exe = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_default();
+    let line = format!("[{} {exe} pid {}] {message}\n", shm::now_ms(), std::process::id());
     unsafe {
         windows::Win32::System::Diagnostics::Debug::OutputDebugStringW(&windows::core::HSTRING::from(format!("remoteman-vcam: {line}")));
     }

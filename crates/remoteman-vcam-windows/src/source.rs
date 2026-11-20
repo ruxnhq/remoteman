@@ -411,10 +411,12 @@ impl IMFMediaEventGenerator_Impl for MediaSource_Impl {
 
 impl IMFMediaSource_Impl for MediaSource_Impl {
     fn GetCharacteristics(&self) -> Result<u32> {
+        crate::log("GetCharacteristics");
         self.check()?;
         Ok(MFMEDIASOURCE_IS_LIVE.0 as u32)
     }
     fn CreatePresentationDescriptor(&self) -> Result<IMFPresentationDescriptor> {
+        crate::log("CreatePresentationDescriptor");
         self.check()?;
         unsafe { self.descriptor.Clone() }
     }
@@ -456,10 +458,12 @@ impl IMFMediaSource_Impl for MediaSource_Impl {
 
 impl IMFMediaSourceEx_Impl for MediaSource_Impl {
     fn GetSourceAttributes(&self) -> Result<IMFAttributes> {
+        crate::log("GetSourceAttributes");
         self.check()?;
         Ok(self.source_attrs.clone())
     }
     fn GetStreamAttributes(&self, id: u32) -> Result<IMFAttributes> {
+        crate::log(&format!("GetStreamAttributes {id}"));
         self.check()?;
         if id != 0 {
             return err(MF_E_INVALIDSTREAMNUMBER);
@@ -472,7 +476,8 @@ impl IMFMediaSourceEx_Impl for MediaSource_Impl {
 }
 
 impl IMFGetService_Impl for MediaSource_Impl {
-    fn GetService(&self, _service: *const GUID, riid: *const GUID, ppv: *mut *mut core::ffi::c_void) -> Result<()> {
+    fn GetService(&self, service: *const GUID, riid: *const GUID, ppv: *mut *mut core::ffi::c_void) -> Result<()> {
+        crate::log(&format!("GetService {:?} {:?}", unsafe { service.as_ref() }, unsafe { riid.as_ref() }));
         // The Frame Server asks for the source's own control interface this way.
         if !riid.is_null() && unsafe { *riid } == IKsControl::IID {
             return unsafe { self.QueryInterface(riid, ppv) }.ok();
@@ -516,9 +521,11 @@ macro_rules! forward {
 
 impl IMFAttributes_Impl for MediaSource_Impl {
     fn GetItem(&self, key: *const GUID, value: *mut PROPVARIANT) -> Result<()> {
+        crate::log(&format!("GetItem {:?}", unsafe { key.as_ref() }));
         forward!(self.GetItem(key, value)).ok()
     }
     fn GetItemType(&self, key: *const GUID) -> Result<MF_ATTRIBUTE_TYPE> {
+        crate::log(&format!("GetItemType {:?}", unsafe { key.as_ref() }));
         let mut out = MF_ATTRIBUTE_TYPE::default();
         forward!(self.GetItemType(key, &mut out)).ok()?;
         Ok(out)
@@ -532,11 +539,13 @@ impl IMFAttributes_Impl for MediaSource_Impl {
         unsafe { self.attrs.Compare(theirs.as_ref(), kind) }
     }
     fn GetUINT32(&self, key: *const GUID) -> Result<u32> {
+        crate::log(&format!("GetUINT32 {:?}", unsafe { key.as_ref() }));
         let mut out = 0;
         forward!(self.GetUINT32(key, &mut out)).ok()?;
         Ok(out)
     }
     fn GetUINT64(&self, key: *const GUID) -> Result<u64> {
+        crate::log(&format!("GetUINT64 {:?}", unsafe { key.as_ref() }));
         let mut out = 0;
         forward!(self.GetUINT64(key, &mut out)).ok()?;
         Ok(out)
@@ -547,6 +556,7 @@ impl IMFAttributes_Impl for MediaSource_Impl {
         Ok(out)
     }
     fn GetGUID(&self, key: *const GUID) -> Result<GUID> {
+        crate::log(&format!("GetGUID {:?}", unsafe { key.as_ref() }));
         let mut out = GUID::zeroed();
         forward!(self.GetGUID(key, &mut out)).ok()?;
         Ok(out)
@@ -574,9 +584,11 @@ impl IMFAttributes_Impl for MediaSource_Impl {
         forward!(self.GetAllocatedBlob(key, buf, size)).ok()
     }
     fn GetUnknown(&self, key: *const GUID, riid: *const GUID, ppv: *mut *mut core::ffi::c_void) -> Result<()> {
+        crate::log(&format!("GetUnknown {:?}", unsafe { key.as_ref() }));
         forward!(self.GetUnknown(key, riid, ppv)).ok()
     }
     fn SetItem(&self, key: *const GUID, value: *const PROPVARIANT) -> Result<()> {
+        crate::log(&format!("SetItem {:?}", unsafe { key.as_ref() }));
         forward!(self.SetItem(key, value)).ok()
     }
     fn DeleteItem(&self, key: *const GUID) -> Result<()> {
@@ -586,24 +598,29 @@ impl IMFAttributes_Impl for MediaSource_Impl {
         forward!(self.DeleteAllItems()).ok()
     }
     fn SetUINT32(&self, key: *const GUID, value: u32) -> Result<()> {
+        crate::log(&format!("SetUINT32 {:?}", unsafe { key.as_ref() }));
         forward!(self.SetUINT32(key, value)).ok()
     }
     fn SetUINT64(&self, key: *const GUID, value: u64) -> Result<()> {
+        crate::log(&format!("SetUINT64 {:?}", unsafe { key.as_ref() }));
         forward!(self.SetUINT64(key, value)).ok()
     }
     fn SetDouble(&self, key: *const GUID, value: f64) -> Result<()> {
         forward!(self.SetDouble(key, value)).ok()
     }
     fn SetGUID(&self, key: *const GUID, value: *const GUID) -> Result<()> {
+        crate::log(&format!("SetGUID {:?}", unsafe { key.as_ref() }));
         forward!(self.SetGUID(key, value)).ok()
     }
     fn SetString(&self, key: *const GUID, value: &PCWSTR) -> Result<()> {
+        crate::log(&format!("SetString {:?}", unsafe { key.as_ref() }));
         forward!(self.SetString(key, *value)).ok()
     }
     fn SetBlob(&self, key: *const GUID, buf: *const u8, size: u32) -> Result<()> {
         forward!(self.SetBlob(key, buf, size)).ok()
     }
     fn SetUnknown(&self, key: *const GUID, value: Ref<IUnknown>) -> Result<()> {
+        crate::log(&format!("SetUnknown {:?}", unsafe { key.as_ref() }));
         unsafe { self.attrs.SetUnknown(key, value.as_ref()) }
     }
     fn LockStore(&self) -> Result<()> {

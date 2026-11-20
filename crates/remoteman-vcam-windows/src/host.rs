@@ -81,8 +81,10 @@ impl VirtualCamera {
                 &HSTRING::from(name),
                 &HSTRING::from(CLSID_VCAM_STRING),
                 None,
-            )?;
-            camera.Start(None)?;
+            )
+            .inspect_err(|e| eprintln!("vcam: MFCreateVirtualCamera: {e}"))?;
+            eprintln!("vcam: MFCreateVirtualCamera made it");
+            camera.Start(None).inspect_err(|e| eprintln!("vcam: IMFVirtualCamera::Start: {e}"))?;
             Ok(VirtualCamera { camera, ring, _mapping: mapping, backing })
         }
     }

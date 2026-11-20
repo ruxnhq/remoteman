@@ -75,6 +75,8 @@ pub struct Host {
     /// many came, how many were missing in between, and the last one's number.
     microphone: Option<Microphone>,
     mic_count: (u32, u32, Option<u32>),
+    /// The device's camera, as a camera on this PC.
+    camera: crate::camera::Feed,
     live: Option<Live>,
     /// The PC was locked when this client came and was unlocked with its password: it is
     /// locked again when the client goes.
@@ -90,7 +92,7 @@ const WRONG_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 impl Host {
     pub fn new(screen: Screen, bitrate: u32, fit: Fit, allowed: Allowed) -> Self {
-        Self { screen, bitrate, fit, allowed, clipboard_wanted: false, copies: Arc::default(), sound: None, microphone: None, mic_count: (0, 0, None), live: None, unlocked_for_client: false, wrong: (0, None) }
+        Self { screen, bitrate, fit, allowed, clipboard_wanted: false, copies: Arc::default(), sound: None, microphone: None, mic_count: (0, 0, None), camera: Default::default(), live: None, unlocked_for_client: false, wrong: (0, None) }
     }
 
     /// A device has come to a locked PC (or one at its sign-in screen), which Windows shows on
@@ -504,6 +506,14 @@ impl HostHandler for Host {
                 }
             }
             Message::Mic { on, .. } => self.take_microphone(*on),
+            Message::Camera { on, codec, .. } => {
+                if let (Some(l), true) = (self.live.as_ref(), *on) {
+                    let (name, link) = (l.name.clone(), l.link.clone());
+                    self.camera.take(true, codec, &name, link);
+                } else {
+                    self.camera.clear();
+                }
+            }
             // The device's word on a file this computer sent it.
             Message::FileResult { ok, message, .. } => {
                 tracing::info!(ok, said = message, "the device answered for a file sent to it");
@@ -518,6 +528,10 @@ impl HostHandler for Host {
             }
             _ => {}
         }
+    }
+
+    fn camera(&mut self, frame: &remoteman_core::Frame) {
+        self.camera.frame(frame);
     }
 
     fn mic(&mut self, packet: &Packet) {
@@ -584,6 +598,7 @@ impl HostHandler for Host {
         *self.allowed.now.lock().unwrap() = None;
         self.clipboard_wanted = false;
         self.take_microphone(false);
+        self.camera.clear();
         self.sound = None;
         if let Some(l) = self.stop() {
             drop(l);

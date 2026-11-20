@@ -15,6 +15,7 @@ path = "src/main.rs"
 [target.'cfg(windows)'.dependencies]
 remoteman-core = { path = "../remoteman-core" }
 remoteman-encode = { path = "../remoteman-encode" }
+remoteman-vcam-windows = { path = "../remoteman-vcam-windows" }
 anyhow = "1"
 serde_json = "1"
 # Opus as the Linux host sends it. The default features build libopus from the copy the crate

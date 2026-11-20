@@ -1789,6 +1789,7 @@ dependencies = [
  "png",
  "remoteman-core",
  "remoteman-encode",
+ "remoteman-vcam-windows",
  "serde_json",
  "tracing",
  "tracing-subscriber",
