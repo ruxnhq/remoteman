@@ -1,6 +1,6 @@
 # The night of 2026-11-20: Windows host and viewer, and what every host shares
 
-The owner, about 03:30 PST: work on everything for the Windows host and viewer and what affects
+The owner, about 23:30 PST on 2026-11-19: work on everything for the Windows host and viewer and what affects
 every host, except a relay, printing, recording and the Store release; also the Mac host, the
 Mac viewer and the Mac and iPad viewers' items (asked of the Mac session). Back in 7-8 hours.
 Use cheap agents where they'll do; weekly usage was 81%, the ceiling is 98%.
@@ -27,9 +27,9 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 ### Windows viewer
 | Item | State |
 |---|---|
-| Conceal lost sound packets (Opus PLC, in-band FEC) | in work |
-| Windows key mapping (`key_mapping`, greyed) | not started |
-| "Getting in" choice (`way_in`, greyed) | not started |
+| Conceal lost sound packets (Opus PLC, in-band FEC) | **done, unit-tested** (c991c14): libopus replaces FFmpeg for sound; gaps from sequence numbers, up to 100 ms made up, the next packet's FEC copy used; tests with a synthetic sine and 1-in-10 loss. Not heard through WASAPI |
+| Windows key mapping (`key_mapping`, greyed) | in work |
+| "Getting in" choice (`way_in`, greyed) | in work |
 | The host's cursor shape in a window | not started |
 | HEVC 4:4:4 decoded on the card (Y410 drawn) | not started |
 | Variable refresh in a window | not started (feasibility first) |
@@ -60,7 +60,7 @@ started**. Agents work in worktrees and commit there; merged into `main` here af
 | More than one viewer at once | not started |
 
 ### Apple (the Mac session)
-Asked at 03:35 PST; its share of the budget about 5 points. Its answer:
+Asked at 23:35 PST; its share of the budget about 5 points. Its answer:
 - The Mac host's loss recovery without a keyframe (long-term references): **left as measured**.
   VideoToolbox gives them only under its low-latency rate control, which costs 5.7-15 ms on
   every frame to save a keyframe on the rare loss; parity covers loss more cheaply.
@@ -73,3 +73,8 @@ Asked at 03:35 PST; its share of the budget about 5 points. Its answer:
   tablet events once the core has it; the Windows host injects it as pen input.
 - Also on its list: a quick reconnect refused after 15 s, and a harmless error after resizes
   (Mac host).
+
+## Side effects
+- Python 3.15 was installed per-user (`%LOCALAPPDATA%\Python\pythoncore-3.15-64`, 23:32) by the
+  Python install manager already on this PC, the first time `python` was run tonight from Git
+  Bash. Nothing else was installed.
