@@ -260,7 +260,10 @@ It builds the host, the driver (`windows\display-driver\build.ps1`) and Remotema
 install in `OUT\payload` (`remoteman-host.exe`, `setup.ps1`, `driver\pkg\RemotemanDisplay.dll`
 and `.inf`, `driver\vdd_settings.xml` and the two licences, `app\`), builds the installer and
 packs it: `target\installer\remoteman-host-setup-VERSION.exe`. `-Payload FOLDER` packs a folder
-gathered by hand instead of building the host, driver and app.
+gathered by hand instead of building the host, driver and app. setup.ps1 is the tree's own
+(`windows\host-installer\setup.ps1`): a tree whose setup.ps1 still registers the logon task
+makes an installer that would add that task beside an installed service, so build from a tree
+with the service-based one.
 
 **One file, 19.4 MB** with the app (18.7 MB without `app\`): the program 4.2 MB, the Windows App
 Runtime 2.6.4 its pages need 12.6 MB (205 files, 57.3 MB unpacked), the rest 2.5 MB (the host,
@@ -330,7 +333,8 @@ UAC prompt). It is a windowed program, so a script waits for it with
 registry on this PC):** `crates/remoteman-host-installer-windows/test/walk.ps1` drives every page
 through UI Automation in light and dark, with screenshots in `C:\rm\shots-setup` (welcome, the
 steps, the close refused while they run, done, failed at setup.ps1 and at the files, the
-uninstaller's confirm, steps, done and failure) and each run's exit code; `test/checks.ps1`: a
+uninstaller's confirm, steps, done and failure, and with no `--theme` the theme Windows is set
+to) and each run's exit code; `test/checks.ps1`: a
 silent install whose 213 files all arrived with their sizes and SHA-256, the `would` lines (what
 a real install would have changed on this PC, where the Inno install is: stop the service, the
 entry and the Inno takeover, setup.ps1, the Run value and the shortcut), the uninstaller copying
@@ -340,7 +344,9 @@ Windows App Runtime packages installed on this PC (`WindowsApps`, `SystemApps`),
 `Microsoft.ui.xaml.dll` taken out of a copy of that folder the window doesn't open at all
 (`0x8007007E`, no fallback). `cargo test` runs what only a real install runs, in folders of its
 own: setup.ps1 started as above (a stand-in that writes setup.log as the real one does, warns
-and fails: the reason read is its `FAILED` line, its lines shown as they come, exit 0 done),
+and fails: the reason read is its `FAILED` line from this run, its lines shown as they come,
+exit 0 done; and one PowerShell can't parse, beside an earlier install's `FAILED` line: the
+reason is what PowerShell said, not the old line),
 the files written over an install (`installed.json` left, an earlier `app\` file gone), the
 Start menu shortcut, and the archive packed, unpacked, cut down to the uninstaller and found
 damaged. **Never run at all:** a real install, upgrade or uninstall; the UAC prompt; the

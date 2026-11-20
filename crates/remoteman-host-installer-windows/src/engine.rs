@@ -492,8 +492,9 @@ impl Run<'_> {
                     self.detail(id, line);
                 }
                 if self.ctx.fail_at.as_deref() == Some(id.key()) {
+                    let this_run = std::fs::metadata(&setup_log).map(|m| m.len()).unwrap_or(0);
                     append(&setup_log, &format!("FAILED: a failure made with --fail-at {} (dry run)", id.key()));
-                    return Err(last_reason(&setup_log).unwrap_or_default());
+                    return Err(last_reason(&setup_log, this_run).unwrap_or_default());
                 }
             } else {
                 std::thread::sleep(Duration::from_millis(1000));
@@ -510,7 +511,10 @@ impl Run<'_> {
             }
             return Err(format!("{} is missing", script.display()));
         }
+        // Where setup.log ends now: what this run of setup.ps1 writes comes after it (an earlier
+        // install's lines, and its reasons, are before).
         let mut from = std::fs::metadata(&setup_log).map(|m| m.len()).unwrap_or(0);
+        let this_run = from;
         let mut child = std::process::Command::new(&ps);
         {
             use std::os::windows::process::CommandExt;
@@ -553,9 +557,9 @@ impl Run<'_> {
         for r in readers {
             output.push_str(&r.join().unwrap_or_default());
         }
-        // setup.ps1's last line, read before this program writes to setup.log again (and its
-        // own lines there are passed over in any case).
-        let reason = last_reason(&setup_log);
+        // setup.ps1's FAILED line from this run, read before this program writes to setup.log
+        // again (its own lines there are passed over in any case).
+        let reason = last_reason(&setup_log, this_run);
         let output = output.trim();
         if !output.is_empty() {
             log::say(&format!("  PowerShell said: {output}"));
@@ -563,9 +567,11 @@ impl Run<'_> {
         if code == 0 {
             return Ok((if verb == "install" { "Installed" } else { "Removed" }.into(), None));
         }
+        // Without one (PowerShell couldn't run the script at all: blocked, or not valid), what
+        // PowerShell said.
         let reason = match reason {
             Some(r) if !r.is_empty() => r,
-            _ if !output.is_empty() => output.lines().next().unwrap_or_default().to_string(),
+            _ if !output.is_empty() => format!("PowerShell couldn't run setup.ps1: {}", powershell_reason(output)),
             _ => format!("setup.ps1 ended with {code}"),
         };
         Err(reason)
@@ -731,13 +737,25 @@ fn ours(line: &str) -> bool {
     line.split_once(' ').is_some_and(|(_, rest)| rest.starts_with("setup.exe: "))
 }
 
-/// setup.ps1's reason for failing: its last line in setup.log, without its time and "FAILED:".
-fn last_reason(file: &Path) -> Option<String> {
+/// setup.ps1's reason for failing: its last line in setup.log after `from` (this run's part),
+/// if that is its "FAILED:" line, without its time and "FAILED:".
+fn last_reason(file: &Path, from: u64) -> Option<String> {
     let text = std::fs::read(file).ok()?;
-    let text = String::from_utf8_lossy(&text);
+    let text = String::from_utf8_lossy(text.get(from as usize..)?);
     let last = text.lines().map(str::trim).rev().find(|l| !l.is_empty() && !ours(l))?;
-    let line = strip_stamp(last);
-    Some(line.strip_prefix("FAILED: ").unwrap_or(&line).to_string())
+    strip_stamp(last).strip_prefix("FAILED: ").map(str::to_string)
+}
+
+/// The line that says what went wrong in PowerShell's own error (not "At ...:2 char:7", not
+/// the "+ " lines under it).
+fn powershell_reason(output: &str) -> String {
+    let lines: Vec<&str> = output.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    lines
+        .iter()
+        .find(|l| !l.starts_with("At ") && !l.starts_with('+') && !l.starts_with("WARNING:"))
+        .or(lines.first())
+        .map(|l| l.to_string())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -806,6 +824,26 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A setup.ps1 PowerShell can't run (here: not valid), in a folder whose setup.log ends with
+    /// an earlier install's failure: the reason is what PowerShell said, not that old line.
+    #[test]
+    fn setup_ps1_that_cannot_run() {
+        let _serial = SERIAL.lock().unwrap();
+        let dir = folder("setup-broken");
+        std::fs::write(dir.join("setup.ps1"), "param([string]$Verb)\r\nif ( {\r\n").unwrap();
+        std::fs::write(dir.join("setup.log"), "2026-11-18T10:00:00 FAILED: an earlier install's reason\r\n").unwrap();
+        log::also(Some(dir.join("setup.log")));
+        let (ctx, facts) = (real_in(&dir, PathBuf::new()), facts());
+        let mut emit = |_: Event| {};
+        let mut run = Run { ctx: &ctx, facts: &facts, emit: &mut emit, at_restart: 0, setup_log: true };
+        let failed = run.setup("install", StepId::Setup);
+        log::also(None);
+        let reason = failed.unwrap_err();
+        assert!(reason.starts_with("PowerShell couldn't run setup.ps1: "), "{reason}");
+        assert!(!reason.contains("earlier install"), "{reason}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Installing over an install: the files are replaced, installed.json (what the earlier
     /// install made, which setup.ps1 reads) is left, and what an earlier Remoteman Host had and
     /// this one doesn't is deleted.
@@ -870,7 +908,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("setup.log");
         std::fs::write(&log, "2026-11-19T18:35:01 install from C:\\x\r\n2026-11-19T18:35:02 FAILED: pnputil did not take the driver\r\n\r\n").unwrap();
-        assert_eq!(last_reason(&log).unwrap(), "pnputil did not take the driver");
+        assert_eq!(last_reason(&log, 0).unwrap(), "pnputil did not take the driver");
+        // Only this run's part counts.
+        let len = std::fs::metadata(&log).unwrap().len();
+        assert_eq!(last_reason(&log, len), None);
+        assert_eq!(powershell_reason("At C:\\x\\setup.ps1:2 char:7\n+  if ( {\n+       ~\nMissing closing ')' after expression.\n    + CategoryInfo : ParserError"), "Missing closing ')' after expression.");
         let mut from = 0;
         assert_eq!(new_lines(&log, &mut from).len(), 2);
         assert!(new_lines(&log, &mut from).is_empty());

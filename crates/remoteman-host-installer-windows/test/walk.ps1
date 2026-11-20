@@ -99,4 +99,20 @@ Ui-Place 60 30
 Ui-Shot "$Out\dark-10-failed-files.png"
 Ui-Invoke "Close"
 Ended $p 1 "an install that fails at the files"
+# With no --theme, the pages follow Windows' own setting (Settings > Personalization > Colors,
+# apps' mode): its background is dark or light as AppsUseLightTheme says.
+$light = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize').AppsUseLightTheme -eq 1
+$log = "$Out\system-theme.log"
+$p = Start-Process -PassThru $Exe -ArgumentList "--dry-run --log `"$log`""
+$null = $p.Handle
+$global:UiPid = Ui-Pid
+$null = Ui-Wait "Install"
+Ui-Place 60 30
+Ui-Shot "$Out\system-theme-welcome.png"
+$image = [System.Drawing.Bitmap]::FromFile("$Out\system-theme-welcome.png")
+$pixel = $image.GetPixel(12, [int]($image.Height * 0.6)); $image.Dispose()
+$bright = ($pixel.R + $pixel.G + $pixel.B) / 3
+Check (($bright -gt 128) -eq $light) "with no --theme the pages are $(if ($bright -gt 128) { 'light' } else { 'dark' }) (brightness $([int]$bright)), as Windows is set ($(if ($light) { 'light' } else { 'dark' }))"
+Ui-Invoke "Cancel"
+Ended $p 2 "the run with Windows' theme"
 Ui-Say "walk done"
