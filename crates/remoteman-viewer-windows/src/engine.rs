@@ -1270,6 +1270,11 @@ impl Engine {
                 field(&mut app, "pair.address", &s("address"));
                 Msg::DialogOk
             }
+            "second-factor-go" => {
+                field(&mut app, "second.code", &s("code"));
+                app.remember = b("remember");
+                Msg::DialogOk
+            }
             "ok" => Msg::DialogOk,
             "cancel" => Msg::DialogCancel,
             "connect" => Msg::Connect(s("address")),
@@ -1477,6 +1482,8 @@ fn state_of(app: &App) -> Value {
         // (`address`: what the dialog opens with, as from Nearby's "Pair…".)
         Dialog::Pair { waiting, problem } => json!({"kind": "pair", "waiting": waiting, "problem": problem, "address": app.fields.get(&id("pair.address")).map(|f| f.string()).unwrap_or_default()}),
         Dialog::Code { name, code, until } => json!({"kind": "code", "name": name, "code": code, "seconds": until.saturating_duration_since(Instant::now()).as_secs()}),
+        // (`problem`: what the app shows in red; it changes with each wrong code, which brings the dialog out again.)
+        Dialog::SecondFactor { name, left } => json!({"kind": "second-factor", "name": name, "problem": left.map(|n| format!("That code didn't work ({n} {} left)", if n == 1 { "try" } else { "tries" })).unwrap_or_default()}),
         Dialog::Paired { target, key } => json!({"kind": "paired", "name": target.name, "address": target.address, "key": key}),
         Dialog::Forget(a) => json!({"kind": "forget", "address": a, "name": app.name_of(a)}),
         Dialog::Address { address, problem } => json!({"kind": "address", "address": address, "problem": problem}),

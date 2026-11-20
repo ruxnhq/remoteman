@@ -25,6 +25,24 @@ The code is made from both keys: the first four bytes of SHA-256 over the text `
 
 For pairing by scanning a code instead of typing an address, a host may show a link (as a QR code): `remoteman://pair?v=0&name=<name>&addr=<addr[:port]>[,<addr[:port]>...]&fp=<the whole fingerprint of the host key, hex>`. A device adds the computer at the first address that answers, pairing as usual (the host still has to have pairing open, and still asks for the six digits where it does), and after connecting forgets the computer again if the key it met is not the one in the link. There is no secret in the link. (Defined by the Apple apps, which show and scan it; the Linux programs don't yet.)
 
+## Second factor
+
+A host's owner may ask for a code from an authenticator app (TOTP, RFC 6238: HMAC-SHA-1, six digits, 30-second steps) on top of the device's key. Off unless the owner turns it on (it is turned on by confirming one right code, so a secret mistyped into the app never locks the owner out). The host keeps the secret, and the devices told "don't ask again" with their expiry, in `<state>/host/second_factor.json`; without that file it is off.
+
+With it on, for a paired device that is not remembered, the host's `host_hello` carries `"second_factor":"totp"` and the host sends nothing more (no `stream`, no feature data; the handler behind the host hears nothing) until the client answers:
+
+```
+client -> host  {"t":"second_factor","code":"123456","remember":true}
+host -> client  {"t":"second_factor_wrong","left":4}
+host -> client  {"t":"error","code":"second_factor","message":"..."}   then it closes
+```
+
+- A right code (the current step, or one either side of it) lets the session go on as without it: the next thing from the host is `stream`. There is no message of its own for "right". `remember: true` lets the host skip asking this device (by certificate fingerprint) for 30 days.
+- A wrong code is answered with `second_factor_wrong` and the number of tries left; the client may try again. After 5 wrong codes in 10 minutes from one device, or 20 from all devices, the host answers with the error `second_factor` and closes, and refuses that device (everyone, for the 20) for 10 minutes: a device that connects meanwhile gets the same error in place of a hello.
+- A client that doesn't know the field never answers: the host closes after 60 seconds with the error `second_factor` and the message "This computer asks for a code from an authenticator app; update remoteman". Clients show an error's message as they do for any.
+- A device that is new (pairing, with or without the owner's confirmation) is asked afterwards, in the same connection, as any other.
+- The log (`connections.log`) gets `second_factor_ok` and `second_factor_wrong` lines (and `refused` for a lockout or a timeout), with the device's name and address; never the code.
+- A client's core API: `Client::on_second_factor(callback)` (`callback(None)` when asked, `callback(Some(left))` after a wrong code) and `Client::second_factor(code, remember)`; in the C interface `rm_client_set_second_factor_callback`, `rm_client_second_factor_wanted` and `rm_client_second_factor`. The connection is made (`connect` returns) before the code is asked for, because the hello is what says so.
 ## A locked host
 
 A host whose desktop is locked may let a paired device in all the same, if its owner has said so: by the device's key alone, or with the password of the host's user as well.

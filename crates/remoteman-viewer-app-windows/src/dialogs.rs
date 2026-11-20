@@ -78,6 +78,20 @@ pub fn dialog(v: &Viewer, context: &ViewContext<Viewer>) -> Option<ContentDialog
                 )))
                 .close_button_text("Cancel")
         }
+        // The six digits go through `Msg::Password` and "Don't ask again" through `Msg::Remember`, as the locked page's.
+        "second-factor" => {
+            let mut col: Vec<View> = vec![
+                TextBlock::new().text(format!("Open your authenticator app and type the six digits it shows for {name}.")).text_wrapping(TextWrapping::Wrap).into(),
+                TextBox::new().header("Code").placeholder_text("123456").width(200.0).text(v.password.clone()).automation_name("Code from the authenticator app").on_text_changed(context.callback(Msg::Password)).into(),
+                CheckBox::new().content("Don't ask again on this device for 30 days").is_checked(v.remember.unwrap_or(false)).on_click(context.message(Msg::Remember)).into(),
+            ];
+            col.extend(problem(d));
+            base.title("This computer asks for a code from your authenticator app")
+                .content(StackPanel::new().spacing(12.0).children(col))
+                .primary_button_text("Connect")
+                .close_button_text("Cancel")
+                .default_button(ContentDialogButton::Primary)
+        }
         "paired" => base
             .title(format!("Paired with {name}"))
             .content(StackPanel::new().spacing(8.0).children((
