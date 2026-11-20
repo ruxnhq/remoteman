@@ -57,7 +57,7 @@ Corner vs(uint n : SV_VertexID) {
     return c;
 }
 
-Texture2DArray<float> luma : register(t0);
+Texture2DArray<float4> luma : register(t0);
 Texture2DArray<float2> chroma : register(t1);
 // A picture decoded on the CPU has Cb and Cr apart: Cb in `chroma`'s first channel, Cr here.
 Texture2DArray<float> cr : register(t2);
@@ -78,7 +78,7 @@ cbuffer Picture : register(b0) {
     float scale, black, yrange, mid;
     float crange;
     float mode, white, peak;
-    float planar, here_white, here_peak, unused3;
+    float planar, here_white, here_peak, layout;
 };
 
 float3 pq_nits(float3 e) {
@@ -106,9 +106,17 @@ float3 fit(float3 lin, float top, float room, float knee) {
 
 float4 ps(Corner c) : SV_Target {
     float3 at = float3(min(c.uv * visible, last), 0);
-    float y = (luma.Sample(smooth, at) * scale - black) / yrange;
-    float2 raw = planar > 0.5 ? float2(chroma.Sample(smooth, at).x, cr.Sample(smooth, at)) : chroma.Sample(smooth, at);
-    float2 cc = (raw * scale - mid) / crange;
+    float4 l = luma.Sample(smooth, at);
+    float3 s = float3(l.x, 0, 0);
+    if (layout > 0.5) {
+        // 4:4:4 as the card decodes it, all in `luma`. Y410 (viewed as R10G10B10A2): U in red,
+        // Y in green, V in blue. AYUV (R8G8B8A8): V in red, U in green, Y in blue. s is Y, U, V.
+        s = layout < 1.5 ? l.grb : l.bgr;
+    } else {
+        s.yz = planar > 0.5 ? float2(chroma.Sample(smooth, at).x, cr.Sample(smooth, at)) : chroma.Sample(smooth, at);
+    }
+    float y = (s.x * scale - black) / yrange;
+    float2 cc = (s.yz * scale - mid) / crange;
     if (mode < 0.5) {
         // Limited-range BT.709, the same numbers as the Linux viewer.
         return float4(y + 1.5748 * cc.y, y - 0.1873 * cc.x - 0.4681 * cc.y, y + 1.8556 * cc.x, 1);
@@ -504,6 +512,9 @@ fn plane_formats(format: DXGI_FORMAT) -> Result<(DXGI_FORMAT, DXGI_FORMAT)> {
     Ok(match format {
         DXGI_FORMAT_P010 => (DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM),
         DXGI_FORMAT_NV12 => (DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM),
+        // 4:4:4: one packed texture, viewed twice (the shader reads `luma`).
+        DXGI_FORMAT_Y410 => (DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM),
+        DXGI_FORMAT_AYUV => (DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM),
         other => bail!("the decoder's pictures are format {}, which isn't drawn yet", other.0),
     })
 }
@@ -926,14 +937,16 @@ impl Drawer {
                 let (scale, black, yrange, mid, crange) = match desc.Format {
                     DXGI_FORMAT_P010 => (65535.0 / 64.0, 64.0, 876.0, 512.0, 896.0),
                     DXGI_FORMAT_R16_UNORM => (65535.0, 64.0, 876.0, 512.0, 896.0),
+                    DXGI_FORMAT_Y410 => (1023.0, 64.0, 876.0, 512.0, 896.0),
                     _ => (255.0, 16.0, 219.0, 128.0, 224.0),
                 };
                 let (tw, th) = (desc.Width as f32, desc.Height as f32);
                 let (vw, vh) = (picture.width as f32, picture.height as f32);
                 let Colour { hdr, white, peak, here_white, here_peak } = colour;
                 let mode = if !hdr { 0.0 } else if self.pq { 1.0 } else { 2.0 };
+                let layout = match desc.Format { DXGI_FORMAT_Y410 => 1.0, DXGI_FORMAT_AYUV => 2.0, _ => 0.0 };
                 let planar = if planes.cr.is_some() { 1.0 } else { 0.0 };
-                let constants: [f32; 16] = [vw / tw, vh / th, (vw - 0.5) / tw, (vh - 0.5) / th, scale, black, yrange, mid, crange, mode, white, peak, planar, here_white, here_peak, 0.0];
+                let constants: [f32; 16] = [vw / tw, vh / th, (vw - 0.5) / tw, (vh - 0.5) / th, scale, black, yrange, mid, crange, mode, white, peak, planar, here_white, here_peak, layout];
                 ctx.UpdateSubresource(&self.constants, 0, None, constants.as_ptr() as *const _, 0, 0);
                 let (ax, ay, aw, ah) = (area.0 as f32, area.1 as f32, area.2 as f32, area.3 as f32);
                 let fit = (aw / vw).min(ah / vh);
