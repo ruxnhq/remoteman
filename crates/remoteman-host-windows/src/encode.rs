@@ -153,7 +153,7 @@ mod nvidia {
         let from = load()?;
         // The Linux host's settings: the fastest preset, two long-term frames, and the usual
         // number of recent ones for the picture's size.
-        let config = Config { codec: if s.mode.codec == Codec::Av1 { remoteman_encode::Codec::Av1 } else { remoteman_encode::Codec::Hevc }, chroma444: s.mode.chroma == Chroma::C444, width: s.width, height: s.height, fps: s.fps, bitrate: s.bitrate, preset: 1, long_term: 2, short_term: None };
+        let config = Config { codec: if s.mode.codec == Codec::Av1 { remoteman_encode::Codec::Av1 } else { remoteman_encode::Codec::Hevc }, chroma444: s.mode.chroma == Chroma::C444, width: s.width, height: s.height, fps: s.fps, bitrate: s.bitrate, preset: 1, long_term: 2, short_term: None, slices: if s.mode.codec == Codec::Hevc && s.mode.chroma == Chroma::C444 { hevc444_slices() } else { 0 } };
         // SAFETY: a live device with multithread protection on (`Gpu` sees to that) and a live
         // texture of that device; the pipeline keeps both for longer than the encoder.
         let mut encoder = unsafe { Encoder::new_d3d11_light(gpu.device.as_raw(), &config, s.hdr, s.light) }?;
@@ -162,4 +162,12 @@ mod nvidia {
         tracing::debug!(library = %from, "NVENC");
         Ok(Box::new(encoder))
     }
+}
+
+/// How many slices NVENC cuts an HEVC 4:4:4 picture into: one, by default. More do not help the
+/// viewer's CPU decode: measured with FFmpeg 9.0, its HEVC decoder only threads frames (and
+/// wavefront rows, which NVENC cannot write), so 8 slices decode as slowly as one and cost 0.2 to
+/// 0.4% more bytes. `REMOTEMAN_HEVC444_SLICES` sets a count to try.
+fn hevc444_slices() -> u32 {
+    std::env::var("REMOTEMAN_HEVC444_SLICES").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
 }

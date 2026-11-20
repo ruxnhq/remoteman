@@ -302,3 +302,58 @@ fn refine_still_picture() {
     let after = encoder.encode_how(0, 99, How::default()).unwrap();
     assert!(after.data.len() < sizes[refine_at].0 / 3, "still constant-QP after the refining frame: {} bytes", after.data.len());
 }
+
+/// Not a check: writes HEVC 4:4:4 10-bit clips of busy synthetic content (text-like detail
+/// scrolling over a gradient) for decode timing, as `REMOTEMAN_CLIP_DIR/<w>x<h>-s<slices>.rm`,
+/// each frame as a u32 length then its bytes. Set `REMOTEMAN_CLIP_DIR`; 1920x1080 and 3840x2160 at
+/// the slice count of `REMOTEMAN_HEVC444_SLICES` (default 1). Run it once per slice setting.
+#[test]
+fn write_clips() {
+    let Some(dir) = std::env::var_os("REMOTEMAN_CLIP_DIR").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let Some(gpu) = nvidia() else {
+        eprintln!("no NVIDIA GPU with NVENC here: skipped");
+        return;
+    };
+    let slices = std::env::var("REMOTEMAN_HEVC444_SLICES").unwrap_or_else(|_| "1".into());
+    let mode = Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 };
+    for (w, h) in [(1920u32, 1080u32), (3840, 2160)] {
+        let mut data = vec![0u32; (w * h) as usize];
+        let mut view_at = |dy: u32| {
+            for y in 0..h {
+                for x in 0..w {
+                    let g = (pq(1000.0 * (x as f32 / w as f32)) * 700.0) as u32;
+                    let v = if text_like(x, y, dy) { 0 } else { (pq(WHITE) * 1023.0) as u32 - (g * y / h) / 4 };
+                    let c = if (x / 64 + y / 64) % 5 == 0 { v / 2 } else { v };
+                    data[(y * w + x) as usize] = v | c << 10 | (v ^ (x & 31)) << 20 | 3 << 30;
+                }
+            }
+            let desc = D3D11_TEXTURE2D_DESC { Width: w, Height: h, MipLevels: 1, ArraySize: 1, Format: DXGI_FORMAT_R10G10B10A2_UNORM, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 }, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32, ..Default::default() };
+            let init = D3D11_SUBRESOURCE_DATA { pSysMem: data.as_ptr() as *const _, SysMemPitch: w * 4, SysMemSlicePitch: 0 };
+            // SAFETY: the pixels live through the call.
+            unsafe {
+                let mut texture = None;
+                gpu.device.CreateTexture2D(&desc, Some(&init), Some(&mut texture)).unwrap();
+                let mut view = None;
+                gpu.device.CreateShaderResourceView(&texture.unwrap(), None, Some(&mut view)).unwrap();
+                view.unwrap()
+            }
+        };
+        let converter = Converter::new(&gpu, w, h, Input::Pq { white: WHITE }, Output::Sdr, true).unwrap();
+        let mut encoder = encode::open(&gpu, &converter.output, &Settings { mode, width: w, height: h, fps: 60, bitrate: 60_000_000, hdr: false, light: None }).unwrap();
+        let mut out = Vec::new();
+        let mut total = 0;
+        for n in 0..60u64 {
+            let view = view_at(n as u32 * 3);
+            converter.convert(&gpu, &view);
+            let made = encoder.encode_how(0, n, How::default()).unwrap();
+            out.extend_from_slice(&(made.data.len() as u32).to_le_bytes());
+            out.extend_from_slice(made.data);
+            total += made.data.len();
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{w}x{h}-s{slices}.rm")), &out).unwrap();
+        eprintln!("CLIP {w}x{h} slices {slices}: {total} bytes over 60 frames");
+    }
+}
