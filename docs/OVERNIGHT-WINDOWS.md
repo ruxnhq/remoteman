@@ -138,3 +138,5 @@ call (-1, -2), so the driver's monitor stayed the main display.
 `C:\rm\installer-2026-11-20-multi\remoteman-host-setup-0.1.2.exe`, built from 8cff415: the
 installed 0.1.1 plus more than one device at once. Optional; the default ("It takes over") behaves
 as 0.1.1 does.
+
+Installed by the owner at 08:08: started clean (the driver's monitors unplugged in 16 ms, the PC's three screens as they were, "When a second device connects: It takes over"); sharing still off.
