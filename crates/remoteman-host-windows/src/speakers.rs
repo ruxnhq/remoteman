@@ -314,6 +314,12 @@ impl Switched {
     /// whatever the default is).
     pub fn engage() -> Option<Self> {
         let made = as_console_user(|| {
+            // Muting is what's used, Steam's speakers or not: it was measured to work (loopback
+            // records the same muted), and it leaves every program on its usual output. Switching
+            // to Steam's speakers stays for REMOTEMAN_SWITCH_TO_STEAM=1.
+            if std::env::var("REMOTEMAN_SWITCH_TO_STEAM").as_deref() != Ok("1") {
+                return Ok(mute_default()?.map(Engaged::Muted));
+            }
             let outputs = outputs()?;
             let Some(saved) = plan(&outputs, &defaults()?) else {
                 if !outputs.iter().any(|(_, n)| is_steam_speakers(n)) {
