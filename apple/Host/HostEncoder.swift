@@ -93,6 +93,24 @@ final class HostEncoder {
         session = s
     }
 
+    /// The picture has been still for a moment: encode it once more at a much higher bitrate, so
+    /// that what the first, quick frames left soft (text above all) comes out sharp. The next
+    /// ordinary frame puts the bitrate back.
+    private var refining: Int?
+    func refine(_ pb: CVPixelBuffer, pts: CMTime, bitrate: Int) {
+        lock.lock()
+        let s = session
+        if refining == nil { refining = bitrate }
+        lock.unlock()
+        guard let s else { return }
+        let high = bitrate * Self.refineFactor
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: high as CFTypeRef)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [high / 4, 1] as CFArray)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_Quality, value: 1.0 as CFNumber)
+        _ = encode(pb, pts: pts, refining: true)
+    }
+    static var refineFactor = 8
+
     /// Another average bitrate, from the next frame on, with no keyframe.
     func setBitrate(_ bitrate: Int) {
         lock.lock()
@@ -120,8 +138,15 @@ final class HostEncoder {
 
     /// Encode now, or drop the frame (returns false) if the previous one isn't out and sent yet.
     @discardableResult
-    func encode(_ pb: CVPixelBuffer, pts: CMTime) -> Bool {
+    func encode(_ pb: CVPixelBuffer, pts: CMTime, refining isRefine: Bool = false) -> Bool {
         lock.lock()
+        // An ordinary frame after a refining one: the ordinary bitrate again.
+        if !isRefine, let normal = refining, let s = session {
+            refining = nil
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate, value: normal as CFTypeRef)
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_DataRateLimits, value: [normal * 3 / 16, 1] as CFArray)
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_Quality, value: 0.5 as CFNumber)
+        }
         guard let session else {
             lock.unlock()
             return false

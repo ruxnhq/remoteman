@@ -58,6 +58,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         /// Fill the virtual display with moving test content while a client is on.
         var testWindow = false
         var testPen = false
+        /// A still picture is sent once more, sharper (off: `--refine no`).
+        var refine = true
         /// Offer this Mac's sound (--sound no leaves it out).
         var sound = true
         /// Silence this Mac's own speakers while a device plays its sound, so that it is heard in
@@ -247,6 +249,36 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private var inputs = 0, inputMax = 0.0
     private var captureConfig: SCStreamConfiguration?, pacedFps = 0
     private var liveStream: SCStream?
+    /// Static refinement: when the screen has been still this long, the last picture once more, sharper.
+    private var lastCaptureAt = 0.0, refined = true, refineTimer: Timer?, refinements = 0
+    private func refineIfStill() {
+        lock.lock()
+        let still = CACurrentMediaTime() - lastCaptureAt
+        let go = options.refine && !refined && still >= 0.4 && lastBuffer != nil
+        if go { refined = true; refinements += 1 }
+        let enc = encoder, pb = lastBuffer, rate = picture.map { bitrate(for: $0) } ?? 25_000_000
+        lock.unlock()
+        guard go, let enc, let pb else { return }
+        frames.async {
+            if let path = MacHost.sourceDump, !FileManager.default.fileExists(atPath: path) { MacHost.dumpLuma(pb, to: path) }
+            enc.refine(pb, pts: CMClockGetTime(CMClockGetHostTimeClock()), bitrate: rate)
+        }
+    }
+    /// For measuring (`--dump-source file`): the luma of the first picture refined, raw 16-bit.
+    static let sourceDump: String? = {
+        let a = CommandLine.arguments
+        return a.firstIndex(of: "--dump-source").flatMap { $0 + 1 < a.count ? a[$0 + 1] : nil }
+    }()
+    static func dumpLuma(_ pb: CVPixelBuffer, to path: String) {
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(pb, 0) else { return }
+        let w = CVPixelBufferGetWidthOfPlane(pb, 0), h = CVPixelBufferGetHeightOfPlane(pb, 0), row = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        var out = Data(capacity: w * h * 2)
+        for y in 0..<h { out.append(Data(bytes: base + y * row, count: w * 2)) }
+        try? out.write(to: URL(fileURLWithPath: path))
+        hostLog("host: source luma \(w)×\(h) written for measuring")
+    }
     /// For checking the stream with other decoders (`--dump file.hevc`): every frame as encoded.
     private let dumpFile: FileHandle? = {
         let args = CommandLine.arguments
@@ -985,6 +1017,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         lock.unlock()
         stream = s
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.stats() }
+        refineTimer?.invalidate()
+        refineTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.refineIfStill() }
         if cursorApart { startCursor() }
         if options.testWindow { testWindow.show(on: id) }
         // For testing the pen without a device that sends one: a stroke across the middle, pressing
@@ -1080,6 +1114,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         if !keepDisplay { testWindow.close() }
         statsTimer?.invalidate()
         statsTimer = nil
+        refineTimer?.invalidate()
+        refineTimer = nil
         cursorTimer?.invalidate()
         cursorTimer = nil
         input.release()
@@ -1207,6 +1243,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let enc = encoder
         let first = lastBuffer == nil
         lastBuffer = pb
+        lastCaptureAt = CACurrentMediaTime()
+        refined = false
         lock.unlock()
         if first {
             let f = CVPixelBufferGetPixelFormatType(pb)

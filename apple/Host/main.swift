@@ -72,6 +72,9 @@ while !args.isEmpty {
     case "--test-noise": TestWindow.noise = yes()
     case "--test-bright-level": TestWindow.level = CGFloat(Double(value()) ?? 4)
     case "--test-pen": options.testPen = yes()
+    case "--refine": options.refine = yes()
+    case "--dump-source": _ = value()
+    case "--refine-factor": HostEncoder.refineFactor = Int(value()) ?? 8
     case "--test-bursts": TestWindow.bursts = yes()
     case "--encoder": HostEncoder.testMode = value()
     case "--pace": options.pace = yes()
