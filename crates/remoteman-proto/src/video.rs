@@ -624,6 +624,7 @@ mod tests {
         let mut r = Reassembler::new();
         r.reset(3);
         r.next = 6;
+        r.begun = true;
         // An old frame.
         for d in &ds {
             assert!(r.push(d).unwrap().is_none());
