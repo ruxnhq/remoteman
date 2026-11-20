@@ -21,6 +21,11 @@ fn main() {
 #[cfg(windows)]
 fn windows_only() {
     let mut res = winresource::WindowsResource::new();
+    // The exe's icon (its first, which the taskbar, Start, Alt+Tab and the full-screen window
+    // use): the viewer's app icon, made by assets/make-icon.ps1.
+    println!("cargo:rerun-if-changed=assets/viewer.ico");
+    let icon = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/viewer.ico");
+    res.set_icon(icon.to_str().expect("icon path"));
     res.set("ProductName", "remoteman");
     res.set("FileDescription", "remoteman");
     res.set("OriginalFilename", "remoteman.exe");
