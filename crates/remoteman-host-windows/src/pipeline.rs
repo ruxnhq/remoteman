@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use remoteman_core::host::{Accept, Link};
-use remoteman_core::{Chroma, Message, Mode};
+use remoteman_core::{Chroma, Codec, Message, Mode};
 use remoteman_encode::FrameEncoder;
 use remoteman_encode::recovery::{Recovery, Sent};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED};
@@ -291,10 +291,15 @@ fn build(gpu: &Gpu, meta: &Metadata, s: &Settings, bitrate: u32) -> Result<(Conv
     // The monitor's peak as Windows was told it (its EDID's), else PQ's usual 1000.
     let light = hdr.then(|| (s.sdr_white.round() as u32, if meta.max_nits > 0.0 { meta.max_nits.round() as u32 } else { 1000 }));
     let light_sei = hdr.then(|| encode::hdr_light(meta, s.sdr_white));
+    // AV1 gets no metadata OBUs: on 2026-11-20 the iPad's VideoToolbox AV1 decoder gave no picture,
+    // and no error, for samples holding them (the Mac's took them), so an iPad app that passes
+    // them on stays black. Devices have the light levels from the stream message anyway.
+    // REMOTEMAN_AV1_HDR_METADATA=1 sends them.
+    let av1_light = std::env::var("REMOTEMAN_AV1_HDR_METADATA").as_deref() == Ok("1");
     let mut refused = Vec::new();
     for &mode in &s.modes {
         let converter = Converter::new(gpu, width, height, input, output, mode.chroma == Chroma::C444)?;
-        match encode::open(gpu, &converter.output, &encode::Settings { mode, width, height, fps: s.fps, bitrate, hdr, light: light_sei }) {
+        match encode::open(gpu, &converter.output, &encode::Settings { mode, width, height, fps: s.fps, bitrate, hdr, light: if mode.codec == Codec::Av1 && !av1_light { None } else { light_sei } }) {
             Ok(encoder) => {
                 tracing::info!(?mode, width, height, fps = s.fps, bitrate, format = meta.format, hdr = meta.is_hdr, ?input, ?output, "encoder ready ({})", encoder.note());
                 return Ok((converter, encoder, mode, light));
