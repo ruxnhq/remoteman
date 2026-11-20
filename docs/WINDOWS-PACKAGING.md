@@ -51,7 +51,7 @@ prompt is allowed) and download nothing.
 **What the Store asks of the owner** (none of it done): a Partner Center developer account
 (individual accounts are free: [open a developer account](https://learn.microsoft.com/en-us/windows/apps/publish/partner-center/open-a-developer-account));
 the app's name reserved there, whose identity (`Identity Name`, `Publisher`,
-`PublisherDisplayName`) replaces the placeholders in `windows/viewer/Package.appxmanifest`; the
+`PublisherDisplayName`) replaces the placeholders in `crates/remoteman-viewer-app-windows/package/AppxManifest.xml`; the
 age-rating questionnaire (IARC); a privacy policy URL (the app talks to other computers and keeps
 paired computers' keys); Store listing text, screenshots and logos; a justification for
 `runFullTrust` (the low-level keyboard hook, raw mouse input, Credential Manager, files to
@@ -61,83 +61,75 @@ session); the privacy policy should say so. Not tried in a package yet.
 
 ## The viewer: an MSIX
 
-**Build** (from this PC, holding the VM: `tools/vm.sh take NAME` first):
+Since 2026-11-19 the viewer is WinUI 3 written in Rust with Microsoft's windows-reactor
+(`crates/remoteman-viewer-app-windows`, the view) over the engine (`crates/remoteman-viewer-windows`,
+linked in as a Rust library): one program, `remoteman.exe`, no C# and no .NET. The C# view
+(`windows/viewer`) and its build scripts are gone.
 
-    scripts/win-viewer-winui.sh --msix
+**Build** (on Windows: Rust with MSVC, Build Tools with CMake, FFmpeg 9 LGPL shared in
+`C:\ffmpeg`, libclang in `C:\rm\llvm\bin`, the Windows SDK's `makeappx.exe` for the MSIX):
 
-It cross-builds `remoteman_engine.dll` here, sends `windows/viewer`, the engine and three of
-FFmpeg's DLLs into the guest, and runs the command that does it inside Windows:
+    powershell -ExecutionPolicy Bypass -File scripts\win-viewer-app.ps1 -Msix [-Out target\viewer-msix] [-Version 0.1.0.0]
 
-    powershell -File windows\viewer\build.ps1 -Packaged [-Out C:\rm\msix] [-TestCert]
+It builds the exe framework-dependent (`REMOTEMAN_FRAMEWORK_DEPENDENT=1`: no Windows App Runtime
+staged beside it, no manifest that looks for one there; in `target\fd`, a short name because
+CMake's paths for Opus run past MSBuild's 260 characters under a longer one), lays out
+`remoteman.exe`, FFmpeg's three DLLs, the assets and `crates/remoteman-viewer-app-windows/package/
+AppxManifest.xml` (with the version given), and packs them with `makeappx`. That leaves
+`target\viewer-msix\remoteman_0.1.0.0_x64.msix`, **unsigned** (the Store signs what is uploaded).
+The manifest declares full trust, the network, the microphone and the camera as before, and a
+`PackageDependency` on `Microsoft.WindowsAppRuntime.2` at 2.6.4 (the version windows-reactor's
+bootstrap asks for; Reactor sets per-monitor DPI awareness itself, so no manifest in the exe is
+needed). No test certificate is made and nothing is signed or installed by the script.
 
-That leaves `C:\rm\msix\Remoteman_0.1.0.0_x64.msix`, **unsigned** (the Store signs what is
-uploaded). `-TestCert` (the script passes it) also signs it with a test certificate whose subject
-is the manifest's `Publisher` (`CN=PLACEHOLDER`), made once in the building account's store, and
-leaves its public half as `remoteman-test.cer`, so that it can be installed for a test: import
-the `.cer` into `LocalMachine\TrustedPeople`, then `Add-AppxPackage` the `.msix` as the user.
+**What is in it: 43.6 MB to download (the C# app's: 54.9 MB), 102.6 MB installed (130 MB), 9
+files:** `remoteman.exe` (9 MB: the view, the engine, Opus, the static CRT), FFmpeg's
+`avcodec-63` (90 MB of the 103), `avutil-61`, `swresample-7`, four logos, the manifest. The
+Windows App Runtime is the Store's framework package, installed with the app.
 
-**What is in it: 54.9 MB to download, 130 MB installed, 69 files** (`msix-contents.txt`): the view
-(`remoteman.exe`, `remoteman.dll`), .NET 10 trimmed, WinUI's projection, the engine (6 MB) and
-FFmpeg's `avcodec-63` (94 MB of the 130), `avutil-61`, `swresample-7`. The Windows App SDK
-itself is not inside: it is the Store's framework package `Microsoft.WindowsAppRuntime.2`, which
-the Store installs with the app. Trimming done:
+**The folder that runs with nothing installed** (development, tests, a download outside the
+Store):
 
-- FFmpeg: only what the engine loads (it links `avcodec` and `avutil`; `avcodec` needs
-  `swresample`). `avformat`, `avfilter`, `avdevice` and `swscale` are left out (also from the
-  unpackaged build).
-- The Windows App SDK's parts by name instead of the `Microsoft.WindowsAppSDK` package, which
-  brought its ML runtime (ONNX Runtime and DirectML, 42 MB), AI, Widgets and Search into the app.
-  The unpackaged folder went from 527 files and 390 MB to 456 and 273 MB with this.
-- .NET trimmed (`PublishTrimmed`, `TrimMode=partial`, packaged build only) with WinUI's projection
-  kept whole: trimmed, the window's own backdrop (`StayingMica`, a subclass of a WinUI type)
-  failed to load and the app closed at start. Untrimmed the package was 104.7 MB; trimmed
-  without the ML parts, 54.9 MB. The one reflection helper (`Engine.Do`'s anonymous objects) is
-  now generic with its properties kept.
-- No `VCRUNTIME140.dll` is needed any more: the Rust programs for Windows are linked with the
-  static C runtime (`.cargo/config.toml`), so the engine and the host need only the Universal
-  CRT every Windows 10 and 11 has (checked: neither imports `VCRUNTIME140`).
+    powershell -ExecutionPolicy Bypass -File scripts\win-viewer-app.ps1 [-Out target\viewer-app]
 
-What would shrink it most next: an FFmpeg built with only the decoders the engine uses (HEVC,
-AV1, and the hardware-acceleration glue), the Opus decoder for the computer's sound, and the
-camera's H.264 encoders (`h264_nvenc`, `h264_mf`, OpenH264, which this LGPL build links in:
-no other DLL is needed for them) instead of the full LGPL build; `avcodec` would go from 94 MB
-to a few. Not done. (The microphone's Opus encoder is libopus built into the engine by
-`opusic-c`, not FFmpeg's.)
+`remoteman.exe`, FFmpeg's three DLLs and the Windows App Runtime 2.6.4 beside them, as
+windows-reactor-setup stages it (the first build on a PC downloads it from NuGet into
+`%LOCALAPPDATA%\windows-reactor-setup`; its list is the pinned Reactor's `assets\runtime.txt`, less
+`Microsoft.Web.WebView2.Core.dll`, which only Reactor's WebView2 control loads): **209 files, 160
+MB** (the C# app's folder: 456 files, 273 MB). Started from that folder with nothing on the path, a
+played session (`--play`) decoded on the card and showed in the window.
 
-**Tested in the VM** (Windows 11 build 26300, RTX 5090 by GPU-PV), with the throwaway Linux host
-`RM_AGENT_ARGS=--keep-output scripts/headless-host.sh` on this PC:
-installed with the test certificate (`signed Developer`); found in Start by typing "remoteman"
-(`viewer-1-start-menu.png`); started from there (`viewer-2-opened.png`: Computers, "No computers
-yet"); paired with 10.0.2.2:7799 (`viewer-3-pair.png`); connected, the host's moving content shown
-in the window with the session's pill (`viewer-4-session.png`); stopped; `Remove-AppxPackage`:
-no package left, its data folder (`LocalState\remoteman` with the client's key and the paired
-host) gone with it, nothing in Credential Manager. Eight launches in a row through `shell:AppsFolder` (what its Start
-entry starts, without typing into Start) all ran.
+**Tested on the owner's PC** (Windows 11 build 26300, RTX 5090), with no host (made-up sessions:
+`--play` clips through the real decoder and drawing; the old program's walk steps for every
+other state, `--ui` with `REMOTEMAN_WALK_FILE`): every page, dialog and menu in light and dark
+through UI Automation, with pictures (`crates/remoteman-viewer-app-windows/test/walk.ps1`); full
+screen's bar and a menu of it as the engine's draw thread saves them (`test/fullshots.ps1`);
+pointer, both buttons, the wheel and keys (a letter, Tab, the arrows, Alt, F10, Space) reaching
+the engine from real input; variable refresh in full screen (`test/vrr.ps1`, below). **Not
+tested:** a real host (left for the owner's session), the MSIX installed (nothing is installed on
+that PC), the second display's window, a touchscreen, the microphone and camera lent to a
+computer.
 
-**One launch not explained:** on the first launch after the guest's restart, the test's UI
-Automation didn't find the window, though the app's process was running (it was stopped by its
-pid at the end). The crash reports in Windows' log at that time were older ones, logged again at
-10:00:11, before that launch at 10:00:47. The cause isn't established. Thirteen other launches
-showed their window. In case one does crash, the view now writes an unhandled exception to
-`LocalState\remoteman-crash.log` in the package's folder even without `--log`. The engine now
-logs a panic's message before the app ends: it can't unwind out of the C functions, and a window
-app has no stderr.
+**Variable refresh** happens in full screen only, which is a window of the engine's own over the
+monitor (the app's window waits hidden behind it) presenting into an HWND flip swap chain with
+tearing allowed, on a Direct3D device that does nothing else (on the engine's device, which also
+decodes, the desktop showed it as an overlay at the monitor's fixed rate). Measured on DISPLAY1
+(ASUS XG32UCWMG, 240 Hz, HDR on) with 100 pictures a second: the monitor blanked 10.00 ms apart
+for the whole run in 8-bit, 10-bit SDR and 10-bit PQ (HDR10 passed through); in a window (the
+`SwapChainPanel`) it stays at 4.17 ms. Earlier reports of 10-bit dropping back after a few seconds
+were another program's window taking the keyboard: the monitor follows the frames only while the
+picture's window (or its process's) is in front. While the bar is out over the picture, its layer
+brings the fixed rate back. DXGI's exclusive full screen also varied the refresh until another
+window took the keyboard, and isn't used.
 
-**Left in the VM by the test** (test tooling, not the app): the test certificate in
-`LocalMachine\TrustedPeople` and its key in SYSTEM's own store, so that the next `--msix` build
-can be installed again.
+**Not tested before (still true):** a clean Windows without the framework package, the Windows
+App Certification Kit, an upgrade, arm64 (the engine and FFmpeg are x64 only).
 
-**Not tested:** a clean Windows without the Windows App SDK's framework package (the VM had it
-from earlier work; the Store installs it with the app, a sideload needs it installed first),
-the Windows App Certification Kit, an upgrade from one version to the next, arm64 (the engine and
-FFmpeg are x64 only).
-
-**A Store submission still needs:** the identity from Partner Center in the manifest; the
-version scheme (as I understand it, not looked up today, Store versions keep the last field 0:
-`0.1.0.0` does); real logos at every
-scale and the listing's art; the Windows App Certification Kit run on the package; the privacy
-policy and `runFullTrust` justification above. Then the unsigned `.msix` is uploaded as it is.
-
+**A Store submission still needs:** the identity from Partner Center in
+`crates/remoteman-viewer-app-windows/package/AppxManifest.xml`; the version scheme (Store
+versions keep the last field 0); real logos at every scale and the listing's art; the Windows App
+Certification Kit run on the package; the privacy policy and `runFullTrust` justification above.
+Then the unsigned `.msix` is uploaded as it is.
 ## The host: an installer of its own
 
 **The display driver is remoteman's own** (since 2026-11-19, on the owner's word that remoteman
@@ -277,7 +269,7 @@ below is from memory of how Windows 11 shows them, not looked up today:
    before the host works for anyone but an administrator who is logged on.
 4. **Store identity:** open the Partner Center account, reserve the name, and answer the age
    rating and privacy questions.
-5. **A smaller FFmpeg** for the viewer (94 MB of its 130).
+5. **A smaller FFmpeg** for the viewer (avcodec is 90 MB of its 103 installed).
 
 ## When the owner's app (Remoteman Host) lands
 
