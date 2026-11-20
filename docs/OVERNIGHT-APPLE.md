@@ -105,6 +105,18 @@ own so that it can't collide with the main session's edits to `docs/PLAN.md`.
   hosts now log to a file of their own and the test script refuses to start while a device is
   connected to the everyday host.
 
+## Later (decided by the owner, 2026-11-19)
+
+- **Frame timing on iPhone and iPad: draw to the screen's own deadline.** Presenting each frame
+  as it arrives was measured on the owner's iPad Pro 13 and iPhone 18 Pro Max (2026-11-19) and was
+  no faster than drawing at the display link's tick: arrival to on screen, median / p95 ms, iPad
+  14.2 / 19.9 at the tick against 15.1 / 30.4 on arrival; iPhone 15.3 to 18.0 / 20.4 to 23.1
+  either way. A frame presented at a random moment often misses the compositor's deadline for the
+  coming refresh. Next to try: CAMetalDisplayLink (iOS 17 and later), which says when the next
+  refresh's frame must be ready, so the newest frame is drawn just before that deadline instead of
+  just after the previous refresh; maybe a few ms. Untested. `--present tick|arrival` and the run
+  summary's "arrival to on screen" line are there for measuring it.
+
 ## Still open, and what needs the owner
 
 - No AV1 from the Mac: it has no AV1 encoder (hardware: HEVC, H.264, ProRes, JPEG).
