@@ -64,6 +64,8 @@ mod service;
 #[cfg(windows)]
 mod display;
 #[cfg(windows)]
+mod ccd;
+#[cfg(windows)]
 mod encode;
 #[cfg(windows)]
 mod hdr;
@@ -191,6 +193,23 @@ mod windows_main {
             args.next();
             crate::display::detach(&args.next().context("--detach OUTPUT")?)?;
             println!("detached");
+            return Ok(());
+        }
+        // For tests on a PC with screens of its own, without the driver: what a device's coming
+        // and going does to the desktop (`--layout-test STATE beside|main|back|drop|probe OUTPUT
+        // INDEX WxHxR`, see `display::layout_test`).
+        if args.peek().map(String::as_str) == Some("--layout-test") {
+            args.next();
+            const USE: &str = "--layout-test STATE beside|main|back|drop|probe OUTPUT INDEX WxHxR";
+            let state = PathBuf::from(args.next().context(USE)?);
+            let step = args.next().context(USE)?;
+            let output = args.next().unwrap_or_default();
+            let index: u32 = args.next().unwrap_or_else(|| "0".into()).parse().context(USE)?;
+            let n: Vec<u32> = args.next().unwrap_or_else(|| "800x600x30".into()).split('x').filter_map(|v| v.parse().ok()).collect();
+            anyhow::ensure!(n.len() == 3, USE);
+            tracing_subscriber::fmt().with_ansi(false).init();
+            std::fs::create_dir_all(&state)?;
+            crate::display::layout_test(&state, &step, &output, index, crate::display::Mode { width: n[0], height: n[1], refresh: n[2] })?;
             return Ok(());
         }
         while let Some(a) = args.next() {

@@ -28,6 +28,7 @@ use windows::Win32::Graphics::Gdi::UpdateWindow;
 use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, SW_SHOWNOACTIVATE, ShowWindow, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP};
 use windows::core::{HSTRING, PCWSTR, w};
 
+use crate::ccd;
 use crate::vdd::{self, Channel, Driver};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,6 +391,16 @@ struct Placed {
     left: i32,
     top: i32,
     primary: bool,
+    /// Its monitor's device path, lower case (empty in a file an older host wrote).
+    monitor: String,
+}
+
+/// Held while the desktop is being arranged on a PC with screens of its own: by a device's
+/// coming and going, and by the watch that keeps the driver's monitors off between devices.
+static ARRANGING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn arranging() -> std::sync::MutexGuard<'static, ()> {
+    ARRANGING.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// The names of the outputs that show the driver's monitors (whether part of the desktop or not).
@@ -397,22 +408,31 @@ fn driver_names() -> Vec<String> {
     driver_outputs().into_iter().map(|(o, _)| o.device).collect()
 }
 
-/// The PC's own screens on the desktop now: every output that is part of it and isn't the
-/// driver's, with its mode and place.
+/// The PC's own screens on the desktop now (every screen that isn't one of the driver's
+/// monitors), with mode, place and monitor.
 fn own_screens() -> Vec<Placed> {
-    let driver = driver_names();
-    outputs()
+    crate::desk::follow();
+    let shown = ccd::shown().unwrap_or_else(|e| {
+        tracing::warn!("couldn't read the desktop's layout: {e:#}");
+        Vec::new()
+    });
+    shown
         .into_iter()
-        .filter(|o| !driver.contains(&o.device))
-        .filter_map(|o| current(&o.device).ok().map(|(mode, at)| Placed { device: o.device, mode, left: at.left, top: at.top, primary: o.primary }))
+        .filter(|s| !s.driver())
+        .map(|s| {
+            // (The rate as Windows' own settings call says it, as the layout file always had it.)
+            let refresh = current(&s.device).map(|c| c.0.refresh).unwrap_or(s.refresh);
+            Placed { device: s.device, mode: Mode { width: s.width, height: s.height, refresh }, left: s.left, top: s.top, primary: (s.left, s.top) == (0, 0), monitor: s.monitor }
+        })
         .collect()
 }
 
-/// The layout file: one screen a line, `device width height refresh left top primary`, tab
-/// apart. Written before a device's monitor first joins the desktop, removed once the screens
-/// are back as it says; still there at a start means the last host died with a device on.
+/// The layout file: one screen a line, `device width height refresh left top primary monitor`,
+/// tab apart (an older host's has no monitor). Written before a device's monitor first joins
+/// the desktop, removed once the screens are back as it says; still there at a start means the
+/// last host died with a device on, or a screen wasn't there to be put back.
 fn save_layout(path: &std::path::Path, screens: &[Placed]) -> Result<()> {
-    let text: String = screens.iter().map(|s| format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\n", s.device, s.mode.width, s.mode.height, s.mode.refresh, s.left, s.top, s.primary as u8)).collect();
+    let text: String = screens.iter().map(|s| format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", s.device, s.mode.width, s.mode.height, s.mode.refresh, s.left, s.top, s.primary as u8, s.monitor)).collect();
     std::fs::write(path, text).with_context(|| format!("writing down the screens' layout in {}", path.display()))
 }
 
@@ -421,52 +441,172 @@ fn load_layout(path: &std::path::Path) -> Result<Vec<Placed>> {
     let mut all = Vec::new();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let f: Vec<&str> = line.split('\t').collect();
-        anyhow::ensure!(f.len() == 7, "a line of {} isn't a screen: {line:?}", path.display());
+        anyhow::ensure!(f.len() == 7 || f.len() == 8, "a line of {} isn't a screen: {line:?}", path.display());
         let n = |i: usize| f[i].parse::<i64>().with_context(|| format!("in {}: {line:?}", path.display()));
-        all.push(Placed { device: f[0].to_string(), mode: Mode { width: n(1)? as u32, height: n(2)? as u32, refresh: n(3)? as u32 }, left: n(4)? as i32, top: n(5)? as i32, primary: n(6)? != 0 });
+        let monitor = f.get(7).map_or(String::new(), |m| m.trim().to_lowercase());
+        all.push(Placed { device: f[0].to_string(), mode: Mode { width: n(1)? as u32, height: n(2)? as u32, refresh: n(3)? as u32 }, left: n(4)? as i32, top: n(5)? as i32, primary: n(6)? != 0, monitor });
     }
     anyhow::ensure!(!all.is_empty(), "{} lists no screen", path.display());
     Ok(all)
 }
 
-/// Stage every output of the driver's that is part of the desktop, except those named, to leave it.
-fn stage_driver_off(keep: &[&str]) -> Result<bool> {
-    let mut any = false;
-    for device in driver_names() {
-        if !keep.contains(&device.as_str()) && attached(&device) {
-            stage(&device, None)?;
-            any = true;
-        }
-    }
-    Ok(any)
+/// The written-down screens as an arrangement: each on its own monitor (as written down, or, in
+/// an older file, the one its output shows now if that is one of the PC's), with the screens
+/// whose monitors aren't connected now left out.
+fn layout_wants(screens: &[Placed]) -> Vec<ccd::Want> {
+    let now = ccd::shown().unwrap_or_default();
+    screens
+        .iter()
+        .filter_map(|s| {
+            let monitor = if s.monitor.is_empty() { now.iter().find(|n| n.device.eq_ignore_ascii_case(&s.device) && !n.driver())?.monitor.clone() } else { s.monitor.clone() };
+            ccd::present(&monitor).then(|| ccd::Want { device: s.device.clone(), monitor, width: s.mode.width, height: s.mode.height, refresh: s.mode.refresh, left: s.left, top: s.top })
+        })
+        .collect()
 }
 
-/// Stage the PC's own screens as the layout file has them, each as far as it goes (a screen
-/// unplugged meanwhile is left out, and said).
-fn stage_screens(screens: &[Placed]) -> usize {
-    let mut staged = 0;
-    for s in screens {
-        match stage(&s.device, Some((s.mode, s.left, s.top, s.primary))) {
-            Ok(()) => staged += 1,
-            Err(e) => tracing::warn!(screen = %s.device, "couldn't put this screen back: {e:#}"),
+/// The written-down main screen's monitor, if the file says.
+fn layout_main(screens: &[Placed]) -> Option<String> {
+    screens.iter().find(|s| s.primary && !s.monitor.is_empty()).map(|s| s.monitor.clone())
+}
+
+/// Move an arrangement so that the screen matching `main` (else its first) is at 0,0, everything
+/// with it.
+fn to_origin(mut wants: Vec<ccd::Want>, main: Option<&str>) -> Vec<ccd::Want> {
+    if wants.iter().any(|w| (w.left, w.top) == (0, 0)) {
+        return wants;
+    }
+    let first = main.and_then(|m| wants.iter().find(|w| w.monitor == m)).or(wants.first()).map(|w| (w.left, w.top));
+    if let Some((x, y)) = first {
+        for w in &mut wants {
+            (w.left, w.top) = (w.left - x, w.top - y);
         }
     }
-    staged
+    wants
 }
 
 /// The PC's own screens back as the layout file has them and every monitor of the driver's off
-/// the desktop. The file goes only once that has worked: until then it is what the next try
-/// (this host's or the next one's) puts back.
+/// the desktop, in one arrangement. The file goes only once all its screens are back as it
+/// says: while one of them isn't connected (a monitor asleep, as DisplayPort monitors that sleep
+/// drop off the computer), those that are go back as it has them, or failing that the driver's
+/// monitors are just taken off, and the file stays for the next try (when a device leaves, at
+/// the next start, or by the watch between devices once that monitor is back). The caller holds
+/// [`ARRANGING`].
 fn restore_layout(path: &std::path::Path) -> Result<()> {
     let screens = load_layout(path)?;
-    if let Err(e) = stage_driver_off(&[]) {
-        tracing::warn!("couldn't take the driver's monitors off the desktop: {e:#}");
+    let main = layout_main(&screens);
+    let wants = layout_wants(&screens);
+    if wants.len() == screens.len() {
+        match ccd::arrange(&wants) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(path);
+                tracing::info!(screens = wants.len(), "the PC's own screens are back as they were");
+                return Ok(());
+            }
+            Err(e) => tracing::warn!("couldn't put the PC's screens back as they were: {e:#}"),
+        }
+    } else {
+        tracing::warn!(here = wants.len(), of = screens.len(), "not all of the PC's screens are connected now (asleep, or unplugged): those that are go back, and the rest when they come");
+        if !wants.is_empty() {
+            match ccd::arrange(&to_origin(wants, main.as_deref())) {
+                Ok(()) => return Ok(()),
+                Err(e) => tracing::warn!("couldn't put the connected screens back as they were: {e:#}"),
+            }
+        }
     }
-    let staged = stage_screens(&screens);
-    apply()?;
-    anyhow::ensure!(staged > 0, "none of the screens in {} could be put back", path.display());
-    let _ = std::fs::remove_file(path);
-    tracing::info!(screens = staged, of = screens.len(), "the PC's own screens are back as they were");
+    // At least: none of the driver's monitors on the desktop, and one of the PC's the main display.
+    ccd::drop_driver(main.as_deref())?;
+    bail!("the PC's screens are as Windows has them, without the driver's monitors; {} stays for the next try", path.display())
+}
+
+/// On a PC with screens of its own, the arrangements for a device's monitor (the driver's
+/// monitor `index`, shown by `device`, in `mode`) among the PC's screens as written down:
+/// beside them to the right, level with the main screen's top; as the main display, the PC's
+/// screens kept where they are beside it (everything measured from it, so they all move left);
+/// or as the only one, the PC's screens off. A screen whose monitor isn't connected is left out.
+fn pc_arrangement(screens: &[Placed], device: &str, index: u32, mode: Mode) -> impl Fn(Place) -> Vec<ccd::Want> {
+    let mine = to_origin(layout_wants(screens), layout_main(screens).as_deref());
+    let right = mine.iter().map(|w| w.left + w.width as i32).max().unwrap_or(0);
+    let top = mine.iter().find(|w| (w.left, w.top) == (0, 0)).map_or(0, |w| w.top);
+    let device = device.to_string();
+    let theirs = move |left: i32, top: i32| ccd::Want { device: device.clone(), monitor: ccd::driver_monitor(index), width: mode.width, height: mode.height, refresh: mode.refresh, left, top };
+    move |place| match place {
+        Place::Beside => mine.iter().cloned().chain(std::iter::once(theirs(right, top))).collect(),
+        Place::Main => std::iter::once(theirs(0, 0)).chain(mine.iter().map(|w| ccd::Want { left: w.left - right, top: w.top - top, ..w.clone() })).collect(),
+        // (By design the PC's monitors get no picture: one that sleeps then may drop off the
+        // computer and not come back by itself, as DisplayPort monitors do.)
+        Place::Only => vec![theirs(0, 0)],
+    }
+}
+
+/// For tests on a PC with screens of its own, without the driver (which only SYSTEM and
+/// administrators may open): what a device's coming and going does to the desktop, with one of
+/// the driver's monitors that exists already (`output` showing monitor `index`, in a `mode` its
+/// list has). `beside` and `main` write the screens down in `state` first, as for a device;
+/// `back` puts them back as [`Screen::release`] does; `drop` takes the driver's monitors off;
+/// `probe` asks Windows (testing only) whether it would take each screen's settings again now.
+/// Says the desktop afterwards.
+pub fn layout_test(state: &std::path::Path, step: &str, output: &str, index: u32, mode: Mode) -> Result<()> {
+    let layout = state.join("screens.txt");
+    let _alone = arranging();
+    crate::desk::follow();
+    match step {
+        "beside" | "main" => {
+            if !layout.exists() {
+                let screens = own_screens();
+                anyhow::ensure!(!screens.is_empty(), "this PC's own screens aren't on the desktop");
+                save_layout(&layout, &screens)?;
+            }
+            let screens = load_layout(&layout)?;
+            let arrangement = pc_arrangement(&screens, output, index, mode);
+            let place = if step == "main" { Place::Main } else { Place::Beside };
+            let showing = ccd::shown()?.iter().any(|s| s.device.eq_ignore_ascii_case(output) && (s.width, s.height) == (mode.width, mode.height));
+            if place == Place::Main && !showing {
+                arrange_settled(&arrangement(Place::Beside))?;
+            }
+            arrange_settled(&arrangement(place))?;
+        }
+        "back" => restore_layout(&layout)?,
+        "drop" => {
+            ccd::drop_driver(None)?;
+        }
+        "probe" => {
+            use windows::Win32::Graphics::Gdi::CDS_TEST;
+            for s in ccd::shown()? {
+                let mut dm = devmode();
+                let name = HSTRING::from(s.device.as_str());
+                // SAFETY: `dm` is sized as the calls want; testing changes nothing.
+                let said = unsafe {
+                    let _ = EnumDisplaySettingsW(&name, ENUM_CURRENT_SETTINGS, &mut dm);
+                    dm.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+                    ChangeDisplaySettingsExW(&name, Some(&dm), None, CDS_TEST, None)
+                };
+                println!("{} ({}): ChangeDisplaySettingsEx testing its own settings: {}", s.device, if s.driver() { "the driver's" } else { "the PC's" }, said.0);
+            }
+        }
+        other => bail!("--layout-test: no step {other:?} (beside, main, back, drop, probe)"),
+    }
+    for s in ccd::shown()? {
+        println!("{} {}x{}@{} at {},{}{} {}", s.device, s.width, s.height, s.refresh, s.left, s.top, if (s.left, s.top) == (0, 0) { " main" } else { "" }, s.monitor);
+    }
+    Ok(())
+}
+
+/// [`ccd::arrange`], and again if the driver's monitors that the driver re-created join the
+/// desktop late (seen: two of them turned up beside a device's display, re-created for its
+/// size, after it had been arranged): watched for two seconds.
+fn arrange_settled(wants: &[ccd::Want]) -> Result<()> {
+    ccd::arrange(wants)?;
+    let since = Instant::now();
+    let mut again = 0;
+    while since.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(250));
+        if let Err(e) = ccd::check(wants) {
+            anyhow::ensure!(again < 3, "the desktop won't stay as arranged: {e:#}");
+            tracing::info!("the desktop changed after it was arranged ({e:#}): arranging it again");
+            ccd::arrange(wants)?;
+            again += 1;
+        }
+    }
     Ok(())
 }
 
@@ -490,6 +630,55 @@ pub struct Screen {
     first_was: Option<Mode>,
     /// The device's second display (the driver's monitor 2), while it has one: its output.
     second: Option<String>,
+    /// A device has a monitor on the desktop (on a PC with screens of its own): the watch
+    /// between devices leaves the desktop alone meanwhile.
+    busy: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// On a PC with screens of its own, between devices: every few seconds, take the driver's
+/// monitors off the desktop if Windows has put them there (it rebuilds the layout from every
+/// monitor connected, the driver's included, whenever one of the PC's monitors sleeps or wakes,
+/// and may make one of the driver's the main display), and put the PC's screens back as the
+/// layout file has them once all of them are connected again (a monitor that was asleep when
+/// the last device left). The main screen is the one last seen there, which is kept in mind.
+fn watch_between_devices(layout: std::path::PathBuf, busy: Arc<std::sync::atomic::AtomicBool>) {
+    let _ = std::thread::Builder::new().name("screens".into()).spawn(move || {
+        let mut main: Option<String> = None;
+        // After a try that failed, a minute's rest (not a warning every three seconds).
+        let mut rest_until: Option<Instant> = None;
+        loop {
+            std::thread::sleep(Duration::from_secs(3));
+            if busy.load(std::sync::atomic::Ordering::Relaxed) || rest_until.is_some_and(|t| Instant::now() < t) {
+                continue;
+            }
+            let Ok(_alone) = ARRANGING.try_lock() else { continue };
+            crate::desk::follow();
+            let Ok(shown) = ccd::shown() else { continue };
+            if !shown.iter().any(ccd::Shown::driver) {
+                if let Some(first) = shown.iter().find(|s| (s.left, s.top) == (0, 0)) {
+                    main = Some(first.monitor.clone());
+                }
+            }
+            if layout.exists() {
+                let Ok(screens) = load_layout(&layout) else { continue };
+                if layout_wants(&screens).len() == screens.len() {
+                    tracing::info!("all of the PC's screens are connected again: putting them back as they were");
+                    if let Err(e) = restore_layout(&layout) {
+                        tracing::warn!("{e:#}");
+                        rest_until = Some(Instant::now() + Duration::from_secs(60));
+                    }
+                    continue;
+                }
+            }
+            if shown.iter().any(ccd::Shown::driver) {
+                tracing::info!(?shown, "Windows put the driver's monitors on the desktop with no device here: taking them off");
+                if let Err(e) = ccd::drop_driver(main.as_deref()) {
+                    tracing::warn!("couldn't take the driver's monitors off the desktop: {e:#}");
+                    rest_until = Some(Instant::now() + Duration::from_secs(60));
+                }
+            }
+        }
+    });
 }
 
 impl Screen {
@@ -503,27 +692,31 @@ impl Screen {
         // A PC with screens of its own; or one whose screens a dead host left off (its layout
         // file says so).
         let pc = outputs().iter().any(|o| !driver_list.contains(&o.device)) || layout.exists();
+        let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if pc {
-            if layout.exists() {
-                tracing::warn!("the last host left a device's monitor on the desktop: putting the PC's screens back");
-                // (On failure the file stays, to be tried again when the device leaves or by the next host.)
-                if let Err(e) = restore_layout(&layout) {
-                    tracing::warn!("couldn't put the PC's screens back yet: {e:#}");
+            {
+                let _alone = arranging();
+                if layout.exists() {
+                    tracing::warn!("the last host left a device's monitor on the desktop, or a screen wasn't there to be put back: putting the PC's screens back");
+                    // (On failure the file stays, to be tried again.)
+                    if let Err(e) = restore_layout(&layout) {
+                        tracing::warn!("couldn't put the PC's screens back yet: {e:#}");
+                    }
+                }
+                // Nobody is here yet: none of the driver's monitors is part of the desktop.
+                crate::desk::follow();
+                if let Err(e) = ccd::drop_driver(None) {
+                    tracing::warn!("couldn't take the driver's monitors off the desktop: {e:#}");
                 }
             }
-            // Nobody is here yet: none of the driver's monitors is part of the desktop.
-            match stage_driver_off(&[]) {
-                Ok(true) => apply().unwrap_or_else(|e| tracing::warn!("couldn't take the driver's monitors off the desktop: {e:#}")),
-                Ok(false) => {}
-                Err(e) => tracing::warn!("couldn't take the driver's monitors off the desktop: {e:#}"),
-            }
+            watch_between_devices(layout.clone(), busy.clone());
             let first = driver_output(0).context("the display driver lists no monitor")?;
             tracing::info!(driver = %driver.path, first = %first.device, "display driver; this PC has screens of its own, so the driver's monitors join the desktop only while a device is here");
-            return Ok(Self { driver: Arc::new(driver), pc, layout, device: first.device, switched: false, own: None, first_was: None, second: None });
+            return Ok(Self { driver: Arc::new(driver), pc, layout, device: first.device, switched: false, own: None, first_was: None, second: None, busy });
         }
         let (output, sure) = find_output()?;
         tracing::info!(driver = %driver.path, output = %output.device, adapter = %output.description, recognised = sure, "display driver");
-        Ok(Self { driver: Arc::new(driver), pc, layout, device: output.device, switched: false, own: None, first_was: None, second: None })
+        Ok(Self { driver: Arc::new(driver), pc, layout, device: output.device, switched: false, own: None, first_was: None, second: None, busy })
     }
 
     /// Has this PC screens of its own, so that the driver's monitors are there only for devices?
@@ -569,6 +762,19 @@ impl Screen {
         while !attached(&own.device) && seen.elapsed() < Duration::from_secs(2) {
             std::thread::sleep(Duration::from_millis(100));
         }
+        if self.pc {
+            // The PC's screens as they are, the driver's monitors off, in one arrangement (a
+            // third monitor of the driver's may join a moment later: the watch between devices
+            // takes it off then).
+            if let Some(first) = driver_output(0) {
+                self.device = first.device;
+            }
+            let _alone = arranging();
+            if let Err(e) = ccd::drop_driver(None) {
+                tracing::warn!("couldn't take the driver's monitors off the desktop: {e:#}");
+            }
+            return true;
+        }
         if attached(&own.device) {
             if let Err(e) = detach(&own.device) {
                 tracing::warn!("the driver's second monitor is part of the desktop and couldn't be taken out: {e:#}");
@@ -590,11 +796,6 @@ impl Screen {
                 Some(_) if seen.elapsed() > Duration::from_millis(1500) => break,
                 _ => std::thread::sleep(Duration::from_millis(100)),
             }
-        }
-        // On a PC with screens of its own the first monitor is off the desktop too until a
-        // device comes (making the others may have brought it back).
-        if self.pc && matches!(stage_driver_off(&[]), Ok(true)) {
-            let _ = apply();
         }
         true
     }
@@ -637,11 +838,8 @@ impl Screen {
             Some(refresh) => Mode { refresh, ..want },
             None => *offered.first().context("the second display's monitor offers no mode")?,
         };
-        // Adding the mode re-created the driver's monitors, and Windows may have put the others
-        // back on the desktop: on a PC with screens of its own only the device's two stay.
         if self.pc {
-            let own = self.own.clone().unwrap_or_default();
-            stage_driver_off(&[own.as_str(), second.device.as_str()])?;
+            return self.give_second_pc(&second.device, other, mode, side);
         }
         // Everything on the desktop now, and the device's own monitor among it.
         let (_, own) = current(self.own.as_deref().unwrap_or(&self.device))?;
@@ -665,8 +863,52 @@ impl Screen {
         Ok((now, area, index))
     }
 
+    /// [`Screen::give_second`] on a PC with screens of its own: one arrangement of what is on the
+    /// desktop now (the PC's screens and the device's own monitor; any other of the driver's
+    /// monitors off) and the second display on that side of it, level with the device's own.
+    fn give_second_pc(&mut self, second: &str, index: u32, mode: Mode, side: remoteman_core::Side) -> Result<(Mode, Area, u32)> {
+        use remoteman_core::Side;
+        let _alone = arranging();
+        crate::desk::follow();
+        let own_device = self.own.clone().context("a second display goes beside a monitor of the device's own, which it hasn't got")?;
+        let shown = ccd::shown()?;
+        let mut wants: Vec<ccd::Want> = shown
+            .iter()
+            .filter(|s| !s.driver() || s.device.eq_ignore_ascii_case(&own_device))
+            .map(|s| ccd::Want { device: s.device.clone(), monitor: s.monitor.clone(), width: s.width, height: s.height, refresh: 0, left: s.left, top: s.top })
+            .collect();
+        let own = wants.iter().find(|w| w.device.eq_ignore_ascii_case(&own_device)).cloned().context("the device's own monitor isn't on the desktop")?;
+        let edge = |pick: fn(&ccd::Want) -> i32, most: bool| wants.iter().map(pick).reduce(|a, b| if most { a.max(b) } else { a.min(b) }).unwrap_or(0);
+        let (x, y) = match side {
+            Side::Right => (edge(|w| w.left + w.width as i32, true), own.top),
+            Side::Left => (edge(|w| w.left, false) - mode.width as i32, own.top),
+            Side::Above => (own.left, edge(|w| w.top, false) - mode.height as i32),
+            Side::Below => (own.left, edge(|w| w.top + w.height as i32, true)),
+        };
+        wants.push(ccd::Want { device: second.to_string(), monitor: ccd::driver_monitor(index), width: mode.width, height: mode.height, refresh: mode.refresh, left: x, top: y });
+        ccd::arrange(&wants)?;
+        let (now, area) = current(second)?;
+        tracing::info!(?now, ?side, output = %second, left = area.left, top = area.top, "the device has a second display");
+        sweep_for_a_while(area);
+        self.second = Some(second.to_string());
+        Ok((now, area, index))
+    }
+
     /// The device's second display leaves the desktop.
     pub fn take_second(&mut self) {
+        if self.pc {
+            let Some(second) = self.second.take() else { return };
+            let _alone = arranging();
+            crate::desk::follow();
+            let kept = ccd::shown().map(|shown| {
+                shown.into_iter().filter(|s| !s.device.eq_ignore_ascii_case(&second)).map(|s| ccd::Want { device: s.device, monitor: s.monitor, width: s.width, height: s.height, refresh: 0, left: s.left, top: s.top }).collect::<Vec<_>>()
+            });
+            match kept.and_then(|wants| ccd::arrange(&wants)) {
+                Ok(()) => tracing::info!("the device's second display is off the desktop again"),
+                Err(e) => tracing::warn!("couldn't take the device's second display off the desktop: {e:#}"),
+            }
+            return;
+        }
         let Some(second) = self.second.take() else { return };
         match detach(&second) {
             Ok(()) => tracing::info!("the device's second display is off the desktop again"),
@@ -755,6 +997,9 @@ impl Screen {
     /// the main screen's top; or as the main display, the PC's screens kept where they are
     /// beside it; or as the only one, the PC's screens off while the device is here.
     fn give_pc(&mut self, want: Mode, place: Place) -> Result<Mode> {
+        self.busy.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _alone = arranging();
+        crate::desk::follow();
         if !self.layout.exists() {
             let screens = own_screens();
             anyhow::ensure!(!screens.is_empty(), "this PC's own screens aren't on the desktop");
@@ -791,34 +1036,15 @@ impl Screen {
             Some(refresh) => Mode { refresh, ..want },
             None => *offered.first().context("the device's monitor offers no mode")?,
         };
-        let right = screens.iter().map(|s| s.left + s.mode.width as i32).max().unwrap_or(0);
-        let top = screens.iter().find(|s| s.primary).map_or(0, |s| s.top);
-        stage_driver_off(&[own.device.as_str()])?;
-        match place {
-            Place::Beside => {
-                // The PC's screens as they were (a resize may follow a placement that moved them).
-                stage_screens(&screens);
-                stage(&own.device, Some((mode, right, top, false)))?;
-            }
-            Place::Main => {
-                // The same place on the desktop, but the main display: everything is measured from it.
-                stage(&own.device, Some((mode, 0, 0, true)))?;
-                for s in &screens {
-                    if let Err(e) = stage(&s.device, Some((s.mode, s.left - right, s.top - top, false))) {
-                        tracing::warn!(screen = %s.device, "couldn't move this screen beside the device's: {e:#}");
-                    }
-                }
-            }
-            Place::Only => {
-                stage(&own.device, Some((mode, 0, 0, true)))?;
-                for s in &screens {
-                    if let Err(e) = stage(&s.device, None) {
-                        tracing::warn!(screen = %s.device, "couldn't switch this screen off: {e:#}");
-                    }
-                }
-            }
+        let arrangement = pc_arrangement(&screens, &own.device, index, mode);
+        // As the main display, it joins as an extra one first: its rate is set while one of the
+        // PC's screens is the main display (seen: with one of the driver's monitors the main
+        // display, Windows refused to set anything with ChangeDisplaySettingsEx).
+        let showing = ccd::shown().unwrap_or_default().iter().any(|s| s.device.eq_ignore_ascii_case(&own.device) && (s.width, s.height, s.refresh) == (mode.width, mode.height, mode.refresh));
+        if place == Place::Main && !showing {
+            arrange_settled(&arrangement(Place::Beside))?;
         }
-        apply()?;
+        arrange_settled(&arrangement(place))?;
         self.own = Some(own.device.clone());
         let (now, area) = current(&own.device)?;
         tracing::info!(?want, ?now, ?place, output = %own.device, left = area.left, top = area.top, "the device has a monitor of its own");
@@ -843,10 +1069,15 @@ impl Screen {
                     }
                 }
             }
-            let done = if self.layout.exists() { restore_layout(&self.layout) } else { stage_driver_off(&[]).and_then(|any| if any { apply() } else { Ok(()) }) };
-            if let Err(e) = done {
-                tracing::warn!("couldn't put the PC's screens back as they were: {e:#}");
+            {
+                let _alone = arranging();
+                crate::desk::follow();
+                let done = if self.layout.exists() { restore_layout(&self.layout) } else { ccd::drop_driver(None).map(|_| ()) };
+                if let Err(e) = done {
+                    tracing::warn!("couldn't put the PC's screens back as they were: {e:#}");
+                }
             }
+            self.busy.store(false, std::sync::atomic::Ordering::Relaxed);
             return;
         }
         self.take_second();
