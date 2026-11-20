@@ -31,6 +31,12 @@ typedef struct rm_nvenc_cfg {
     uint32_t hdr_pq;      // 0 = BT.709 SDR, 1 = BT.2020 PQ signalling
     uint32_t long_term;   // how many long-term reference frames to keep room for (0: none)
     uint32_t short_term;  // how many recent frames to keep (0: the usual, fitted to the picture)
+    // HDR metadata for a BT.2020 PQ stream (hdr_pq): SEI (HEVC) or metadata OBUs (AV1), written on
+    // keyframes. hdr_light 0: none. Chromaticities in 0.00002 units (SMPTE ST 2086: green, blue,
+    // red, white point; x then y), mastering luminances in 0.0001 cd/m2, MaxCLL and MaxFALL in cd/m2.
+    uint32_t hdr_light;
+    uint32_t hdr_chroma[8];
+    uint32_t hdr_max_lum, hdr_min_lum, hdr_max_cll, hdr_max_fall;
 } rm_nvenc_cfg;
 
 typedef struct rm_nvenc {
@@ -51,6 +57,12 @@ typedef struct rm_nvenc {
     uint8_t *out;
     size_t out_cap;
     uint32_t last_qp;     // the last frame's average quantiser, as the encoder reported it
+    MASTERING_DISPLAY_INFO mastering;  // HDR metadata, handed to the encoder with each keyframe
+    CONTENT_LIGHT_LEVEL light;
+    uint8_t av1_mdcv[25], av1_cll[5];  // the same as AV1 metadata OBU payloads
+    NV_ENC_AV1_OBU_PAYLOAD obus[2];
+    int hdr_sei;          // whether to hand it over
+    int sent_first;       // the first picture, a keyframe whatever is asked, has gone
     char err[256];
 } rm_nvenc;
 
@@ -157,6 +169,38 @@ static int cap(rm_nvenc *e, GUID codec, NV_ENC_CAPS which) {
     return v;
 }
 
+// AV1's HDR metadata as OBU payloads of our own: NVENC's AV1 encoder wrote no metadata OBU from
+// outputMasteringDisplay/outputMaxCll and the pointers in the picture's parameters (tried on an
+// RTX 5090, 2026-11, with the values in HEVC's units and in AV1's). NVENC wraps a payload in an
+// OBU of type 5 (metadata) by itself, taking `payloadType` as the metadata_type and adding the
+// trailing bits; the payload is the syntax of AV1 spec 6.7.3 (type 1, HDR CLL) and 6.7.4 (type 2,
+// HDR MDCV): primaries as 0.16 fixed point (red, green, blue, the order of the spec's index), the
+// white point, the maximum luminance as 24.8 and the minimum as 18.14 fixed point. The arrays
+// below hold the type byte too (for reading), and the payloads start after it.
+static void put16(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
+static void put32(uint8_t *p, uint32_t v) { put16(p, v >> 16); put16(p + 2, v & 0xffff); }
+
+static void av1_metadata(rm_nvenc *e, const rm_nvenc_cfg *cfg) {
+    // Our chromaticities come green, blue, red, white (HEVC's order) in units of 0.00002.
+    static const int order[4] = { 2, 0, 1, 3 };
+    uint8_t *m = e->av1_mdcv, *c = e->av1_cll;
+    int i;
+    m[0] = 2;
+    for (i = 0; i < 4; i++) {
+        uint32_t x = (uint32_t)((uint64_t)cfg->hdr_chroma[2 * order[i]] * 65536 / 50000);
+        uint32_t y = (uint32_t)((uint64_t)cfg->hdr_chroma[2 * order[i] + 1] * 65536 / 50000);
+        put16(m + 1 + 4 * i, x > 65535 ? 65535 : x);
+        put16(m + 3 + 4 * i, y > 65535 ? 65535 : y);
+    }
+    put32(m + 17, (uint32_t)((uint64_t)cfg->hdr_max_lum * 256 / 10000));
+    put32(m + 21, (uint32_t)(((uint64_t)cfg->hdr_min_lum * 16384 + 5000) / 10000));
+    c[0] = 1;
+    put16(c + 1, e->light.maxContentLightLevel);
+    put16(c + 3, e->light.maxPicAverageLightLevel);
+    e->obus[0].payloadType = 2; e->obus[0].payloadSize = 24; e->obus[0].payload = m + 1;
+    e->obus[1].payloadType = 1; e->obus[1].payloadSize = 4; e->obus[1].payload = c + 1;
+}
+
 static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void *device, const rm_nvenc_cfg *cfg, char *err, int errlen) {
     rm_nvenc *e = calloc(1, sizeof *e);
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS open = { NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER };
@@ -203,6 +247,17 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
     uint32_t trc = cfg->hdr_pq ? NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084 : NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
     uint32_t mat = cfg->hdr_pq ? NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL : NV_ENC_VUI_MATRIX_COEFFS_BT709;
     e->av1 = cfg->codec == 1;
+    if (cfg->hdr_pq && cfg->hdr_light) {
+        CHROMA_POINTS *pts[4] = { &e->mastering.g, &e->mastering.b, &e->mastering.r, &e->mastering.whitePoint };
+        int i;
+        for (i = 0; i < 4; i++) { pts[i]->x = (uint16_t)cfg->hdr_chroma[2 * i]; pts[i]->y = (uint16_t)cfg->hdr_chroma[2 * i + 1]; }
+        e->mastering.maxLuma = cfg->hdr_max_lum;
+        e->mastering.minLuma = cfg->hdr_min_lum;
+        e->light.maxContentLightLevel = (uint16_t)(cfg->hdr_max_cll > 65535 ? 65535 : cfg->hdr_max_cll);
+        e->light.maxPicAverageLightLevel = (uint16_t)(cfg->hdr_max_fall > 65535 ? 65535 : cfg->hdr_max_fall);
+        e->hdr_sei = 1;
+        if (cfg->codec == 1) av1_metadata(e, cfg);
+    }
     // How many recent frames the encoder keeps to refer to, and so to fall back on when a newer
     // one is invalidated. Four: AV1 in NVENC has no more.
     e->short_term = 4;
@@ -250,6 +305,7 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
         h->hevcVUIParameters.colourPrimaries = prim;
         h->hevcVUIParameters.transferCharacteristics = trc;
         h->hevcVUIParameters.colourMatrix = mat;
+        if (e->hdr_sei) { h->outputMasteringDisplay = 1; h->outputMaxCll = 1; }
         if (!cfg->chroma444) {
             // The conversion averages each 2x2 block, so chroma sits in the block's centre.
             h->hevcVUIParameters.chromaSampleLocationFlag = 1;
@@ -274,7 +330,9 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
     // 4:4:4 from Direct3D: an R10G10B10A2 texture of R'G'B' (DXGI's R in the low bits is
     // NVENC's ABGR10), converted by NVENC. Its conversion was measured to be BT.709's matrix in
     // limited range (the same mean Y, Cb, Cr as this host's own 4:2:0 conversion of one frame,
-    // to half a code value); for BT.2020 it is unknown, so the host doesn't ask for 4:4:4 HDR.
+    // to half a code value); and with the VUI saying BT.2020 NCL (hdr_pq) it converts with
+    // BT.2020's (measured 2026-11-19 on colour bars: Y, Cb, Cr of red, green, blue and white exact
+    // to the code value), so 4:4:4 HDR is the same RGB of PQ with BT.2020 primaries.
     if (cfg->chroma444 && device_type == NV_ENC_DEVICE_TYPE_DIRECTX) e->fmt = NV_ENC_BUFFER_FORMAT_ABGR10;
     if ((s = e->f.nvEncCreateBitstreamBuffer(e->enc, &bs))) FAIL("bitstream buffer");
     e->bitstream = bs.bitstreamBuffer;
@@ -372,6 +430,17 @@ int rm_nvenc_encode(rm_nvenc *e, int idx, uint64_t timestamp, int force_idr, int
     pic.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
     pic.inputTimeStamp = timestamp;
     pic.encodePicFlags = force_idr ? NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS : 0;
+    // The HDR metadata goes with every keyframe: the first picture, and those asked for.
+    if (e->hdr_sei && (force_idr || !e->sent_first)) {
+        if (e->av1) {
+            pic.codecPicParams.av1PicParams.obuPayloadArray = e->obus;
+            pic.codecPicParams.av1PicParams.obuPayloadArrayCnt = 2;
+        } else {
+            pic.codecPicParams.hevcPicParams.pMasteringDisplay = &e->mastering;
+            pic.codecPicParams.hevcPicParams.pMaxCll = &e->light;
+        }
+    }
+    e->sent_first = 1;
     if (e->long_term && e->av1) {
         NV_ENC_PIC_PARAMS_AV1 *p = &pic.codecPicParams.av1PicParams;
         if (mark >= 0) { p->ltrMarkFrame = 1; p->ltrMarkFrameIdx = mark; }

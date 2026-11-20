@@ -252,10 +252,11 @@ fn build(gpu: &Gpu, meta: &Metadata, s: &Settings, bitrate: u32) -> Result<(Conv
     let output = if hdr { Output::Pq { sdr_white: s.sdr_white } } else { Output::Sdr };
     // The monitor's peak as Windows was told it (its EDID's), else PQ's usual 1000.
     let light = hdr.then(|| (s.sdr_white.round() as u32, if meta.max_nits > 0.0 { meta.max_nits.round() as u32 } else { 1000 }));
+    let light_sei = hdr.then(|| encode::hdr_light(meta, s.sdr_white));
     let mut refused = Vec::new();
     for &mode in &s.modes {
         let converter = Converter::new(gpu, width, height, input, output, mode.chroma == Chroma::C444)?;
-        match encode::open(gpu, &converter.output, &encode::Settings { mode, width, height, fps: s.fps, bitrate, hdr }) {
+        match encode::open(gpu, &converter.output, &encode::Settings { mode, width, height, fps: s.fps, bitrate, hdr, light: light_sei }) {
             Ok(encoder) => {
                 tracing::info!(?mode, width, height, fps = s.fps, bitrate, format = meta.format, hdr = meta.is_hdr, ?input, ?output, "encoder ready ({})", encoder.note());
                 return Ok((converter, encoder, mode, light));

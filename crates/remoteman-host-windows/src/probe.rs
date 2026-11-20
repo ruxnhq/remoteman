@@ -177,10 +177,10 @@ pub fn run(picture: bool) -> Result<()> {
     }
     // Each mode, and HDR where the mode has it, with an input of its own layout (4:4:4: RGB
     // that NVENC converts).
-    let tries: Vec<(remoteman_core::Mode, bool)> = encode::MODES.into_iter().flat_map(|m| if m.chroma == remoteman_core::Chroma::C444 { vec![(m, false)] } else { vec![(m, false), (m, true)] }).collect();
+    let tries: Vec<(remoteman_core::Mode, bool)> = encode::MODES.into_iter().flat_map(|m| vec![(m, false), (m, true)]).collect();
     for (mode, hdr) in tries {
         let layout = mode.chroma == remoteman_core::Chroma::C444;
-        let settings = encode::Settings { mode, width: meta.width, height: meta.height, fps: 60, bitrate: 20_000_000, hdr };
+        let settings = encode::Settings { mode, width: meta.width, height: meta.height, fps: 60, bitrate: 20_000_000, hdr, light: hdr.then(|| encode::hdr_light(&meta, crate::hdr::USUAL_SDR_WHITE)) };
         let output = if hdr { convert::Output::Pq { sdr_white: crate::hdr::USUAL_SDR_WHITE } } else { convert::Output::Sdr };
         let mode_name = format!("{:?} {:?}{}", mode.codec, mode.chroma, if hdr { " HDR" } else { "" });
         let converter = match Converter::new(&gpu, meta.width, meta.height, input, output, layout) {
