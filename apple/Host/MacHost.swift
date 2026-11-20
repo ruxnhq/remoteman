@@ -1060,7 +1060,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func teardown(keepDisplay: Bool = false) {
         generation += 1
-        testWindow.close()
+        // A display changed in place keeps its test window, which follows the new size, so the
+        // desktop behind it never shows in between.
+        if !keepDisplay { testWindow.close() }
         statsTimer?.invalidate()
         statsTimer = nil
         cursorTimer?.invalidate()
