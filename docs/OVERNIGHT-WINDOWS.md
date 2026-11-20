@@ -116,3 +116,11 @@ One UAC prompt.
 New in the tray: per-device switches (view only, clipboard, files, sound, microphone, camera),
 recent connections and a notice when a device connects, "Lock this PC when a device disconnects"
 (off), "Silence this PC's speakers while a device listens" (needs Steam's sound devices).
+
+## The new viewer, installed (08:00)
+Built from cf2f75d (`C:\rm\viewer-app-new`) and checked against the Mac test host for 25 s
+(the Mac was locked: no input sent): HEVC 10-bit PQ fitted to this screen's white, decoded on the
+card, the Mac's cursor worn, the window's size followed (1478x956), ~150 pictures a second, 0
+lost, about 5 ms old. Installed over `%LOCALAPPDATA%\Programs\remoteman`; the previous viewer is
+in `C:\rm\viewer-app-backup-2026-11-20` (copy it back to undo). The Mac test host has no `parity`
+yet (its core is older), so parity wasn't exercised.
