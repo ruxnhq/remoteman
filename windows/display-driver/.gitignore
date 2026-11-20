@@ -1,0 +1,8 @@
+x64/
+RemotemanDisplay/x64/
+*.exe
+*.dll
+*.cat
+*.pdb
+out/
+obj/

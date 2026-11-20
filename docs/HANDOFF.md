@@ -69,3 +69,7 @@ The VM differs from before in this: the driver's settings allow two monitors, a 
 - Signing the display driver for real PCs. The self-signed, per-machine route was only ever meant for VMs.
 - Whether to make a second Windows VM on the Radeon 610M for AMD work (the lab has run Windows guests on it; whether hardware encode works in one was not looked into).
 - Nothing of today's work is pushed.
+
+## 2026-11-19: remoteman's own display driver, and a native Windows build
+
+On the owner's word, remoteman no longer depends on Guesthouse: the display driver is forked into `windows/display-driver` (RemotemanDisplay) with its own hardware id, control GUID, shared-object names, settings folder and EDID (`RMN0001`), and Guesthouse's VM link taken out. **A host built from this tree no longer talks to Guesthouse's driver**: the VM above needs remoteman's driver installed (the host installer does it) before the host works there again. Everything is now built natively on the owner's Windows PC (`scripts/win-host-installer.ps1`; the driver's `build.ps1` needs only Build Tools and the driver kit's NuGet packages), and the host and the viewer were installed on that PC, a real one with three screens of its own. `docs/WINDOWS-PACKAGING.md` and `windows/display-driver/README.md` have the details.

@@ -31,6 +31,24 @@ pub struct Scene {
     /// SDR white it can go; set by whoever owns the window.
     pub screen_hdr: AtomicBool,
     pub headroom: AtomicU32,
+    /// Present each picture as it arrives, with tearing allowed, for a monitor that varies its
+    /// refresh to follow (the "Variable refresh rate" switch, in full screen); set by whoever
+    /// owns the window. Otherwise at the display's next refresh.
+    pub variable_refresh: AtomicBool,
+    /// The range of refresh rates the monitor under the window varies within, if it can.
+    #[allow(dead_code)]
+    pub vrr_range: Mutex<Option<(u32, u32)>>,
+    /// Said by the draw thread: DXGI allows presenting with tearing on this device, and the
+    /// last picture was presented that way (never so far: see `draw.rs`).
+    pub tearing_allowed: AtomicBool,
+    pub tearing: AtomicBool,
+    /// Said by the draw thread: how an HDR stream is shown: 0 there is none, 1 passed through
+    /// to a swap chain in HDR10, 2 tone-mapped to SDR.
+    pub hdr_shown: AtomicU8,
+    /// The display's refresh rate, for the draw thread's figures (0: not known).
+    pub refresh_hz: AtomicU32,
+    /// For tests (`--watch-vblank`): the draw thread logs how its pictures reach the screen.
+    pub measure: AtomicBool,
     /// A panel's scale, x in the high half, each an f32's bits (0: none, a window's own).
     pub panel_scale: AtomicU64,
     /// The window, for waking it from other threads (0 until there is one).
@@ -129,6 +147,9 @@ pub struct Shared {
     pub replaced: AtomicU32,
     /// The longest decode, in microseconds.
     pub decode_us_max: AtomicU32,
+    /// How fast 4:4:4 is being decoded on the processor (with its upload), in millions of
+    /// pixels a second, once there have been enough pictures to say (0: not so, or not yet).
+    pub cpu_444_rate: AtomicU32,
     /// The bytes of video that arrived.
     pub bytes: AtomicU64,
     // The newest frame's age when it was decoded and when it had been handed to the swap
@@ -175,6 +196,7 @@ impl Shared {
             presented: AtomicU32::default(),
             replaced: AtomicU32::default(),
             decode_us_max: AtomicU32::default(),
+            cpu_444_rate: AtomicU32::default(),
             bytes: AtomicU64::default(),
             age_decoded_us: AtomicU64::default(),
             age_presented_us: AtomicU64::default(),
@@ -383,6 +405,11 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
     let mut barren: (u32, Option<std::time::Instant>) = (0, None);
     let mut in_step = 0u32;
     let mut asked: Option<std::time::Instant> = None;
+    // Pictures decoded since `since`, the time they took in all and the longest (with the
+    // upload, for pictures decoded on the processor), for a line in the log every few seconds;
+    // and the bytes they came in.
+    let mut took_all: (u32, u64, u32, std::time::Instant) = (0, 0, 0, std::time::Instant::now());
+    let mut bytes_all = 0u64;
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Stream(i) => {
@@ -437,6 +464,24 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
                     say!("decoding: {}", s.decoder.lock().unwrap());
                 }
                 let took = t.elapsed().as_micros() as u32;
+                took_all = (took_all.0 + 1, took_all.1 + took as u64, took_all.2.max(took), took_all.3);
+                bytes_all += data.len() as u64;
+                if took_all.3.elapsed() >= Duration::from_secs(5) {
+                    let (n, all, most, since) = took_all;
+                    let pixels = picture.width as u64 * picture.height as u64;
+                    let bits_a_pixel = bytes_all as f64 * 8.0 / (pixels * n as u64).max(1) as f64;
+                    say!("decoding: {n} pictures in {:.1} s, {:.2} ms each on average, {:.2} at most, {bits_a_pixel:.3} bits a pixel ({})", since.elapsed().as_secs_f64(), all as f64 / n as f64 / 1000.0, most as f64 / 1000.0, s.decoder.lock().unwrap());
+                    // Only a busy picture says how fast the processor is: a still desktop
+                    // decodes many times faster than one that moves (0.4 bits a pixel is 50
+                    // Mbit/s at 1920x1080 and 60 a second).
+                    if i.mode.chroma == remoteman_core::Chroma::C444 && crate::decode::mode_in_software(i.mode) && n >= 60 && bits_a_pixel >= 0.1 {
+                        // Pixels a microsecond are millions a second.
+                        let rate = (pixels * n as u64 / all.max(1)) as u32;
+                        s.cpu_444_rate.store(rate.max(1), Ordering::Relaxed);
+                    }
+                    took_all = (0, 0, 0, std::time::Instant::now());
+                    bytes_all = 0;
+                }
                 s.decode_us_max.fetch_max(took, Ordering::Relaxed);
                 s.decoded.fetch_add(1, Ordering::Relaxed);
                 s.decoded_total.fetch_add(1, Ordering::Relaxed);

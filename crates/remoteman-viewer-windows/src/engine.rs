@@ -79,6 +79,8 @@ struct Engine {
     /// The host's cursor, made into a Windows one, for the app to wear over the picture.
     cursor: Cell<Option<HCURSOR>>,
     cursor_serial: Cell<u32>,
+    /// When the monitor under the window was last looked at (`watch_monitor`).
+    watched: Cell<Option<Instant>>,
 }
 
 thread_local! {
@@ -420,6 +422,7 @@ fn start(words: Vec<String>, notify: Notify) -> Result<()> {
         second: RefCell::new(None),
         cursor: Cell::new(None),
         cursor_serial: Cell::new(0),
+        watched: Cell::new(None),
     });
     ENGINE.with(|x| *x.borrow_mut() = Some(e.clone()));
     // The Windows key, Alt+Tab and the like, while a session has the keyboard.
@@ -437,6 +440,8 @@ impl Engine {
     fn attach(&self, panel: *mut c_void, window: isize) -> Result<()> {
         anyhow::ensure!(!panel.is_null(), "no panel");
         self.host.set(window);
+        // Before anything connects: the hello says whether this monitor is in HDR.
+        self.watch_monitor();
         let (gpu, scene) = {
             let app = self.app.borrow();
             (app.gpu.clone(), app.scene.clone())
@@ -472,6 +477,11 @@ impl Engine {
             *self.drawing.borrow_mut() = Some(drawing);
         }
         say!("engine: the panel shows the picture");
+        if self.app.borrow().args.watch_vblank {
+            let scene = self.app.borrow().scene.clone();
+            scene.measure.store(true, Ordering::Relaxed);
+            crate::monitor::watch_vblanks(window, scene);
+        }
         // (Taken out first: the app mustn't stay borrowed while the player starts.)
         let play = self.app.borrow().args.play.clone();
         if let Some(path) = play {
@@ -486,7 +496,7 @@ impl Engine {
     /// For tests: a made-up session whose picture is a recorded HEVC stream, played at 60 a
     /// second over and over through the same decoder and drawing as a real one.
     fn play(&self, path: &std::path::Path) -> Result<()> {
-        use remoteman_core::{Chroma, Codec, Handler, Mode, StreamInfo};
+        use remoteman_core::{Handler, StreamInfo};
         let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
         // Access units start at each delimiter (HEVC NAL type 35).
         let mut starts = Vec::new();
@@ -508,22 +518,31 @@ impl Engine {
         let (shared, mut feed) = crate::stream::start(&app.gpu, &app.scene)?;
         let colour = app.args.play_colour.clone();
         let (w, h) = app.args.size.unwrap_or((1920, 1080));
-        say!("play: {} access units of {}, {colour}", units.len(), path.display());
-        let display = remoteman_core::Display { width: w, height: h, scale: 1.0, refresh: 60, placement: remoteman_core::Placement::Extend, hdr: colour != "bt709", headroom: 0.0 };
+        let (mode, rate) = (app.args.play_mode, app.args.play_rate);
+        say!("play: {} access units of {}, {mode:?}, {colour}, {}", units.len(), path.display(), if rate == 0 { "as fast as they are decoded".to_owned() } else { format!("{rate} a second") });
+        let display = remoteman_core::Display { width: w, height: h, scale: 1.0, refresh: rate.max(1), placement: remoteman_core::Placement::Extend, hdr: colour != "bt709", headroom: 0.0 };
         let target = crate::app::Target { address: "test.invalid:7791".into(), name: format!("{} (played)", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()) };
-        app.session = Some(crate::app::Session::new(None, shared, target, vec!["video".into()], display, crate::store::Quality::Automatic, 0, "linux".into()));
+        // A played HDR stream stands for a computer that sends HDR.
+        let features = if display.hdr { vec!["video".into(), "hdr".into()] } else { vec!["video".into()] };
+        app.session = Some(crate::app::Session::new(None, shared, target, features, display, crate::store::Quality::Automatic, 0, "linux".into()));
         app.enter();
         drop(app);
         std::thread::Builder::new().name("play".into()).spawn(move || {
-            let info = StreamInfo { epoch: 1, mode: Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 }, width: w, height: h, refresh: 60, colour, sdr_white: 203, peak: 1000 };
+            let info = StreamInfo { epoch: 1, mode, width: w, height: h, refresh: rate.max(1), colour, sdr_white: 203, peak: 1000 };
             feed.stream(&info);
             let mut number = 0u32;
+            // Each frame at its time, not after the one before plus a sleep: the rate is the
+            // rate asked for, however long feeding takes.
+            let started = Instant::now();
             loop {
                 for (n, data) in units.iter().enumerate() {
                     let frame = remoteman_core::Frame { key: n == 0, recovery: false, epoch: 1, number, capture_us: 0, data: data.clone() };
                     feed.frame(&frame, None);
                     number += 1;
-                    std::thread::sleep(Duration::from_micros(16_667));
+                    if rate > 0 {
+                        let due = started + Duration::from_secs_f64(number as f64 / rate as f64);
+                        std::thread::sleep(due.saturating_duration_since(Instant::now()));
+                    }
                 }
             }
         })?;
@@ -539,23 +558,69 @@ impl Engine {
         }
         let host = HWND(self.host.get() as *mut _);
         let (mw, mh, hz, ..) = crate::window::monitor_of(host);
+        self.watch_monitor();
         let mut app = self.app.borrow_mut();
-        // Whether this screen is in HDR, which the hello says (a test may say it for it).
-        let (found, headroom) = crate::gpu::screen_hdr(host);
-        let (hdr, headroom) = match app.args.screen_hdr {
-            Some(forced) => (forced, if forced { headroom.max(1000.0 / 203.0) } else { 0.0 }),
-            None => (found, headroom),
-        };
-        if app.scene.screen_hdr.swap(hdr, Ordering::Relaxed) != hdr || app.scene.headroom.load(Ordering::Relaxed) == 0 {
-            say!("screen: {} (Windows says {}){}", if hdr { "HDR" } else { "SDR" }, if found { "HDR" } else { "SDR" }, if hdr { format!(", headroom {headroom:.1}") } else { String::new() });
-        }
-        app.scene.headroom.store(headroom.to_bits().max(1), Ordering::Relaxed);
         app.scene.client_size.store(pack(w as u32, h as u32), Ordering::Relaxed);
         app.scene.panel_scale.store(pack_scale(sx, sy), Ordering::Relaxed);
         app.scene.poke();
         app.monitor = (mw, mh, hz);
         let maximised = unsafe { IsZoomed(host).as_bool() };
         app.resized(w as f32 / sx, h as f32 / sy, sx, maximised);
+    }
+
+    /// The monitor under the window, as it is now: whether it is in HDR (the hello says so, and
+    /// a session is asked again when that changes), its refresh, and whether it varies its
+    /// refresh. Looked at when the panel changes and once a second, since Windows' HDR switch
+    /// and the window's monitor can change without the panel's size.
+    fn watch_monitor(&self) {
+        let host = HWND(self.host.get() as *mut _);
+        if host.0.is_null() {
+            return;
+        }
+        self.watched.set(Some(Instant::now()));
+        let Ok(mut app) = self.app.try_borrow_mut() else { return };
+        // (A test may say it for it.)
+        let (found, headroom) = crate::gpu::screen_hdr(host);
+        let (hdr, headroom) = match app.args.screen_hdr {
+            Some(forced) => (forced, if forced { headroom.max(1000.0 / 203.0) } else { 0.0 }),
+            None => (found, headroom),
+        };
+        let changed = app.scene.screen_hdr.swap(hdr, Ordering::Relaxed) != hdr;
+        if changed || app.scene.headroom.load(Ordering::Relaxed) == 0 {
+            say!("screen: {} (Windows says {}){}", if hdr { "HDR" } else { "SDR" }, if found { "HDR" } else { "SDR" }, if hdr { format!(", headroom {headroom:.1}") } else { String::new() });
+        }
+        app.scene.headroom.store(headroom.to_bits().max(1), Ordering::Relaxed);
+        let (mw, mh, hz, _, _) = crate::window::monitor_of(host);
+        app.scene.refresh_hz.store(hz, Ordering::Relaxed);
+        // (Also before the panel has a size: what a computer named on the command line is
+        // asked for.)
+        app.monitor = (mw, mh, hz);
+        *app.scene.vrr_range.lock().unwrap() = crate::monitor::vrr_of(host);
+        if changed {
+            app.scene.poke();
+        }
+        // In a session, the computer is asked again if that changed what is asked of it (or
+        // when a second display that held the change back has gone).
+        app.follow_hdr();
+        let took = self.watched.get().map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+        if took > 2.0 {
+            say!("screen: looking at the monitor took {took:.1} ms");
+        }
+        drop(app);
+        self.decide_refresh();
+    }
+
+    /// Whether pictures are presented as they arrive (variable refresh) or at the display's
+    /// refresh: the switch, full screen, the monitor, and DXGI.
+    fn decide_refresh(&self) {
+        let Ok(app) = self.app.try_borrow() else { return };
+        let scene = &app.scene;
+        let range = *scene.vrr_range.lock().unwrap();
+        let (on, why) = crate::monitor::variable_refresh(FEATURES.variable_refresh && app.store.settings.variable_refresh, app.fullscreen, range, scene.tearing_allowed.load(Ordering::Relaxed));
+        if scene.variable_refresh.swap(on, Ordering::Relaxed) != on {
+            say!("variable refresh: {}", if on { "on: each picture is presented as it arrives" } else { why });
+            scene.poke();
+        }
     }
 
     fn forwarding(&self) -> bool {
@@ -736,6 +801,10 @@ impl Engine {
             app.tick();
         }
         self.cursor_changed();
+        if self.watched.get().is_some_and(|t| t.elapsed() >= Duration::from_secs(1)) {
+            self.watch_monitor();
+        }
+        self.decide_refresh();
         // A captured pointer: while the app's window has the keyboard and the picture is the
         // computer's, and Ctrl+Alt+Shift hasn't given it back.
         // SAFETY: a plain query.
@@ -959,6 +1028,8 @@ impl Engine {
                     "shortcuts" => Flag::Shortcuts,
                     "sound" => Flag::Sound,
                     "clipboard" => Flag::Clipboard,
+                    "hdr" => Flag::Hdr,
+                    "variable-refresh" => Flag::VariableRefresh,
                     _ => return false,
                 };
                 Msg::Toggle(flag, v.get("address").and_then(Value::as_str).map(str::to_owned))
@@ -1077,6 +1148,7 @@ fn state(app: &App) -> Value {
         "match_refresh": st.match_refresh, "ctrl_as_command": st.ctrl_as_command, "shortcuts": st.shortcuts,
         "sound": st.sound, "clipboard": st.clipboard, "figures": st.figures, "fullscreen": st.fullscreen,
         "hover_bar": st.hover_bar, "capture": st.capture, "scroll_reversed": st.scroll_reversed,
+        "hdr": st.hdr, "variable_refresh": st.variable_refresh,
         "folder": app.store.receive_folder().display().to_string(),
         "controls": options(app, &Choice::Controls), "default_quality": options(app, &Choice::DefaultQuality),
         "scroll": options(app, &Choice::Scroll), "pointer": options(app, &Choice::Pointer),
@@ -1107,7 +1179,9 @@ fn state(app: &App) -> Value {
         })
     });
     let decodes = |word: &str| app.decoders.iter().any(|m| format!("{:?}", m.codec).eq_ignore_ascii_case(word) && m.chroma == remoteman_core::Chroma::C420);
+    let picture = picture_state(app);
     json!({
+        "picture": picture,
         "screen": screen,
         "dialog": dialog,
         "computers": computers,
@@ -1131,6 +1205,57 @@ fn state(app: &App) -> Value {
             "release_shortcut": FEATURES.release_shortcut, "second_display": FEATURES.second_display, "mirror": FEATURES.mirror, "way_in": FEATURES.way_in,
         },
         "not_yet": crate::features::NOT_YET,
+    })
+}
+
+/// HDR, variable refresh and 4:4:4 as they stand: the switches, what this monitor and this PC
+/// can do, and what the picture is doing now, with why where something is off.
+fn picture_state(app: &App) -> Value {
+    let (scene, st) = (&app.scene, &app.store.settings);
+    let session = app.session.as_ref();
+    let offers = |f: &str| session.is_some_and(|s| s.offers(f));
+    let shown = match scene.hdr_shown.load(Ordering::Relaxed) {
+        1 => "passed-through",
+        2 => "tone-mapped",
+        _ => "sdr",
+    };
+    let screen = scene.screen_hdr.load(Ordering::Relaxed);
+    let hdr_why = if !st.hdr {
+        "Off"
+    } else if !screen {
+        "This monitor isn't in HDR"
+    } else if session.is_some() && !offers("hdr") {
+        "This computer doesn't send HDR"
+    } else {
+        "Used"
+    };
+    let range = *scene.vrr_range.lock().unwrap();
+    let tearing_allowed = scene.tearing_allowed.load(Ordering::Relaxed);
+    let (vrr_active, vrr_why) = if FEATURES.variable_refresh { crate::monitor::variable_refresh(st.variable_refresh, app.fullscreen, range, tearing_allowed) } else { (false, crate::features::NOT_YET) };
+    // 4:4:4: where it is decoded, how fast the processor is taken to be, and whether it is in
+    // what Automatic offers for the display this window would ask for now.
+    let full = app.decoders.iter().find(|m| m.chroma == remoteman_core::Chroma::C444);
+    let address = session.map(|s| s.target.address.clone());
+    let placement = session.map_or(app.store.settings.placement, |s| s.display.placement);
+    let display = app.display_for(address.as_deref(), placement);
+    let (rate, measured) = app.cpu_444_rate();
+    let withheld = app.withholds_444(&display, Quality::Automatic);
+    json!({
+        "hdr": {
+            "on": st.hdr, "screen": screen, "headroom": f32::from_bits(scene.headroom.load(Ordering::Relaxed)),
+            "offered": offers("hdr"), "asked": session.is_some_and(|s| s.display.hdr),
+            "stream": session.is_some_and(|s| s.shared.hdr.load(Ordering::Relaxed)), "shown": shown, "why": hdr_why,
+        },
+        "variable_refresh": {
+            "on": st.variable_refresh, "range": range.map(|(lo, hi)| json!([lo, hi])), "tearing_allowed": tearing_allowed,
+            "active": vrr_active, "why": vrr_why,
+        },
+        "sharp_text": {
+            "decoder": match full { None => "none", Some(m) if crate::decode::mode_in_software(*m) => "processor", Some(_) => "card" },
+            "rate": rate, "measured": measured,
+            "display": [display.width, display.height, display.refresh],
+            "offered": full.is_some() && withheld.is_none(), "why": withheld.unwrap_or_default(),
+        },
     })
 }
 

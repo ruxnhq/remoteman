@@ -14,6 +14,9 @@
 //!   --ui STEPS --shots DIR [--dark|--light]
 //!                        pictures of the screens named (`walk.rs`; `all` for every one), with
 //!                        a made-up list and no network
+//!   --profiles           the card's Direct3D 11 decoder profiles, and leave
+//!   --vrr-probe SECONDS  the variable refresh control (`probe.rs`), and leave
+//! (the engine also takes --watch-vblank, --screen-hdr and --play with its --play-* words)
 //!
 //! Who does what:
 //! - the main thread owns the window and the app's state: what is on the window, what each
@@ -59,7 +62,11 @@ mod keys;
 #[cfg(windows)]
 mod menus;
 #[cfg(windows)]
+mod monitor;
+#[cfg(windows)]
 mod pages;
+#[cfg(windows)]
+mod probe;
 #[cfg(windows)]
 mod session;
 #[cfg(windows)]
@@ -120,6 +127,16 @@ fn run() -> anyhow::Result<i32> {
 
     let gpu = gpu::Gpu::open()?;
     say!("gpu: {}", gpu.name);
+    if args.profiles {
+        for line in gpu.profiles()? {
+            say!("decoder profile: {line}");
+        }
+        return Ok(0);
+    }
+    if let Some(seconds) = args.vrr_probe {
+        probe::run(&gpu, seconds)?;
+        return Ok(0);
+    }
     let mut decoders = Vec::new();
     // Any maker's card that decodes through Direct3D 11 video does; what a card doesn't
     // decode is decoded on the CPU, the last resort (REMOTEMAN_SOFTWARE=1 does so for all of

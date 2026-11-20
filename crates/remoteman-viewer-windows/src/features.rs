@@ -33,13 +33,18 @@ pub struct Features {
     pub folder_choice: bool,
     /// HDR pictures.
     pub hdr: bool,
-    /// Each frame shown when it arrives, where the monitor can.
+    /// Each frame shown when it arrives, where the monitor can. Off: measured on an RTX 5090
+    /// with a 240 Hz VRR monitor, neither the app's `SwapChainPanel` nor a window of the
+    /// engine's own that doesn't take the keyboard makes the monitor vary its refresh; an
+    /// activated window with an 8-bit HWND swap chain does (`probe.rs`, `draw.rs`).
+    #[allow(dead_code)]
     pub variable_refresh: bool,
     /// A choice of whether the stream follows this monitor's refresh rate (it always does).
     pub refresh_choice: bool,
     /// The other computer's display resized to follow this window.
     pub follow_window: bool,
-    /// Full colour detail (4:4:4): what Direct3D's decoders hand out for it is untried.
+    /// Full colour detail (4:4:4): HEVC 4:4:4 decoded on the processor (FFmpeg has no D3D11VA
+    /// path for it), offered unasked only where the processor keeps up.
     pub sharp_text: bool,
     /// A captured pointer that sends raw movement.
     pub pointer_capture: bool,

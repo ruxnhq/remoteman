@@ -42,13 +42,24 @@ pub struct Args {
     /// picture, through the same decoding and drawing; `--play-colour bt2020-pq` for HDR.
     pub play: Option<PathBuf>,
     pub play_colour: String,
+    /// For tests: the mode of what `--play` plays (`hevc`, `hevc444`), and how many pictures
+    /// a second it is fed at (0: as fast as they are decoded).
+    pub play_mode: Mode,
+    pub play_rate: u32,
+    /// List the card's decoder profiles and leave.
+    pub profiles: bool,
+    /// For tests: the monitor's refreshes in the log (`monitor::watch_vblanks`).
+    pub watch_vblank: bool,
+    /// For tests, the old program only: the variable refresh control (`probe.rs`), for so
+    /// many seconds.
+    pub vrr_probe: Option<u64>,
 }
 
-const USAGE: &str = "usage: remoteman [HOST:PORT] [--pair] [--state DIR] [--size WxH] [--refresh HZ] [--decoders av1,hevc] [--seconds N] [--fullscreen] [--shot FILE.png] [--stats] [--input-demo] [--log FILE] [--sound] [--ui STEPS --shots DIR [--dark|--light]]";
+const USAGE: &str = "usage: remoteman [HOST:PORT] [--pair] [--state DIR] [--size WxH] [--refresh HZ] [--decoders av1,hevc] [--seconds N] [--fullscreen] [--shot FILE.png] [--stats] [--input-demo] [--log FILE] [--sound] [--ui STEPS --shots DIR [--dark|--light]] [--profiles] [--vrr-probe SECONDS] [--watch-vblank] [--screen-hdr yes|no] [--play FILE [--play-colour bt709|bt2020-pq] [--play-mode hevc|hevc444] [--play-rate N]]";
 
 fn mode(word: &str) -> Option<Mode> {
-    // 4:4:4 isn't offered: D3D11VA hands 4:2:0 pictures out as P010, and what a 4:4:4 one looks
-    // like there is untried.
+    // 4:4:4 is decoded on the processor (this FFmpeg's HEVC decoder has no D3D11VA path for
+    // it, though the card lists the profile) and offered where that keeps up (`App::withholds_444`).
     Some(match word {
         "av1" => Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 },
         "hevc" => Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 },
@@ -92,6 +103,11 @@ pub fn parse_from(words: Vec<String>) -> Result<Args> {
         screen_hdr: None,
         play: None,
         play_colour: "bt709".into(),
+        play_mode: mode("hevc").unwrap(),
+        play_rate: 60,
+        profiles: false,
+        watch_vblank: false,
+        vrr_probe: None,
     };
     while let Some(arg) = words.next() {
         let mut value = || words.next().ok_or_else(|| anyhow!("{arg} needs a value"));
@@ -124,6 +140,14 @@ pub fn parse_from(words: Vec<String>) -> Result<Args> {
             "--screen-hdr" => args.screen_hdr = Some(value()? == "yes"),
             "--play" => args.play = Some(value()?.into()),
             "--play-colour" => args.play_colour = value()?,
+            "--play-mode" => {
+                let v = value()?;
+                args.play_mode = mode(&v).ok_or_else(|| anyhow!("unknown mode {v}"))?;
+            }
+            "--play-rate" => args.play_rate = value()?.parse()?,
+            "--profiles" => args.profiles = true,
+            "--watch-vblank" => args.watch_vblank = true,
+            "--vrr-probe" => args.vrr_probe = Some(value()?.parse()?),
             other => bail!("unknown option {other}\n{USAGE}"),
         }
     }

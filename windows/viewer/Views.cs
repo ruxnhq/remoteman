@@ -407,7 +407,7 @@ public sealed class SettingsPage : RowsPage
         g = Group("Picture");
         Row(g, "Default quality", "Automatic picks the best stream this PC decodes on its graphics card", Choice(s.O("default_quality"), i => Choose("default-quality", i)));
         Row(g, "Match this monitor's refresh rate", "Otherwise 60 Hz", Toggle(s.B("match_refresh"), () => Flag("match-refresh")), f.B("refresh_choice"));
-        Row(g, "HDR", "Used when the computer offers it and this monitor is in HDR", Toggle(false, () => { }), f.B("hdr"));
+        Row(g, "HDR", "Used when the computer offers it and this monitor is in HDR", Toggle(s.B("hdr"), () => Flag("hdr")), f.B("hdr"));
 
         g = Group("Keyboard");
         Row(g, "Send system shortcuts to the computer", "Alt+Tab, the Windows key and others, while a session is in front. Ctrl+Alt+Delete is always in Send keys.", Toggle(f.B("system_shortcuts") && s.B("shortcuts"), () => Flag("shortcuts")), f.B("system_shortcuts"));
@@ -621,8 +621,16 @@ public sealed class SessionBar : UserControl
         m.Items.Add(size);
         var mon = _state.A("monitor");
         m.Items.Add(new MenuFlyoutItem { Text = $"Refresh rate: this monitor's, {(mon.Count == 3 ? mon[2] : 60)} Hz", IsEnabled = false });
-        m.Items.Add(new ToggleMenuFlyoutItem { Text = "HDR (not available yet)", IsEnabled = false });
-        m.Items.Add(new ToggleMenuFlyoutItem { Text = "Variable refresh rate (not available yet)", IsEnabled = false });
+        // The engine says what each comes to now ("picture"); these only show it and flip it.
+        var pic = _state.O("picture");
+        var hdr = new ToggleMenuFlyoutItem { Text = "HDR", IsChecked = _state.O("settings").B("hdr"), IsEnabled = _state.O("features").B("hdr") && Offers("hdr") && pic.O("hdr").B("screen") };
+        ToolTipService.SetToolTip(hdr, "When the computer offers it and this monitor is in HDR. Now: " + pic.O("hdr").S("why"));
+        hdr.Click += (_, _) => Engine.Do("toggle", new { flag = "hdr" });
+        m.Items.Add(hdr);
+        var vrr = new ToggleMenuFlyoutItem { Text = _state.O("features").B("variable_refresh") ? "Variable refresh rate" : "Variable refresh rate (not available yet)", IsChecked = _state.O("features").B("variable_refresh") && _state.O("settings").B("variable_refresh"), IsEnabled = _state.O("features").B("variable_refresh") && pic.O("variable_refresh")?["range"] is JsonArray && pic.O("variable_refresh").B("tearing_allowed") };
+        ToolTipService.SetToolTip(vrr, "Shows each frame when it arrives, in full screen. Now: " + pic.O("variable_refresh").S("why"));
+        vrr.Click += (_, _) => Engine.Do("toggle", new { flag = "variable-refresh" });
+        m.Items.Add(vrr);
         m.Items.Add(new MenuFlyoutSeparator());
         bool second = s.B("second");
         var add = Ui.Item(second ? "Remove the second display" : "Add a second display…", () => Engine.Do("second"), "");

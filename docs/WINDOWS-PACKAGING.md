@@ -135,14 +135,30 @@ policy and `runFullTrust` justification above. Then the unsigned `.msix` is uplo
 
 ## The host: an installer of its own
 
-**Build** (from this PC, holding the VM):
+**The display driver is remoteman's own** (since 2026-11-19, on the owner's word that remoteman
+must not depend on Guesthouse): `windows/display-driver`, forked from Guesthouse's fork of
+zako-vdd, with its own name, hardware id, control GUID, shared-object names, settings folder and
+EDID, and Guesthouse's VM link taken out. Its README says what changed; its BUILDING.md how it is
+built (Build Tools and the driver kit's NuGet packages, no Visual Studio driver integration).
+Everything below that was run before that date ran with Guesthouse's build of the driver.
+
+**Build on Windows** (one command; needs Build Tools with C++, Rust, Inno Setup 6 and the driver
+kit's NuGet packages):
+
+    powershell -ExecutionPolicy Bypass -File scripts\win-host-installer.ps1 [-Version 0.1.0]
+
+It builds the host, the driver (`windows\display-driver\build.ps1`) and the installer, which it
+leaves in `target\installer`.
+
+**Build from Linux** (holding the VM; the driver must have been built in Windows first, as Linux
+can't build it):
 
     scripts/win-host-installer.sh [VERSION]
 
-It cross-builds `remoteman-host.exe` here, sends it with `windows/host-installer` and Guesthouse's display
-driver (`GuesthouseDisplay.dll`, `.inf`, `vdd_settings.xml` set to three monitors, the driver's
-MIT and MS-PL licences; from `$GUESTHOUSE_DRIVER`, by default the VM's copy) into the guest and
-runs the command that does it inside Windows:
+It cross-builds `remoteman-host.exe` here, sends it with `windows/host-installer` and remoteman's
+display driver (`RemotemanDisplay.dll`, `.inf`, `vdd_settings.xml` asking for three monitors, the
+driver's MIT and MS-PL licences; from `$REMOTEMAN_DRIVER`, by default
+`windows/display-driver/out`) into the guest and runs the command that does it inside Windows:
 
     powershell -File windows\host-installer\build.ps1 [-Version 0.1.0]
 
@@ -157,8 +173,10 @@ jrsoftware.org, its signature checked) and leaves `C:\rm\installer\remoteman-hos
 2. the display driver: a catalog over its two files, signed with a certificate made on this
    machine (`CN=remoteman display driver, this machine only`), put in the machine's Root and
    TrustedPublisher stores, its private key deleted at once so nothing else can ever be signed
-   with it; the driver package added, the display device made (or, if one is there, updated);
-   the driver's settings into `C:\VirtualDisplayDriver` unless a driver already has some there;
+   with it; the driver package added, the display device (`Root\RemotemanDisplay`) made (or, if
+   one is there, updated); the driver's settings into `%ProgramData%\remoteman\display` unless an
+   earlier install left some there (Administrators and SYSTEM full, LOCAL SERVICE, which the
+   driver runs as, may change them, Users may read them);
 3. an inbound firewall rule, "remoteman host": UDP 7791, for that program only, every profile;
 4. a scheduled task, "remoteman host", that starts the host at each logon, elevated, in the
    session of whoever logs on (input, the cursor and mode changes work nowhere else), restarted
