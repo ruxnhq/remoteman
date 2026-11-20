@@ -218,12 +218,13 @@ pub fn view(app: &App, ui: &mut Ui, menu: &Menu) {
                 ("Ctrl+Shift+Esc", "", &[29, 42, 1]),
                 ("Print Screen", "", &[99]),
             ];
-            let mut lines: Vec<Line> = chords.iter().enumerate().map(|(n, (label, hint, codes))| Item { id: idn("keys", n), ..item("", label, Msg::SendKeys(codes)).hint(hint) }.line()).collect();
+            let view_only = app.view_only();
+            let mut lines: Vec<Line> = chords.iter().enumerate().map(|(n, (label, hint, codes))| Item { id: idn("keys", n), ..item("", label, Msg::SendKeys(codes)).hint(hint) }.en(crate::features::control(view_only)).line()).collect();
             lines.push(Line::Rule);
             let shortcuts = item("keys.shortcuts", "Send system shortcuts to the computer", Msg::Toggle(Flag::Shortcuts, None))
                 .caption("Alt+Tab, the Windows key and others go to it while this window is in front")
                 .toggle(FEATURES.system_shortcuts && app.store.settings.shortcuts)
-                .en(gate(FEATURES.system_shortcuts));
+                .en(if view_only { crate::features::control(true) } else { gate(FEATURES.system_shortcuts) });
             lines.push(shortcuts.line());
             let mut release = item("keys.release", "Release the keyboard", Msg::CloseMenu).caption("Gives shortcuts back to this PC").hint("Ctrl+Alt+Shift").en(gate(FEATURES.release_shortcut));
             release.msg = None;

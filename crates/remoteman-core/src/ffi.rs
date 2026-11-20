@@ -986,6 +986,107 @@ pub unsafe extern "C" fn rm_host_set_bitrate_callback(host: *const Host, default
     });
 }
 
+/// What one device may do: each field 1 allowed, 0 not (`input` 0 is view-only).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct RmPermissions {
+    pub input: u8,
+    pub clipboard: u8,
+    pub files: u8,
+    pub sound: u8,
+    pub mic: u8,
+    pub camera: u8,
+}
+
+/// What the device with this fingerprint may do, written to `out` (everything allowed for a
+/// device nobody restricted). Returns 1, or 0 if `host`, `fingerprint` or `out` is null.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `fingerprint` a valid C string; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_get_permissions(host: *const Host, fingerprint: *const c_char, out: *mut RmPermissions) -> i32 {
+    if host.is_null() || fingerprint.is_null() || out.is_null() {
+        return 0;
+    }
+    let p = unsafe { &*host }.permissions(&unsafe { text(fingerprint) });
+    unsafe {
+        *out = RmPermissions { input: p.input as u8, clipboard: p.clipboard as u8, files: p.files as u8, sound: p.sound as u8, mic: p.mic as u8, camera: p.camera as u8 };
+    }
+    1
+}
+
+/// Change what a device may do; kept across restarts, and applied at once to the connected
+/// device, which is sent a `features` message. Returns 1 done, 0 a null argument, -1 it
+/// couldn't be saved.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `fingerprint` a valid C string; `permissions` readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_set_permissions(host: *const Host, fingerprint: *const c_char, permissions: *const RmPermissions) -> i32 {
+    if host.is_null() || fingerprint.is_null() || permissions.is_null() {
+        return 0;
+    }
+    let p = unsafe { *permissions };
+    let p = crate::permissions::Permissions { input: p.input != 0, clipboard: p.clipboard != 0, files: p.files != 0, sound: p.sound != 0, mic: p.mic != 0, camera: p.camera != 0 };
+    match unsafe { &*host }.set_permissions(&unsafe { text(fingerprint) }, p) {
+        Ok(()) => 1,
+        Err(_) => -1,
+    }
+}
+
+/// The last `max` lines of the connection log as a JSON array, oldest first:
+/// `[{"time":"2026-11-19T10:15:00Z","event":"connected","name":"...","fingerprint":"...",
+/// "address":"1.2.3.4:5","duration":12,"reason":"..."}]` (`event`: `paired`, `connected`,
+/// `left`, `refused`; `duration` only with `left`, `reason` only when known). The caller
+/// frees it with `rm_string_free`.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_connections_json(host: *const Host, max: usize) -> *mut c_char {
+    let json = if host.is_null() { "[]".to_owned() } else { serde_json::to_string(&unsafe { &*host }.connections(max)).unwrap_or_else(|_| "[]".into()) };
+    CString::new(json).unwrap_or_default().into_raw()
+}
+
+/// Free a string returned by `rm_host_connections_json`. Null is fine.
+///
+/// # Safety
+/// `s` must be such a string, not freed before.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_string_free(s: *mut c_char) {
+    if !s.is_null() {
+        drop(unsafe { CString::from_raw(s) });
+    }
+}
+
+/// The host program's own context for [`rm_host_set_notice_callback`].
+struct NoticeCtx(*mut c_void);
+// SAFETY: as `BitrateCtx`.
+unsafe impl Send for NoticeCtx {}
+
+/// Have the core call `on_notice` when a device is `paired`, `connected` or `refused`, with
+/// the event as one line of JSON (as in `rm_host_connections_json`), valid only during the
+/// call. It comes on the core's handler thread, in turn with the other callbacks. A null
+/// `on_notice` removes the callback.
+///
+/// # Safety
+/// `host` must come from `rm_host_start`; `ctx` is passed back to `on_notice`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rm_host_set_notice_callback(host: *const Host, on_notice: Option<extern "C" fn(ctx: *mut c_void, json: *const c_char)>, ctx: *mut c_void) {
+    let host = unsafe { &*host };
+    let Some(f) = on_notice else {
+        host.clear_notice_hook();
+        return;
+    };
+    let ctx = NoticeCtx(ctx);
+    host.set_notice_hook(move |event| {
+        let ctx = &ctx;
+        if let Ok(json) = CString::new(serde_json::to_string(event).unwrap_or_default().replace('\0', " ")) {
+            f(ctx.0, json.as_ptr());
+        }
+    });
+}
+
 /// Let the next unknown device in (it is remembered, and pairing turns itself off), or stop.
 ///
 /// # Safety

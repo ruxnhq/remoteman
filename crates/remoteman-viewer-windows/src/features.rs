@@ -103,6 +103,12 @@ pub const FEATURES: Features = Features {
 
 pub const NOT_YET: &str = "Not available yet";
 
+/// For a control that sends input to the computer: greyed out, and saying why, when the
+/// computer shows this device the picture only.
+pub fn control(view_only: bool) -> En {
+    En { on: !view_only, why: if view_only { "View only: this computer lets you see its screen, not control it" } else { "" } }
+}
+
 /// For a control of something that may not exist yet: usable if it does, otherwise greyed out
 /// and saying so.
 pub fn gate(available: bool) -> En {

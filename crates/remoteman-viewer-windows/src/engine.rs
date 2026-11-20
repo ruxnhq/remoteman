@@ -752,7 +752,9 @@ impl Engine {
         // Whatever it is, it comes after the pointer's newest place.
         self.pacer.flush();
         let Ok(app) = self.app.try_borrow() else { return };
-        if let Some(client) = app.client().cloned() {
+        if app.view_only() {
+            // The computer shows this device the picture only: nothing is sent to control it.
+        } else if let Some(client) = app.client().cloned() {
             drop(app);
             client.send(event);
         } else if app.args.play.is_some() && app.session.is_some() {
@@ -781,7 +783,7 @@ impl Engine {
         self.point_at(0);
         let (at, client) = {
             let app = self.app.borrow();
-            (app.fraction(x as f32, y as f32), app.client().cloned())
+            (app.fraction(x as f32, y as f32), app.input_client().cloned())
         };
         match (at, client) {
             (Some((x, y)), Some(client)) => self.pacer.put(client, x, y),
@@ -1529,7 +1531,7 @@ fn state_of(app: &App) -> Value {
     let session = app.session.as_ref().map(|s| {
         let f = &app.figures;
         json!({
-            "address": s.target.address, "name": s.target.name, "os": s.os, "features": s.features,
+            "address": s.target.address, "name": s.target.name, "os": s.os, "features": s.features, "view_only": s.view_only(),
             "placement": placement_key(s.display.placement), "quality": s.quality.key(), "bitrate": s.bitrate,
             "bitrate_step": crate::app::BITRATES.iter().position(|b| *b == s.bitrate).unwrap_or(crate::app::BITRATES.len() - 1),
             "sound": s.sound_on, "clipboard": s.clipboard_on, "second": s.second_on,

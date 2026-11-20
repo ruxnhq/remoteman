@@ -416,6 +416,7 @@ mod windows_main {
         allowed.paused.store(saved.paused, Ordering::Relaxed);
         allowed.lock_on_leave.store(saved.lock_on_leave, Ordering::Relaxed);
         allowed.speakers_follow.store(saved.speakers_follow, Ordering::Relaxed);
+        allowed.notify.store(saved.notify, Ordering::Relaxed);
         allowed.real_screens.store(screen.pc(), Ordering::Relaxed);
         // A host that died while a device listened left the speakers switched: put them back.
         crate::speakers::init(&state);
@@ -446,6 +447,9 @@ mod windows_main {
         tracing::info!(?features, "what this host does");
         let options = HostOptions { listen, state: state.clone(), name, os: "windows".into(), features, pair, test_drop_one_in: drop_one_in };
         let host = std::sync::Arc::new(Host::start(options, session::Host::new(screen, bitrate * 1_000_000, fit, allowed.clone()))?);
+        // What the core says of devices (paired, connected, refused) is kept for the app's notifications.
+        let noted = allowed.clone();
+        host.set_notice_hook(move |event| crate::control::note(&noted, event));
         crate::control::serve(host.address.port(), std::sync::Arc::downgrade(&host), allowed, state);
         tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
         watch_lock(std::sync::Arc::downgrade(&host));

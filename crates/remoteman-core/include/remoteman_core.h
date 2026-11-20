@@ -297,6 +297,34 @@ void rm_host_set_features(const rm_host *host, const char *features);
 // client. A host that never calls this behaves as before.
 void rm_host_set_bitrate_callback(const rm_host *host, uint32_t default_bps, void (*on_bitrate)(void *ctx, uint32_t bits_per_second), void *ctx);
 
+// What one device may do: 1 allowed, 0 not. `input` 0 is view-only: the device is shown the
+// picture and its input is dropped by the core. Everything is allowed until set otherwise.
+typedef struct rm_permissions {
+    uint8_t input;
+    uint8_t clipboard;
+    uint8_t files;
+    uint8_t sound;
+    uint8_t mic;
+    uint8_t camera;
+} rm_permissions;
+// What the device with this fingerprint may do, written to `out`. 1, or 0 on a null argument.
+int32_t rm_host_get_permissions(const rm_host *host, const char *fingerprint, rm_permissions *out);
+// Change what a device may do. Kept across restarts; the connected device is told at once
+// with a `features` message (the host's features less what it may not have) and, for sound,
+// mic, camera and clipboard taken away, on_message gets the matching `{"t":"...","on":false}`.
+// 1 done, 0 a null argument, -1 not saved.
+int32_t rm_host_set_permissions(const rm_host *host, const char *fingerprint, const rm_permissions *permissions);
+// The last `max` lines of the connection log as a JSON array, oldest first:
+// [{"time":"2026-11-19T10:15:00Z","event":"connected","name":"..","fingerprint":"..",
+//   "address":"1.2.3.4:5","duration":12,"reason":".."}]. `event` is paired, connected, left
+// or refused; `duration` (seconds) only with left; `reason` only when known. Free the result
+// with rm_string_free.
+char *rm_host_connections_json(const rm_host *host, size_t max);
+void rm_string_free(char *s);
+// Called when a device is paired, connected or refused, with that event as JSON (as above),
+// valid only during the call, on the core's handler thread. NULL removes it.
+void rm_host_set_notice_callback(const rm_host *host, void (*on_notice)(void *ctx, const char *json), void *ctx);
+
 // Pairing: let the next unknown device in (it is remembered and pairing turns itself off).
 void rm_host_set_pairing(const rm_host *host, int32_t on);
 int32_t rm_host_pairing(const rm_host *host);

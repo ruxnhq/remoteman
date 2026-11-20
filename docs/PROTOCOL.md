@@ -160,6 +160,8 @@ Everything beside the picture and input. Three rules hold for all of it:
 - **Nothing of a feature is sent to a side that hasn't asked for it.** Each starts with a message from the client, so a client or host that knows nothing of a feature is never handed a datagram or a stream it can't read. (A client must still ignore datagram kinds it doesn't know.)
 - **When the desktop behind the connection changes** (a new stream epoch because the login screen gave way to the session), what the client had switched on stays on: the host side carries it over, and the client hears `sound_format` again.
 
+**What a device may do.** A host's owner can allow each paired device some of this and not the rest, and the list in a device's hello (and any later `features`) is the host's features less what that device isn't allowed: `input` (and `pen` with it), `clipboard`, `files`, `sound`, `mic`, `camera`. A host may leave `input` out of a device's features: the device is shown the picture only (view-only); a client must not send input then, and shows that it is view-only. Whatever an old client sends anyway is dropped by the host (input events of every kind, clipboard and file messages and blobs, microphone and camera datagrams, requests to start sound, microphone or camera).
+
 A host whose owner switches a feature on or off while a client is connected sends `{"t":"features","features":[...]}`: the whole list as it is now, replacing the hello's. A client enables and disables its controls to match, and stops what was switched off.
 
 ### Channels they use
