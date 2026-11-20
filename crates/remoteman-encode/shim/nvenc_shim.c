@@ -57,7 +57,8 @@ typedef struct rm_nvenc {
     uint8_t *out;
     size_t out_cap;
     uint32_t last_qp;     // the last frame's average quantiser, as the encoder reported it
-    uint32_t boost_from;  // the rate to go back to after a refining frame (0: none under way)
+    uint32_t boost_from;  // nonzero while a refining frame is under way
+    NV_ENC_RC_PARAMS boost_rc; // the rate control parameters to go back to after it
     MASTERING_DISPLAY_INFO mastering;  // HDR metadata, handed to the encoder with each keyframe
     CONTENT_LIGHT_LEVEL light;
     uint8_t av1_mdcv[25], av1_cll[5];  // the same as AV1 metadata OBU payloads
@@ -492,19 +493,43 @@ int rm_nvenc_set_bitrate(rm_nvenc *e, uint32_t bitrate) {
 // Static refinement: the next frame may take `factor` times the usual bits. begin raises the
 // rate (and the rate buffer with it, one frame's worth) without a keyframe; end puts back what
 // was there. The caller does both around one frame.
-int rm_nvenc_boost_begin(rm_nvenc *e, uint32_t factor) {
+static int reconfigure_now(rm_nvenc *e) {
+    NV_ENC_RECONFIGURE_PARAMS r = { NV_ENC_RECONFIGURE_PARAMS_VER };
+    NVENCSTATUS s;
+    r.reInitEncodeParams = e->init;
+    r.reInitEncodeParams.encodeConfig = &e->config;
+    r.resetEncoder = 0;
+    r.forceIDR = 0;
+    if ((s = e->f.nvEncReconfigureEncoder(e->enc, &r))) return nv_fail(e, s, "reconfigure");
+    return 0;
+}
+
+// With qp != 0 the encoder is put in constant-QP mode at that quantiser for the frame; if it
+// refuses (or qp is 0) the rate is raised `factor` times instead. end puts back the rate
+// control parameters as they were.
+int rm_nvenc_boost_begin(rm_nvenc *e, uint32_t factor, uint32_t qp) {
     uint64_t up;
     if (e->boost_from) return 0;
-    e->boost_from = e->config.rcParams.averageBitRate;
-    up = (uint64_t)e->boost_from * factor;
+    e->boost_rc = e->config.rcParams;
+    e->boost_from = 1;
+    if (qp) {
+        NV_ENC_RC_PARAMS *rc = &e->config.rcParams;
+        rc->rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
+        rc->constQP.qpInterP = qp;
+        rc->constQP.qpInterB = qp;
+        rc->constQP.qpIntra = qp;
+        if (!reconfigure_now(e)) return 0;
+        e->config.rcParams = e->boost_rc;
+    }
+    up = (uint64_t)e->boost_rc.averageBitRate * factor;
     return rm_nvenc_set_bitrate(e, up > 0xffffffffu ? 0xffffffffu : (uint32_t)up);
 }
 
 int rm_nvenc_boost_end(rm_nvenc *e) {
-    uint32_t back = e->boost_from;
-    if (!back) return 0;
+    if (!e->boost_from) return 0;
     e->boost_from = 0;
-    return rm_nvenc_set_bitrate(e, back);
+    e->config.rcParams = e->boost_rc;
+    return reconfigure_now(e);
 }
 
 // Tell the encoder the frame with this timestamp never arrived: later frames must not refer to it.

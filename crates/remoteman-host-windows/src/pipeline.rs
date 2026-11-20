@@ -341,6 +341,16 @@ fn age_us(meta: &Metadata) -> u64 {
 pub static REFINE: AtomicBool = AtomicBool::new(true);
 const REFINE_AFTER: Duration = Duration::from_millis(400);
 const REFINE_FACTOR: u32 = 8;
+/// The constant quantiser of the refining frame: finer for small pictures, coarser for large ones
+/// so the one frame stays within a couple of megabytes even for a page of dense text (measured on
+/// a worst-case 720p text pattern: QP 24 is 450 kB, 28 is 360 kB, 16 is 630 kB).
+fn refine_qp(width: u32, height: u32) -> u32 {
+    match width as u64 * height as u64 {
+        0..=2_200_000 => 24,
+        2_200_001..=4_500_000 => 28,
+        _ => 32,
+    }
+}
 
 fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<()> {
     let mut rate = s.bitrate;
@@ -513,14 +523,14 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         }
         let idr = control.keyframe.swap(false, Ordering::Relaxed);
         let reported = control.lost.lock().unwrap().take();
-        let (p_mode, p_hdr) = (p.mode, p.hdr.is_some());
+        let (p_mode, p_hdr, p_size) = (p.mode, p.hdr.is_some(), (p.width, p.height));
         let Picture { encoder, recovery, .. } = &mut p;
         let n = recovery.number();
         let plan = recovery.plan(idr, reported, &mut |t| encoder.invalidate(t).inspect_err(|e| tracing::debug!(t, "invalidate: {e:#}")));
         if reported.is_some() {
             tracing::debug!(?reported, n, ?plan, "loss report");
         }
-        let made = if refining { encoder.encode_refined(0, n, plan.how, REFINE_FACTOR) } else { encoder.encode_how(0, n, plan.how) }.context("encode")?;
+        let made = if refining { encoder.encode_refined(0, n, plan.how, REFINE_FACTOR, refine_qp(p_size.0, p_size.1)) } else { encoder.encode_how(0, n, plan.how) }.context("encode")?;
         if refining {
             refines += 1;
             tracing::info!(bytes = made.data.len(), qp = made.qp, "refined the still picture");

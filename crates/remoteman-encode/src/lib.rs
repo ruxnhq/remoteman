@@ -80,7 +80,7 @@ unsafe extern "C" {
     fn rm_nvenc_long_term(e: *mut c_void) -> u32;
     fn rm_nvenc_set_bitrate(e: *mut c_void, bitrate: u32) -> c_int;
     fn rm_nvenc_invalidate(e: *mut c_void, ts: u64) -> c_int;
-    fn rm_nvenc_boost_begin(e: *mut c_void, factor: u32) -> c_int;
+    fn rm_nvenc_boost_begin(e: *mut c_void, factor: u32, qp: u32) -> c_int;
     fn rm_nvenc_boost_end(e: *mut c_void) -> c_int;
     fn rm_nvenc_close(e: *mut c_void);
 }
@@ -151,8 +151,9 @@ pub trait FrameEncoder {
         false
     }
     /// Like [`Self::encode_how`], with room for `factor` times the bits the rate allows one
-    /// frame, and the rate back as it was straight after. For static refinement.
-    fn encode_refined(&mut self, _idx: usize, _timestamp: u64, _how: How, _factor: u32) -> Result<Made<'_>> {
+    /// frame, and the rate back as it was straight after. For static refinement. With `qp` not
+    /// 0, the frame is made at that constant quantiser instead (`factor` is the fallback).
+    fn encode_refined(&mut self, _idx: usize, _timestamp: u64, _how: How, _factor: u32, _qp: u32) -> Result<Made<'_>> {
         bail!("this encoder cannot refine a still picture")
     }
     /// The frame with this timestamp was lost on the way: stop referring to it.
@@ -344,9 +345,9 @@ impl Encoder {
     }
 
     /// [`FrameEncoder::encode_refined`].
-    pub fn encode_refined(&mut self, idx: usize, timestamp: u64, how: How, factor: u32) -> Result<Made<'_>> {
+    pub fn encode_refined(&mut self, idx: usize, timestamp: u64, how: How, factor: u32, qp: u32) -> Result<Made<'_>> {
         // SAFETY: a live encoder.
-        if unsafe { rm_nvenc_boost_begin(self.enc, factor) } != 0 {
+        if unsafe { rm_nvenc_boost_begin(self.enc, factor, qp) } != 0 {
             bail!("{}", self.last_error());
         }
         let made = self.encode_how(idx, timestamp, how).map(|m| (m.data.as_ptr(), m.data.len(), m.key, m.marked, m.referred, m.qp));
@@ -398,8 +399,8 @@ impl FrameEncoder for Encoder {
         true
     }
 
-    fn encode_refined(&mut self, idx: usize, timestamp: u64, how: How, factor: u32) -> Result<Made<'_>> {
-        Encoder::encode_refined(self, idx, timestamp, how, factor)
+    fn encode_refined(&mut self, idx: usize, timestamp: u64, how: How, factor: u32, qp: u32) -> Result<Made<'_>> {
+        Encoder::encode_refined(self, idx, timestamp, how, factor, qp)
     }
 
     fn invalidate(&mut self, timestamp: u64) -> Result<()> {

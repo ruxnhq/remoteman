@@ -247,7 +247,7 @@ fn refine_still_picture() {
         let view = text_source(&gpu, *dy).unwrap();
         converter.convert(&gpu, &view);
         let how = How::default();
-        let made = if n == refine_at { encoder.encode_refined(0, n as u64, how, 8) } else { encoder.encode_how(0, n as u64, how) }.unwrap();
+        let made = if n == refine_at { encoder.encode_refined(0, n as u64, how, 8, std::env::var("REMOTEMAN_REFINE_QP").ok().and_then(|v| v.parse().ok()).unwrap_or(24)) } else { encoder.encode_how(0, n as u64, how) }.unwrap();
         assert_eq!(made.key, n == 0, "frame {n}: keyframe {}", made.key);
         sizes.push((made.data.len(), made.qp));
         out.extend_from_slice(made.data);
@@ -296,4 +296,9 @@ fn refine_still_picture() {
     // The ordinary frame after it keeps the quality and is small again.
     assert!(p[refine_at - 6 + 1] >= p[refine_at - 6 - 1], "the frame after lost the quality");
     assert!(sizes[refine_at + 1].0 < sizes[refine_at].0, "the rate did not come back");
+    // And the rate control is CBR again, not constant QP: a scroll frame after it is back at the
+    // usual size, not at the refining one's.
+    converter.convert(&gpu, &text_source(&gpu, 21).unwrap());
+    let after = encoder.encode_how(0, 99, How::default()).unwrap();
+    assert!(after.data.len() < sizes[refine_at].0 / 3, "still constant-QP after the refining frame: {} bytes", after.data.len());
 }
