@@ -8,6 +8,7 @@
 pub mod blob;
 pub mod ffi;
 pub mod host;
+mod join;
 pub mod permissions;
 pub mod rate;
 pub mod second_factor;

@@ -19,6 +19,8 @@ use remoteman_transport::{Connection, Identity, RecvStream, Trust, listen, peer_
 
 use crate::blob::{self, BlobEvent, BlobSender, Chunk};
 pub use crate::permissions::{ConnectionEvent, Permissions};
+pub use crate::join::SecondDevice;
+use crate::join::{self, Lead, LeadEnd, LeadSlot};
 use crate::permissions::{ConnectionLog, PermissionStore};
 use crate::second_factor::{self, Check, SecondFactorStore};
 use crate::rate::RateController;
@@ -282,7 +284,7 @@ impl Link {
     }
 }
 
-enum Call {
+pub(crate) enum Call {
     Connected(ClientInfo, Link, tokio::sync::oneshot::Sender<Result<Accept, String>>),
     Keyframe,
     Lost(u32, u32),
@@ -298,7 +300,7 @@ enum Call {
 
 /// The permissions and the log, shared by the host's tasks. A [`Gate`] asks them about one
 /// device.
-struct State {
+pub(crate) struct State {
     perms: PermissionStore,
     log: ConnectionLog,
     /// Called, on the handler's thread, with each notice (see [`Host::set_notice_hook`]).
@@ -310,17 +312,27 @@ struct State {
     factor_wait: std::sync::atomic::AtomicU64,
     /// This computer's name, for the authenticator app's list.
     name: String,
+    /// What a device that connects while another is using the computer does
+    /// ([`SecondDevice`], as 0, 1, 2), kept in `host/second_device`.
+    second: std::sync::atomic::AtomicU8,
+    second_path: PathBuf,
+}
+
+impl State {
+    fn second_device(&self) -> SecondDevice {
+        SecondDevice::from_u8(self.second.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or_default()
+    }
 }
 
 /// What the device being served may do, asked again at each use so a change applies at once.
 #[derive(Clone)]
-struct Gate {
-    state: Arc<State>,
-    fingerprint: String,
+pub(crate) struct Gate {
+    pub(crate) state: Arc<State>,
+    pub(crate) fingerprint: String,
 }
 
 impl Gate {
-    fn get(&self) -> Permissions {
+    pub(crate) fn get(&self) -> Permissions {
         self.state.perms.get(&self.fingerprint)
     }
 }
@@ -411,8 +423,10 @@ pub struct Device {
     pub fingerprint: String,
     /// The name it gave in its last hello, or the address it paired from until it has said one.
     pub name: String,
-    /// It is the client connected right now.
+    /// It is a client connected right now (the one being served, or one that joined it).
     pub connected: bool,
+    /// It is connected as a second device that joined the session of another.
+    pub joined: bool,
 }
 
 /// The connection of the client being served, and its fingerprint.
@@ -449,6 +463,8 @@ struct Confirm {
 }
 
 pub struct Host {
+    /// The session joiners join, while one is up.
+    lead: LeadSlot,
     confirm: Arc<Confirm>,
     runtime: Option<tokio::runtime::Runtime>,
     endpoint: remoteman_transport::Endpoint,
@@ -458,7 +474,7 @@ pub struct Host {
     who: Who,
     /// What this host can do, as the next hello will say it.
     features: Arc<Mutex<Vec<String>>>,
-    state: Arc<State>,
+    pub(crate) state: Arc<State>,
     calls: Mutex<mpsc::Sender<Call>>,
     /// Told once the handler thread has ended and let go of everything it held.
     handler_done: Mutex<mpsc::Receiver<()>>,
@@ -487,7 +503,7 @@ impl Host {
         let (done, handler_done) = mpsc::channel::<()>();
         let link: Arc<Mutex<Option<Link>>> = Arc::default();
         let hook: Arc<Mutex<Option<BitrateHook>>> = Arc::default();
-        let state = Arc::new(State { perms: PermissionStore::load(&options.state.join("host/permissions.json")), log: ConnectionLog::open(&options.state.join("connections.log")), notice: Mutex::default(), factor: SecondFactorStore::load(&options.state.join("host/second_factor.json")), factor_wait: 60_000.into(), name: options.name.clone() });
+        let state = Arc::new(State { perms: PermissionStore::load(&options.state.join("host/permissions.json")), log: ConnectionLog::open(&options.state.join("connections.log")), notice: Mutex::default(), factor: SecondFactorStore::load(&options.state.join("host/second_factor.json")), factor_wait: 60_000.into(), name: options.name.clone(), second: (std::fs::read_to_string(options.state.join("host/second_device")).ok().and_then(|s| SecondDevice::parse(&s)).unwrap_or_default() as u8).into(), second_path: options.state.join("host/second_device") });
         let (thread_link, thread_hook, thread_state) = (link.clone(), hook.clone(), state.clone());
         std::thread::Builder::new().name("remoteman host".into()).spawn(move || {
             let (link, hook, state) = (thread_link, thread_hook, thread_state);
@@ -554,8 +570,9 @@ impl Host {
         let who = Who::default();
         let features = Arc::new(Mutex::new(with_parity(options.features.clone())));
         let confirm = Arc::new(Confirm { own: identity.fingerprint.clone(), ..Confirm::default() });
-        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone(), confirm.clone(), state.clone()));
-        Ok(Self { confirm, runtime: Some(runtime), endpoint, trust, link, hook, who, features, state, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
+        let lead = LeadSlot::default();
+        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone(), confirm.clone(), state.clone(), lead.clone()));
+        Ok(Self { lead, confirm, runtime: Some(runtime), endpoint, trust, link, hook, who, features, state, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
     }
 
     /// Let the next unknown device in (it is remembered and pairing turns itself off), or stop
@@ -718,10 +735,22 @@ impl Host {
         let _ = self.calls.lock().unwrap().send(Call::Message(message));
     }
 
+    /// What a device that connects while another is using this computer does. Takes effect for
+    /// the next connection; kept with the host's state.
+    pub fn set_second_device(&self, mode: SecondDevice) {
+        self.state.second.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::write(&self.state.second_path, mode.as_str());
+    }
+
+    pub fn second_device(&self) -> SecondDevice {
+        self.state.second_device()
+    }
+
     /// Every device this host trusts, in the order they were paired.
     pub fn devices(&self) -> Vec<Device> {
         let connected = self.who.lock().unwrap().as_ref().map(|(fp, _)| fp.clone());
-        self.trust.list().into_iter().map(|(fingerprint, name)| Device { connected: connected.as_deref() == Some(&fingerprint), fingerprint, name }).collect()
+        let joined = self.lead.lock().unwrap().as_ref().map(|l| l.joined()).unwrap_or_default();
+        self.trust.list().into_iter().map(|(fingerprint, name)| Device { connected: connected.as_deref() == Some(&fingerprint) || joined.contains(&fingerprint), joined: joined.contains(&fingerprint), fingerprint, name }).collect()
     }
 
     /// Stop trusting a device. It is dropped if it is the one connected, and refused from now
@@ -730,6 +759,9 @@ impl Host {
         let was = self.trust.remove(fingerprint)?;
         let _ = self.state.perms.forget(fingerprint);
         let _ = self.state.factor.forget_device(fingerprint);
+        if let Some(lead) = self.lead.lock().unwrap().as_ref() {
+            lead.close_device(fingerprint, CLOSE_REVOKED, b"this device is no longer trusted here");
+        }
         let who = self.who.lock().unwrap();
         if let Some((fp, conn)) = who.as_ref() {
             if fp == fingerprint {
@@ -802,7 +834,7 @@ impl Drop for Host {
 pub const CLOSE_DROPPED: u32 = 2;
 pub const CLOSE_REVOKED: u32 = 3;
 
-async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>, who: Who, features: Arc<Mutex<Vec<String>>>, confirm: Arc<Confirm>, state: Arc<State>) {
+async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>, who: Who, features: Arc<Mutex<Vec<String>>>, confirm: Arc<Confirm>, state: Arc<State>, lead_slot: LeadSlot) {
     let options = Arc::new(options);
     let mut current: Option<(tokio::task::JoinHandle<()>, Connection)> = None;
     while let Some(incoming) = endpoint.accept().await {
@@ -822,13 +854,31 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
                 fresh = true;
             }
         }
+        // With the host set to `watch` or `control`, a device that isn't the lead's own joins
+        // the lead's session instead of ending it (docs/PROTOCOL.md, "More than one device").
+        let second = state.second_device();
+        let lead = if second == SecondDevice::TakeOver { None } else { lead_slot.lock().unwrap().clone().filter(|l| l.is_open() && l.fingerprint != fingerprint) };
+        if let Some(lead) = lead {
+            let (options, calls, trust, state) = (options.clone(), calls.clone(), trust.clone(), state.clone());
+            let offered = features.lock().unwrap().clone();
+            let (lead_slot, current_link) = (lead_slot.clone(), current_link.clone());
+            tokio::spawn(async move {
+                let started = serve(&conn, fingerprint, &options, &calls, &current_link, &lead_slot, &trust, &state, offered, held, fresh, Some((lead, second == SecondDevice::Control))).await;
+                if let Err((_, e)) = started {
+                    if conn.close_reason().is_none() {
+                        conn.close(1u32.into(), format!("{e:#}").as_bytes());
+                    }
+                }
+            });
+            continue;
+        }
         // The newest client takes over. The old session is closed and left to finish by
         // itself, so the handler hears `left` for it exactly once, and before the new `connected`.
         if let Some((old, old_conn)) = current.take() {
             old_conn.close(0u32.into(), b"another device took over");
             let _ = old.await;
         }
-        let (options, calls, current_link) = (options.clone(), calls.clone(), current_link.clone());
+        let (options, calls, current_link, lead_slot) = (options.clone(), calls.clone(), current_link.clone(), lead_slot.clone());
         let session_conn = conn.clone();
         *who.lock().unwrap() = Some((fingerprint.clone(), conn.clone()));
         // Revoked between its handshake and here: it doesn't get a session.
@@ -838,7 +888,7 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
         let (who, trust, state) = (who.clone(), trust.clone(), state.clone());
         let offered = features.lock().unwrap().clone();
         current = Some((tokio::spawn(async move {
-            let started = serve(&conn, fingerprint, &options, &calls, &current_link, &trust, &state, offered, held, fresh).await;
+            let started = serve(&conn, fingerprint, &options, &calls, &current_link, &lead_slot, &trust, &state, offered, held, fresh, None).await;
             {
                 let mut who = who.lock().unwrap();
                 if who.as_ref().is_some_and(|(_, c)| c.stable_id() == conn.stable_id()) {
@@ -925,19 +975,27 @@ async fn ask_second_factor(send: &mut remoteman_transport::SendStream, recv: &mu
 }
 
 /// Writes the `left` line of the connection log when a session ends, however it ends.
-struct LeftLog {
+pub(crate) struct LeftLog {
     state: Arc<State>,
     conn: Connection,
     name: String,
     fingerprint: String,
     address: String,
     since: Instant,
+    joined: bool,
+}
+
+impl LeftLog {
+    pub(crate) fn new(state: Arc<State>, conn: Connection, name: String, fingerprint: String, address: String, joined: bool) -> Self {
+        Self { state, conn, name, fingerprint, address, since: Instant::now(), joined }
+    }
 }
 
 impl Drop for LeftLog {
     fn drop(&mut self) {
         let mut event = ConnectionEvent::new("left", &self.name, &self.fingerprint, &self.address);
         event.duration = Some(self.since.elapsed().as_secs());
+        event.joined = self.joined;
         if let Some(reason) = self.conn.close_reason() {
             event.reason = reason.to_string();
         }
@@ -953,7 +1011,7 @@ const REPEAT_AFTER: Duration = Duration::from_millis(100);
 
 /// One client's session. The flag in the result says whether the handler's `connected` ran (and
 /// so whether `left` is owed).
-async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, trust: &Trust, state: &Arc<State>, features: Vec<String>, held: Option<Arc<Confirm>>, fresh: bool) -> Result<bool, (bool, anyhow::Error)> {
+async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, lead_slot: &LeadSlot, trust: &Trust, state: &Arc<State>, features: Vec<String>, held: Option<Arc<Confirm>>, fresh: bool, join: Option<(Arc<Lead>, bool)>) -> Result<bool, (bool, anyhow::Error)> {
     let no = |e: anyhow::Error| (false, e);
     let gate = Gate { state: state.clone(), fingerprint: fingerprint.clone() };
     let address = conn.remote_address().to_string();
@@ -1025,7 +1083,10 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         tokio::time::sleep(Duration::from_millis(200)).await;
         return Err(no(anyhow::anyhow!("the device is refused for wrong second-factor codes")));
     }
-    let features = gate.get().filter(&features);
+    let mut features = gate.get().filter(&features);
+    if let Some((_, control)) = &join {
+        features = join::features(features, *control);
+    }
     // Parity only where both sides said so.
     let parity = parity && features.iter().any(|f| f == "parity");
     write_message(&mut send, &Message::HostHello { proto: remoteman_proto::PROTO, name: options.name.clone(), os: options.os.clone(), features, second_factor: factor.then(|| "totp".to_owned()) }).await.map_err(no)?;
@@ -1042,6 +1103,11 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     // Nothing more is sent, and the handler hears nothing, until the code is right.
     if factor {
         ask_second_factor(&mut send, &mut recv, state, &gate.fingerprint, name.trim(), &address, &record).await.map_err(no)?;
+    }
+
+    // A device that joins another's session has no handler session of its own.
+    if let Some((lead, control)) = join {
+        return join::serve(conn, send, recv, &lead, control, name.trim().to_owned(), &decoders, parity, calls, gate, address, &record).await;
     }
 
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Out>(4);
@@ -1080,14 +1146,17 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     };
     record(ConnectionEvent::new("connected", &client_name, &gate.fingerprint, &address));
     // However this session ends, it is logged once as having left.
-    let _left = LeftLog { state: state.clone(), conn: conn.clone(), name: client_name, fingerprint: gate.fingerprint.clone(), address: address.clone(), since: Instant::now() };
+    let _left = LeftLog::new(state.clone(), conn.clone(), client_name, gate.fingerprint.clone(), address.clone(), false);
     let yes = |e: anyhow::Error| (true, e);
     // Counts up each time the picture starts afresh.
     let epoch = std::sync::atomic::AtomicU32::new(1);
     let now = || epoch.load(std::sync::atomic::Ordering::Relaxed) as u16;
-    write_message(&mut send, &Message::Stream { epoch: now(), mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour, index: 0, sdr_white: accept.sdr_white, peak: accept.peak })
-        .await
-        .map_err(yes)?;
+    let first_stream = Message::Stream { epoch: now(), mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour, index: 0, sdr_white: accept.sdr_white, peak: accept.peak };
+    write_message(&mut send, &first_stream).await.map_err(yes)?;
+    // From here devices may join this session; it ends for them when it ends.
+    let lead = Arc::new(Lead::new(gate.fingerprint.clone(), first_stream));
+    *lead_slot.lock().unwrap() = Some(lead.clone());
+    let _lead_end = LeadEnd { lead: lead.clone(), slot: lead_slot.clone() };
     // Three things write to the control stream: answers to the client, cursor shapes, and a
     // new stream description when the picture starts afresh.
     let send = tokio::sync::Mutex::new(send);
@@ -1160,10 +1229,12 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     answer.store(0, std::sync::atomic::Ordering::Relaxed);
                     last[0] = None;
                     let m = Message::Stream { epoch: now(), mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 0, sdr_white: a.sdr_white, peak: a.peak };
+                    lead.restart(&m);
                     write_message(&mut *send.lock().await, &m).await?;
                     continue;
                 }
             };
+            lead.frame(&f.data, f.key, f.capture_us, now(), number);
             let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
             // With parity the data is cut a little smaller, and a copy sent later is cut so too.
             let (datagrams, cut) = if parity {
@@ -1227,18 +1298,28 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             match c {
                 CursorMsg::Shape(s) => {
                     let m = Message::Cursor { width: s.width, height: s.height, hot_x: s.hot_x, hot_y: s.hot_y, rgba: encode_bytes(&s.rgba) };
+                    lead.cursor_shape(&m);
                     write_message(&mut *send.lock().await, &m).await?;
                 }
                 CursorMsg::At { x, y, visible } => {
                     let at = CursorAt { epoch: now(), visible, x, y };
                     if last != Some(at) {
                         last = Some(at);
-                        let _ = conn.send_datagram(at.write().into());
+                        let w = at.write();
+                        lead.cursor_at(&w);
+                        let _ = conn.send_datagram(w.into());
                     }
                 }
-                CursorMsg::Message(m) => write_message(&mut *send.lock().await, &m).await?,
+                CursorMsg::Message(m) => {
+                    if matches!(m, Message::SoundFormat { .. }) {
+                        lead.sound_format(&m);
+                    }
+                    write_message(&mut *send.lock().await, &m).await?
+                }
                 CursorMsg::Sound(packet) => {
-                    let _ = conn.send_datagram(packet.write().into());
+                    let w = packet.write();
+                    lead.sound(&w);
+                    let _ = conn.send_datagram(w.into());
                 }
                 CursorMsg::Blob { kind, header, content } => {
                     tokio::spawn(blob::send(conn.clone(), kind, header, content));
@@ -1369,7 +1450,7 @@ fn take_events(buf: &mut Vec<u8>, mut sink: impl FnMut(Event)) -> Result<()> {
     result
 }
 
-async fn read_input(mut stream: RecvStream, first: u8, calls: &mpsc::Sender<Call>, gate: &Gate) -> Result<()> {
+pub(crate) async fn read_input(mut stream: RecvStream, first: u8, calls: &mpsc::Sender<Call>, gate: &Gate) -> Result<()> {
     // `first` was read off the stream to see what it was.
     let mut buf = vec![first];
     let mut chunk = [0u8; 4096];

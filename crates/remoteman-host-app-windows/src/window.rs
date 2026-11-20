@@ -50,6 +50,7 @@ pub struct Callbacks {
     pub files: Callback<bool>,
     pub lock_on_leave: Callback<bool>,
     pub speakers: Callback<bool>,
+    pub second_device: Callback<Option<usize>>,
     pub notify: Callback<bool>,
     pub second_factor: Callback<bool>,
     pub second_factor_code: Callback<Rc<str>>,
@@ -243,6 +244,7 @@ impl HostWindow {
                     actions.push(push("Revoke…", context.callback(move |()| Message::Revoke(device.clone())), false).automation_name(format!("Revoke {}", d.name)).into());
                     let state = if !d.permissions.input { "View only" } else if d.connected { "Connected now" } else { "Paired" };
                     let state = if d.connected && !d.permissions.input { "Connected now · view only".to_string() } else { state.to_string() };
+                    let state = if d.joined { format!("{state} · joined") } else { state };
                     page.push(row(&d.name, Some(&state), Some(StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children(actions).into())));
                     page.push(permissions_card(input, d));
                 }
@@ -274,6 +276,16 @@ impl HostWindow {
         page.push(row("Receive files from devices", Some("Into Downloads, never over an existing file"), Some(switch(s.is_some_and(|s| s.files), s.is_some(), "Receive files from devices", input.on.files.clone()))));
 
         page.push(heading("While a device is connected"));
+        let second = match s.map(|s| s.second_device.as_str()) {
+            Some("watch") => 1,
+            Some("control") => 2,
+            _ => 0,
+        };
+        page.push(row(
+            "When a second device connects",
+            Some("While one device is using this PC. A device that watches or controls too sees the same screen; when the first leaves, the second's session ends with it"),
+            Some(ComboBox::new().min_width(200.0).items_source(["It takes over", "It watches", "It can control too"]).selected_index(second).is_enabled(s.is_some()).automation_name("When a second device connects").on_selection_changed(input.on.second_device.clone()).into()),
+        ));
         page.push(row(
             "Lock this PC when a device disconnects",
             Some("The PC is kept awake while a device is connected, and locked once the last one leaves"),

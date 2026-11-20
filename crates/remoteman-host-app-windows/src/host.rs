@@ -61,6 +61,8 @@ pub struct Device {
     pub name: String,
     pub fingerprint: String,
     pub connected: bool,
+    /// It is connected as a second device that joined another's session.
+    pub joined: bool,
     pub permissions: Permissions,
 }
 
@@ -94,12 +96,15 @@ pub struct Connection {
     pub address: String,
     pub duration: Option<u64>,
     pub reason: String,
+    /// With `connected`: the device joined another device's session.
+    pub joined: bool,
 }
 
 impl Connection {
     /// What it says in a list or a notification: "Anna's iPad connected".
     pub fn words(&self) -> String {
         match self.event.as_str() {
+            "connected" if self.joined => format!("{} joined", self.name),
             "connected" => format!("{} connected", self.name),
             "left" => match self.duration {
                 Some(s) => format!("{} left after {}", self.name, span(s)),
@@ -164,6 +169,8 @@ pub struct Status {
     pub name: String,
     pub paused: bool,
     pub pairing: bool,
+    /// What a device that connects while another is using this PC does: `take_over`, `watch` or `control`.
+    pub second_device: String,
     pub clipboard: bool,
     pub files: bool,
     pub lock_on_leave: bool,
@@ -205,7 +212,7 @@ impl Status {
                     .map(|d| {
                         let p = d.get("permissions").cloned().unwrap_or_default();
                         let permissions = Permissions { input: yes(&p, "input"), clipboard: yes(&p, "clipboard"), files: yes(&p, "files"), sound: yes(&p, "sound"), mic: yes(&p, "mic"), camera: yes(&p, "camera") };
-                        Device { name: s(d, "name"), fingerprint: s(d, "fingerprint"), connected: b(d, "connected"), permissions }
+                        Device { name: s(d, "name"), fingerprint: s(d, "fingerprint"), connected: b(d, "connected"), joined: b(d, "joined"), permissions }
                     })
                     .collect()
             })
@@ -213,7 +220,7 @@ impl Status {
         let events = |key: &str| -> Vec<Connection> {
             o.get(key)
                 .and_then(|d| d.as_array())
-                .map(|list| list.iter().map(|e| Connection { seq: n(e, "seq"), time: s(e, "time"), event: s(e, "event"), name: s(e, "name"), address: s(e, "address"), duration: e.get("duration").and_then(|x| x.as_u64()), reason: s(e, "reason") }).collect())
+                .map(|list| list.iter().map(|e| Connection { seq: n(e, "seq"), time: s(e, "time"), event: s(e, "event"), name: s(e, "name"), address: s(e, "address"), duration: e.get("duration").and_then(|x| x.as_u64()), reason: s(e, "reason"), joined: b(e, "joined") }).collect())
                 .unwrap_or_default()
         };
         let client = o.get("client").filter(|c| c.is_object()).map(|c| Client {
@@ -234,6 +241,7 @@ impl Status {
             name: s(&o, "name"),
             paused: b(&o, "paused"),
             pairing: b(&o, "pairing"),
+            second_device: s(&o, "second_device"),
             clipboard: b(&o, "clipboard"),
             files: b(&o, "files"),
             lock_on_leave: b(&o, "lock_on_leave"),
@@ -332,7 +340,7 @@ mod tests {
         let s = Status::parse(SAID).unwrap();
         assert_eq!(s.name, "DEN-PC");
         assert!(s.clipboard && !s.files && s.microphone && !s.paused);
-        assert_eq!(s.devices, vec![Device { name: "iPad Pro".into(), fingerprint: "ab".into(), connected: true, permissions: Permissions { input: false, mic: false, ..Permissions::default() } }]);
+        assert_eq!(s.devices, vec![Device { name: "iPad Pro".into(), fingerprint: "ab".into(), connected: true, joined: false, permissions: Permissions { input: false, mic: false, ..Permissions::default() } }]);
         assert!(s.notify);
         assert_eq!(s.notices.len(), 1);
         assert_eq!(s.notices[0].seq, 7);

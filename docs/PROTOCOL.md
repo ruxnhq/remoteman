@@ -81,6 +81,26 @@ The second display goes when the session ends, and when the first is made afresh
 
 Some hosts neither show a login or lock screen nor ask for a password: they log their user in, or unlock, for a paired device (the Mac host, where its owner has switched that on and given it the password once). That takes a few seconds, during which there is no session to show. Such a host answers the hello with `{"t":"error","code":"logging_in","message":"..."}` and closes, its closing reason beginning `logging in: `. A client says so, waits about three seconds and connects again, by itself, some ten times before it asks its user. Through the core a host's handler gets this by refusing with words that begin `logging in: `.
 
+## More than one device
+
+A host takes one device at a time unless its owner has set what a second device does (`second_device`, in the core's host state): `take_over` (the default: the newest device ends the first's session, as it always did), `watch`, or `control`. A client doesn't ask for this and isn't told which; it finds out from what it gets. With `watch` or `control`, a device that connects while another is using the computer (and passes pairing, its permissions and the second factor as usual) **joins** that session instead of replacing it. The first device is the **lead**; it is served as ever. The same device connecting again (a lead that reconnects) always takes its own place.
+
+What the joiner gets, in the order it arrives:
+
+- `host_hello`, whose `features` are the host's, less what the joiner's permissions take away, and less what stays the lead's: never `clipboard`, `files`, `mic`, `camera`, `configure`, `placement`, `displays`; and no `input`, `pen` or `gamepad` unless the host is set to `control` and the device may control. `parity` and `sound` stay.
+- The lead's current `stream` message, with the lead's epoch, codec, size and colour: the joiner takes the picture as the lead has it. It can't ask for another size or codec (`configure` is dropped), and the second display is not offered.
+- A keyframe soon after: the joiner asks the host for one when it joins, and again with `keyframe` or `lost` whenever it needs one. The host passes such requests on at most once in about half a second for all joiners together, and never counts a joiner's loss in the lead's network measurement, so a joiner on a bad link doesn't lower the lead's picture. A joiner that has lost frames therefore recovers by keyframe only: the host sends it no `recovery` flag (a recovery point made for the lead's loss can lean on frames this device missed),; a client takes a plain frame after a loss as not a restart point and keeps asking until a keyframe comes.
+- Every video frame of the lead with the lead's frame numbers (and parity, if it asked), cut to its own datagram size; the cursor's shape and position; the sound, once it has said `{"t":"sound","on":true}` (if it may) and the host has said `sound_format`. A joiner that is too slow loses frames, as it would on a lossy network; it never holds the lead back.
+- When the picture starts afresh (the lead's resize, a change of desktop), a new `stream` message with a new epoch, for the joiner to set up again.
+
+What a joiner sends: `ping`, `keyframe`, `lost` and `sound` are used. With `watch` its input is read and thrown away; with `control` it is used exactly like the lead's, and the host doesn't arbitrate between them. Everything else is ignored: clipboard and file blobs, microphone and camera datagrams, `configure`, display messages.
+
+A joiner whose decoders (from its hello) can't decode the lead's codec, chroma or depth is refused after the hello with `{"t":"error","code":"busy","message":"Another device is using this computer in a way this device can't show"}`.
+
+When the lead leaves, the session ends for the joiners too: each gets `{"t":"error","code":"failed","message":"The device that was using this computer left"}` and the connection is closed. A joiner that wants the computer connects again, and is then the lead. When a joiner leaves, only it is gone.
+
+The connection log records a joiner with `"joined":true` on its `connected` and `left` lines, and the host's notice ("Anna's iPad joined") is made as for any connection.
+
 ## Finding a host
 
 A host that can be reached from the network says so with DNS-SD (Bonjour, Avahi): a service of type `_remoteman._udp` whose instance name is the computer's name and whose port is the one it listens on. Its text records:
