@@ -594,8 +594,13 @@ impl Engine {
         self.watched.set(Some(Instant::now()));
         let Ok(mut app) = self.app.try_borrow_mut() else { return };
         // (A test may say it for it.)
-        let light = crate::gpu::screen_light(host);
+        let mut light = crate::gpu::screen_light(host);
         let found = light.hdr;
+        if app.args.screen_hdr == Some(true) && !found {
+            // A test saying an SDR screen is HDR: a neutral one, on which a stream whose white is
+            // 203 nits comes out as its PQ codes went in, up to the roll-off's knee.
+            light = crate::gpu::Light { hdr: true, white: 203.0, peak: 1000.0 };
+        }
         let (hdr, headroom) = match app.args.screen_hdr {
             Some(forced) => (forced, if forced { light.headroom().max(1000.0 / 203.0) } else { 0.0 }),
             None => (found, light.headroom()),
@@ -1414,7 +1419,7 @@ fn picture_state(app: &App) -> Value {
     let session = app.session.as_ref();
     let offers = |f: &str| session.is_some_and(|s| s.offers(f));
     let shown = match scene.hdr_shown.load(Ordering::Relaxed) {
-        1 => "passed-through",
+        1 => "fitted",
         2 => "tone-mapped",
         _ => "sdr",
     };

@@ -46,8 +46,8 @@ pub struct Scene {
     /// last picture was presented that way (never so far: see `draw.rs`).
     pub tearing_allowed: AtomicBool,
     pub tearing: AtomicBool,
-    /// Said by the draw thread: how an HDR stream is shown: 0 there is none, 1 passed through
-    /// to a swap chain in HDR10, 2 tone-mapped to SDR.
+    /// Said by the draw thread: how an HDR stream is shown: 0 there is none, 1 fitted to this
+    /// screen's white and peak in a swap chain in HDR10, 2 tone-mapped to SDR.
     pub hdr_shown: AtomicU8,
     /// The display's refresh rate, for the draw thread's figures (0: not known).
     pub refresh_hz: AtomicU32,

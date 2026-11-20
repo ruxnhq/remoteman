@@ -824,7 +824,7 @@ impl Drawer {
         };
         let ok = done.is_ok();
         match done {
-            Ok(()) => say!("swap chain: {}", if pq { "PQ BT.2020 (HDR10), passed through" } else { "sRGB" }),
+            Ok(()) => say!("swap chain: {}", if pq { "PQ BT.2020 (HDR10)" } else { "sRGB" }),
             Err(e) => say!("swap chain: no {} colour space ({e}); tone-mapped to SDR instead", if pq { "PQ" } else { "sRGB" }),
         }
         self.pq = pq && ok;
