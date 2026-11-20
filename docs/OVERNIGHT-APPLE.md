@@ -117,6 +117,13 @@ own so that it can't collide with the main session's edits to `docs/PLAN.md`.
   just after the previous refresh; maybe a few ms. Untested. `--present tick|arrival` and the run
   summary's "arrival to on screen" line are there for measuring it.
 
+## Mac host, open (2026-11-19 night)
+
+- A quick reconnect was refused once: the Windows viewer's new connection came the same
+  millisecond its old one left (21:20:47), and the host gave up after 15 s ("starting the display
+  timed out"); its next try worked. Not reproduced: seven back-to-back 4K HDR sessions on loopback,
+  with gaps of 2 s and with a new connection replacing a live one, all came up in under 1 s.
+
 ## Still open, and what needs the owner
 
 - No AV1 from the Mac: it has no AV1 encoder (hardware: HEVC, H.264, ProRes, JPEG).

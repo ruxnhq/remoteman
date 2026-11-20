@@ -178,7 +178,8 @@ final class HostEncoder {
                 }
             }
             guard status == noErr, let sb else {
-                if status != noErr { hostLog("encoder: frame failed (\(status))") }
+                // -12903: the session was replaced while this frame was in it (a change of size); not a fault.
+                if status != noErr, status != kVTInvalidSessionErr { hostLog("encoder: frame failed (\(status))") }
                 // The frame that was to be a keyframe is gone: ask again.
                 if force { self.requestKeyframe() }
                 return
