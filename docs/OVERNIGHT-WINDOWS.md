@@ -218,3 +218,16 @@ screen follows the pictures (variable refresh works); in a window the monitor st
 Windows gives independent flip, and with it variable refresh, only to a window covering its
 monitor. Not built. What might do it is outside the app: NVIDIA's "G-SYNC for windowed and full
 screen mode" in the NVIDIA Control Panel (not tried; the owner's setting).
+
+## Main display, and the Apple side (09:35-09:50)
+- Main display with 0.1.7 (the test client as the device, 2400x1600): the device's display became
+  the main one at 0,0 with the PC's three screens kept on and moved left in their arrangement;
+  when it left, the screens came back exactly, 10 windows came back to the main screen, the
+  driver's monitor was unplugged; its scale set to 200 %. The 8 s wait for the mode was still
+  there (the off-the-desktop check never fired); now at most 3 s, then the arrangement asks for
+  the mode (b09bcb6, `C:\rm\installer-2026-11-20-018\remoteman-host-setup-0.1.8.exe`, not installed).
+- The Mac session built the Apple side (28b69d6, 55a0878 on its branch, not installed): the second
+  factor's prompt, the Mac host's second-device setting, per-device permissions with the log and a
+  notice, game controllers in the viewers; checked on its own loopback. The tests against this
+  PC need the owner: switching the second factor on here was stopped by this session's permission
+  check (it changes who can sign in); the half-started setup was discarded (status off).
