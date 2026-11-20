@@ -206,6 +206,13 @@ impl Injector {
         Self { area, keys: BTreeSet::new(), buttons: BTreeSet::new(), moved: (0.0, 0.0), scrolled: (0.0, 0.0), touches: BTreeMap::new(), touch: None, pen_device: None, pen_failed: false, pen_state: PenState::Away, gamepad: Default::default(), refused: 0 }
     }
 
+    /// Show the pointer if Windows has hidden it (after typing, or after touch or pen input,
+    /// Windows keeps it hidden until a mouse moves): one pixel over and back. A device that
+    /// draws the pointer itself is told it's hidden while it is, so without this a session
+    /// could start with no pointer until someone moved the PC's own mouse.
+    pub fn wake_pointer(&mut self) {
+        self.send(&[mouse_input(MOUSEEVENTF_MOVE, 1, 0, 0), mouse_input(MOUSEEVENTF_MOVE, -1, 0, 0)]);
+    }
     fn send(&mut self, inputs: &[INPUT]) {
         // Started by the service: onto the desktop that takes input now (the sign-in or lock
         // screen's, or the user's).

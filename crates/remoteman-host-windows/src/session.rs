@@ -269,7 +269,9 @@ impl Host {
         if !cursor_apart {
             tracing::info!("this client doesn't draw the pointer: it is drawn into the picture");
         }
-        self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, common: modes, ceiling, name: name.clone(), files: Files::default(), clipboard: None, copied: BTreeMap::new(), mode: started.mode, second: None, target: 0, _hdr: hdr });
+        let mut injector = Injector::new(area);
+        injector.wake_pointer();
+        self.live = Some(Live { pipeline, cursor, injector, link, screen, decoders, cursor_apart, common: modes, ceiling, name: name.clone(), files: Files::default(), clipboard: None, copied: BTreeMap::new(), mode: started.mode, second: None, target: 0, _hdr: hdr });
         // A new picture shares the clipboard anew.
         self.share_clipboard(self.clipboard_wanted);
         {
