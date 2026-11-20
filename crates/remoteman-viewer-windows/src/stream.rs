@@ -27,10 +27,41 @@ pub struct Scene {
     poked: Condvar,
     /// The window's client area in pixels: width in the high half.
     pub client_size: AtomicU64,
+    /// This screen shows HDR (Windows has it in HDR mode), and how many times brighter than
+    /// SDR white it can go; set by whoever owns the window.
+    pub screen_hdr: AtomicBool,
+    pub headroom: AtomicU32,
+    /// Where this screen puts SDR white and the brightest it goes, in nits, each an f32's bits
+    /// (0: not known yet): what an HDR picture is fitted to (`gpu::Light`).
+    pub screen_white: AtomicU32,
+    pub screen_peak: AtomicU32,
+    /// Present each picture as it arrives, with tearing allowed, for a monitor that varies its
+    /// refresh to follow (the "Variable refresh rate" switch, in full screen); set by whoever
+    /// owns the window. Otherwise at the display's next refresh.
+    pub variable_refresh: AtomicBool,
+    /// The range of refresh rates the monitor under the window varies within, if it can.
+    #[allow(dead_code)]
+    pub vrr_range: Mutex<Option<(u32, u32)>>,
+    /// Said by the draw thread: DXGI allows presenting with tearing on this device, and the
+    /// last picture was presented that way (never so far: see `draw.rs`).
+    pub tearing_allowed: AtomicBool,
+    pub tearing: AtomicBool,
+    /// Said by the draw thread: how an HDR stream is shown: 0 there is none, 1 fitted to this
+    /// screen's white and peak in a swap chain in HDR10, 2 tone-mapped to SDR.
+    pub hdr_shown: AtomicU8,
+    /// The display's refresh rate, for the draw thread's figures (0: not known).
+    pub refresh_hz: AtomicU32,
+    /// For tests (`--watch-vblank`): the draw thread logs how its pictures reach the screen.
+    pub measure: AtomicBool,
+    /// A panel's scale, x in the high half, each an f32's bits (0: none, a window's own).
+    pub panel_scale: AtomicU64,
     /// The window, for waking it from other threads (0 until there is one).
     pub hwnd: AtomicIsize,
     /// Set when it is time to leave.
     pub quit: AtomicBool,
+    /// Set to stop the draw thread alone (the engine moves drawing between the app's panel and
+    /// its full-screen window); what else watches quit goes on.
+    pub stop_draw: AtomicBool,
     /// A picture of the window to save once the frame numbered so has been drawn, and how
     /// many have been saved.
     pub shot: Mutex<Option<(PathBuf, u64)>>,
@@ -81,6 +112,10 @@ pub struct Shared {
     pub decoder: Mutex<String>,
     /// The stream's size in pixels, once the host has said: 0 until then. Width in the high half.
     pub stream_size: AtomicU64,
+    /// The stream is HDR (BT.2020 with PQ), and where its SDR white and peak sit, in nits.
+    pub hdr: AtomicBool,
+    pub sdr_white: AtomicU32,
+    pub peak: AtomicU32,
     pub refresh: AtomicU32,
     /// What the host says it can do, when that changes during the session.
     pub features: Mutex<Option<Vec<String>>>,
@@ -89,6 +124,9 @@ pub struct Shared {
     /// The computer is asking its owner about this PC: the code both sides show, and the
     /// seconds its owner has.
     pub pairing: Mutex<Option<(String, u32)>>,
+    /// The computer wants a code from an authenticator app: `Some(None)` the first time,
+    /// `Some(Some(n))` after a wrong one, with `n` tries left; taken by the window.
+    pub second_factor: Mutex<Option<Option<u32>>>,
     /// What was copied on the computer (its kind, `text/plain…` or `image/png`, and its
     /// bytes), until the window puts it on this clipboard.
     pub copies: Mutex<Vec<(String, Vec<u8>)>>,
@@ -100,6 +138,14 @@ pub struct Shared {
     pub folder: Mutex<PathBuf>,
     /// Plays the computer's sound, while that is on.
     pub sound: Mutex<Option<crate::sound::Player>>,
+    /// This PC's microphone and camera, while the computer is lent them (`media.rs`); the
+    /// camera's changes of mind, counted; whether the computer was told it is on; and why it
+    /// couldn't be opened, until the window says so.
+    pub microphone: Mutex<Option<crate::mic::Capture>>,
+    pub camera: Mutex<Option<crate::camera::Camera>>,
+    pub camera_turn: AtomicU32,
+    pub camera_told: AtomicBool,
+    pub camera_failed: Mutex<Option<String>>,
     /// The decoder was given frames and gave no picture: the window asks the computer for a
     /// keyframe (nothing was lost on the way, so nothing else will).
     pub stuck: AtomicBool,
@@ -119,6 +165,9 @@ pub struct Shared {
     pub replaced: AtomicU32,
     /// The longest decode, in microseconds.
     pub decode_us_max: AtomicU32,
+    /// How fast 4:4:4 is being decoded on the processor (with its upload), in millions of
+    /// pixels a second, once there have been enough pictures to say (0: not so, or not yet).
+    pub cpu_444_rate: AtomicU32,
     /// The bytes of video that arrived.
     pub bytes: AtomicU64,
     // The newest frame's age when it was decoded and when it had been handed to the swap
@@ -140,6 +189,9 @@ impl Shared {
             picture: Mutex::default(),
             cursor: Mutex::default(),
             cursor_gone: AtomicBool::default(),
+            hdr: AtomicBool::default(),
+            sdr_white: AtomicU32::new(203),
+            peak: AtomicU32::new(1000),
             cursor_at: Mutex::default(),
             cursor_moved: AtomicBool::default(),
             stage: AtomicU8::default(),
@@ -150,11 +202,17 @@ impl Shared {
             features: Mutex::default(),
             bitrate: AtomicU32::default(),
             pairing: Mutex::default(),
+            second_factor: Mutex::default(),
             copies: Mutex::default(),
             results: Mutex::default(),
             received: Mutex::default(),
             folder: Mutex::default(),
             sound: Mutex::default(),
+            microphone: Mutex::default(),
+            camera: Mutex::default(),
+            camera_turn: AtomicU32::default(),
+            camera_told: AtomicBool::default(),
+            camera_failed: Mutex::default(),
             stuck: AtomicBool::default(),
             copy_seq: AtomicU32::default(),
             file_seq: AtomicU32::default(),
@@ -162,6 +220,7 @@ impl Shared {
             presented: AtomicU32::default(),
             replaced: AtomicU32::default(),
             decode_us_max: AtomicU32::default(),
+            cpu_444_rate: AtomicU32::default(),
             bytes: AtomicU64::default(),
             age_decoded_us: AtomicU64::default(),
             age_presented_us: AtomicU64::default(),
@@ -174,6 +233,15 @@ impl Shared {
 
 pub fn pack(width: u32, height: u32) -> u64 {
     (width as u64) << 32 | height as u64
+}
+
+#[allow(dead_code)]
+pub fn pack_scale(x: f32, y: f32) -> u64 {
+    ((x.to_bits() as u64) << 32) | y.to_bits() as u64
+}
+
+pub fn unpack_scale(v: u64) -> (f32, f32) {
+    if v == 0 { (1.0, 1.0) } else { (f32::from_bits((v >> 32) as u32), f32::from_bits(v as u32)) }
 }
 
 pub fn unpack(size: u64) -> (u32, u32) {
@@ -204,9 +272,13 @@ impl Feed {
 
 impl Handler for Feed {
     fn stream(&mut self, info: &StreamInfo) {
-        say!("stream: {:?} {}x{} at {} Hz, {}", info.mode, info.width, info.height, info.refresh, info.colour);
+        let light = if info.colour == "bt2020-pq" { format!(", SDR white at {} nits, brightest {}", info.sdr_white, info.peak) } else { String::new() };
+        say!("stream: {:?} {}x{} at {} Hz, {}{light}", info.mode, info.width, info.height, info.refresh, info.colour);
         self.shared.stream_size.store(pack(info.width, info.height), Ordering::Relaxed);
         self.shared.refresh.store(info.refresh, Ordering::Relaxed);
+        self.shared.hdr.store(info.colour == "bt2020-pq", Ordering::Relaxed);
+        self.shared.sdr_white.store(info.sdr_white.max(1), Ordering::Relaxed);
+        self.shared.peak.store(info.peak.max(1), Ordering::Relaxed);
         self.wake_window();
         let _ = self.tx.send(Msg::Stream(info.clone()));
     }
@@ -250,6 +322,12 @@ impl Handler for Feed {
             Message::FileResult { ok, message, .. } => {
                 self.shared.results.lock().unwrap().push((*ok, message.clone()));
                 self.wake_window();
+            }
+            // The computer lost a frame of this PC's camera: the next one is a keyframe.
+            Message::CameraKeyframe => {
+                if let Some(camera) = self.shared.camera.lock().unwrap().as_ref() {
+                    camera.keyframe();
+                }
             }
             _ => {}
         }
@@ -358,10 +436,15 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
     let mut barren: (u32, Option<std::time::Instant>) = (0, None);
     let mut in_step = 0u32;
     let mut asked: Option<std::time::Instant> = None;
+    // Pictures decoded since `since`, the time they took in all and the longest (with the
+    // upload, for pictures decoded on the processor), for a line in the log every few seconds;
+    // and the bytes they came in.
+    let mut took_all: (u32, u64, u32, std::time::Instant) = (0, 0, 0, std::time::Instant::now());
+    let mut bytes_all = 0u64;
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Stream(i) => {
-                decoder = Some(if crate::decode::is_software(i.mode.codec) { Decoder::software(gpu, i.mode.codec)? } else { Decoder::new(gpu, i.mode.codec, sampled)? });
+                decoder = Some(if crate::decode::mode_in_software(i.mode) { Decoder::software(gpu, i.mode.codec)? } else { Decoder::new(gpu, i.mode.codec, sampled)? });
                 first = true;
                 info = Some(i);
             }
@@ -369,7 +452,7 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
                 let (Some(d), Some(i)) = (decoder.as_mut(), info.as_ref()) else { continue };
                 let t = std::time::Instant::now();
                 let mut decoded = d.decode(&data, age);
-                if first && sampled && decoded.is_err() && !crate::decode::is_software(i.mode.codec) {
+                if first && sampled && decoded.is_err() && !crate::decode::mode_in_software(i.mode) {
                     // The card is only asked for its textures at the first frame, a keyframe.
                     // Try that frame again with textures for decoding alone.
                     say!("no decoder textures that can be sampled ({:#}): copying each picture on the GPU instead", decoded.as_ref().err().unwrap());
@@ -412,6 +495,24 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
                     say!("decoding: {}", s.decoder.lock().unwrap());
                 }
                 let took = t.elapsed().as_micros() as u32;
+                took_all = (took_all.0 + 1, took_all.1 + took as u64, took_all.2.max(took), took_all.3);
+                bytes_all += data.len() as u64;
+                if took_all.3.elapsed() >= Duration::from_secs(5) {
+                    let (n, all, most, since) = took_all;
+                    let pixels = picture.width as u64 * picture.height as u64;
+                    let bits_a_pixel = bytes_all as f64 * 8.0 / (pixels * n as u64).max(1) as f64;
+                    say!("decoding: {n} pictures in {:.1} s, {:.2} ms each on average, {:.2} at most, {bits_a_pixel:.3} bits a pixel ({})", since.elapsed().as_secs_f64(), all as f64 / n as f64 / 1000.0, most as f64 / 1000.0, s.decoder.lock().unwrap());
+                    // Only a busy picture says how fast the processor is: a still desktop
+                    // decodes many times faster than one that moves (0.4 bits a pixel is 50
+                    // Mbit/s at 1920x1080 and 60 a second).
+                    if i.mode.chroma == remoteman_core::Chroma::C444 && crate::decode::on_processor(i.mode) && n >= 60 && bits_a_pixel >= 0.1 {
+                        // Pixels a microsecond are millions a second.
+                        let rate = (pixels * n as u64 / all.max(1)) as u32;
+                        s.cpu_444_rate.store(rate.max(1), Ordering::Relaxed);
+                    }
+                    took_all = (0, 0, 0, std::time::Instant::now());
+                    bytes_all = 0;
+                }
                 s.decode_us_max.fetch_max(took, Ordering::Relaxed);
                 s.decoded.fetch_add(1, Ordering::Relaxed);
                 s.decoded_total.fetch_add(1, Ordering::Relaxed);

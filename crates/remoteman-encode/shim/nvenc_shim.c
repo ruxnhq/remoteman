@@ -31,6 +31,13 @@ typedef struct rm_nvenc_cfg {
     uint32_t hdr_pq;      // 0 = BT.709 SDR, 1 = BT.2020 PQ signalling
     uint32_t long_term;   // how many long-term reference frames to keep room for (0: none)
     uint32_t short_term;  // how many recent frames to keep (0: the usual, fitted to the picture)
+    // HDR metadata for a BT.2020 PQ stream (hdr_pq): SEI (HEVC) or metadata OBUs (AV1), written on
+    // keyframes. hdr_light 0: none. Chromaticities in 0.00002 units (SMPTE ST 2086: green, blue,
+    // red, white point; x then y), mastering luminances in 0.0001 cd/m2, MaxCLL and MaxFALL in cd/m2.
+    uint32_t hdr_light;
+    uint32_t hdr_chroma[8];
+    uint32_t hdr_max_lum, hdr_min_lum, hdr_max_cll, hdr_max_fall;
+    uint32_t slices;      // HEVC: pictures cut into this many slices (0 or 1: one), so a decoder can use threads
 } rm_nvenc_cfg;
 
 typedef struct rm_nvenc {
@@ -51,6 +58,14 @@ typedef struct rm_nvenc {
     uint8_t *out;
     size_t out_cap;
     uint32_t last_qp;     // the last frame's average quantiser, as the encoder reported it
+    uint32_t boost_from;  // nonzero while a refining frame is under way
+    NV_ENC_RC_PARAMS boost_rc; // the rate control parameters to go back to after it
+    MASTERING_DISPLAY_INFO mastering;  // HDR metadata, handed to the encoder with each keyframe
+    CONTENT_LIGHT_LEVEL light;
+    uint8_t av1_mdcv[25], av1_cll[5];  // the same as AV1 metadata OBU payloads
+    NV_ENC_AV1_OBU_PAYLOAD obus[2];
+    int hdr_sei;          // whether to hand it over
+    int sent_first;       // the first picture, a keyframe whatever is asked, has gone
     char err[256];
 } rm_nvenc;
 
@@ -157,12 +172,46 @@ static int cap(rm_nvenc *e, GUID codec, NV_ENC_CAPS which) {
     return v;
 }
 
+// AV1's HDR metadata as OBU payloads of our own: NVENC's AV1 encoder wrote no metadata OBU from
+// outputMasteringDisplay/outputMaxCll and the pointers in the picture's parameters (tried on an
+// RTX 5090, 2026-11, with the values in HEVC's units and in AV1's). NVENC wraps a payload in an
+// OBU of type 5 (metadata) by itself, taking `payloadType` as the metadata_type and adding the
+// trailing bits; the payload is the syntax of AV1 spec 6.7.3 (type 1, HDR CLL) and 6.7.4 (type 2,
+// HDR MDCV): primaries as 0.16 fixed point (red, green, blue, the order of the spec's index), the
+// white point, the maximum luminance as 24.8 and the minimum as 18.14 fixed point. The arrays
+// below hold the type byte too (for reading), and the payloads start after it.
+static void put16(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
+static void put32(uint8_t *p, uint32_t v) { put16(p, v >> 16); put16(p + 2, v & 0xffff); }
+
+static void av1_metadata(rm_nvenc *e, const rm_nvenc_cfg *cfg) {
+    // Our chromaticities come green, blue, red, white (HEVC's order) in units of 0.00002.
+    static const int order[4] = { 2, 0, 1, 3 };
+    uint8_t *m = e->av1_mdcv, *c = e->av1_cll;
+    int i;
+    m[0] = 2;
+    for (i = 0; i < 4; i++) {
+        uint32_t x = (uint32_t)((uint64_t)cfg->hdr_chroma[2 * order[i]] * 65536 / 50000);
+        uint32_t y = (uint32_t)((uint64_t)cfg->hdr_chroma[2 * order[i] + 1] * 65536 / 50000);
+        put16(m + 1 + 4 * i, x > 65535 ? 65535 : x);
+        put16(m + 3 + 4 * i, y > 65535 ? 65535 : y);
+    }
+    put32(m + 17, (uint32_t)((uint64_t)cfg->hdr_max_lum * 256 / 10000));
+    put32(m + 21, (uint32_t)(((uint64_t)cfg->hdr_min_lum * 16384 + 5000) / 10000));
+    c[0] = 1;
+    put16(c + 1, e->light.maxContentLightLevel);
+    put16(c + 3, e->light.maxPicAverageLightLevel);
+    e->obus[0].payloadType = 2; e->obus[0].payloadSize = 24; e->obus[0].payload = m + 1;
+    e->obus[1].payloadType = 1; e->obus[1].payloadSize = 4; e->obus[1].payload = c + 1;
+}
+
 static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void *device, const rm_nvenc_cfg *cfg, char *err, int errlen) {
     rm_nvenc *e = calloc(1, sizeof *e);
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS open = { NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER };
     NV_ENC_PRESET_CONFIG preset = { NV_ENC_PRESET_CONFIG_VER, 0, { NV_ENC_CONFIG_VER } };
     NV_ENC_CREATE_BITSTREAM_BUFFER bs = { NV_ENC_CREATE_BITSTREAM_BUFFER_VER };
-    static const GUID presets[] = { NV_ENC_PRESET_P1_GUID, NV_ENC_PRESET_P2_GUID, NV_ENC_PRESET_P3_GUID, NV_ENC_PRESET_P4_GUID,
+    /* Not static: the presets are const variables, not constant expressions, which MSVC's C
+       compiler refuses in a static initializer (clang accepts it). */
+    const GUID presets[] = { NV_ENC_PRESET_P1_GUID, NV_ENC_PRESET_P2_GUID, NV_ENC_PRESET_P3_GUID, NV_ENC_PRESET_P4_GUID,
                                     NV_ENC_PRESET_P5_GUID, NV_ENC_PRESET_P6_GUID, NV_ENC_PRESET_P7_GUID };
     GUID codec = cfg->codec == 1 ? NV_ENC_CODEC_AV1_GUID : NV_ENC_CODEC_HEVC_GUID;
     GUID preset_guid = presets[(cfg->preset >= 1 && cfg->preset <= 7 ? cfg->preset : 1) - 1];
@@ -178,8 +227,9 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
     if ((s = e->f.nvEncOpenEncodeSessionEx(&open, &e->enc))) FAIL("open session");
 
     if (!cap(e, codec, NV_ENC_CAPS_SUPPORT_10BIT_ENCODE)) { snprintf(err, errlen, "no 10-bit encode for this codec"); goto fail; }
-    // Direct3D has no planar 10-bit 4:4:4 texture to hand over, so that path is 4:2:0 (P010) only.
-    if (cfg->chroma444 && device_type == NV_ENC_DEVICE_TYPE_DIRECTX) { snprintf(err, errlen, "no 4:4:4 input from Direct3D"); goto fail; }
+    // Direct3D has no planar 10-bit 4:4:4 format, and NVENC refuses an R16 texture with the
+    // planes stacked (UNORM or UINT: NV_ENC_ERR_UNSUPPORTED_PARAM on registering, 2026-11-19).
+    // So from Direct3D 4:4:4 is 10-bit RGB that NVENC converts itself (see below).
     if (cfg->chroma444 && !cap(e, codec, NV_ENC_CAPS_SUPPORT_YUV444_ENCODE)) { snprintf(err, errlen, "no 4:4:4 encode for this codec"); goto fail; }
 
     if ((s = e->f.nvEncGetEncodePresetConfigEx(e->enc, codec, preset_guid, NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &preset))) FAIL("preset");
@@ -200,6 +250,17 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
     uint32_t trc = cfg->hdr_pq ? NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084 : NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
     uint32_t mat = cfg->hdr_pq ? NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL : NV_ENC_VUI_MATRIX_COEFFS_BT709;
     e->av1 = cfg->codec == 1;
+    if (cfg->hdr_pq && cfg->hdr_light) {
+        CHROMA_POINTS *pts[4] = { &e->mastering.g, &e->mastering.b, &e->mastering.r, &e->mastering.whitePoint };
+        int i;
+        for (i = 0; i < 4; i++) { pts[i]->x = (uint16_t)cfg->hdr_chroma[2 * i]; pts[i]->y = (uint16_t)cfg->hdr_chroma[2 * i + 1]; }
+        e->mastering.maxLuma = cfg->hdr_max_lum;
+        e->mastering.minLuma = cfg->hdr_min_lum;
+        e->light.maxContentLightLevel = (uint16_t)(cfg->hdr_max_cll > 65535 ? 65535 : cfg->hdr_max_cll);
+        e->light.maxPicAverageLightLevel = (uint16_t)(cfg->hdr_max_fall > 65535 ? 65535 : cfg->hdr_max_fall);
+        e->hdr_sei = 1;
+        if (cfg->codec == 1) av1_metadata(e, cfg);
+    }
     // How many recent frames the encoder keeps to refer to, and so to fall back on when a newer
     // one is invalidated. Four: AV1 in NVENC has no more.
     e->short_term = 4;
@@ -247,6 +308,8 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
         h->hevcVUIParameters.colourPrimaries = prim;
         h->hevcVUIParameters.transferCharacteristics = trc;
         h->hevcVUIParameters.colourMatrix = mat;
+        if (e->hdr_sei) { h->outputMasteringDisplay = 1; h->outputMaxCll = 1; }
+        if (cfg->slices > 1) { h->sliceMode = 3; h->sliceModeData = cfg->slices; }
         if (!cfg->chroma444) {
             // The conversion averages each 2x2 block, so chroma sits in the block's centre.
             h->hevcVUIParameters.chromaSampleLocationFlag = 1;
@@ -268,6 +331,13 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
     if ((s = e->f.nvEncInitializeEncoder(e->enc, &e->init))) FAIL("initialize encoder");
 
     e->fmt = cfg->chroma444 ? NV_ENC_BUFFER_FORMAT_YUV444_10BIT : NV_ENC_BUFFER_FORMAT_YUV420_10BIT;
+    // 4:4:4 from Direct3D: an R10G10B10A2 texture of R'G'B' (DXGI's R in the low bits is
+    // NVENC's ABGR10), converted by NVENC. Its conversion was measured to be BT.709's matrix in
+    // limited range (the same mean Y, Cb, Cr as this host's own 4:2:0 conversion of one frame,
+    // to half a code value); and with the VUI saying BT.2020 NCL (hdr_pq) it converts with
+    // BT.2020's (measured 2026-11-19 on colour bars: Y, Cb, Cr of red, green, blue and white exact
+    // to the code value), so 4:4:4 HDR is the same RGB of PQ with BT.2020 primaries.
+    if (cfg->chroma444 && device_type == NV_ENC_DEVICE_TYPE_DIRECTX) e->fmt = NV_ENC_BUFFER_FORMAT_ABGR10;
     if ((s = e->f.nvEncCreateBitstreamBuffer(e->enc, &bs))) FAIL("bitstream buffer");
     e->bitstream = bs.bitstreamBuffer;
     snprintf(err, errlen, "ref invalidation %s, %u long-term frames",
@@ -291,7 +361,8 @@ rm_nvenc *rm_nvenc_open_d3d11(void *device, const rm_nvenc_cfg *cfg, char *err, 
     return nvenc_open(NULL, NV_ENC_DEVICE_TYPE_DIRECTX, device, cfg, err, errlen);
 }
 
-// Register one ID3D11Texture2D* (P010, the encoder's size) as an encoder input.
+// Register one ID3D11Texture2D* of the encoder's size as an encoder input: P010 for 4:2:0, and
+// R10G10B10A2 (R'G'B') for 4:4:4.
 int rm_nvenc_register_d3d11(rm_nvenc *e, void *texture) {
     NV_ENC_REGISTER_RESOURCE r = { NV_ENC_REGISTER_RESOURCE_VER };
     NVENCSTATUS s;
@@ -363,6 +434,17 @@ int rm_nvenc_encode(rm_nvenc *e, int idx, uint64_t timestamp, int force_idr, int
     pic.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
     pic.inputTimeStamp = timestamp;
     pic.encodePicFlags = force_idr ? NV_ENC_PIC_FLAG_FORCEIDR | NV_ENC_PIC_FLAG_OUTPUT_SPSPPS : 0;
+    // The HDR metadata goes with every keyframe: the first picture, and those asked for.
+    if (e->hdr_sei && (force_idr || !e->sent_first)) {
+        if (e->av1) {
+            pic.codecPicParams.av1PicParams.obuPayloadArray = e->obus;
+            pic.codecPicParams.av1PicParams.obuPayloadArrayCnt = 2;
+        } else {
+            pic.codecPicParams.hevcPicParams.pMasteringDisplay = &e->mastering;
+            pic.codecPicParams.hevcPicParams.pMaxCll = &e->light;
+        }
+    }
+    e->sent_first = 1;
     if (e->long_term && e->av1) {
         NV_ENC_PIC_PARAMS_AV1 *p = &pic.codecPicParams.av1PicParams;
         if (mark >= 0) { p->ltrMarkFrame = 1; p->ltrMarkFrameIdx = mark; }
@@ -408,6 +490,48 @@ int rm_nvenc_set_bitrate(rm_nvenc *e, uint32_t bitrate) {
     r.forceIDR = 0;
     if ((s = e->f.nvEncReconfigureEncoder(e->enc, &r))) return nv_fail(e, s, "reconfigure");
     return 0;
+}
+
+// Static refinement: the next frame may take `factor` times the usual bits. begin raises the
+// rate (and the rate buffer with it, one frame's worth) without a keyframe; end puts back what
+// was there. The caller does both around one frame.
+static int reconfigure_now(rm_nvenc *e) {
+    NV_ENC_RECONFIGURE_PARAMS r = { NV_ENC_RECONFIGURE_PARAMS_VER };
+    NVENCSTATUS s;
+    r.reInitEncodeParams = e->init;
+    r.reInitEncodeParams.encodeConfig = &e->config;
+    r.resetEncoder = 0;
+    r.forceIDR = 0;
+    if ((s = e->f.nvEncReconfigureEncoder(e->enc, &r))) return nv_fail(e, s, "reconfigure");
+    return 0;
+}
+
+// With qp != 0 the encoder is put in constant-QP mode at that quantiser for the frame; if it
+// refuses (or qp is 0) the rate is raised `factor` times instead. end puts back the rate
+// control parameters as they were.
+int rm_nvenc_boost_begin(rm_nvenc *e, uint32_t factor, uint32_t qp) {
+    uint64_t up;
+    if (e->boost_from) return 0;
+    e->boost_rc = e->config.rcParams;
+    e->boost_from = 1;
+    if (qp) {
+        NV_ENC_RC_PARAMS *rc = &e->config.rcParams;
+        rc->rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
+        rc->constQP.qpInterP = qp;
+        rc->constQP.qpInterB = qp;
+        rc->constQP.qpIntra = qp;
+        if (!reconfigure_now(e)) return 0;
+        e->config.rcParams = e->boost_rc;
+    }
+    up = (uint64_t)e->boost_rc.averageBitRate * factor;
+    return rm_nvenc_set_bitrate(e, up > 0xffffffffu ? 0xffffffffu : (uint32_t)up);
+}
+
+int rm_nvenc_boost_end(rm_nvenc *e) {
+    if (!e->boost_from) return 0;
+    e->boost_from = 0;
+    e->config.rcParams = e->boost_rc;
+    return reconfigure_now(e);
 }
 
 // Tell the encoder the frame with this timestamp never arrived: later frames must not refer to it.

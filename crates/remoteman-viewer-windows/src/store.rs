@@ -49,8 +49,8 @@ pub fn fit_lines(width: u32, height: u32, scale: f32, most: u32) -> (u32, u32, f
 pub enum Quality {
     /// The decoders in their usual order.
     Automatic,
-    /// Full colour detail (4:4:4) first. Not offered here yet (`Features::sharp_text`); kept
-    /// so that a file written by the Linux viewer reads back as it was.
+    /// Full colour detail (4:4:4) first, even where it is decoded on the processor and may
+    /// not keep up (it was asked for).
     Sharp,
     Hevc,
     Av1,
@@ -93,9 +93,17 @@ impl Quality {
             Quality::Av1 => Some(Codec::Av1),
             _ => None,
         };
+        let full = |m: &Mode| m.chroma == remoteman_core::Chroma::C444;
+        if self == Quality::Sharp {
+            // Full colour detail first; the rest behind it in case the computer can't.
+            out.sort_by_key(|m| !full(m));
+            return out;
+        }
+        // Otherwise 4:4:4 only as the last resort: it costs bitrate and, here, the CPU.
+        out.sort_by_key(full);
         if let Some(codec) = first {
             // A stable sort: the others stay as they were.
-            out.sort_by_key(|m| m.codec != codec);
+            out.sort_by_key(|m| m.codec != codec || full(m));
         }
         out
     }
@@ -131,13 +139,64 @@ pub struct Computer {
     pub clipboard: bool,
     /// Which side of the computer's other displays a second display here is put on.
     pub second_side: Side,
+    /// The hardware addresses of its network cards (`aa:bb:cc:dd:ee:ff`, comma-separated), as
+    /// it last advertised them on this network: what waking it is sent to. The Linux viewer's
+    /// key, `cards`.
+    pub cards: String,
+    /// "Wake it over the network": it may be sent the waking packet.
+    pub wake: bool,
+    /// "Getting in": only a session that is already running, never its login screen (the
+    /// hello's `way_in: attach`; the Linux viewer's key, `way-in`). A computer with one way in
+    /// takes no notice.
+    pub attach_only: bool,
     /// Lines this viewer doesn't use (the Linux viewer's), kept as they were.
     pub other: Vec<(String, String)>,
 }
 
 impl Computer {
     fn new(name: &str, address: &str, os: &str, now: i64, settings: &Settings) -> Self {
-        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: 0, sound: settings.sound, clipboard: settings.clipboard, second_side: Side::Right, other: Vec::new() }
+        // A new computer's display follows the window: as large as the picture's place, and
+        // asked for again when the window changes size (full screen included).
+        Self { name: name.to_owned(), address: address.to_owned(), os: os.to_owned(), paired: now, used: now, placement: Placement::Extend, quality: None, bitrate: 0, max_height: WINDOW, sound: settings.sound, clipboard: settings.clipboard, second_side: Side::Right, cards: String::new(), wake: true, attach_only: false, other: Vec::new() }
+    }
+
+    /// The network cards it can be woken through.
+    pub fn card_list(&self) -> Vec<String> {
+        self.cards.split(',').map(str::trim).filter(|c| !c.is_empty()).map(str::to_owned).collect()
+    }
+}
+
+/// A key on this keyboard that can act as the Windows key (Super, Command) on the computer,
+/// as in the Linux viewer: the Windows key itself always does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stand {
+    /// No other key.
+    Own,
+    RightAlt,
+    RightCtrl,
+    CapsLock,
+}
+
+impl Stand {
+    /// Each with its settings word and its name in the drop-down (the first is the default).
+    pub const ALL: [(Stand, &str, &str); 4] = [(Stand::Own, "own", "Super / Command"), (Stand::RightAlt, "right-alt", "Right Alt"), (Stand::RightCtrl, "right-ctrl", "Right Ctrl"), (Stand::CapsLock, "caps-lock", "Caps Lock")];
+
+    pub fn from_key(key: &str) -> Self {
+        Self::ALL.iter().find(|s| s.1 == key).map_or(Stand::Own, |s| s.0)
+    }
+
+    pub fn key(self) -> &'static str {
+        Self::ALL.iter().find(|s| s.0 == self).map_or("own", |s| s.1)
+    }
+
+    /// The key's USB usage.
+    fn usage(self) -> Option<u16> {
+        match self {
+            Stand::Own => None,
+            Stand::RightAlt => Some(0xE6),
+            Stand::RightCtrl => Some(0xE4),
+            Stand::CapsLock => Some(0x39),
+        }
     }
 }
 
@@ -159,6 +218,8 @@ pub struct Settings {
     pub scroll_reversed: bool,
     /// On a Mac, Ctrl on this keyboard is Command there (and the Windows key is Ctrl).
     pub ctrl_as_command: bool,
+    /// The key that acts as the Windows key (Super, Command) besides the Windows key itself.
+    pub super_key: Stand,
     /// The pointer is held in the window and its raw movement sent.
     pub capture: bool,
     /// What a newly paired computer's sessions start with.
@@ -166,6 +227,22 @@ pub struct Settings {
     pub clipboard: bool,
     /// Where files from a computer go; empty: the Downloads folder.
     pub folder: String,
+    /// Ask for HDR when this monitor is in HDR (and the computer offers it).
+    pub hdr: bool,
+    /// In full screen on a monitor that can vary its refresh, show each frame as it arrives.
+    pub variable_refresh: bool,
+    /// How fast this PC's processor decodes 4:4:4, in millions of pixels a second, as last
+    /// measured in a session (0: never measured).
+    pub cpu_444: u32,
+    /// Touchscreen touches go to the computer as touches, not as the pointer (the Linux
+    /// viewer's key, `touch`).
+    pub touch: bool,
+    /// Game controllers go to the computer.
+    pub gamepad: bool,
+    /// Computers may be lent this PC's microphone and camera; each is still switched on in a
+    /// session by the person here.
+    pub allow_microphone: bool,
+    pub allow_camera: bool,
     /// Lines this viewer doesn't use, kept as they were.
     pub other: Vec<(String, String)>,
 }
@@ -173,6 +250,9 @@ pub struct Settings {
 impl Settings {
     /// The usage to send for a key on this keyboard, for a computer that runs `os`.
     pub fn map_key(&self, usage: u16, os: &str) -> u16 {
+        // A stand-in first: it is then the Windows key like the real one, and goes on
+        // through whatever the Mac setting does to that.
+        let usage = if self.super_key.usage() == Some(usage) { 0xE3 } else { usage };
         let mac = matches!(os.to_ascii_lowercase().as_str(), "macos" | "mac" | "darwin");
         if !(self.ctrl_as_command && mac) {
             return usage;
@@ -187,7 +267,10 @@ impl Settings {
     }
 }
 
-const SETTINGS_KEYS: [&str; 13] = ["capture-pointer", "placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder"];
+/// The picture's own keys (this viewer's alone so far).
+const PICTURE_KEYS: [&str; 3] = ["hdr", "variable-refresh", "cpu-444"];
+
+const SETTINGS_KEYS: [&str; 18] = ["game-controllers", "super-key", "capture-pointer", "placement", "hover-bar", "figures", "fullscreen", "shortcuts", "quality", "match-refresh", "scroll-reversed", "ctrl-as-command", "sound", "clipboard", "folder", "touch", "allow-microphone", "allow-camera"];
 
 pub struct Store {
     dir: PathBuf,
@@ -232,11 +315,19 @@ impl Store {
             match_refresh: yes("match-refresh", true),
             scroll_reversed: yes("scroll-reversed", false),
             ctrl_as_command: yes("ctrl-as-command", false),
+            super_key: Stand::from_key(&get("super-key").unwrap_or_default()),
             capture: yes("capture-pointer", false),
             sound: yes("sound", false),
             clipboard: yes("clipboard", false),
             folder: get("folder").unwrap_or_default(),
-            other: text.lines().filter_map(|l| l.split_once('=')).filter(|(k, _)| !SETTINGS_KEYS.contains(k)).map(|(k, v)| (k.to_owned(), v.to_owned())).collect(),
+            hdr: yes("hdr", true),
+            variable_refresh: yes("variable-refresh", true),
+            cpu_444: get("cpu-444").and_then(|v| v.parse().ok()).unwrap_or(0),
+            touch: yes("touch", false),
+            gamepad: yes("game-controllers", true),
+            allow_microphone: yes("allow-microphone", false),
+            allow_camera: yes("allow-camera", false),
+            other: text.lines().filter_map(|l| l.split_once('=')).filter(|(k, _)| !SETTINGS_KEYS.contains(k) && !PICTURE_KEYS.contains(k)).map(|(k, v)| (k.to_owned(), v.to_owned())).collect(),
         };
         let mut store = Self { dir: dir.to_owned(), computers: Vec::new(), settings, pretend: false };
         if let Ok(text) = std::fs::read_to_string(dir.join("viewer-computers")) {
@@ -259,6 +350,9 @@ impl Store {
                     "sound" => c.sound = value == "yes",
                     "clipboard" => c.clipboard = value == "yes",
                     "second-side" => c.second_side = SIDES.iter().find(|s| s.1 == value).map_or(Side::Right, |s| s.0),
+                    "cards" => c.cards = value.to_owned(),
+                    "wake" => c.wake = value != "no",
+                    "way-in" => c.attach_only = value == "attach",
                     other => c.other.push((other.to_owned(), value.to_owned())),
                 }
             }
@@ -371,7 +465,7 @@ impl Store {
         let clean = |s: &str| s.replace(['\n', '\r'], " ");
         for c in &self.computers {
             out += &format!(
-                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\npicture-lines={}\nsound={}\nclipboard={}\nsecond-side={}\n",
+                "[computer]\nname={}\naddress={}\nos={}\npaired={}\nused={}\nplacement={}\nquality={}\nbitrate={}\npicture-lines={}\nsound={}\nclipboard={}\nsecond-side={}\ncards={}\nwake={}\nway-in={}\n",
                 clean(&c.name),
                 clean(&c.address),
                 clean(&c.os),
@@ -384,6 +478,9 @@ impl Store {
                 if c.sound { "yes" } else { "no" },
                 if c.clipboard { "yes" } else { "no" },
                 SIDES.iter().find(|s| s.0 == c.second_side).map_or("right", |s| s.1),
+                clean(&c.cards),
+                if c.wake { "yes" } else { "no" },
+                if c.attach_only { "attach" } else { "any" },
             );
             for (key, value) in &c.other {
                 out += &format!("{key}={}\n", clean(value));
@@ -400,7 +497,7 @@ impl Store {
         let s = &self.settings;
         let yes = |b: bool| if b { "yes" } else { "no" };
         let mut out = format!(
-            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\ncapture-pointer={}\nsound={}\nclipboard={}\nfolder={}\n",
+            "placement={}\nhover-bar={}\nfigures={}\nfullscreen={}\nshortcuts={}\nquality={}\nmatch-refresh={}\nscroll-reversed={}\nctrl-as-command={}\nsuper-key={}\ncapture-pointer={}\nsound={}\nclipboard={}\nfolder={}\ntouch={}\nallow-microphone={}\nallow-camera={}\ngame-controllers={}\n",
             placement_key(s.placement),
             yes(s.hover_bar),
             yes(s.figures),
@@ -410,11 +507,17 @@ impl Store {
             yes(s.match_refresh),
             yes(s.scroll_reversed),
             yes(s.ctrl_as_command),
+            s.super_key.key(),
             yes(s.capture),
             yes(s.sound),
             yes(s.clipboard),
             s.folder.replace(['\n', '\r'], " "),
+            yes(s.touch),
+            yes(s.allow_microphone),
+            yes(s.allow_camera),
+            yes(s.gamepad),
         );
+        out += &format!("hdr={}\nvariable-refresh={}\ncpu-444={}\n", yes(s.hdr), yes(s.variable_refresh), s.cpu_444);
         for (key, value) in &s.other {
             out += &format!("{key}={value}\n");
         }
@@ -490,5 +593,186 @@ pub fn when(unix: i64) -> String {
             let month = MONTHS[(m - 1).clamp(0, 11) as usize];
             if y == this_year { format!("{d} {month}") } else { format!("{d} {month} {y}") }
         }
+    }
+}
+
+/// How fast a processor is taken to decode HEVC 4:4:4 before this PC's has been measured, in
+/// millions of pixels a second: about half of what one of the fastest desktop processors did
+/// (a Ryzen 9 9950X3D: 228 at 1920x1080, 243 at 2560x1440, 330 at 3840x2160, with the upload,
+/// on one core: NVENC's pictures are one slice each, and frame threads would hold pictures
+/// back). Enough for 1280x720 at 60, not for 1920x1080 at 60 until measured.
+pub const CPU_444_GUESS: u32 = 120;
+
+/// What is kept of a new measurement of the processor's 4:4:4 rate: the lowest seen, since a
+/// rate measured on a larger picture (fewer bits a pixel) must not vouch for a smaller one.
+pub fn kept_cpu_444(kept: u32, measured: u32) -> u32 {
+    if kept == 0 { measured } else { kept.min(measured) }
+}
+
+/// Whether 4:4:4 decoded on the processor keeps up with a picture of `width` x `height` at
+/// `refresh` a second, for a processor that decodes `rate` million pixels a second (measured,
+/// or the guess above): with a fifth of each frame's time left over for the rest of the work.
+pub fn cpu_keeps_up(width: u32, height: u32, refresh: u32, rate: u32) -> bool {
+    let wanted = width as f64 * height as f64 * refresh.max(1) as f64;
+    wanted * 1.25 <= rate as f64 * 1e6
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use remoteman_core::Chroma;
+
+    fn modes() -> Vec<Mode> {
+        vec![Mode { codec: Codec::Av1, chroma: Chroma::C420, depth: 10 }, Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 }, Mode { codec: Codec::Hevc, chroma: Chroma::C444, depth: 10 }]
+    }
+
+    fn settings_with(super_key: Stand, ctrl_as_command: bool) -> Settings {
+        let mut s = Store::load(&std::env::temp_dir().join("remoteman-no-such-settings")).settings;
+        s.super_key = super_key;
+        s.ctrl_as_command = ctrl_as_command;
+        s
+    }
+
+    #[test]
+    fn keys_go_as_they_are_by_default() {
+        let s = settings_with(Stand::Own, false);
+        for os in ["linux", "macos", "windows"] {
+            for usage in [0xE0, 0xE3, 0xE4, 0xE6, 0xE7, 0x39, 0x04] {
+                assert_eq!(s.map_key(usage, os), usage);
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_acts_as_command_on_a_mac_only() {
+        let s = settings_with(Stand::Own, true);
+        // Ctrl and the Windows key swap, each side with its own.
+        assert_eq!((s.map_key(0xE0, "macos"), s.map_key(0xE4, "macos")), (0xE3, 0xE7));
+        assert_eq!((s.map_key(0xE3, "macos"), s.map_key(0xE7, "Darwin")), (0xE0, 0xE4));
+        assert_eq!(s.map_key(0xE6, "macos"), 0xE6);
+        for os in ["linux", "windows", ""] {
+            assert_eq!((s.map_key(0xE0, os), s.map_key(0xE3, os)), (0xE0, 0xE3));
+        }
+    }
+
+    #[test]
+    fn another_key_stands_in_for_the_windows_key() {
+        for (stand, usage) in [(Stand::RightAlt, 0xE6), (Stand::RightCtrl, 0xE4), (Stand::CapsLock, 0x39)] {
+            let s = settings_with(stand, false);
+            // It is the left Windows key (Super, Command) everywhere, and the real one still is.
+            for os in ["linux", "macos", "windows"] {
+                assert_eq!(s.map_key(usage, os), 0xE3);
+                assert_eq!(s.map_key(0xE3, os), 0xE3);
+                assert_eq!(s.map_key(0x04, os), 0x04);
+            }
+        }
+        // The others aren't touched.
+        let s = settings_with(Stand::CapsLock, false);
+        assert_eq!((s.map_key(0xE6, "linux"), s.map_key(0xE4, "linux")), (0xE6, 0xE4));
+    }
+
+    #[test]
+    fn a_stand_in_goes_through_the_mac_swap_too() {
+        // Caps Lock as the Windows key, Ctrl as Command: on a Mac Caps Lock is Ctrl, as in the Linux viewer.
+        let s = settings_with(Stand::CapsLock, true);
+        assert_eq!(s.map_key(0x39, "macos"), 0xE0);
+        assert_eq!(s.map_key(0x39, "linux"), 0xE3);
+        // Right Ctrl as the Windows key: it is no Ctrl any more, and so no Command.
+        let s = settings_with(Stand::RightCtrl, true);
+        assert_eq!(s.map_key(0xE4, "macos"), 0xE0);
+        assert_eq!(s.map_key(0xE0, "macos"), 0xE3);
+    }
+
+    #[test]
+    fn the_stand_in_is_kept_in_the_settings_file() {
+        let dir = std::env::temp_dir().join(format!("remoteman-stand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = Store::load(&dir);
+        assert_eq!(store.settings.super_key, Stand::Own);
+        store.settings.super_key = Stand::RightAlt;
+        store.save_settings();
+        let text = std::fs::read_to_string(dir.join("viewer-settings")).unwrap();
+        assert!(text.contains("super-key=right-alt\n"));
+        assert_eq!(Store::load(&dir).settings.super_key, Stand::RightAlt);
+        // A word nobody knows is the Windows key alone.
+        std::fs::write(dir.join("viewer-settings"), "super-key=f13\n").unwrap();
+        assert_eq!(Store::load(&dir).settings.super_key, Stand::Own);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_way_in_is_kept_per_computer_as_the_linux_viewer_keeps_it() {
+        let dir = std::env::temp_dir().join(format!("remoteman-wayin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("viewer-computers"), "[computer]\nname=a\naddress=a:7791\nway-in=attach\n[computer]\nname=b\naddress=b:7791\nway-in=any\n[computer]\nname=c\naddress=c:7791\n").unwrap();
+        let mut store = Store::load(&dir);
+        let by = |s: &Store, n: &str| s.computers.iter().find(|c| c.name == n).map(|c| c.attach_only);
+        assert_eq!((by(&store, "a"), by(&store, "b"), by(&store, "c")), (Some(true), Some(false), Some(false)));
+        store.update("b:7791", |c| c.attach_only = true);
+        let again = Store::load(&dir);
+        assert_eq!((by(&again, "a"), by(&again, "b"), by(&again, "c")), (Some(true), Some(true), Some(false)));
+        // It is a key of its own, not one of the lines kept as they were.
+        assert!(again.computers.iter().all(|c| c.other.iter().all(|(k, _)| k != "way-in")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_processor_keeps_up_where_its_rate_allows() {
+        // The guess: 720p60, not 1080p60.
+        assert!(cpu_keeps_up(1280, 720, 60, CPU_444_GUESS));
+        assert!(!cpu_keeps_up(1920, 1080, 60, CPU_444_GUESS));
+        // This PC's processor as measured at 1080p (228): 1080p60, not 1080p120, not 1440p60
+        // with the fifth to spare, never 4K, nor its monitors' 240 Hz.
+        assert!(cpu_keeps_up(1920, 1080, 60, 228));
+        assert!(!cpu_keeps_up(1920, 1080, 120, 228));
+        assert!(!cpu_keeps_up(2560, 1440, 60, 228));
+        assert!(!cpu_keeps_up(3840, 2160, 60, 228));
+        assert!(!cpu_keeps_up(1920, 1080, 240, 228));
+        // No rate: nothing.
+        assert!(!cpu_keeps_up(640, 480, 30, 0));
+    }
+
+    #[test]
+    fn a_rate_measured_on_a_larger_picture_does_not_vouch_for_a_smaller_one() {
+        // 4K measured first (330 a microsecond's worth), then 1080p (228): 228 is kept, and a
+        // 1080p at 120 (which measured about 105 a second) isn't offered.
+        let kept = kept_cpu_444(kept_cpu_444(0, 330), 228);
+        assert_eq!(kept, 228);
+        assert!(!cpu_keeps_up(1920, 1080, 120, kept));
+        assert_eq!(kept_cpu_444(228, 330), 228);
+    }
+
+    #[test]
+    fn sharp_text_puts_four_four_four_first_and_automatic_last() {
+        let sharp = Quality::Sharp.order(&modes());
+        assert_eq!(sharp[0].chroma, Chroma::C444);
+        let auto = Quality::Automatic.order(&modes());
+        assert_eq!(auto.last().unwrap().chroma, Chroma::C444);
+        let hevc = Quality::Hevc.order(&modes());
+        assert_eq!((hevc[0].codec, hevc[0].chroma), (Codec::Hevc, Chroma::C420));
+    }
+
+    #[test]
+    fn the_picture_settings_are_kept_and_read_back() {
+        let dir = std::env::temp_dir().join(format!("remoteman-store-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file from before these keys: HDR and variable refresh start on, the rate unknown,
+        // and a line of the Linux viewer's is kept.
+        std::fs::write(dir.join("viewer-settings"), "figures=yes\npicture-lines=1080\n").unwrap();
+        let mut store = Store::load(&dir);
+        assert!(store.settings.hdr && store.settings.variable_refresh);
+        assert_eq!(store.settings.cpu_444, 0);
+        store.settings.hdr = false;
+        store.settings.variable_refresh = false;
+        store.settings.cpu_444 = 287;
+        store.save_settings();
+        let again = Store::load(&dir);
+        assert!(!again.settings.hdr && !again.settings.variable_refresh);
+        assert_eq!(again.settings.cpu_444, 287);
+        assert!(again.settings.figures);
+        assert_eq!(again.settings.other, vec![("picture-lines".to_owned(), "1080".to_owned())]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

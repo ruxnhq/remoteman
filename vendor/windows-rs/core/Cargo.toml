@@ -1,0 +1,30 @@
+[package]
+name = "windows-core"
+version = "0.101.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "Core type support for COM and Windows"
+repository = "https://github.com/microsoft/windows-rs"
+categories = ["os::windows-apis"]
+readme = "readme.md"
+
+[dependencies]
+windows-implement = { version = "0.101.0", path = "../implement", default-features = false, optional = true }
+windows-interface = { version = "0.101.0", path = "../interface", default-features = false, optional = true }
+windows-link = { version = "0.100.1", path = "../link", default-features = false }
+windows-result = { version = "0.100.1", path = "../result", default-features = false }
+windows-strings = { version = "0.100.1", path = "../strings", default-features = false }
+
+[features]
+default = ["std", "proc-macros"]
+std = ["windows-result/std", "windows-strings/std"]
+proc-macros = ["dep:windows-implement", "dep:windows-interface"]
+
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = []
+
+[lints.rust]
+unexpected_cfgs = { level = 'warn', check-cfg = ['cfg(windows_slim_errors, windows_cast_diagnostics)'] }

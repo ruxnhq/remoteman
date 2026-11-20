@@ -1,5 +1,5 @@
-//! From samples as PipeWire delivers them, in pieces of any size, to packets of one frame each,
-//! leaving out the frames of a silence.
+//! From samples as PipeWire (or WASAPI, in the Windows viewer) delivers them, in pieces of any
+//! size, to packets of one frame each, leaving out the frames of a silence.
 
 use anyhow::Result;
 
@@ -17,7 +17,7 @@ pub(crate) const SILENCE_FRAMES: u32 = 10;
 /// continuation: the stream stopped in between.
 const BREAK_US: i64 = 20_000;
 
-pub(crate) struct Framer {
+pub struct Framer {
     encoder: Encoder,
     channels: usize,
     /// Samples that don't fill a frame yet.
@@ -31,7 +31,7 @@ pub(crate) struct Framer {
 }
 
 impl Framer {
-    pub(crate) fn new(channels: Channels, on_packet: Box<dyn FnMut(Packet) + Send>) -> Result<Self> {
+    pub fn new(channels: Channels, on_packet: Box<dyn FnMut(Packet) + Send>) -> Result<Self> {
         Ok(Self {
             encoder: Encoder::new(channels)?,
             channels: channels.count(),
@@ -45,7 +45,7 @@ impl Framer {
 
     /// Take in interleaved samples, the first of them captured at `first_us`, and hand over a
     /// packet for every frame they complete.
-    pub(crate) fn feed(&mut self, samples: &[f32], first_us: u64) {
+    pub fn feed(&mut self, samples: &[f32], first_us: u64) {
         let first_us = first_us as i64;
         // Left over from before the stream stopped: by now it is old sound, and playing it in
         // front of the new one would be worse than losing those last milliseconds.

@@ -1,0 +1,155 @@
+windows_core::link!("ole32.dll" "system" fn CoCreateFreeThreadedMarshaler(punkouter : *mut core::ffi::c_void, ppunkmarshal : *mut *mut core::ffi::c_void) -> windows_core::HRESULT);
+windows_core::link!("ole32.dll" "system" fn CoCreateInstance(rclsid : *const IID, punkouter : *mut core::ffi::c_void, dwclscontext : DWORD, riid : *const IID, ppv : *mut LPVOID) -> windows_core::HRESULT);
+windows_core::link!("ole32.dll" "system" fn CoIncrementMTAUsage(pcookie : *mut CO_MTA_USAGE_COOKIE) -> windows_core::HRESULT);
+windows_core::link!("ole32.dll" "system" fn CoInitializeEx(pvreserved : LPVOID, dwcoinit : DWORD) -> windows_core::HRESULT);
+windows_core::link!("ole32.dll" "system" fn CoTaskMemAlloc(cb : SIZE_T) -> LPVOID);
+windows_core::link!("ole32.dll" "system" fn CoTaskMemFree(pv : LPVOID));
+windows_core::link!("ole32.dll" "system" fn CoUninitialize());
+windows_core::link!("kernel32.dll" "system" fn EncodePointer(ptr : PVOID) -> PVOID);
+windows_core::link!("kernel32.dll" "system" fn FreeLibrary(hlibmodule : HMODULE) -> windows_core::BOOL);
+windows_core::link!("kernel32.dll" "system" fn GetProcAddress(hmodule : HMODULE, lpprocname : windows_core::PCSTR) -> FARPROC);
+windows_core::link!("kernel32.dll" "system" fn LoadLibraryExA(lplibfilename : windows_core::PCSTR, hfile : HANDLE, dwflags : DWORD) -> HMODULE);
+windows_core::link!("api-ms-win-core-winrt-l1-1-0.dll" "system" fn RoGetActivationFactory(activatableclassid : *mut core::ffi::c_void, iid : *const IID, factory : *mut *mut core::ffi::c_void) -> windows_core::HRESULT);
+windows_core::link!("ole32.dll" "system" fn RoGetAgileReference(options : AgileReferenceOptions, riid : *const IID, punk : *mut core::ffi::c_void, ppagilereference : *mut *mut core::ffi::c_void) -> windows_core::HRESULT);
+windows_core::link!("rpcrt4.dll" "system" fn UuidCreate(uuid : *mut UUID) -> windows_core::RPC_STATUS);
+pub const AGILEREFERENCE_DEFAULT: AgileReferenceOptions = 0;
+pub type AgileReferenceOptions = i32;
+pub type CLSCTX = i32;
+pub const CLSCTX_INPROC_SERVER: CLSCTX = 1;
+pub type COINIT = i32;
+pub const COINIT_APARTMENTTHREADED: COINIT = 2;
+pub const CO_E_NOTINITIALIZED: windows_core::HRESULT = windows_core::HRESULT(0x800401F0_u32 as _);
+pub type CO_MTA_USAGE_COOKIE = *mut CO_MTA_USAGE_COOKIE__;
+#[repr(C, packed(8))]
+#[derive(Clone, Copy, Default)]
+pub struct CO_MTA_USAGE_COOKIE__ {
+    pub unused: i32,
+}
+pub type DWORD = u32;
+pub const E_INVALIDARG: windows_core::HRESULT = windows_core::HRESULT(0x80070057_u32 as _);
+pub const E_NOINTERFACE: windows_core::HRESULT = windows_core::HRESULT(0x80004002_u32 as _);
+pub const E_POINTER: windows_core::HRESULT = windows_core::HRESULT(0x80004003_u32 as _);
+#[cfg(target_arch = "x86")]
+pub type FARPROC = Option<unsafe extern "system" fn() -> i32>;
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "arm64ec",
+    target_arch = "x86_64"
+))]
+pub type FARPROC = Option<unsafe extern "system" fn() -> INT_PTR>;
+pub type HANDLE = *mut core::ffi::c_void;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HINSTANCE__ {
+    pub unused: i32,
+}
+pub type HMODULE = *mut HINSTANCE__;
+windows_core::imp::define_interface!(
+    IAgileObject,
+    IAgileObject_Vtbl,
+    0x94ea2b94_e9cc_49e0_c0ff_ee64ca8f5b90
+);
+windows_core::imp::interface_hierarchy!(IAgileObject, windows_core::IUnknown);
+#[repr(C)]
+pub struct IAgileObject_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IAgileReference,
+    IAgileReference_Vtbl,
+    0xc03f6a43_65a4_9818_987e_e0b810d2a6f2
+);
+windows_core::imp::interface_hierarchy!(IAgileReference, windows_core::IUnknown);
+impl IAgileReference {
+    pub(crate) unsafe fn Resolve<T>(&self) -> windows_core::Result<T>
+    where
+        T: windows_core::Interface,
+    {
+        let mut result__ = core::ptr::null_mut();
+        unsafe {
+            (windows_core::Interface::vtable(self).Resolve)(
+                windows_core::Interface::as_raw(self),
+                &T::IID,
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::from_abi(result__))
+        }
+    }
+}
+#[repr(C)]
+pub struct IAgileReference_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+    pub Resolve: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *const IID,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+pub type IID = windows_core::GUID;
+#[allow(dead_code)]
+pub type INT_PTR = isize;
+windows_core::imp::define_interface!(
+    IWeakReference,
+    IWeakReference_Vtbl,
+    0x00000037_0000_0000_c000_000000000046
+);
+windows_core::imp::interface_hierarchy!(IWeakReference, windows_core::IUnknown);
+impl IWeakReference {
+    pub(crate) unsafe fn Resolve(
+        &self,
+        riid: *const IID,
+        objectreference: *mut Option<windows_core::IInspectable>,
+    ) -> windows_core::HRESULT {
+        unsafe {
+            (windows_core::Interface::vtable(self).Resolve)(
+                windows_core::Interface::as_raw(self),
+                riid,
+                objectreference as _,
+            )
+        }
+    }
+}
+#[repr(C)]
+pub struct IWeakReference_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+    pub Resolve: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *const IID,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IWeakReferenceSource,
+    IWeakReferenceSource_Vtbl,
+    0x00000038_0000_0000_c000_000000000046
+);
+windows_core::imp::interface_hierarchy!(IWeakReferenceSource, windows_core::IUnknown);
+impl IWeakReferenceSource {
+    pub(crate) unsafe fn GetWeakReference(&self) -> windows_core::Result<IWeakReference> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).GetWeakReference)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::from_abi(result__))
+        }
+    }
+}
+#[repr(C)]
+pub struct IWeakReferenceSource_Vtbl {
+    pub base__: windows_core::IUnknown_Vtbl,
+    pub GetWeakReference: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+pub const JSCRIPT_E_CANTEXECUTE: windows_core::HRESULT = windows_core::HRESULT(0x89020001_u32 as _);
+pub const LOAD_LIBRARY_SEARCH_DEFAULT_DIRS: i32 = 4096;
+pub type LPVOID = *mut core::ffi::c_void;
+pub type PVOID = *mut core::ffi::c_void;
+pub const REGDB_E_CLASSNOTREG: windows_core::HRESULT = windows_core::HRESULT(0x80040154_u32 as _);
+pub const RPC_E_DISCONNECTED: windows_core::HRESULT = windows_core::HRESULT(0x80010108_u32 as _);
+pub type SIZE_T = usize;
+pub const S_OK: windows_core::HRESULT = windows_core::HRESULT(0x0_u32 as _);
+pub type UUID = windows_core::GUID;

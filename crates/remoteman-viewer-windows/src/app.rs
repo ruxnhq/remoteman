@@ -50,6 +50,10 @@ pub enum Dialog {
     /// owner confirms there before `until`.
     Code { name: String, code: String, until: Instant },
     Paired { target: Target, key: String },
+    /// The computer asks for a code from an authenticator app (`left`: tries left, after a wrong
+    /// one). Answered with `DialogOk`; `remember` (the locked page's flag) is "don't ask again
+    /// on this device for 30 days".
+    SecondFactor { name: String, left: Option<u32> },
     Forget(String),
     Address { address: String, problem: Option<String> },
     About,
@@ -79,6 +83,10 @@ pub enum Choice {
     /// How large a picture to ask a computer for.
     Size(String),
     Scroll,
+    /// The key that acts as the Windows key (Super, Command) besides the Windows key itself.
+    WindowsKey,
+    /// How a computer with more than one way in is entered.
+    WayIn(String),
     /// Which side of the computer's displays a second display goes.
     Side(String),
     /// The pointer follows this one, or is captured.
@@ -93,6 +101,9 @@ pub enum Flag {
     Shortcuts,
     Sound,
     Clipboard,
+    /// HDR where this monitor is in HDR, and variable refresh in full screen (the engine's).
+    Hdr,
+    VariableRefresh,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -149,6 +160,13 @@ pub enum Msg {
     ToggleRemember,
     /// Choose where files from a computer go.
     PickFolder,
+    /// Lend the computer this PC's microphone or camera, or stop (`media.rs`).
+    ToggleMicrophone,
+    ToggleCamera,
+    /// Flip a switch `App::set_option` knows (with an address: one computer's).
+    Set(&'static str, Option<String>),
+    /// Send this computer the waking packet, then connect (`nearby.rs`).
+    Wake(String),
 }
 
 /// What only the window can do.
@@ -158,6 +176,8 @@ pub enum Effect {
     Maximise,
     Close,
     Fullscreen(bool),
+    /// The pointer reached the top edge of full screen: the app brings out its bar.
+    BarEdge,
     Title(String),
     /// Let go of every key the other computer was told is down.
     ReleaseKeys,
@@ -217,6 +237,9 @@ pub struct Session {
     pub clipboard_on: bool,
     /// There is a second display, in a window of its own.
     pub second_on: bool,
+    /// The computer is lent this PC's microphone, and its camera (`media.rs`).
+    pub mic_on: bool,
+    pub camera_on: bool,
     /// The text that last came from the computer's clipboard: not to be sent back. And the
     /// text last sent: Windows says "the clipboard changed" several times for one copy.
     from_computer: Option<String>,
@@ -229,11 +252,18 @@ pub struct Session {
 impl Session {
     #[allow(clippy::too_many_arguments)]
     pub fn new(client: Option<Arc<Client>>, shared: Arc<Shared>, target: Target, features: Vec<String>, display: Display, quality: Quality, bitrate: u32, os: String) -> Self {
-        Self { client, shared, target, features, display, quality, bitrate, began: Instant::now(), os, sound_on: false, clipboard_on: false, second_on: false, from_computer: None, sent_copy: None, asked: None, wanted: (0, 0) }
+        Self { client, shared, target, features, display, quality, bitrate, began: Instant::now(), os, sound_on: false, clipboard_on: false, second_on: false, mic_on: false, camera_on: false, from_computer: None, sent_copy: None, asked: None, wanted: (0, 0) }
     }
 
     pub fn offers(&self, feature: &str) -> bool {
         self.features.iter().any(|f| f == feature)
+    }
+
+    /// The computer left `input` out of what it offers this device: the owner allows it to see
+    /// the screen and nothing more. Nothing is sent to control it then (a made-up or played
+    /// session has no computer and is never view-only).
+    pub fn view_only(&self) -> bool {
+        self.client.is_some() && !self.offers("input")
     }
 }
 
@@ -285,9 +315,10 @@ pub struct Summary {
 }
 
 /// The steps of the bitrate limit, in megabits a second; the last is no limit.
-pub const BITRATES: [u32; 12] = [5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 0];
+pub const BITRATES: [u32; 15] = [5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 150, 300, 500, 0];
 /// The ones the drop-down of a computer's settings offers.
-pub const BITRATE_CHOICES: [u32; 6] = [0, 10, 20, 40, 60, 100];
+/// The same steps as the Linux viewer's "Bitrate, at most".
+pub const BITRATE_CHOICES: [u32; 7] = [0, 20, 50, 100, 150, 300, 500];
 
 pub struct App {
     pub args: Args,
@@ -327,6 +358,11 @@ pub struct App {
     /// in again; and how far out it is drawn (0 to 1).
     pub bar_out: bool,
     bar_until: Option<Instant>,
+    /// Full screen's bar and menus are the app's WinUI ones (in a window of their own at the top
+    /// edge) rather than the kit's: the kit draws none of them, and the pointer reaching the top edge
+    /// is told to the app (`Effect::BarEdge`). `edge`: it is at the top edge now.
+    pub native_bar: bool,
+    edge: bool,
     pub bar_slide: f32,
     pub figures: Figures,
     last_second: Instant,
@@ -365,6 +401,11 @@ pub struct App {
     pub remote_cursor: Option<Arc<remoteman_core::CursorShape>>,
     /// A line of news over the window, until it has been read.
     pub toast: Option<(String, Instant)>,
+    /// The picture has a place of its own (the WinUI 3 app's panel, `engine.rs`) and the
+    /// size the window is said to have is that place's: the bar is not in it.
+    pub panel: bool,
+    /// The computers seen on this network (`nearby.rs`).
+    pub sightings: crate::nearby::Sightings,
 }
 
 fn mode_word(mode: &Mode) -> &'static str {
@@ -405,6 +446,8 @@ impl App {
             reach: HashMap::new(),
             bar_out: false,
             bar_until: None,
+            native_bar: false,
+            edge: false,
             bar_slide: 0.0,
             figures: Figures::default(),
             last_second: now,
@@ -427,7 +470,10 @@ impl App {
             captured: false,
             remote_cursor: None,
             toast: None,
+            panel: false,
             shown_format: None,
+            // Not for pictures of the window: what is really nearby isn't to be in them.
+            sightings: crate::nearby::Sightings::start(args.ui.is_none().then(|| scene.clone()), args.browse.as_deref()),
             args,
             gpu,
             scene,
@@ -454,6 +500,16 @@ impl App {
         self.session.as_ref().and_then(|s| s.client.as_ref())
     }
 
+    /// The client to send input to: none when the computer allows this device to view only.
+    pub fn input_client(&self) -> Option<&Arc<Client>> {
+        if self.session.as_ref().is_some_and(|s| s.view_only()) { None } else { self.client() }
+    }
+
+    /// The session is view only (see [`Session::view_only`]).
+    pub fn view_only(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.view_only())
+    }
+
     /// The session's bar is not part of the window but comes out over the picture.
     pub fn bar_hidden(&self) -> bool {
         self.fullscreen || self.store.settings.hover_bar
@@ -474,6 +530,10 @@ impl App {
 
     /// What is known of a computer before trying it, as far as this build may say.
     pub fn reach_of(&self, address: &str) -> Option<Reach> {
+        // Seen on this network now (DNS-SD): it is there, whatever the last try found.
+        if FEATURES.presence && self.seen(address).is_some() {
+            return Some(Reach::Online);
+        }
         self.reach.get(address).copied().filter(|r| FEATURES.presence || *r == Reach::Unreachable)
     }
 
@@ -502,7 +562,7 @@ impl App {
                 if !self.maximised && (w < 1224.0 || h < 744.0) {
                     (w, h) = (1224.0, 744.0);
                 }
-                if !self.store.settings.hover_bar {
+                if !self.store.settings.hover_bar && !self.panel {
                     h -= crate::session::BAR;
                 }
                 (w * self.scale, h * self.scale)
@@ -520,14 +580,19 @@ impl App {
             // A size from the command line is a test's: pixels as they are.
             (w, h, scale) = (size.0, size.1, 1.0);
         }
-        let most = address.and_then(|a| self.store.find(a)).map_or(0, |c| c.max_height);
+        // (A computer not paired yet gets what a new one is given: the window's size.)
+        let most = address.and_then(|a| self.store.find(a)).map_or(WINDOW, |c| c.max_height);
         let (mut w, mut h, scale) = fit_lines(w, h, scale, most);
         // (A mirrored display is the computer's own size whatever is asked.)
         if most == WINDOW && self.args.size.is_none() && placement != Placement::Mirror {
             (w, h) = self.picture_pixels();
         }
         let refresh = if self.store.settings.match_refresh { self.monitor.2.clamp(30, 240) } else { 60 };
-        Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement, hdr: false, headroom: 0.0 }
+        // HDR where this screen shows it (or a test says so) and the switch is on; the host
+        // then may send PQ.
+        let hdr = FEATURES.hdr && self.store.settings.hdr && self.scene.screen_hdr.load(Ordering::Relaxed);
+        let headroom = if hdr { f32::from_bits(self.scene.headroom.load(Ordering::Relaxed)) } else { 0.0 };
+        Display { width: w & !1, height: h & !1, scale, refresh: self.args.refresh.unwrap_or(refresh), placement, hdr, headroom }
     }
 
     /// While connected with "The window's size": when the window has changed size and been
@@ -554,6 +619,66 @@ impl App {
                 client.send_message(Message::Configure { display: Some(display), bitrate: None, decoders: None });
             }
         }
+    }
+
+    /// HDR is asked for while the switch is on and this monitor is in HDR. When that changes in
+    /// a session (the switch, Windows' own HDR switch, the window taken to another monitor),
+    /// the computer is asked again with `configure`, and its picture starts afresh. Not while
+    /// there is a second display: a display made afresh takes it away; the change waits until
+    /// it is gone (this is looked at once a second).
+    pub fn follow_hdr(&mut self) {
+        let Some(s) = self.session.as_ref().filter(|s| !s.second_on) else { return };
+        let (address, placement) = (s.target.address.clone(), s.display.placement);
+        let fresh = self.display_for(Some(&address), placement);
+        let s = self.session.as_mut().unwrap();
+        if fresh.hdr == s.display.hdr {
+            return;
+        }
+        (s.display.hdr, s.display.headroom) = (fresh.hdr, fresh.headroom);
+        if !s.offers("hdr") {
+            // It sends SDR either way.
+            return;
+        }
+        let Some(client) = s.client.as_ref().filter(|_| s.offers("configure")) else {
+            say!("HDR {}: from the next session (this computer can't change its picture during one)", if fresh.hdr { "on" } else { "off" });
+            return;
+        };
+        let mut display = s.display;
+        if let Some((w, h)) = s.asked {
+            (display.width, display.height) = (w, h);
+        }
+        say!("HDR {} asked for (headroom {:.1})", if display.hdr { "on" } else { "off" }, display.headroom);
+        client.send_message(Message::Configure { display: Some(display), bitrate: None, decoders: None });
+    }
+
+    /// How fast this PC's processor is taken to decode 4:4:4: as measured, or the guess.
+    pub fn cpu_444_rate(&self) -> (u32, bool) {
+        match self.store.settings.cpu_444 {
+            0 => (crate::store::CPU_444_GUESS, false),
+            measured => (measured, true),
+        }
+    }
+
+    /// Why 4:4:4 is left out of what is offered for `display` with `quality`, if it is: it is
+    /// decoded on the processor here (this FFmpeg has no D3D11VA path for it), and only offered
+    /// unasked where the processor keeps up. "Sharp text" asks for it whatever the speed.
+    pub fn withholds_444(&self, display: &Display, quality: Quality) -> Option<String> {
+        let mode = self.decoders.iter().find(|m| m.chroma == remoteman_core::Chroma::C444)?;
+        if quality == Quality::Sharp || !crate::decode::on_processor(*mode) {
+            return None;
+        }
+        let (rate, measured) = self.cpu_444_rate();
+        if crate::store::cpu_keeps_up(display.width, display.height, display.refresh, rate) {
+            return None;
+        }
+        Some(format!(
+            "decoded on the processor here, which manages about {rate} million pixels a second ({}); {} x {} at {} Hz is {:.0}",
+            if measured { "measured" } else { "a guess until measured" },
+            display.width,
+            display.height,
+            display.refresh,
+            display.width as f64 * display.height as f64 * display.refresh as f64 / 1e6
+        ))
     }
 
     /// The usage to send for a key on this keyboard.
@@ -642,6 +767,11 @@ impl App {
         self.give_up();
         let (placement, quality, _) = self.choices(&target.address);
         let display = self.display_for(Some(&target.address), placement);
+        let mut decoders = quality.order(&self.decoders);
+        if let Some(why) = self.withholds_444(&display, quality) {
+            say!("4:4:4 not offered: {why}");
+            decoders.retain(|m| m.chroma != remoteman_core::Chroma::C444);
+        }
         let (shared, feed) = match crate::stream::start(&self.gpu, &self.scene) {
             Ok(started) => started,
             Err(e) => return self.failed(&target, &format!("{e:#}"), pairing),
@@ -652,16 +782,17 @@ impl App {
             name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows".into()),
             pair,
             display,
-            decoders: quality.order(&self.decoders),
+            decoders,
             test_drop_one_in: None,
             test_delay_lost_ms: None,
             cursor: true,
             // Used once: a password that didn't work is typed again.
             unlock: self.unlock.take(),
-            attach_only: false,
+            // "Getting in": only a session already running, never a login screen.
+            attach_only: self.store.find(&target.address).is_some_and(|c| c.attach_only),
         };
         *shared.folder.lock().unwrap() = self.store.receive_folder();
-        say!("connecting to {} for {}x{} at {} Hz", target.address, display.width, display.height, display.refresh);
+        say!("connecting to {} for {}x{} at {} Hz{}", target.address, display.width, display.height, display.refresh, if display.hdr { format!(", HDR (headroom {:.1})", display.headroom) } else { String::new() });
         let (id, tx, scene) = (self.attempt_id, self.results.0.clone(), self.scene.clone());
         let _ = std::thread::Builder::new().name("connect".into()).spawn(move || {
             let result = Client::connect(options, feed).map_err(|e| format!("{e:#}"));
@@ -732,6 +863,14 @@ impl App {
             self.dialog = Some(Dialog::Code { name: host_part(&target.address).to_owned(), code, until: Instant::now() + Duration::from_secs(seconds as u64) });
             self.dirty = true;
         }
+        if let Some(left) = self.session.as_ref().and_then(|s| s.shared.second_factor.lock().unwrap().take()) {
+            say!("the computer asks for a code from an authenticator app{}", left.map(|n| format!(" (wrong; {n} tries left)")).unwrap_or_default());
+            let name = self.session.as_ref().map(|s| s.target.name.clone()).unwrap_or_default();
+            self.dialog = Some(Dialog::SecondFactor { name, left });
+            self.fields.insert(id("second.code"), Field::default());
+            self.focus(id("second.code"), false);
+            self.dirty = true;
+        }
         if let Some(features) = self.session.as_ref().and_then(|s| s.shared.features.lock().unwrap().take()) {
             say!("the computer now offers {features:?}");
             self.session.as_mut().unwrap().features = features;
@@ -799,6 +938,13 @@ impl App {
     fn hold(&mut self, client: Client, shared: Arc<Shared>, target: Target, display: Display) {
         let (_, quality, bitrate) = self.choices(&target.address);
         let (features, os) = (client.host_features.clone(), client.host_os.clone());
+        // A computer that wants a code from an authenticator app says so through this, at once if
+        // it already has: `poll` shows the dialog.
+        let asked = shared.clone();
+        client.on_second_factor(move |left| {
+            *asked.second_factor.lock().unwrap() = Some(left);
+            asked.scene.wake_window();
+        });
         self.session = Some(Session::new(Some(Arc::new(client)), shared, target, features, display, quality, bitrate, os));
     }
 
@@ -852,6 +998,16 @@ impl App {
         if s.clipboard_on && !s.offers("clipboard") {
             s.clipboard_on = false;
         }
+        let (mic, camera) = (s.mic_on && !s.offers("mic"), s.camera_on && !s.offers("camera"));
+        // The window says whether this device may control the computer.
+        let title = format!("{}{} - remoteman", s.target.name, if s.view_only() { " (view only)" } else { "" });
+        if mic {
+            self.set_microphone(false);
+        }
+        if camera {
+            self.set_camera(false);
+        }
+        self.effects.push(Effect::Title(title));
     }
 
     /// Play the computer's sound here, or stop.
@@ -1121,7 +1277,8 @@ impl App {
         *self.scene.session.lock().unwrap() = Some(s.shared.clone());
         self.scene.poke();
         self.effects.push(Effect::ForgetCursor);
-        self.effects.push(Effect::Title(format!("{name} - remoteman")));
+        let view_only = self.session.as_ref().is_some_and(|s| s.view_only());
+        self.effects.push(Effect::Title(format!("{name}{} - remoteman", if view_only { " (view only)" } else { "" })));
         // Room for the picture, if the list's window was small.
         if !self.maximised && !self.fullscreen && self.args.host.is_none() && (self.size.0 < 1224.0 || self.size.1 < 744.0) && self.front_size.is_none() {
             self.front_size = Some(self.size);
@@ -1163,6 +1320,9 @@ impl App {
     pub fn stop(&mut self, reason: Option<&str>) {
         let Some(s) = &self.session else { return };
         let (target, shown) = (s.target.clone(), s.shared.presented_total.load(Ordering::Relaxed) > 0);
+        if matches!(self.dialog, Some(Dialog::SecondFactor { .. })) {
+            self.dialog = None;
+        }
         self.end(false);
         self.summary.as_mut().unwrap().ended = reason.map(str::to_owned);
         match reason {
@@ -1197,6 +1357,7 @@ impl App {
             ended: None,
         });
         *s.shared.sound.lock().unwrap() = None;
+        crate::media::stop_all(&s.shared);
         if s.second_on {
             if let Some(second) = &s.shared.second {
                 say!("second display: {} decoded, {} presented", second.decoded_total.load(Ordering::Relaxed), second.presented_total.load(Ordering::Relaxed));
@@ -1315,9 +1476,24 @@ impl App {
                     Flag::Shortcuts => &mut s.shortcuts,
                     Flag::Sound => &mut s.sound,
                     Flag::Clipboard => &mut s.clipboard,
+                    Flag::Hdr => &mut s.hdr,
+                    Flag::VariableRefresh => &mut s.variable_refresh,
                 };
                 *field = !*field;
+                let now = *field;
                 self.store.save_settings();
+                say!("setting: {} is {}", match flag {
+                    Flag::MatchRefresh => "match refresh",
+                    Flag::CtrlAsCommand => "Ctrl as Command",
+                    Flag::Shortcuts => "system shortcuts",
+                    Flag::Sound => "sound",
+                    Flag::Clipboard => "clipboard",
+                    Flag::Hdr => "HDR",
+                    Flag::VariableRefresh => "variable refresh rate",
+                }, if now { "on" } else { "off" });
+                if flag == Flag::Hdr {
+                    self.follow_hdr();
+                }
             }
             Msg::Toggle(flag, Some(address)) => self.store.update(&address, |c| match flag {
                 Flag::Sound => c.sound = !c.sound,
@@ -1359,7 +1535,7 @@ impl App {
             Msg::Disconnect => self.stop(None),
             Msg::SendKeys(codes) => {
                 self.menu = None;
-                if let Some(client) = self.client() {
+                if let Some(client) = self.input_client() {
                     let usages: Vec<u16> = codes.iter().filter_map(|c| keys::linux_to_hid(*c)).collect();
                     for usage in &usages {
                         client.send(Event::Key { usage: *usage, down: true });
@@ -1417,6 +1593,18 @@ impl App {
                 self.menu = None;
                 self.choose(choice, n);
             }
+            Msg::ToggleMicrophone => {
+                let on = self.session.as_ref().is_some_and(|s| s.mic_on);
+                self.set_microphone(!on);
+            }
+            Msg::ToggleCamera => {
+                let on = self.session.as_ref().is_some_and(|s| s.camera_on);
+                self.set_camera(!on);
+            }
+            Msg::Set(what, address) => {
+                self.set_option(what, None, address.as_deref());
+            }
+            Msg::Wake(address) => self.wake(&address),
         }
     }
 
@@ -1438,7 +1626,8 @@ impl App {
     /// What a drop-down offers: each choice, whether it can be chosen, and which is chosen now.
     pub fn options(&self, choice: &Choice) -> (Vec<(String, bool)>, usize) {
         let decodes = |word: &str| self.decoders.iter().any(|m| mode_word(m) == word);
-        let qualities = [(Quality::Automatic, true), (Quality::Sharp, FEATURES.sharp_text), (Quality::Hevc, decodes("hevc")), (Quality::Av1, decodes("av1"))];
+        let full = self.decoders.iter().any(|m| m.chroma == remoteman_core::Chroma::C444);
+        let qualities = [(Quality::Automatic, true), (Quality::Sharp, FEATURES.sharp_text && full), (Quality::Hevc, decodes("hevc")), (Quality::Av1, decodes("av1"))];
         match choice {
             Choice::Controls => (vec![("Title bar".into(), true), ("Show the bar on hover".into(), true)], self.store.settings.hover_bar as usize),
             Choice::DefaultQuality => (qualities.iter().map(|(q, on)| (q.name().to_owned(), *on)).collect(), qualities.iter().position(|(q, _)| *q == self.store.settings.quality).unwrap_or(0)),
@@ -1451,6 +1640,8 @@ impl App {
                 (SIZES.iter().map(|s| (s.1.to_owned(), true)).collect(), SIZES.iter().position(|s| s.0 == now).unwrap_or(0))
             }
             Choice::Scroll => (vec![("Same as this PC".into(), true), ("Reversed".into(), true)], self.store.settings.scroll_reversed as usize),
+            Choice::WindowsKey => (crate::store::Stand::ALL.iter().map(|s| (s.2.to_owned(), true)).collect(), crate::store::Stand::ALL.iter().position(|s| s.0 == self.store.settings.super_key).unwrap_or(0)),
+            Choice::WayIn(address) => (vec![("The computer decides".into(), true), ("Only a session that is already running".into(), true)], self.store.find(address).is_some_and(|c| c.attach_only) as usize),
             Choice::Pointer => (vec![("Follows this pointer".into(), true), ("Captured".into(), true)], self.store.settings.capture as usize),
             Choice::Side(address) => {
                 let now = self.store.find(address).map_or(remoteman_core::Side::Right, |c| c.second_side);
@@ -1490,6 +1681,11 @@ impl App {
                 self.store.settings.scroll_reversed = n == 1;
                 self.store.save_settings();
             }
+            Choice::WindowsKey => {
+                self.store.settings.super_key = crate::store::Stand::ALL[n.min(3)].0;
+                self.store.save_settings();
+            }
+            Choice::WayIn(address) => self.store.update(&address, |c| c.attach_only = n == 1),
             Choice::Pointer => {
                 self.store.settings.capture = n == 1;
                 self.store.save_settings();
@@ -1546,6 +1742,18 @@ impl App {
                 self.start_attempt(target, true, true);
             }
             Some(Dialog::Pair { .. }) | Some(Dialog::Code { .. }) => {}
+            Some(Dialog::SecondFactor { .. }) => {
+                let typed = self.fields.get(&id("second.code")).map(|f| f.string()).unwrap_or_default();
+                let code: String = typed.chars().filter(|c| !c.is_whitespace()).collect();
+                // Six digits, or the dialog stays as it is.
+                if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) {
+                    if let Some(client) = self.session.as_ref().and_then(|s| s.client.clone()) {
+                        client.second_factor(&code, self.remember);
+                    }
+                    self.dialog = None;
+                    self.remember = false;
+                }
+            }
             Some(Dialog::Paired { .. }) => {
                 // If the connection has gone meanwhile, `poll` has already let it go.
                 self.dialog = None;
@@ -1595,6 +1803,11 @@ impl App {
             Some(Dialog::Pair { waiting: Some(_), .. }) | Some(Dialog::Code { .. }) => self.give_up(),
             // The connection kept from pairing isn't wanted now.
             Some(Dialog::Paired { .. }) => self.end(false),
+            // Not giving the code: the session is over.
+            Some(Dialog::SecondFactor { .. }) => {
+                self.remember = false;
+                self.stop(None);
+            }
             _ => {}
         }
         self.dirty = true;
@@ -1691,6 +1904,15 @@ impl App {
     /// A hidden bar comes out when the pointer reaches the top edge and goes two seconds after
     /// the pointer has left it.
     fn bar_watch(&mut self, y: f32, over: bool) {
+        if self.native_bar && self.fullscreen {
+            // The app's bar does the rest (it comes out, and goes when it is let go of).
+            let at = y < 2.0;
+            if at && !self.edge {
+                self.effects.push(Effect::BarEdge);
+            }
+            self.edge = at;
+            return;
+        }
         if !self.bar_out && y < 2.0 {
             self.bar_out = true;
             self.dirty = true;
@@ -1702,6 +1924,7 @@ impl App {
 
     pub fn mouse_leave(&mut self) {
         self.mouse = (-1.0, -1.0);
+        self.edge = false;
         if self.input.hot != 0 {
             self.input.hot = 0;
             self.tip = None;
@@ -1937,6 +2160,8 @@ impl App {
     }
 
     pub fn tick(&mut self) {
+        self.nearby_tick();
+        self.media_tick();
         let now = Instant::now();
         if self.animating() {
             let target = if self.bar_out { 1.0f32 } else { 0.0 };
@@ -2026,6 +2251,14 @@ impl App {
             );
         }
         self.figures = figures;
+        // What the processor managed with 4:4:4, kept for what is offered from now on.
+        let rate = self.session.as_ref().map_or(0, |s| s.shared.cpu_444_rate.swap(0, Ordering::Relaxed));
+        let kept = crate::store::kept_cpu_444(self.store.settings.cpu_444, rate);
+        if rate > 0 && kept != self.store.settings.cpu_444 {
+            say!("4:4:4 on the processor: {rate} million pixels a second measured; {kept} kept");
+            self.store.settings.cpu_444 = kept;
+            self.store.save_settings();
+        }
         if self.screen == Screen::Session && (self.store.settings.figures || self.menu.as_ref().is_some_and(|m| m.kind == MenuKind::Picture)) {
             self.dirty = true;
         }
@@ -2045,7 +2278,7 @@ impl App {
         if self.screen != Screen::Session || self.session.is_none() {
             return None;
         }
-        let top = if self.bar_hidden() { 0.0 } else { crate::session::BAR };
+        let top = if self.bar_hidden() || self.panel { 0.0 } else { crate::session::BAR };
         Some(ui::rect(0.0, top, self.size.0, (self.size.1 - top).max(1.0)))
     }
 

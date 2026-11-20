@@ -183,8 +183,8 @@ fn computers(app: &App, ui: &mut Ui) {
         }
         ui.label_in(rect(x + 14.0, r.y + 156.0, r.right() - 12.0 - x - 14.0, 16.0), &line, Font::Caption, t.t2, Align::Left);
         let go = rect(r.x + 12.0, r.y + 184.0, r.w - 64.0, 32.0);
-        if reach == Some(Reach::Asleep) {
-            ui.button(idn("card.wake", i), go, "Wake and connect", Look::Plain, None, Msg::Connect(c.address.clone()), gate(FEATURES.wake));
+        if reach == Some(Reach::Asleep) || (reach == Some(Reach::Unreachable) && app.wakeable(&c.address)) {
+            ui.button(idn("card.wake", i), go, "Wake and connect", Look::Plain, None, Msg::Wake(c.address.clone()), gate(FEATURES.wake));
         } else {
             let look = if reach == Some(Reach::Unreachable) { Look::Plain } else { Look::Accent };
             ui.button(idn("card.connect", i), go, "Connect", look, None, Msg::Connect(c.address.clone()), ON);
@@ -205,6 +205,13 @@ fn computers(app: &App, ui: &mut Ui) {
         ui.icon(Icon::Computer, near.x + 16.0, near.y + 22.0, t.tx.fade(0.4));
         ui.label(near.x + 46.0, near.y + 12.0, "Looking for computers on this network", Font::Body, t.tx.fade(0.4));
         ui.label(near.x + 46.0, near.y + 32.0, "Not available yet. Pair a computer by its address.", Font::Caption, t.t2.fade(0.6));
+    } else {
+        // (The WinUI 3 app lists each with its own Pair button; this kit only says who.)
+        let found = &app.sightings.unpaired;
+        let names: Vec<String> = found.iter().map(|f| format!("{} ({})", f.name, short(&f.address))).collect();
+        ui.icon(Icon::Computer, near.x + 16.0, near.y + 22.0, t.tx);
+        ui.label(near.x + 46.0, near.y + 12.0, if found.is_empty() { "None found" } else { "On this network, not paired" }, Font::Body, t.tx);
+        ui.label(near.x + 46.0, near.y + 32.0, &if names.is_empty() { "A computer shows here while its remoteman host is on and it is on this network.".to_owned() } else { names.join(", ") }, Font::Caption, t.t2);
     }
     y += 68.0;
     ui.label(left, y, "A computer that is not listed can be paired by its address.", Font::Caption, t.t2);
@@ -295,6 +302,9 @@ fn trouble(app: &App, ui: &mut Ui, target: &Target, problem: &Problem) {
         Problem::Unreachable(detail) => {
             let words = format!("{detail} at {}. It may be off, on another network, or its firewall may be closed to remoteman.", short(&address));
             let mut acts = vec![again("Try again")];
+            if app.wakeable(&address) {
+                acts.push((id("problem.wake"), "Wake and connect", Look::Plain, Msg::Wake(address.clone()), ON));
+            }
             if known {
                 acts.push((id("problem.address"), "Edit address…", Look::Plain, Msg::EditAddress(address.clone()), ON));
             }
@@ -304,7 +314,7 @@ fn trouble(app: &App, ui: &mut Ui, target: &Target, problem: &Problem) {
         Problem::Asleep => {
             let used = app.store.find(&address).map_or(0, |c| c.used);
             let seen = if used > 0 { format!("It was last used from this PC {}. ", when(used)) } else { String::new() };
-            let wake: Act = (id("problem.wake"), "Wake and connect", Look::Accent, Msg::Connect(address.clone()), gate(FEATURES.wake));
+            let wake: Act = (id("problem.wake"), "Wake and connect", Look::Accent, Msg::Wake(address.clone()), gate(FEATURES.wake));
             status(ui, area, Sign::Icon(Icon::Moon), &format!("{name} is asleep"), &format!("{seen}Waking it over the network takes a few seconds."), None, &[wake, back]);
         }
         Problem::NotPaired => {
@@ -526,7 +536,7 @@ fn settings(app: &App, ui: &mut Ui) {
             ),
             row("set.release", "Release the keyboard", "Ctrl+Alt+Shift, pressed together, gives shortcuts back to this PC, and takes them again", Ctl::None, gate(FEATURES.release_shortcut)),
             row("set.command", "On a Mac, Ctrl acts as Command", "Ctrl+C on this keyboard copies on a Mac, as it does here", Ctl::Toggle(s.ctrl_as_command, Some(Msg::Toggle(Flag::CtrlAsCommand, None))), gate(FEATURES.ctrl_as_command)),
-            row("set.winkey", "Windows key", "Opens the overview on a Linux computer, Spotlight's key on a Mac", fixed("Super / Command"), gate(FEATURES.key_mapping)),
+            row("set.winkey", "Windows key", "Opens the overview on a Linux computer, Spotlight's key on a Mac. Another key can act as it too", chosen(app, Choice::WindowsKey), gate(FEATURES.key_mapping)),
         ],
     );
     y = group(
@@ -539,7 +549,8 @@ fn settings(app: &App, ui: &mut Ui) {
         &[
             row("set.pointer", "Pointer", "Captured sends raw movement, which games and 3D apps need. Ctrl+Alt+Shift lets it go", chosen(app, Choice::Pointer), gate(FEATURES.pointer_capture)),
             row("set.scroll", "Scroll direction", "", chosen(app, Choice::Scroll), gate(FEATURES.scroll_direction)),
-            row("set.touch", "Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", Ctl::Toggle(false, None), gate(FEATURES.touch)),
+            row("set.gamepad", "Game controllers go to the computer", "A controller held here plays there while this window is in front", Ctl::Toggle(s.gamepad, Some(Msg::Set("game-controllers", None))), gate(FEATURES.gamepad)),
+            row("set.touch", "Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", Ctl::Toggle(s.touch, Some(Msg::Set("touch", None))), gate(FEATURES.touch)),
         ],
     );
     y = group(
@@ -551,8 +562,8 @@ fn settings(app: &App, ui: &mut Ui) {
         "Sound, microphone and camera",
         &[
             row("set.sound", "Play the computer's sound here", "For computers paired from now on; each has its own switch", Ctl::Toggle(s.sound, Some(Msg::Toggle(Flag::Sound, None))), gate(FEATURES.sound)),
-            row("set.mic", "Let computers use this microphone", "Still switched on by you in each session", Ctl::Toggle(false, None), gate(FEATURES.microphone)),
-            row("set.camera", "Let computers use this camera", "For calls made on the other computer", Ctl::Toggle(false, None), gate(FEATURES.camera)),
+            row("set.mic", "Let computers use this microphone", "Still switched on by you in each session", Ctl::Toggle(s.allow_microphone, Some(Msg::Set("allow-microphone", None))), gate(FEATURES.microphone)),
+            row("set.camera", "Let computers use this camera", "For calls made on the other computer", Ctl::Toggle(s.allow_camera, Some(Msg::Set("allow-camera", None))), gate(FEATURES.camera)),
         ],
     );
     y = group(
@@ -615,8 +626,8 @@ fn computer(app: &App, ui: &mut Ui, address: &str) {
         &[
             row("computer.name", "Name", "", Ctl::Field, ON),
             row("computer.address", "Address", short(address), Ctl::Button("Edit address…", Look::Plain, Some(Msg::EditAddress(a()))), ON),
-            row("computer.wake", "Wake it over the network", "When it is asleep and on the same network", Ctl::Toggle(false, None), gate(FEATURES.wake)),
-            row("computer.way", "Getting in", "Joins your session there if you are logged in, otherwise shows its login screen", fixed("The computer decides"), gate(FEATURES.way_in)),
+            row("computer.wake", "Wake it over the network", "When it is asleep and on the same network", Ctl::Toggle(c.wake, Some(Msg::Set("wake", Some(a())))), gate(FEATURES.wake)),
+            row("computer.way", "Getting in", "Joins your session there if you are logged in, otherwise shows its login screen. A computer with one way in takes no notice", chosen(app, Choice::WayIn(a())), gate(FEATURES.way_in)),
         ],
     );
     let sits = PLACEMENT_NAMES.iter().find(|p| p.0 == c.placement).map_or("", |p| p.2);
@@ -803,6 +814,25 @@ pub fn dialog(app: &App, ui: &mut Ui, dialog: &Dialog) {
                 }
                 c.gap(16.0);
                 c.para(&format!("After pairing, this PC and {name} keep each other's key. Nothing else has to be typed again."), Font::Caption, t.t2);
+            });
+        }
+        Dialog::SecondFactor { name, left } => {
+            sheet(ui, Some(("Connect", Look::Accent, ON)), "Cancel", &|c| {
+                c.para("This computer asks for a code from your authenticator app", Font::Subtitle, t.tx);
+                c.gap(16.0);
+                c.para(&format!("Open the authenticator app and type the six digits it shows for {name}."), Font::Body, t.tx);
+                c.gap(16.0);
+                if let (Some(r), Some(field)) = (c.room(32.0), app.fields.get(&id("second.code"))) {
+                    c.ui.field(id("second.code"), r, field, ON);
+                }
+                c.gap(12.0);
+                if let Some(r) = c.room(24.0) {
+                    c.ui.toggle(id("second.remember"), r.x, r.y, app.remember, "Don't ask again on this device for 30 days", Msg::ToggleRemember, ON);
+                }
+                if let Some(n) = left {
+                    c.gap(12.0);
+                    c.para(&format!("That code didn't work ({n} {} left)", if *n == 1 { "try" } else { "tries" }), Font::Body, t.bad);
+                }
             });
         }
         Dialog::Paired { target, key } => {

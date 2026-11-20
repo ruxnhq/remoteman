@@ -3,19 +3,18 @@
 //!
 //! Where this works and where it doesn't. `SendInput` reaches the desktop of the session the
 //! calling process is in, and only the input desktop of that session. So this host must run in
-//! the user's interactive session; started as a service in session 0 it can stream (capture
-//! and encode work there) but its input goes nowhere. For the same reason the sign-in screen,
-//! the lock screen and Windows' own permission prompts are out of reach: they are on the
-//! Winlogon desktop, which only a SYSTEM process attached to that desktop may put input into.
-//! Reaching them later needs a service that starts a helper as SYSTEM in the user's session and
-//! follows the input desktop (`OpenInputDesktop`, `SetThreadDesktop`) as it switches; that is
-//! not built. Windows also drops input meant for a window of a more privileged process, which
-//! doesn't arise here because the display driver already makes this host run elevated.
+//! the console's session, not in session 0. The sign-in screen, the lock screen and Windows'
+//! own permission prompts are on the Winlogon desktop, which only a SYSTEM process attached to
+//! that desktop may put input into: the service (`service.rs`) starts this host as SYSTEM in
+//! the console's session, and each injection first follows the input desktop
+//! (`crate::desk::follow`). A host started any other way reaches the user's desktop only.
+//! Windows also drops input meant for a window of a more privileged process, which doesn't
+//! arise here because the display driver already makes this host run elevated.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use remoteman_core::{Button, Event, TouchPhase};
+use remoteman_core::{Button, Event, PenPhase, TouchPhase};
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE,
@@ -23,12 +22,43 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY, VK_PAUSE,
 };
 use windows::Win32::UI::Input::Pointer::{
-    InitializeTouchInjection, InjectTouchInput, POINTER_FLAG_DOWN, POINTER_FLAG_INCONTACT, POINTER_FLAG_INRANGE, POINTER_FLAG_UP, POINTER_FLAG_UPDATE, POINTER_FLAGS, POINTER_INFO, POINTER_TOUCH_INFO,
+    InitializeTouchInjection, InjectSyntheticPointerInput, InjectTouchInput, POINTER_FLAG_FIRSTBUTTON, POINTER_FLAG_NEW, POINTER_FLAG_SECONDBUTTON, POINTER_PEN_INFO, POINTER_FLAG_DOWN, POINTER_FLAG_INCONTACT, POINTER_FLAG_INRANGE, POINTER_FLAG_UP, POINTER_FLAG_UPDATE, POINTER_FLAGS, POINTER_INFO, POINTER_TOUCH_INFO,
     TOUCH_FEEDBACK_NONE,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, PT_TOUCH, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, TOUCH_MASK_CONTACTAREA};
+use windows::Win32::UI::Controls::{CreateSyntheticPointerDevice, DestroySyntheticPointerDevice, HSYNTHETICPOINTERDEVICE, POINTER_FEEDBACK_DEFAULT, POINTER_TYPE_INFO};
+use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED, PEN_MASK_PRESSURE, PEN_MASK_ROTATION, PEN_MASK_TILT_X, PEN_MASK_TILT_Y, PT_PEN, PT_TOUCH, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, TOUCH_MASK_CONTACTAREA};
 
 use crate::display::Area;
+
+/// A synthetic pen device (`CreateSyntheticPointerDevice`), destroyed when dropped.
+struct PenDevice(HSYNTHETICPOINTERDEVICE);
+
+// SAFETY: the handle is only used through `&mut self` of the injector that owns it, and
+// Windows lets any thread of the process use it.
+unsafe impl Send for PenDevice {}
+
+impl PenDevice {
+    fn create() -> windows::core::Result<Self> {
+        // SAFETY: plain call: one pen, with Windows' own feedback (the pen cursor).
+        unsafe { CreateSyntheticPointerDevice(PT_PEN, 1, POINTER_FEEDBACK_DEFAULT) }.map(Self)
+    }
+}
+
+impl Drop for PenDevice {
+    fn drop(&mut self) {
+        // SAFETY: a device `create` made, destroyed once.
+        unsafe { DestroySyntheticPointerDevice(self.0) };
+    }
+}
+
+/// Where the pen is, as far as Windows has been told.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PenState {
+    /// Not in range of the screen.
+    Away,
+    Hovering,
+    Down,
+}
 
 /// How a key is given to Windows.
 #[derive(Clone, Copy)]
@@ -161,16 +191,25 @@ pub struct Injector {
     touches: BTreeMap<u8, POINT>,
     /// Whether touch injection could be set up; not tried until the first touch.
     touch: Option<bool>,
+    /// The synthetic pen device, made at the first pen event; and whether making it failed.
+    pen_device: Option<PenDevice>,
+    pen_failed: bool,
+    pen_state: PenState,
+    /// The virtual game controller (gamepad.rs).
+    gamepad: crate::gamepad::Gamepad,
     /// Events Windows didn't take, and whether that has been said.
     refused: u32,
 }
 
 impl Injector {
     pub fn new(area: Arc<Mutex<Area>>) -> Self {
-        Self { area, keys: BTreeSet::new(), buttons: BTreeSet::new(), moved: (0.0, 0.0), scrolled: (0.0, 0.0), touches: BTreeMap::new(), touch: None, refused: 0 }
+        Self { area, keys: BTreeSet::new(), buttons: BTreeSet::new(), moved: (0.0, 0.0), scrolled: (0.0, 0.0), touches: BTreeMap::new(), touch: None, pen_device: None, pen_failed: false, pen_state: PenState::Away, gamepad: Default::default(), refused: 0 }
     }
 
     fn send(&mut self, inputs: &[INPUT]) {
+        // Started by the service: onto the desktop that takes input now (the sign-in or lock
+        // screen's, or the user's).
+        crate::desk::follow();
         // SAFETY: a slice of whole INPUTs and their size.
         let taken = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
         if taken as usize != inputs.len() {
@@ -242,6 +281,14 @@ impl Injector {
                     tracing::debug!(usage, "a key this host has no scancode for");
                     return;
                 };
+                // Ctrl+Alt+Del (HID Delete with a Ctrl and an Alt held): no program can type it,
+                // only the service can make Windows see it.
+                let held = |a: u16, b: u16| self.keys.contains(&a) || self.keys.contains(&b);
+                if *down && *usage == 0x4C && held(0xE0, 0xE4) && held(0xE2, 0xE6) {
+                    let asked = crate::desk::secure_attention();
+                    tracing::info!(asked, "Ctrl+Alt+Del from the device");
+                    return;
+                }
                 if *down {
                     self.keys.insert(*usage);
                 } else {
@@ -255,12 +302,25 @@ impl Injector {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 { ki: KEYBDINPUT { wScan: c, dwFlags: KEYEVENTF_UNICODE | if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) }, ..Default::default() } },
                 };
-                let inputs: Vec<INPUT> = text.encode_utf16().flat_map(|c| [unit(c, false), unit(c, true)]).collect();
-                if !inputs.is_empty() {
+                // One character (down and up) at a time, as the other hosts do: sent as one batch,
+                // Windows' newer text controls (Notepad's, Windows Terminal's) took the first
+                // word and then the last character over and over ("remoteman rrrr…" for
+                // "remoteman from the Mac viewer", seen 2026-11-19).
+                let units: Vec<u16> = text.encode_utf16().collect();
+                for (i, &c) in units.iter().enumerate() {
+                    // (A surrogate pair goes as one: the two halves together.)
+                    if (0xDC00..0xE000).contains(&c) && i > 0 {
+                        continue;
+                    }
+                    let pair = (0xD800..0xDC00).contains(&c) && units.get(i + 1).is_some_and(|n| (0xDC00..0xE000).contains(n));
+                    let inputs: Vec<INPUT> = if pair { vec![unit(c, false), unit(c, true), unit(units[i + 1], false), unit(units[i + 1], true)] } else { vec![unit(c, false), unit(c, true)] };
                     self.send(&inputs);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
             }
             Event::Touch { phase, slot, x, y } => self.touch(*phase, *slot, *x, *y),
+            Event::Pen { phase, buttons, x, y, pressure, tilt_x, tilt_y, twist } => self.pen(*phase, *buttons, *x, *y, *pressure, *tilt_x, *tilt_y, *twist),
+            Event::Gamepad { .. } => self.gamepad.inject(event),
             // This host gives a device one display, so there is nothing to choose between.
             Event::Display(_) => {}
         }
@@ -311,12 +371,105 @@ impl Injector {
         } else {
             self.touches.insert(slot, at);
         }
+        crate::desk::follow();
         // SAFETY: a slice of whole contacts.
         if let Err(e) = unsafe { InjectTouchInput(&contacts) } {
             self.refused += 1;
             if self.refused == 1 {
                 tracing::warn!("Windows didn't take a touch ({e}). Said once.");
             }
+        }
+    }
+
+
+    /// The pen, through a synthetic pen device made at the first event. Hovering is "in range"
+    /// without "in contact"; leaving the range is an update without "in range". A lift is
+    /// made up when the client goes from down to hovering or away without saying so, and a
+    /// contact when a move comes for a pen that isn't down.
+    #[allow(clippy::too_many_arguments)]
+    fn pen(&mut self, phase: PenPhase, buttons: u8, x: f32, y: f32, pressure: f32, tilt_x: f32, tilt_y: f32, twist: f32) {
+        if self.pen_device.is_none() {
+            if self.pen_failed {
+                return;
+            }
+            // The desktop the device is made on is the one that takes input now.
+            crate::desk::follow();
+            match PenDevice::create() {
+                Ok(d) => self.pen_device = Some(d),
+                Err(e) => {
+                    self.pen_failed = true;
+                    tracing::warn!("pen events from the client can't be passed on (CreateSyntheticPointerDevice: {e}). Said once.");
+                    return;
+                }
+            }
+        }
+        let at = self.pixel(x, y);
+        // The steps to get the pen from where it is to where the client says.
+        let mut steps: Vec<(PenState, POINTER_FLAGS)> = Vec::new();
+        let was = self.pen_state;
+        let in_range = POINTER_FLAG_INRANGE;
+        let contact = POINTER_FLAG_INCONTACT | POINTER_FLAG_FIRSTBUTTON | POINTER_FLAG_INRANGE;
+        let new = if was == PenState::Away { POINTER_FLAG_NEW } else { POINTER_FLAGS(0) };
+        match phase {
+            PenPhase::Down | PenPhase::Move if was == PenState::Down => steps.push((PenState::Down, POINTER_FLAG_UPDATE | contact)),
+            PenPhase::Down | PenPhase::Move => steps.push((PenState::Down, POINTER_FLAG_DOWN | new | contact)),
+            PenPhase::Up if was == PenState::Down => steps.push((PenState::Hovering, POINTER_FLAG_UP | in_range)),
+            PenPhase::Up => return,
+            PenPhase::Hover => {
+                if was == PenState::Down {
+                    steps.push((PenState::Hovering, POINTER_FLAG_UP | in_range));
+                }
+                steps.push((PenState::Hovering, POINTER_FLAG_UPDATE | new | in_range));
+            }
+            PenPhase::Leave => {
+                if was == PenState::Away {
+                    return;
+                }
+                if was == PenState::Down {
+                    steps.push((PenState::Hovering, POINTER_FLAG_UP | in_range));
+                }
+                steps.push((PenState::Away, POINTER_FLAG_UPDATE));
+            }
+        }
+        let mut pen_flags = 0;
+        if buttons & 1 != 0 {
+            pen_flags |= PEN_FLAG_BARREL;
+        }
+        if buttons & 2 != 0 {
+            pen_flags |= PEN_FLAG_ERASER | PEN_FLAG_INVERTED;
+        }
+        let finite = |v: f32| if v.is_finite() { v } else { 0.0 };
+        for (state, flags) in steps {
+            let mut flags = flags;
+            let touching = state == PenState::Down;
+            if buttons & 1 != 0 && touching {
+                flags |= POINTER_FLAG_SECONDBUTTON;
+            }
+            let info = POINTER_PEN_INFO {
+                pointerInfo: POINTER_INFO { pointerType: PT_PEN, pointerId: 0, pointerFlags: flags, ptPixelLocation: at, ..Default::default() },
+                penFlags: pen_flags,
+                penMask: PEN_MASK_PRESSURE | PEN_MASK_ROTATION | PEN_MASK_TILT_X | PEN_MASK_TILT_Y,
+                pressure: if touching { (finite(pressure).clamp(0.0, 1.0) * 1024.0).round() as u32 } else { 0 },
+                rotation: (finite(twist).round() as i32).rem_euclid(360) as u32,
+                tiltX: finite(tilt_x).clamp(-90.0, 90.0).round() as i32,
+                tiltY: finite(tilt_y).clamp(-90.0, 90.0).round() as i32,
+            };
+            let mut ti = POINTER_TYPE_INFO { r#type: PT_PEN, ..Default::default() };
+            ti.Anonymous.penInfo = info;
+            crate::desk::follow();
+            // SAFETY: one whole POINTER_TYPE_INFO, for the device this injector made.
+            let result = unsafe { InjectSyntheticPointerInput(self.pen_device.as_ref().unwrap().0, &[ti]) };
+            if let Err(e) = result {
+                self.refused += 1;
+                if self.refused == 1 {
+                    tracing::warn!("Windows didn't take a pen event ({e}); it may be on another desktop than the device was made on. Said once.");
+                }
+                // A new device (on the desktop that takes input now) at the next event.
+                self.pen_device = None;
+                self.pen_state = PenState::Away;
+                return;
+            }
+            self.pen_state = state;
         }
     }
 
@@ -332,11 +485,50 @@ impl Injector {
         for slot in self.touches.keys().copied().collect::<Vec<_>>() {
             self.touch(TouchPhase::Up, slot, 0.0, 0.0);
         }
+        if self.pen_state != PenState::Away {
+            self.pen(PenPhase::Leave, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        }
+        // The device goes with the session.
+        self.pen_device = None;
+        self.gamepad.release();
     }
 }
 
 impl Drop for Injector {
     fn drop(&mut self) {
         self.release_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A device's fractions land in the rectangle of the screen it is shown (a mirrored screen
+    /// that isn't at the desktop's origin included), and never outside it.
+    #[test]
+    fn fractions_map_into_the_screens_rectangle() {
+        let area = Arc::new(Mutex::new(Area { left: -2560, top: 300, width: 2560, height: 1440 }));
+        let injector = Injector::new(area.clone());
+        let p = injector.pixel(0.0, 0.0);
+        assert_eq!((p.x, p.y), (-2560, 300));
+        let p = injector.pixel(0.5, 0.5);
+        assert_eq!((p.x, p.y), (-1280, 1020));
+        let p = injector.pixel(1.0, 1.0);
+        assert_eq!((p.x, p.y), (-1, 1739));
+        let p = injector.pixel(7.0, -3.0);
+        assert_eq!((p.x, p.y), (-1, 300));
+        // The screen changing size under the stream: the next event follows it.
+        *area.lock().unwrap() = Area { left: 0, top: 0, width: 1920, height: 1080 };
+        let p = injector.pixel(0.5, 0.5);
+        assert_eq!((p.x, p.y), (960, 540));
+    }
+
+    /// Makes and destroys the synthetic pen device, and injects nothing.
+    #[test]
+    fn a_synthetic_pen_device_can_be_made_and_destroyed() {
+        let device = PenDevice::create().expect("CreateSyntheticPointerDevice(PT_PEN)");
+        assert!(!device.0.0.is_null());
+        drop(device);
     }
 }

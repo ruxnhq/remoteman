@@ -27,6 +27,34 @@ struct Cfg {
     hdr_pq: u32,
     long_term: u32,
     short_term: u32,
+    hdr_light: u32,
+    hdr_chroma: [u32; 8],
+    hdr_max_lum: u32,
+    hdr_min_lum: u32,
+    hdr_max_cll: u32,
+    hdr_max_fall: u32,
+    slices: u32,
+}
+
+/// What an HDR stream (BT.2020 PQ) says about the picture's light, as the mastering display
+/// colour volume (SMPTE ST 2086) and the content light level (CTA-861.3), written on keyframes:
+/// SEI messages in HEVC, metadata OBUs in AV1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HdrLight {
+    /// The display's peak luminance, in nits.
+    pub peak: f32,
+    /// Its black level, in nits.
+    pub min: f32,
+    /// MaxCLL: the brightest pixel's light, in nits (0: unknown).
+    pub max_cll: u32,
+    /// MaxFALL: the brightest frame's average light, in nits (0: unknown).
+    pub max_fall: u32,
+}
+
+impl HdrLight {
+    /// BT.2020 primaries and a D65 white point, in ST 2086's units of 0.00002: green, blue, red,
+    /// white, each x then y.
+    const BT2020: [u32; 8] = [8500, 39850, 6550, 2300, 35400, 14600, 15635, 16450];
 }
 
 #[cfg(not(windows))]
@@ -53,6 +81,8 @@ unsafe extern "C" {
     fn rm_nvenc_long_term(e: *mut c_void) -> u32;
     fn rm_nvenc_set_bitrate(e: *mut c_void, bitrate: u32) -> c_int;
     fn rm_nvenc_invalidate(e: *mut c_void, ts: u64) -> c_int;
+    fn rm_nvenc_boost_begin(e: *mut c_void, factor: u32, qp: u32) -> c_int;
+    fn rm_nvenc_boost_end(e: *mut c_void) -> c_int;
     fn rm_nvenc_close(e: *mut c_void);
 }
 
@@ -77,6 +107,8 @@ pub struct Config {
     /// large HEVC pictures three, so the stream's level stays where decoders expect it. Said
     /// outright, both numbers are taken as they are.
     pub short_term: Option<u32>,
+    /// HEVC: cut each picture into this many slices (0: one), so a software decoder can use threads.
+    pub slices: u32,
 }
 
 /// How to encode one frame.
@@ -117,6 +149,16 @@ pub trait FrameEncoder {
     fn encode_how(&mut self, idx: usize, timestamp: u64, how: How) -> Result<Made<'_>>;
     /// Encode at this many bits a second from the next frame on, with no keyframe.
     fn set_bitrate(&mut self, bitrate: u32) -> Result<()>;
+    /// Whether [`Self::encode_refined`] does anything (NVENC only).
+    fn can_refine(&self) -> bool {
+        false
+    }
+    /// Like [`Self::encode_how`], with room for `factor` times the bits the rate allows one
+    /// frame, and the rate back as it was straight after. For static refinement. With `qp` not
+    /// 0, the frame is made at that constant quantiser instead (`factor` is the fallback).
+    fn encode_refined(&mut self, _idx: usize, _timestamp: u64, _how: How, _factor: u32, _qp: u32) -> Result<Made<'_>> {
+        bail!("this encoder cannot refine a still picture")
+    }
     /// The frame with this timestamp was lost on the way: stop referring to it.
     fn invalidate(&mut self, timestamp: u64) -> Result<()>;
 }
@@ -147,6 +189,13 @@ impl Config {
             hdr_pq: 0,
             long_term: self.long_term,
             short_term: self.short_term.unwrap_or(0),
+            hdr_light: 0,
+            hdr_chroma: [0; 8],
+            hdr_max_lum: 0,
+            hdr_min_lum: 0,
+            hdr_max_cll: 0,
+            hdr_max_fall: 0,
+            slices: self.slices,
         }
     }
 }
@@ -172,17 +221,39 @@ impl Encoder {
     }
 
     /// An encoder fed from textures of a Direct3D 11 device (see [`Self::add_texture`]).
-    /// 4:2:0 only: Direct3D has no planar 10-bit 4:4:4 texture.
+    /// `hdr`: the stream says BT.2020 primaries, PQ and the BT.2020 matrix rather than BT.709.
+    /// For 4:4:4 the texture is 10-bit R'G'B' that NVENC converts (see [`Self::add_texture`]).
     ///
     /// # Safety
     /// `device` must be a live `ID3D11Device*` with multithread protection switched on (the
     /// encoder works on it from threads of its own), and must outlive the encoder.
     #[cfg(windows)]
-    pub unsafe fn new_d3d11(device: *mut c_void, cfg: &Config) -> Result<Self> {
+    pub unsafe fn new_d3d11(device: *mut c_void, cfg: &Config, hdr: bool) -> Result<Self> {
+        // SAFETY: as the caller vouches.
+        unsafe { Self::new_d3d11_light(device, cfg, hdr, None) }
+    }
+
+    /// As [`Self::new_d3d11`], and an HDR stream (`hdr`) with `light` says it in its keyframes:
+    /// BT.2020 mastering primaries, the display's peak and black, MaxCLL and MaxFALL.
+    ///
+    /// # Safety
+    /// As [`Self::new_d3d11`].
+    #[cfg(windows)]
+    pub unsafe fn new_d3d11_light(device: *mut c_void, cfg: &Config, hdr: bool, light: Option<HdrLight>) -> Result<Self> {
         let mut err = [0 as c_char; 256];
+        let mut raw = cfg.raw();
+        raw.hdr_pq = hdr as u32;
+        if let (true, Some(l)) = (hdr, light) {
+            raw.hdr_light = 1;
+            raw.hdr_chroma = HdrLight::BT2020;
+            raw.hdr_max_lum = (l.peak * 10000.0).round().clamp(1.0, u32::MAX as f32) as u32;
+            raw.hdr_min_lum = (l.min * 10000.0).round().max(0.0) as u32;
+            raw.hdr_max_cll = l.max_cll;
+            raw.hdr_max_fall = l.max_fall;
+        }
         // SAFETY: the wrapper's contract; `err` is a writable buffer of the given length.
         unsafe {
-            let enc = rm_nvenc_open_d3d11(device, &cfg.raw(), err.as_mut_ptr(), 256);
+            let enc = rm_nvenc_open_d3d11(device, &raw, err.as_mut_ptr(), 256);
             if enc.is_null() {
                 bail!("{}", text(&err));
             }
@@ -190,7 +261,8 @@ impl Encoder {
         }
     }
 
-    /// Register a P010 texture of the encoder's size as an input. Returns the input's index.
+    /// Register a texture of the encoder's size as an input: P010 for 4:2:0, R10G10B10A2 of
+    /// BT.709 R'G'B' for 4:4:4. Returns the input's index.
     ///
     /// # Safety
     /// `texture` must be a live `ID3D11Texture2D*` of the device the encoder was opened on, and
@@ -276,6 +348,26 @@ impl Encoder {
         Ok(())
     }
 
+    /// [`FrameEncoder::encode_refined`].
+    pub fn encode_refined(&mut self, idx: usize, timestamp: u64, how: How, factor: u32, qp: u32) -> Result<Made<'_>> {
+        // SAFETY: a live encoder.
+        if unsafe { rm_nvenc_boost_begin(self.enc, factor, qp) } != 0 {
+            bail!("{}", self.last_error());
+        }
+        let made = self.encode_how(idx, timestamp, how).map(|m| (m.data.as_ptr(), m.data.len(), m.key, m.marked, m.referred, m.qp));
+        // Whatever came of the frame, the rate goes back.
+        // SAFETY: as above.
+        let back = unsafe { rm_nvenc_boost_end(self.enc) };
+        let (ptr, len, key, marked, referred, qp) = made?;
+        if back != 0 {
+            bail!("{}", self.last_error());
+        }
+        // SAFETY: still the encoder's own bitstream copy, which a reconfigure doesn't touch and
+        // which stays valid until the next encode (the borrow of `self` sees to that).
+        let data = unsafe { std::slice::from_raw_parts(ptr, len) };
+        Ok(Made { data, key, marked, referred, qp })
+    }
+
     /// The frame with this timestamp was lost on the way: stop referring to it.
     pub fn invalidate(&mut self, timestamp: u64) -> Result<()> {
         // SAFETY: a live encoder.
@@ -305,6 +397,14 @@ impl FrameEncoder for Encoder {
 
     fn set_bitrate(&mut self, bitrate: u32) -> Result<()> {
         Encoder::set_bitrate(self, bitrate)
+    }
+
+    fn can_refine(&self) -> bool {
+        true
+    }
+
+    fn encode_refined(&mut self, idx: usize, timestamp: u64, how: How, factor: u32, qp: u32) -> Result<Made<'_>> {
+        Encoder::encode_refined(self, idx, timestamp, how, factor, qp)
     }
 
     fn invalidate(&mut self, timestamp: u64) -> Result<()> {

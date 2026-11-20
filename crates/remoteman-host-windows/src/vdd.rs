@@ -1,5 +1,5 @@
-//! The display driver's side of the bargain: Guesthouse's `drivers/windows-display` (a fork of
-//! zako-vdd), spoken to through its control device. Everything that is this driver's own, and
+//! The display driver's side of the bargain: remoteman's own driver in `windows/display-driver`
+//! (forked from Guesthouse's fork of zako-vdd), spoken to through its control device. Everything that is this driver's own, and
 //! no other's, lives here: the interface GUID, the IOCTLs, the text commands, and the layout of
 //! the frame channel's metadata with the rule for reading it. The rest of the host sees a
 //! monitor that can be asked for modes ([`Driver::set_modes`]) and a [`Channel`] of shared
@@ -35,8 +35,9 @@ use windows::Win32::System::Memory::{FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, 
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::core::{GUID, HSTRING, PCWSTR};
 
-/// `GUID_DEVINTERFACE_ZAKO_VDD_CONTROL`.
-const CONTROL: GUID = GUID::from_u128(0xDA9F8C2B_7E4F_49A1_9D4E_6F2B0E1A0C4D);
+/// `GUID_DEVINTERFACE_ZAKO_VDD_CONTROL` as remoteman's driver has it (zako-vdd's and Guesthouse's
+/// is DA9F8C2B-7E4F-49A1-9D4E-6F2B0E1A0C4D, which this host leaves alone).
+const CONTROL: GUID = GUID::from_u128(0x07FDC362_5DEF_4362_9B0E_361FEEF0CDFF);
 
 /// `CTL_CODE(FILE_DEVICE_UNKNOWN, function, METHOD_BUFFERED, access)`.
 const fn ctl(function: u32, access: u32) -> u32 {
@@ -53,11 +54,13 @@ const _: () = assert!(IOCTL_COMMAND == 0x22A000 && IOCTL_PING == 0x226004 && IOC
 const MAX_SLOTS: usize = 8;
 
 /// What marks this driver's adapter among the display adapters Windows lists (its device
-/// description, hardware id or name), most telling first.
-pub const ADAPTER_HINTS: [&str; 4] = ["guesthousedisplay", "guesthouse", "rdpudd chained", "zakovdd"];
+/// description, hardware id or name), most telling first: its hardware id, then the device name
+/// its INF gives it (which other forks of zako-vdd give theirs too).
+pub const ADAPTER_HINTS: [&str; 2] = ["remotemandisplay", "rdpudd chained"];
 
-/// What marks one of this driver's monitors in its device path, lower case.
-pub const MONITOR_HINTS: [&str; 2] = ["ghs0001", "zako"];
+/// What marks one of this driver's monitors in its device path, lower case: its EDID's
+/// manufacturer and product, `RMN0001`.
+pub const MONITOR_HINTS: [&str; 1] = ["rmn0001"];
 
 /// `VDD_FRAME_CHANNEL_CAPS`.
 #[repr(C)]
@@ -161,6 +164,12 @@ unsafe impl Send for Driver {}
 unsafe impl Sync for Driver {}
 
 impl Driver {
+    /// No driver: a handle that opens nothing, for a host that doesn't use it (every call on
+    /// it fails).
+    pub fn absent() -> Self {
+        Self { handle: windows::Win32::Foundation::INVALID_HANDLE_VALUE, path: String::new() }
+    }
+
     /// Find the driver's control interface and open it. Opening it also wakes the driver.
     pub fn open() -> Result<Self> {
         let path = interface_path().context("looking for the display driver's control interface")?;
@@ -191,10 +200,11 @@ impl Driver {
     }
 
     /// Send one of the driver's text commands. The driver answers "done" whatever came of it
-    /// (what it made of the command is only in its ETW trace, provider `Guesthouse.Display`),
+    /// (what it made of the command is only in its ETW trace, provider `remoteman.Display`),
     /// so success here means no more than that it was delivered.
     ///
-    /// Only `SETMODES` and `REFRESHMODES` are sent by this host. Most of the others rewrite the
+    /// Only `SETMODES`, `REFRESHMODES`, `CREATEMONITOR`, `PLUGMONITOR n` and `DESTROYMONITOR n` are sent
+    /// by this host (the last two from driver 0.1.1.0; an older driver ignores the one and doesn't know the other). Most of the others rewrite the
     /// driver's settings file and reload it, which is not this program's to do.
     pub fn command(&self, text: &str) -> Result<()> {
         let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();

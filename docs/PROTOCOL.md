@@ -25,6 +25,24 @@ The code is made from both keys: the first four bytes of SHA-256 over the text `
 
 For pairing by scanning a code instead of typing an address, a host may show a link (as a QR code): `remoteman://pair?v=0&name=<name>&addr=<addr[:port]>[,<addr[:port]>...]&fp=<the whole fingerprint of the host key, hex>`. A device adds the computer at the first address that answers, pairing as usual (the host still has to have pairing open, and still asks for the six digits where it does), and after connecting forgets the computer again if the key it met is not the one in the link. There is no secret in the link. (Defined by the Apple apps, which show and scan it; the Linux programs don't yet.)
 
+## Second factor
+
+A host's owner may ask for a code from an authenticator app (TOTP, RFC 6238: HMAC-SHA-1, six digits, 30-second steps) on top of the device's key. Off unless the owner turns it on (it is turned on by confirming one right code, so a secret mistyped into the app never locks the owner out). The host keeps the secret, and the devices told "don't ask again" with their expiry, in `<state>/host/second_factor.json`; without that file it is off.
+
+With it on, for a paired device that is not remembered, the host's `host_hello` carries `"second_factor":"totp"` and the host sends nothing more (no `stream`, no feature data; the handler behind the host hears nothing) until the client answers:
+
+```
+client -> host  {"t":"second_factor","code":"123456","remember":true}
+host -> client  {"t":"second_factor_wrong","left":4}
+host -> client  {"t":"error","code":"second_factor","message":"..."}   then it closes
+```
+
+- A right code (the current step, or one either side of it) lets the session go on as without it: the next thing from the host is `stream`. There is no message of its own for "right". `remember: true` lets the host skip asking this device (by certificate fingerprint) for 30 days.
+- A wrong code is answered with `second_factor_wrong` and the number of tries left; the client may try again. After 5 wrong codes in 10 minutes from one device, or 20 from all devices, the host answers with the error `second_factor` and closes, and refuses that device (everyone, for the 20) for 10 minutes: a device that connects meanwhile gets the same error in place of a hello.
+- A client that doesn't know the field never answers: the host closes after 60 seconds with the error `second_factor` and the message "This computer asks for a code from an authenticator app; update remoteman". Clients show an error's message as they do for any.
+- A device that is new (pairing, with or without the owner's confirmation) is asked afterwards, in the same connection, as any other.
+- The log (`connections.log`) gets `second_factor_ok` and `second_factor_wrong` lines (and `refused` for a lockout or a timeout), with the device's name and address; never the code.
+- A client's core API: `Client::on_second_factor(callback)` (`callback(None)` when asked, `callback(Some(left))` after a wrong code) and `Client::second_factor(code, remember)`; in the C interface `rm_client_set_second_factor_callback`, `rm_client_second_factor_wanted` and `rm_client_second_factor`. The connection is made (`connect` returns) before the code is asked for, because the hello is what says so.
 ## A locked host
 
 A host whose desktop is locked may let a paired device in all the same, if its owner has said so: by the device's key alone, or with the password of the host's user as well.
@@ -63,6 +81,26 @@ The second display goes when the session ends, and when the first is made afresh
 
 Some hosts neither show a login or lock screen nor ask for a password: they log their user in, or unlock, for a paired device (the Mac host, where its owner has switched that on and given it the password once). That takes a few seconds, during which there is no session to show. Such a host answers the hello with `{"t":"error","code":"logging_in","message":"..."}` and closes, its closing reason beginning `logging in: `. A client says so, waits about three seconds and connects again, by itself, some ten times before it asks its user. Through the core a host's handler gets this by refusing with words that begin `logging in: `.
 
+## More than one device
+
+A host takes one device at a time unless its owner has set what a second device does (`second_device`, in the core's host state): `take_over` (the default: the newest device ends the first's session, as it always did), `watch`, or `control`. A client doesn't ask for this and isn't told which; it finds out from what it gets. With `watch` or `control`, a device that connects while another is using the computer (and passes pairing, its permissions and the second factor as usual) **joins** that session instead of replacing it. The first device is the **lead**; it is served as ever. The same device connecting again (a lead that reconnects) always takes its own place.
+
+What the joiner gets, in the order it arrives:
+
+- `host_hello`, whose `features` are the host's, less what the joiner's permissions take away, and less what stays the lead's: never `clipboard`, `files`, `mic`, `camera`, `configure`, `placement`, `displays`; and no `input`, `pen` or `gamepad` unless the host is set to `control` and the device may control. `parity` and `sound` stay.
+- The lead's current `stream` message, with the lead's epoch, codec, size and colour: the joiner takes the picture as the lead has it. It can't ask for another size or codec (`configure` is dropped), and the second display is not offered.
+- A keyframe soon after: the joiner asks the host for one when it joins, and again with `keyframe` or `lost` whenever it needs one. The host passes such requests on at most once in about half a second for all joiners together, and never counts a joiner's loss in the lead's network measurement, so a joiner on a bad link doesn't lower the lead's picture. A joiner that has lost frames therefore recovers by keyframe only: the host sends it no `recovery` flag (a recovery point made for the lead's loss can lean on frames this device missed),; a client takes a plain frame after a loss as not a restart point and keeps asking until a keyframe comes.
+- Every video frame of the lead with the lead's frame numbers (and parity, if it asked), cut to its own datagram size; the cursor's shape and position; the sound, once it has said `{"t":"sound","on":true}` (if it may) and the host has said `sound_format`. A joiner that is too slow loses frames, as it would on a lossy network; it never holds the lead back.
+- When the picture starts afresh (the lead's resize, a change of desktop), a new `stream` message with a new epoch, for the joiner to set up again.
+
+What a joiner sends: `ping`, `keyframe`, `lost` and `sound` are used. With `watch` its input is read and thrown away; with `control` it is used exactly like the lead's, and the host doesn't arbitrate between them. Everything else is ignored: clipboard and file blobs, microphone and camera datagrams, `configure`, display messages.
+
+A joiner whose decoders (from its hello) can't decode the lead's codec, chroma or depth is refused after the hello with `{"t":"error","code":"busy","message":"Another device is using this computer in a way this device can't show"}`.
+
+When the lead leaves, the session ends for the joiners too: each gets `{"t":"error","code":"failed","message":"The device that was using this computer left"}` and the connection is closed. A joiner that wants the computer connects again, and is then the lead. When a joiner leaves, only it is gone.
+
+The connection log records a joiner with `"joined":true` on its `connected` and `left` lines, and the host's notice ("Anna's iPad joined") is made as for any connection.
+
 ## Finding a host
 
 A host that can be reached from the network says so with DNS-SD (Bonjour, Avahi): a service of type `_remoteman._udp` whose instance name is the computer's name and whose port is the one it listens on. Its text records:
@@ -93,7 +131,7 @@ Each message is a `u32` length followed by that many bytes of UTF-8 JSON, an obj
 **Client → host**
 
 - `{"t":"client_hello","proto":0,"name":"Anna's iPad","display":{"width":2752,"height":2064,"scale":2.0,"refresh":120},"decoders":[{"codec":"av1","chroma":"420","depth":10},{"codec":"hevc","chroma":"444","depth":10},{"codec":"hevc","chroma":"420","depth":10}]}`
-  The first message. `display` is the client's screen in pixels, with the scale it wants the desktop drawn at and its refresh rate in Hz. `decoders` lists what it decodes in hardware, most preferred first. An optional `"cursor":true` says the client draws the cursor itself (see Cursor). An optional `"placement"` inside `display` says where the display sits among the host's own screens: `"extend"` (the default: an extra display beside them), `"main"` (the main display, the host's own screens kept on beside it) or `"only"` (the host's own screens off while the client is connected). A host that can do this lists `placement` in its features; one that can't gives an extra display whatever is asked. The host's own layout comes back when the client leaves. A fourth value, `"mirror"`, asks for no display of the client's own: the client is shown the host's main monitor as it is, and its input lands there. The `stream` message then carries that monitor's size (not the one the client asked for) and a refresh rate no higher than either side's. A host that can do it lists `mirror` in its features; one that doesn't know the value gives an extra display.
+  The first message. `display` is the client's screen in pixels, with the scale it wants the desktop drawn at and its refresh rate in Hz. `decoders` lists what it decodes in hardware, most preferred first. An optional `"cursor":true` says the client draws the cursor itself (see Cursor). An optional `"parity":true` says it can use parity datagrams (see Parity). An optional `"placement"` inside `display` says where the display sits among the host's own screens: `"extend"` (the default: an extra display beside them), `"main"` (the main display, the host's own screens kept on beside it) or `"only"` (the host's own screens off while the client is connected). A host that can do this lists `placement` in its features; one that can't gives an extra display whatever is asked. The host's own layout comes back when the client leaves. A fourth value, `"mirror"`, asks for no display of the client's own: the client is shown the host's main monitor as it is, and its input lands there. The `stream` message then carries that monitor's size (not the one the client asked for) and a refresh rate no higher than either side's. A host that can do it lists `mirror` in its features; one that doesn't know the value gives an extra display.
 - `{"t":"lost","first":812,"last":813,"epoch":1}`: frames 812 to 813 never arrived whole (`last` is the newest frame number the client has seen; `epoch` is the stream epoch the numbers belong to, and a host drops a report about an epoch that is over). See Video, "Loss".
 - `{"t":"keyframe"}`: the client needs a keyframe, with no way round it (at the start of a stream).
 - `{"t":"ping","id":7,"client_us":123456}`: answered at once with `pong`. `client_us` is the client's clock in microseconds.
@@ -156,9 +194,11 @@ The host reports every move, the client's own included, a pipeline's delay later
 
 Everything beside the picture and input. Three rules hold for all of it:
 
-- **A host lists what it has** in its hello's `features`: `sound`, `mic`, `camera`, `configure`, `clipboard`, `files`. A client offers only those.
+- **A host lists what it has** in its hello's `features`: `sound`, `mic`, `camera`, `configure`, `clipboard`, `files`, `parity`, `pen`, `gamepad`. A client offers only those.
 - **Nothing of a feature is sent to a side that hasn't asked for it.** Each starts with a message from the client, so a client or host that knows nothing of a feature is never handed a datagram or a stream it can't read. (A client must still ignore datagram kinds it doesn't know.)
 - **When the desktop behind the connection changes** (a new stream epoch because the login screen gave way to the session), what the client had switched on stays on: the host side carries it over, and the client hears `sound_format` again.
+
+**What a device may do.** A host's owner can allow each paired device some of this and not the rest, and the list in a device's hello (and any later `features`) is the host's features less what that device isn't allowed: `input` (and `pen` with it), `clipboard`, `files`, `sound`, `mic`, `camera`. A host may leave `input` out of a device's features: the device is shown the picture only (view-only); a client must not send input then, and shows that it is view-only. Whatever an old client sends anyway is dropped by the host (input events of every kind, clipboard and file messages and blobs, microphone and camera datagrams, requests to start sound, microphone or camera).
 
 A host whose owner switches a feature on or off while a client is connected sends `{"t":"features","features":[...]}`: the whole list as it is now, replacing the hello's. A client enables and disables its controls to match, and stops what was switched off.
 
@@ -200,12 +240,35 @@ A blob is a stream that begins with a kind byte, then a `u32` length and that ma
 ### Camera (`camera`)
 
 - Client → host: `{"t":"camera","on":true,"codec":"h264","width":1280,"height":720,"fps":30}`, then camera datagrams; `{"t":"camera","on":false}` to stop. `h264` at 1280×720 and 30 a second is the mode every host takes; `hevc` is for hosts that say so later. Frames are Annex-B with the parameter sets in front of every keyframe and no B-frames; the size may change at a keyframe (a device turned on its side).
-- Host → client: `{"t":"camera_keyframe"}` when it lost a frame; the client's next frame is a keyframe. (The client also sends one every 2 s or so, which makes most losses heal by themselves.) The host presents the camera as one that programs on the desktop can pick. It keeps the size it was started with for as long as it is on: a picture of another size (the device turned) is scaled to fit and centred on black, because camera programs pick one size when they open a camera and don't follow a change.
+- Host → client: `{"t":"camera_keyframe"}` when it lost a frame; the client's next frame is a keyframe. (The client also sends one every 2 s or so, which makes most losses heal by themselves.) The host presents the camera as one that programs on the desktop can pick (the Windows host as a Windows 11 virtual camera, which its installer sets up: it lists `camera` only where that is registered). It keeps the size it was started with for as long as it is on: a picture of another size (the device turned) is scaled to fit and centred on black, because camera programs pick one size when they open a camera and don't follow a change.
 
 ### Settings (`configure`)
 
 - Client → host: `{"t":"configure","display":{...},"bitrate":25000000,"decoders":[...]}`. Every field is optional and what is left out stays as it is. `display` is as in the hello (size, scale, refresh, placement); a new one, or other `decoders`, starts a new stream epoch. `bitrate` is the most the picture may use, in bits a second; 0 gives the choice back to the host.
 - Host → client, now and then: `{"t":"status","bitrate":25000000}`: what the picture is being encoded at, for the device to show.
+- **Bitrate following the network.** `bitrate` in `configure` (or the host's own default when there is none or 0) is a *ceiling*; what the picture is encoded at is a target at or below it. On a loss report the host multiplies the target by 0.8 (reports within 500 ms of the last cut count as one), down to the larger of 2 Mbit/s and 15% of the ceiling. After 2 s without a report the target climbs 3% every 500 ms (about 6% a second) until it is back at the ceiling. Every change is sent as `status`. A new `configure` starts from the ceiling again. The encoder's rate changes live, with no keyframe. Hosts whose encoder can't do that (or that haven't implemented it) keep the rate they chose; the client sends nothing new for this, loss reports are the only signal.
+
+### Parity (`parity`)
+
+A host that lists `parity` in its features may send, to a client that said `"parity":true` in its `client_hello`, one parity datagram (kind 7) after each group of up to 10 data fragments of the first picture's frames (and after the last, shorter group). Nothing of it goes to any other client, and a client that doesn't know it ignores the kind. The datagram:
+
+```
+u8   kind        7 = parity
+u8   flags       as the video datagram's (bit 0 key, bit 1 recovery) for the frame
+u16  epoch
+u32  frame
+u16  first       the index of the group's first data fragment
+u16  count       how many fragments the frame has
+u8   n           how many data fragments the group has (1 to 255; the host uses 10)
+u8   0
+u16  last_len    the payload length of the frame's last fragment
+u64  capture_us  the frame's
+...  payload     the XOR of the group's fragment payloads, shorter ones padded with zeros
+```
+
+The header is 24 bytes; to keep every datagram within the connection's limit the host cuts the frame's data fragments 4 bytes smaller than it would without parity (so a frame sent with parity is not cut as it would be without). The group size is fixed at 10 (about 10% more bytes, outside the bitrate); `first` and `n` are in each datagram, so a host may change it without the client noticing.
+
+A client that holds all but one of a group's fragments and has the group's parity rebuilds the missing one: the XOR of the parity and the others, as long as the parity is, or `last_len` long if it is the frame's last fragment. With two missing in a group nothing is rebuilt (the frame is given up as in "Loss"). Parity may come before or after its data; a parity datagram of another epoch, an earlier frame, or one that does not agree with the frame's `count` is ignored. Second displays and the camera have no parity.
 
 ### Clipboard (`clipboard`)
 
@@ -232,6 +295,30 @@ A sequence of events on the input stream, each a `u8` type and then its fields:
 | 5 key | `u16 usage, u8 down` | A USB HID usage on page 7 (keyboard), by physical position, modifiers included. Any ⌘/Ctrl swapping is done by the client. |
 | 6 touch | `u8 phase, u8 slot, f32 x, f32 y` | Phase 0 down, 1 move, 2 up. `slot` tells fingers apart. Position as for type 1. |
 | 7 text | `u16 length`, then UTF-8 | Text typed through an on-screen keyboard or input method, put in as typed. |
+| 9 pen | `u8 phase, u8 buttons, f32 x, f32 y, f32 pressure, f32 tilt_x, f32 tilt_y, f32 twist` | See Pen. 27 bytes with the type. |
+| 10 gamepad | `u8 pad, u8 flags, u16 buttons, f32 left_trigger, f32 right_trigger, f32 left_x, f32 left_y, f32 right_x, f32 right_y` | See Game controllers. 29 bytes with the type. |
+
+### Pen
+
+A client sends type 9 only to a host that lists `pen` in its features, and falls back to touch or mouse for any other. One pen at a time, no id.
+
+- `phase`: 0 contact down, 1 move in contact, 2 contact up, 3 hover move (in range, no contact), 4 left hover range.
+- `buttons`: bit 0 the barrel (side) button, bit 1 the eraser end. A change while the pen is down or hovering is sent as a move.
+- `x`, `y`: as for type 1: little-endian `f32`s, fractions (0 to 1) of the display from its top left.
+- `pressure`: 0 to 1, 0 while hovering. `tilt_x`, `tilt_y`: degrees, -90 to 90, as Windows pointer input has them. `twist`: degrees, 0 to 359, 0 if unknown.
+
+A host that can inject a pen lists `pen`, and lifts the pen if the client leaves mid-stroke.
+
+### Game controllers (`gamepad`)
+
+A client sends type 10 only to a host that lists `gamepad` in its features. A controller held at the client drives a virtual Xbox-style controller on the host. Fields, little-endian:
+
+- `pad`: 0 to 3, which of the client's controllers. A host that can show only one controller takes pad 0 and ignores the rest.
+- `flags`: bit 0 connected. A state with bit 0 clear says that pad was unplugged; the other fields are then 0.
+- `buttons`: a bit mask in XInput's order: DPAD_UP 0x0001, DPAD_DOWN 0x0002, DPAD_LEFT 0x0004, DPAD_RIGHT 0x0008, START/MENU 0x0010, BACK/VIEW 0x0020, LEFT_THUMB 0x0040, RIGHT_THUMB 0x0080, LEFT_SHOULDER 0x0100, RIGHT_SHOULDER 0x0200, GUIDE 0x0400, A 0x1000, B 0x2000, X 0x4000, Y 0x8000. (A host may have no use for GUIDE.)
+- `left_trigger`, `right_trigger`: 0 to 1. `left_x`, `left_y`, `right_x`, `right_y`: -1 to 1, right and up positive.
+
+Each event is the whole state of the pad. The client sends one whenever the state changes, and repeats the current state every 100 ms while any input is off neutral. Events go on the input stream, which is reliable and ordered, so the repeat is not for a lost packet but keeps a host's view fresh and settles a host that missed the start of a session. When the client's window loses the keyboard, or the session ends, a client sends a neutral state for each pad that was in use; a host lets go of every pad when the client leaves. (Rumble back to the device isn't in the protocol yet.)
 
 A host ignores event types it doesn't know only if it can skip them, so new types go into a new protocol version.
 
@@ -241,4 +328,4 @@ The client sends `ping` now and then and takes the answer with the shortest roun
 
 ## Not in version 0
 
-Re-requesting lost fragments, parity, bitrate following the network, resume tokens, QR pairing, more than one display, HDR, a camera or microphone switched on from the host's side (when a program there opens it).
+Re-requesting lost fragments, resume tokens, QR pairing, more than one display, HDR, a camera or microphone switched on from the host's side (when a program there opens it).

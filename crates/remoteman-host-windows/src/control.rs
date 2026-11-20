@@ -1,11 +1,15 @@
 //! The owner's side of the host: what it is asked and told while it runs, by `remoteman-host
 //! ctl WORDS` today and by a tray icon later. The words are the Linux host's (`status`, `pair
 //! on|off|accept|decline`, `allow clipboard|files on|off`, `drop`, `revoke FINGERPRINT`), so
-//! one interface can speak to both.
+//! one interface can speak to both. `send PATH` sends a file to the connected device.
 //!
 //! It is a named pipe, `\\.\pipe\remoteman-host-PORT`, one line in and one answer out. The
-//! pipe is made with Windows' default protection for pipes: the system, Administrators and the
-//! account that made it may write to it. The host runs elevated, so `ctl` must too.
+//! system, Administrators and the user the host runs as may use it, that user also from a
+//! prompt that isn't elevated (the owner's app, Remoteman Host, runs so); nobody else.
+//!
+//! `sharing off` turns every device away (the connected one is dropped, pairing closes) until
+//! `sharing on`; it is remembered in the state folder, as the switches for files and the
+//! clipboard are.
 
 use std::ffi::c_void;
 use std::io::{Read, Write};
@@ -18,7 +22,9 @@ use remoteman_core::Message;
 use remoteman_core::host::Host;
 use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE};
 use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, FlushFileBuffers};
-use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
+use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT};
+use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows::Win32::Security::{PSECURITY_DESCRIPTOR, RevertToSelf, SECURITY_ATTRIBUTES};
 use windows::core::HSTRING;
 
 /// `PIPE_ACCESS_DUPLEX`.
@@ -46,28 +52,58 @@ pub struct Now {
 pub struct Allowed {
     pub files: Arc<AtomicBool>,
     pub clipboard: Arc<AtomicBool>,
+    /// Lock the PC when a device's session ends (off unless the owner says so).
+    pub lock_on_leave: Arc<AtomicBool>,
+    /// Make Steam's speakers the default output while a device listens, so the PC's own go quiet (on unless the owner says otherwise).
+    pub speakers_follow: Arc<AtomicBool>,
     /// A device this host can play a client's microphone into was found.
     pub microphone: Arc<AtomicBool>,
     /// The driver has a second monitor to give a device as its own.
     pub own_monitor: Arc<AtomicBool>,
     /// And a third, for a device's second display.
     pub second: Arc<AtomicBool>,
+    /// A device's monitor can be made HDR and the encoder can say so.
+    pub hdr: Arc<AtomicBool>,
+    /// Sharing is switched off: no device may connect.
+    pub paused: Arc<AtomicBool>,
+    /// The PC has screens of its own: `mirror` shows a device its main screen as it is.
+    pub real_screens: Arc<AtomicBool>,
     pub now: Arc<Mutex<Option<Now>>>,
+    /// Tell the owner when a device connects, is refused or is paired (on unless the owner says
+    /// otherwise): the app shows a notification for each of `notices`.
+    pub notify: Arc<AtomicBool>,
+    /// The last few things the core reported about devices, each with a number that counts up
+    /// from this host's start, for the app to notice the new ones by.
+    pub notices: Arc<Mutex<std::collections::VecDeque<(u64, remoteman_core::host::ConnectionEvent)>>>,
+    /// What the device said of files sent to it: how many it answered for, and the last
+    /// answer (whether it took it, and what it said: where it went, or why not).
+    pub sent: Arc<Mutex<(u64, bool, String)>>,
 }
 
 /// What this host does, as its hello lists it. `mirror`: a device may ask for the monitor as
 /// it is. `placement`: a device gets a monitor of its own, placed as it asks. `displays`: and a
 /// second one, where the driver has a third monitor.
 pub fn features(allowed: &Allowed) -> Vec<String> {
-    let mut features: Vec<String> = ["video", "input", "cursor", "configure", "mirror", "sound"].map(String::from).to_vec();
+    let mut features: Vec<String> = ["video", "input", "cursor", "configure", "mirror", "sound", "pen"].map(String::from).to_vec();
     if allowed.own_monitor.load(Ordering::Relaxed) {
         features.push("placement".into());
         if allowed.second.load(Ordering::Relaxed) {
             features.push("displays".into());
         }
     }
+    if crate::gamepad::available() {
+        features.push("gamepad".into());
+    }
+    if allowed.hdr.load(Ordering::Relaxed) {
+        features.push("hdr".into());
+    }
     if allowed.microphone.load(Ordering::Relaxed) {
         features.push("mic".into());
+    }
+    // The device's camera as a camera on this PC: where the installer registered the media
+    // source (a camera driver of remoteman's own).
+    if crate::camera::available() {
+        features.push("camera".into());
     }
     if allowed.files.load(Ordering::Relaxed) {
         features.push("files".into());
@@ -78,25 +114,109 @@ pub fn features(allowed: &Allowed) -> Vec<String> {
     features
 }
 
+/// What this computer is called, as devices are told.
+fn host_name() -> String {
+    NAME.get().cloned().unwrap_or_default()
+}
+
+/// The name the host gives itself, for `status`.
+pub static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 fn saved_path(state: &Path) -> PathBuf {
     state.join("allowed.json")
 }
 
-/// What the owner switched on earlier: (files, clipboard).
-pub fn load(state: &Path) -> (bool, bool) {
-    let saved = std::fs::read_to_string(saved_path(state)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    let is = |key: &str| saved.as_ref().and_then(|v| v.get(key)).and_then(|v| v.as_bool()).unwrap_or(false);
-    (is("files"), is("clipboard"))
+/// What the owner switched earlier.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub files: bool,
+    pub clipboard: bool,
+    /// Sharing off.
+    pub paused: bool,
+    pub lock_on_leave: bool,
+    pub speakers_follow: bool,
+    pub notify: bool,
+}
+
+/// Keep what the core says of a device for the app to show (`Allowed::notices`).
+pub fn note(allowed: &Allowed, event: &remoteman_core::host::ConnectionEvent) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let mut notices = allowed.notices.lock().unwrap();
+    notices.push_back((SEQ.fetch_add(1, Ordering::Relaxed), event.clone()));
+    while notices.len() > 20 {
+        notices.pop_front();
+    }
+}
+
+pub fn load(state: &Path) -> Saved {
+    parse(std::fs::read_to_string(saved_path(state)).ok().as_deref())
+}
+
+fn parse(text: Option<&str>) -> Saved {
+    let saved = text.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    let is = |key: &str, otherwise: bool| saved.as_ref().and_then(|v| v.get(key)).and_then(|v| v.as_bool()).unwrap_or(otherwise);
+    Saved { files: is("files", false), clipboard: is("clipboard", false), paused: is("paused", false), lock_on_leave: is("lock_on_leave", false), speakers_follow: is("speakers_follow", true), notify: is("notify", true) }
 }
 
 fn save(state: &Path, allowed: &Allowed) -> std::io::Result<()> {
-    let saved = serde_json::json!({ "files": allowed.files.load(Ordering::Relaxed), "clipboard": allowed.clipboard.load(Ordering::Relaxed) });
+    let on = |b: &Arc<AtomicBool>| b.load(Ordering::Relaxed);
+    let saved = serde_json::json!({
+        "files": on(&allowed.files), "clipboard": on(&allowed.clipboard), "paused": on(&allowed.paused),
+        "lock_on_leave": on(&allowed.lock_on_leave), "speakers_follow": on(&allowed.speakers_follow),
+        "notify": on(&allowed.notify),
+    });
     std::fs::create_dir_all(state)?;
     std::fs::write(saved_path(state), saved.to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_default_and_round_trip() {
+        // Nothing saved: files, clipboard, pause and lock are off; the speakers follow.
+        assert_eq!(parse(None), Saved { files: false, clipboard: false, paused: false, lock_on_leave: false, speakers_follow: true, notify: true });
+        // A file from before these settings existed.
+        assert_eq!(parse(Some(r#"{"files":true,"clipboard":false,"paused":true}"#)), Saved { files: true, clipboard: false, paused: true, lock_on_leave: false, speakers_follow: true, notify: true });
+        let dir = std::env::temp_dir().join(format!("remoteman-settings-{}", std::process::id()));
+        let allowed = Allowed::default();
+        allowed.lock_on_leave.store(true, Ordering::Relaxed);
+        save(&dir, &allowed).unwrap();
+        assert_eq!(load(&dir), Saved { files: false, clipboard: false, paused: false, lock_on_leave: true, speakers_follow: false, notify: false });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 pub fn pipe_name(port: u16) -> String {
     format!(r"\\.\pipe\remoteman-host-{port}")
+}
+
+/// The host's log file, for `log` (set at the start when there is one).
+pub static LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Is this process SYSTEM, started by the service? Asked once.
+fn system() -> bool {
+    static IS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *IS.get_or_init(crate::desk::is_system)
+}
+
+/// The pipe's protection: the system and Administrators, and the user: the one this process
+/// runs as, whether or not that user's program is elevated (an elevated program's token makes
+/// Administrators, not the user, the owner of what it creates, so Windows' default would shut
+/// the user's own app out); or, for a host the service started as SYSTEM, whoever is signed in
+/// at the console now (nobody but the system and Administrators while nobody is). `None`:
+/// Windows' default, if the user can't be named. The descriptor is the caller's to free.
+fn protection() -> Option<SECURITY_ATTRIBUTES> {
+    let user = if system() { crate::desk::console_user_sid() } else { Some(crate::desk::own_sid()?) };
+    let sddl = HSTRING::from(match user {
+        Some(sid) => format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;{sid})"),
+        None => "D:(A;;GA;;;SY)(A;;GA;;;BA)".to_string(),
+    });
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: the text outlives the call; the descriptor is LocalAlloc'd and freed by the caller.
+    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&sddl, 1, &mut descriptor, None) }.ok()?;
+    Some(SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor.0, bInheritHandle: false.into() })
 }
 
 /// Answer the owner's questions for as long as the host lives.
@@ -104,10 +224,20 @@ pub fn serve(port: u16, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
     let name = HSTRING::from(pipe_name(port));
     let spawned = std::thread::Builder::new().name("control".into()).spawn(move || {
         let mut said = false;
+        let mut warned = false;
         loop {
             // A pipe for each question: the one before is closed when it has been answered.
-            // SAFETY: plain call; the name outlives it.
-            let pipe = unsafe { CreateNamedPipeW(&name, FILE_FLAGS_AND_ATTRIBUTES(DUPLEX), PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, None) };
+            // Its protection is made anew each time, as the user at the console may change.
+            let protection = protection();
+            if protection.is_none() && !std::mem::replace(&mut warned, true) {
+                tracing::warn!("the control pipe has Windows' default protection: only an elevated prompt can speak to this host");
+            }
+            // SAFETY: plain call; the name and the protection outlive it.
+            let pipe = unsafe { CreateNamedPipeW(&name, FILE_FLAGS_AND_ATTRIBUTES(DUPLEX), PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, protection.as_ref().map(|p| p as *const _)) };
+            if let Some(p) = &protection {
+                // SAFETY: LocalAlloc'd by `protection`; the pipe keeps its own copy.
+                let _ = unsafe { windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(p.lpSecurityDescriptor))) };
+            }
             if pipe.is_invalid() {
                 if !std::mem::replace(&mut said, true) {
                     tracing::warn!("no control pipe ({}): this host can't be asked how it stands", windows::core::Error::from_thread());
@@ -130,10 +260,22 @@ pub fn serve(port: u16, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
                 line.push(byte[0]);
             }
             let line = String::from_utf8_lossy(&line);
+            // A host running as SYSTEM opens a file to send with the asking user's rights, so
+            // that nobody gets a file sent that they couldn't read themselves.
+            let as_asker = system() && line.trim().starts_with("send ");
+            // SAFETY: a connected pipe; undone below on this thread.
+            if as_asker && unsafe { ImpersonateNamedPipeClient(pipe) }.is_err() {
+                let _ = file.write_all(b"couldn't take on the asking user's rights to read the file\n");
+                continue;
+            }
             let said = match host.upgrade() {
                 Some(host) => answer(&host, &allowed, &state, line.trim()),
                 None => "the host is stopping\n".into(),
             };
+            if as_asker {
+                // SAFETY: back to this process's own rights.
+                let _ = unsafe { RevertToSelf() };
+            }
             let _ = file.write_all(said.as_bytes());
             // What was written is read before the pipe goes.
             // SAFETY: a live handle.
@@ -165,25 +307,94 @@ pub fn ask(port: u16, words: &str) -> anyhow::Result<String> {
     anyhow::bail!("no host is answering on {name}: {} (is it running, and is this prompt elevated?)", last.map(|e| e.to_string()).unwrap_or_default())
 }
 
+/// Send a file to the connected device, on a thread of its own. The device decides where it
+/// goes and answers when it has it (`Allowed::sent`). As the Linux host does it.
+fn send_file(link: Option<remoteman_core::host::Link>, path: &Path) -> Result<(), String> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let link = link.ok_or("no device is connected")?;
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let size = file.metadata().map_err(|e| e.to_string())?.len();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
+    let header = remoteman_core::media::FileHeader { id: NEXT.fetch_add(1, Ordering::Relaxed), name, size };
+    tracing::info!(bytes = size, "a file goes to the device");
+    let blob = link.open_blob(remoteman_core::media::BLOB_FILE, serde_json::to_string(&header).unwrap_or_default());
+    std::thread::Builder::new()
+        .name("file".into())
+        .spawn(move || {
+            let mut piece = vec![0u8; 256 * 1024];
+            loop {
+                match file.read(&mut piece) {
+                    Ok(0) => {
+                        let _ = blob.finish();
+                        return;
+                    }
+                    Ok(n) if blob.write(&piece[..n]) => {}
+                    // The connection went, or the file can't be read on: given up (dropping
+                    // the blob tells the device).
+                    _ => return,
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
+    // A path may have spaces in it: everything after the word.
+    if let Some(path) = line.trim().strip_prefix("send ") {
+        if !allowed.files.load(Ordering::Relaxed) {
+            return "files are switched off on this computer\n".into();
+        }
+        return match send_file(host.link(), Path::new(path.trim().trim_matches('"'))) {
+            Ok(()) => "ok\n".into(),
+            Err(why) => format!("{why}\n"),
+        };
+    }
     let mut words = line.split_whitespace();
     match (words.next(), words.next(), words.next()) {
+        // The end of the host's log (its last N lines, 200 unless said), for the owner's app
+        // and for a prompt that isn't elevated (the log's folder is Administrators' only).
+        (Some("log"), n, _) => {
+            let Some(path) = LOG.get() else { return "this host keeps no log (it wasn't started with --log)\n".into() };
+            let n = n.and_then(|n| n.parse::<usize>().ok()).unwrap_or(200).clamp(1, 5000);
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    let lines: Vec<&str> = text.lines().collect();
+                    lines[lines.len().saturating_sub(n)..].iter().map(|l| format!("{l}\n")).collect()
+                }
+                Err(e) => format!("{}: {e}\n", path.display()),
+            }
+        }
         (Some("status") | None, _, _) => {
             let client = allowed.now.lock().unwrap().as_ref().map(|n| {
                 serde_json::json!({ "name": n.name, "since": n.since, "width": n.width, "height": n.height, "refresh": n.refresh, "placement": n.placement, "picture": n.picture, "sound": n.sound })
             });
+            let sent = {
+                let sent = allowed.sent.lock().unwrap();
+                serde_json::json!({ "answered": sent.0, "ok": sent.1, "said": sent.2 })
+            };
             let status = serde_json::json!({
                 "address": host.address.to_string(),
                 "fingerprint": host.fingerprint,
                 "pairing": host.pairing(),
+                "second_device": host.second_device().as_str(),
                 "pending": host.pending(),
-                "devices": host.devices(),
+                "devices": devices_json(host),
+                "notify": allowed.notify.load(Ordering::Relaxed),
+                "notices": allowed.notices.lock().unwrap().iter().map(|(seq, e)| { let mut v = serde_json::to_value(e).unwrap_or_default(); v["seq"] = (*seq).into(); v }).collect::<Vec<_>>(),
+                "connections": host.connections(12),
                 "daemon": false,
-                "paused": false,
+                "paused": allowed.paused.load(Ordering::Relaxed),
+                "second_factor": host.second_factor().map(|s| serde_json::json!({ "remembered": s.remembered })),
+                "name": host_name(),
                 "clipboard": allowed.clipboard.load(Ordering::Relaxed),
                 "files": allowed.files.load(Ordering::Relaxed),
+                "lock_on_leave": allowed.lock_on_leave.load(Ordering::Relaxed),
+                "speakers_follow": allowed.speakers_follow.load(Ordering::Relaxed),
                 "microphone": allowed.microphone.load(Ordering::Relaxed),
                 "client": client,
+                "sent": sent,
             });
             format!("{status}\n")
         }
@@ -202,6 +413,21 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "ok\n".into()
             } else {
                 "no device is waiting\n".into()
+            }
+        }
+        // Sharing off: every device is turned away until it is on again.
+        (Some("sharing"), Some(word @ ("on" | "off")), _) => {
+            let off = word == "off";
+            allowed.paused.store(off, Ordering::Relaxed);
+            if off {
+                host.set_pairing(false);
+                host.decide(false);
+                host.drop_client();
+            }
+            tracing::info!(on = !off, "sharing switched by the owner");
+            match save(state, allowed) {
+                Ok(()) => "ok\n".into(),
+                Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
         (Some("drop"), _, _) => {
@@ -232,6 +458,161 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
-        _ => "status | pair on|off|accept|decline | allow clipboard|files on|off | drop | revoke FINGERPRINT\n".into(),
+        // What a device that connects while another is using the PC does: take over, watch, or
+        // control too. Kept by the core with the host's state.
+        (Some("set"), Some("second-device"), Some(word)) => match remoteman_core::host::SecondDevice::parse(word) {
+            Some(mode) => {
+                host.set_second_device(mode);
+                tracing::info!(mode = mode.as_str(), "what a second device does was set by the owner");
+                "ok\n".into()
+            }
+            None => "set second-device take-over|watch|control\n".into(),
+        },
+        // Host settings: lock the PC when a device's session ends; Steam's speakers as the
+        // default output while a device listens.
+        (Some("set"), Some(what @ ("lock" | "speakers" | "notify")), Some(word @ ("on" | "off"))) => {
+            let on = word == "on";
+            match what {
+                "lock" => &allowed.lock_on_leave,
+                "speakers" => &allowed.speakers_follow,
+                _ => &allowed.notify,
+            }
+            .store(on, Ordering::Relaxed);
+            tracing::info!(setting = what, on, "setting switched by the owner");
+            match save(state, allowed) {
+                Ok(()) => "ok\n".into(),
+                Err(e) => format!("done, but it won't be remembered: {e}\n"),
+            }
+        }
+        // The last N lines of the connection log (10 unless said), one JSON object a line.
+        (Some("connections"), n, _) => {
+            let n = n.and_then(|n| n.parse::<usize>().ok()).unwrap_or(10).clamp(1, 1000);
+            host.connections(n).iter().map(|e| format!("{}\n", serde_json::to_string(e).unwrap_or_default())).collect()
+        }
+        (Some("device"), _, _) => device(host, line.trim()["device".len()..].trim()),
+        (Some("second-factor"), what, arg) => second_factor(host, what, arg),
+        _ => "status | second-factor on|confirm CODE|off|status|forget | pair on|off|accept|decline | allow clipboard|files on|off | set lock|speakers|notify on|off | set second-device take-over|watch|control | device NAME [view-only on|off | allow clipboard|files|sound|mic|camera on|off] | connections [N] | drop | revoke FINGERPRINT | send PATH | sharing on|off\n".into(),
     }
+}
+
+/// `second-factor on|confirm CODE|off|status|forget`: a code from an authenticator app asked for on
+/// top of a device's key. The pipe takes a line and gives one answer, so turning it on is two
+/// steps: `on` makes the secret (and prints it, as a link and in groups of four; `on json` as
+/// JSON for the app), `confirm CODE` with a code the authenticator shows turns it on.
+fn second_factor(host: &Host, what: Option<&str>, arg: Option<&str>) -> String {
+    match (what, arg) {
+        (Some("on"), json) => match host.enable_second_factor() {
+            Ok(s) if json == Some("json") => format!("{}\n", serde_json::json!({ "secret": s.secret, "grouped": s.grouped, "uri": s.uri })),
+            Ok(s) => format!("Add this to an authenticator app: {}\nor type the key by hand: {}\nthen turn it on with a code from the app: remoteman-host ctl second-factor confirm 123456\n", s.uri, s.grouped),
+            Err(e) => format!("{e:#}\n"),
+        },
+        (Some("confirm"), Some(code)) => {
+            if host.confirm_second_factor(code) {
+                tracing::info!("the second factor was switched on by the owner");
+                "ok: devices are asked for a code from now on\n".into()
+            } else {
+                "that code didn't work (or `second-factor on` wasn't run first)\n".into()
+            }
+        }
+        (Some("off"), _) => match host.disable_second_factor() {
+            Ok(()) => {
+                tracing::info!("the second factor was switched off by the owner");
+                "ok\n".into()
+            }
+            Err(e) => format!("{e:#}\n"),
+        },
+        (Some("forget"), _) => match host.forget_remembered() {
+            Ok(()) => "ok: every device is asked for a code again\n".into(),
+            Err(e) => format!("{e:#}\n"),
+        },
+        (Some("status") | None, _) => match host.second_factor() {
+            Some(s) => format!("on; {} device(s) told not to be asked again\n", s.remembered),
+            None => "off\n".into(),
+        },
+        _ => "second-factor on|confirm CODE|off|status|forget\n".into(),
+    }
+}
+
+/// The devices this host trusts with what each may do.
+fn devices_json(host: &Host) -> Vec<serde_json::Value> {
+    host.devices()
+        .into_iter()
+        .map(|d| {
+            let permissions = host.permissions(&d.fingerprint);
+            let mut v = serde_json::to_value(&d).unwrap_or_default();
+            v["permissions"] = serde_json::to_value(permissions).unwrap_or_default();
+            v
+        })
+        .collect()
+}
+
+/// The device a name or the start of a fingerprint means: the name as the device gave it (any
+/// case), a fingerprint's start, or the start of a name when only one starts so.
+fn find_device(host: &Host, name: &str) -> Result<remoteman_core::host::Device, String> {
+    let all = host.devices();
+    let lower = name.to_lowercase();
+    let exact: Vec<_> = all.iter().filter(|d| d.name.to_lowercase() == lower || d.fingerprint == name).collect();
+    let found: Vec<_> = if !exact.is_empty() {
+        exact
+    } else {
+        all.iter().filter(|d| (name.len() >= 4 && d.fingerprint.starts_with(&lower)) || d.name.to_lowercase().starts_with(&lower)).collect()
+    };
+    match found.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(format!("no device is called {name:?} (see `status`)")),
+        _ => Err(format!("{name:?} could mean more than one device: {}", found.iter().map(|d| format!("{} ({})", d.name, &d.fingerprint[..8.min(d.fingerprint.len())])).collect::<Vec<_>>().join(", "))),
+    }
+}
+
+/// `device NAME` shows what a device may do; `device NAME view-only on|off` and `device NAME
+/// allow clipboard|files|sound|mic|camera on|off` change it. NAME may have spaces in it.
+fn device(host: &Host, rest: &str) -> String {
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    let n = tokens.len();
+    let onoff = |w: &str| match w {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    };
+    let (name, change) = if n >= 3 && tokens[n - 2] == "view-only" && onoff(tokens[n - 1]).is_some() {
+        (tokens[..n - 2].join(" "), Some(("input", !onoff(tokens[n - 1]).unwrap())))
+    } else if n >= 4 && tokens[n - 3] == "allow" && onoff(tokens[n - 1]).is_some() && ["clipboard", "files", "sound", "mic", "camera"].contains(&tokens[n - 2]) {
+        (tokens[..n - 3].join(" "), Some((tokens[n - 2], onoff(tokens[n - 1]).unwrap())))
+    } else {
+        (tokens.join(" "), None)
+    };
+    if name.is_empty() {
+        return "device NAME [view-only on|off | allow clipboard|files|sound|mic|camera on|off]\n".into();
+    }
+    let found = match find_device(host, &name) {
+        Ok(d) => d,
+        Err(why) => return format!("{why}\n"),
+    };
+    let mut p = host.permissions(&found.fingerprint);
+    if let Some((what, on)) = change {
+        match what {
+            "input" => p.input = on,
+            "clipboard" => p.clipboard = on,
+            "files" => p.files = on,
+            "sound" => p.sound = on,
+            "mic" => p.mic = on,
+            _ => p.camera = on,
+        }
+        if let Err(e) = host.set_permissions(&found.fingerprint, p) {
+            return format!("done, but it won't be remembered: {e:#}\n");
+        }
+        tracing::info!(device = found.name, what, on, "a device's permission changed by the owner");
+    }
+    let yn = |b: bool| if b { "allowed" } else { "not allowed" };
+    format!(
+        "{} ({}): {}; clipboard {}, files {}, sound {}, microphone {}, camera {}\n",
+        found.name,
+        &found.fingerprint[..16.min(found.fingerprint.len())],
+        if p.input { "can control this PC" } else { "view only" },
+        yn(p.clipboard),
+        yn(p.files),
+        yn(p.sound),
+        yn(p.mic),
+        yn(p.camera)
+    )
 }

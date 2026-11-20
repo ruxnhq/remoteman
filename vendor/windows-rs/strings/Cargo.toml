@@ -1,0 +1,25 @@
+[package]
+name = "windows-strings"
+version = "0.100.1"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "Windows string types"
+repository = "https://github.com/microsoft/windows-rs"
+categories = ["os::windows-apis"]
+readme = "readme.md"
+
+[target.'cfg(windows)'.dependencies]
+windows-link = { version = "0.100.1", path = "../link", default-features = false }
+
+[features]
+default = ["std"]
+std = []
+
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = []
+
+[lints.rust]
+unexpected_cfgs = { level = 'warn', check-cfg = ['cfg(windows_slim_errors, windows_cast_diagnostics)'] }

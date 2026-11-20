@@ -62,6 +62,8 @@ pub struct App {
     pub hover_bar: Cell<bool>,
     /// Seconds of streaming counted, for the line in the log every ten.
     pub log_tick: Cell<u32>,
+    /// When this run's first session was first seen by `tick` (for the test above).
+    pub tick_started: Cell<Option<std::time::Instant>>,
     /// For the same line: pictures shown and input events sent since the last one.
     pub shown_window: Cell<u32>,
     /// For finding stalls (see the log line): microseconds, the longest since last written.
@@ -128,6 +130,7 @@ pub struct App {
 
 const STYLE: &str = "
 .rm-video { background: black; }
+.rm-waiting { color: white; }
 /* The session's bar: a pill floating over the picture, with a background of its own that
    reads on any picture, a hairline edge and a soft shadow. */
 .rm-pill { padding: 5px 6px; border-radius: 999px; background-color: color-mix(in srgb, var(--headerbar-bg-color) 94%, transparent); color: var(--headerbar-fg-color); border: 1px solid color-mix(in srgb, currentColor 13%, transparent); box-shadow: 0 1px 2px alpha(black, 0.2), 0 6px 20px alpha(black, 0.3); }
@@ -484,6 +487,9 @@ impl App {
             self.front_size.set(Some((self.window.width(), self.window.height())));
             self.window.set_default_size(1280, 800);
         }
+        // Until the first picture comes (a computer that has to unlock or make a display takes
+        // seconds), the window says so over the black.
+        self.view.await_picture(Some(&self.target.borrow().as_ref().map(|t| t.name.clone()).unwrap_or_default()));
         self.stack.set_visible_child_name("stream");
         self.show_list();
         computers::refresh(self);
@@ -850,8 +856,13 @@ impl App {
                 s.client.send_message(remoteman_core::Message::Keyframe);
             }
         }
+        // For tests: a computer whose first picture takes this many seconds to come.
+        let held = std::env::var("REMOTEMAN_TEST_SLOW_PICTURE").ok().and_then(|v| v.parse::<f32>().ok()).is_some_and(|secs| self.tick_started.get().is_none_or(|t| t.elapsed().as_secs_f32() < secs));
+        if self.tick_started.get().is_none() && self.session.borrow().is_some() {
+            self.tick_started.set(Some(std::time::Instant::now()));
+        }
         let (picture, closed, cursor) = match self.session.borrow().as_ref() {
-            Some(s) => (s.shared.picture.lock().unwrap().take(), s.shared.closed.lock().unwrap().clone(), s.shared.cursor.lock().unwrap().take()),
+            Some(s) => (if held { None } else { s.shared.picture.lock().unwrap().take() }, s.shared.closed.lock().unwrap().clone(), s.shared.cursor.lock().unwrap().take()),
             None => return,
         };
         let captured = self.capture.borrow().is_some();
@@ -895,6 +906,7 @@ impl App {
             // A picture: whatever the computer was doing before it let this device in is over.
             // (Not sooner: a computer that is logging in answers the hello and then closes.)
             self.logging_in.set(0);
+            self.view.await_picture(None);
             // And a password that got this device in is one worth keeping, if that was asked.
             if let Some(used) = self.unlocking.borrow_mut().take() {
                 if used.remember && !used.kept {
@@ -1061,6 +1073,7 @@ pub fn build(application: &adw::Application, args: Args) {
         attempt: Cell::new(0),
         hover_bar: Cell::new(hover_bar),
         log_tick: Cell::new(0),
+        tick_started: Cell::new(None),
         shown_window: Cell::new(0),
         last_tick: Cell::new(None),
         tick_gap_max: Cell::new(0),

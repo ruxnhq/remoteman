@@ -8,6 +8,10 @@
 pub mod blob;
 pub mod ffi;
 pub mod host;
+mod join;
+pub mod permissions;
+pub mod rate;
+pub mod second_factor;
 pub mod receive;
 // The relay talks over a Unix socket.
 #[cfg(unix)]
@@ -21,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 pub use remoteman_proto::control::{Chroma, Codec, Display, Mode, Placement, Side};
-pub use remoteman_proto::input::{Button, Event, TouchPhase};
+pub use remoteman_proto::input::{Button, Event, PenPhase, TouchPhase};
 pub use remoteman_proto::keys;
 pub use remoteman_proto::{PORT, PROTO};
 use remoteman_proto::video::{CursorAt, KIND_CURSOR, KIND_VIDEO, Reassembler};
@@ -175,6 +179,8 @@ pub struct Stats {
     pub keyframe_requests: u32,
     /// The shortest round trip seen, in microseconds (0: none yet).
     pub round_trip_us: u32,
+    /// Fragments rebuilt from the host's parity datagrams: each would have cost a frame.
+    pub repaired: u32,
 }
 
 #[derive(Default)]
@@ -182,6 +188,7 @@ struct Counters {
     lost: AtomicU32,
     requests: AtomicU32,
     rtt: AtomicU32,
+    repaired: AtomicU32,
 }
 
 /// Sends microphone packets on a client's connection, from any thread: as
@@ -241,6 +248,26 @@ pub struct Client {
     pub host_features: Vec<String>,
     /// The host's certificate fingerprint.
     pub host_fingerprint: String,
+    /// The host wants a code from an authenticator app before it starts the session.
+    pub host_second_factor: bool,
+    second_factor: Arc<std::sync::Mutex<Ask>>,
+}
+
+/// Who is told the host wants a code, and what is waiting for someone to tell.
+struct Ask {
+    callback: Option<Box<dyn FnMut(Option<u32>) + Send>>,
+    /// The host asked (`Some(None)`) or said "wrong" (`Some(Some(left))`) before a callback was set.
+    pending: Option<Option<u32>>,
+}
+
+impl Ask {
+    fn fire(ask: &std::sync::Mutex<Ask>, left: Option<u32>) {
+        let mut ask = ask.lock().unwrap();
+        match ask.callback.as_mut() {
+            Some(f) => f(left),
+            None => ask.pending = Some(left),
+        }
+    }
 }
 
 impl Client {
@@ -283,10 +310,10 @@ impl Client {
         let now_us = move || clock.elapsed().as_micros() as u64;
         handler.stage(Stage::Hello);
         let (mut send, mut recv) = conn.open_bi().await?;
-        write_message(&mut send, &Message::ClientHello { proto: remoteman_proto::PROTO, name: o.name, display: o.display, decoders: o.decoders, cursor: o.cursor, unlock: o.unlock, way_in: o.attach_only.then(|| "attach".to_owned()) }).await?;
-        let (host_name, host_os, host_features) = loop {
+        write_message(&mut send, &Message::ClientHello { proto: remoteman_proto::PROTO, name: o.name, display: o.display, decoders: o.decoders, cursor: o.cursor, unlock: o.unlock, way_in: o.attach_only.then(|| "attach".to_owned()), parity: true }).await?;
+        let (host_name, host_os, host_features, host_second_factor) = loop {
             match read_message(&mut recv).await?.context("the host closed the connection")? {
-                Message::HostHello { name, os, features, .. } => break (name, os, features),
+                Message::HostHello { name, os, features, second_factor, .. } => break (name, os, features, second_factor.is_some()),
                 Message::Error { code, message } => return Err(forget(anyhow::anyhow!("the host refused: {code}: {message}"))),
                 // New here, and the host's owner is being asked: show the code and wait.
                 Message::Pairing { seconds } => handler.pairing(&remoteman_transport::pair_code(&fingerprint, &identity.fingerprint), seconds),
@@ -295,6 +322,10 @@ impl Client {
         };
         handler.stage(Stage::Display);
 
+        // A host that asks for a code from an authenticator app sends nothing more until it has one
+        // (docs/PROTOCOL.md, "Second factor"): the app is asked through `Client::on_second_factor`.
+        let ask = Arc::new(std::sync::Mutex::new(Ask { callback: None, pending: host_second_factor.then_some(None) }));
+        let asks = ask.clone();
         let counters = Arc::new(Counters::default());
         let (ctl_tx, mut ctl_rx) = tokio::sync::mpsc::channel::<Message>(16);
         let control = ctl_tx.clone();
@@ -348,6 +379,7 @@ impl Client {
                             let _ = offset_tx.send(Some(host_us as i64 - ((client_us + back) / 2) as i64));
                         }
                     }
+                    Message::SecondFactorWrong { left } => Ask::fire(&asks, Some(left)),
                     Message::Error { code, message } => {
                         let _ = failed.send(format!("{code}: {message}"));
                     }
@@ -467,7 +499,7 @@ impl Client {
                     {
                         // A picture's datagram for a stream this side hasn't heard of yet (none
                         // at all, or a newer one than the one it knows): kept for when it has.
-                        let ahead = d.first() == Some(&KIND_VIDEO) && (!started || d.get(2..4).is_some_and(|e| { let e = u16::from_le_bytes([e[0], e[1]]); e != r.epoch() && e.wrapping_sub(r.epoch()) < 0x8000 }));
+                        let ahead = matches!(d.first(), Some(&KIND_VIDEO | &remoteman_proto::video::KIND_PARITY)) && (!started || d.get(2..4).is_some_and(|e| { let e = u16::from_le_bytes([e[0], e[1]]); e != r.epoch() && e.wrapping_sub(r.epoch()) < 0x8000 }));
                         if ahead {
                             // (A few megabytes at most: older ones give way.)
                             if early.len() >= 4096 {
@@ -488,7 +520,7 @@ impl Client {
                             continue;
                         }
                         match d.first() {
-                            Some(&KIND_VIDEO) => {}
+                            Some(&KIND_VIDEO | &remoteman_proto::video::KIND_PARITY) => {}
                             Some(&remoteman_proto::video::KIND_VIDEO2) => {
                                 if !started2 {
                                     continue;
@@ -540,6 +572,7 @@ impl Client {
                             Ok(None) => continue,
                             Err(e) => break format!("bad video datagram: {e}"),
                         };
+                        c.repaired.store(r.repaired() as u32, Ordering::Relaxed);
                         if let Some((first, last)) = r.take_lost() {
                             c.lost.fetch_add(last - first + 1, Ordering::Relaxed);
                             // Keep the earliest loss not yet recovered from.
@@ -595,7 +628,29 @@ impl Client {
             host_os,
             host_features,
             host_fingerprint: fingerprint,
+            host_second_factor,
+            second_factor: ask,
         })
+    }
+
+    /// Be told when the host wants a code from an authenticator app: `callback(None)` the first
+    /// time, `callback(Some(n))` after a wrong one, with `n` tries left. Answer with
+    /// [`Client::second_factor`]. If the host is already waiting for a code, `callback` is called at
+    /// once, on this thread. It is called with a lock held: answer from another thread or just
+    /// call `second_factor` (which doesn't wait), but don't set the callback again from inside it.
+    pub fn on_second_factor(&self, callback: impl FnMut(Option<u32>) + Send + 'static) {
+        let mut ask = self.second_factor.lock().unwrap();
+        ask.callback = Some(Box::new(callback));
+        if let Some(left) = ask.pending.take() {
+            (ask.callback.as_mut().unwrap())(left);
+        }
+    }
+
+    /// Answer the host's ask for a code (see [`Client::on_second_factor`]); with `remember` the host
+    /// need not ask this device again for 30 days. A wrong code is answered with another call of the
+    /// callback. Never blocks.
+    pub fn second_factor(&self, code: &str, remember: bool) {
+        self.send_message(Message::SecondFactor { code: code.trim().to_owned(), remember });
     }
 
     /// Send one of the feature messages (`sound`, `mic`, `camera`, `configure`, `clipboard`,
@@ -648,8 +703,24 @@ impl Client {
         sender
     }
 
-    /// Send one input event. Never blocks.
+    /// Whether the host takes pen events: it lists `pen` in its features. A client without
+    /// that sends touch or mouse instead.
+    pub fn host_has_pen(&self) -> bool {
+        self.host_features.iter().any(|f| f == "pen")
+    }
+
+    /// Whether the host takes game controller states: it lists `gamepad` in its features.
+    pub fn host_has_gamepad(&self) -> bool {
+        self.host_features.iter().any(|f| f == "gamepad")
+    }
+
+    /// Send one input event. Never blocks. A pen event for a host that doesn't list `pen` (and
+    /// a gamepad state for one without `gamepad`) is dropped: it would be a type the host can't
+    /// read.
     pub fn send(&self, event: Event) {
+        if (matches!(event, Event::Pen { .. }) && !self.host_has_pen()) || (matches!(event, Event::Gamepad { .. }) && !self.host_has_gamepad()) {
+            return;
+        }
         let _ = self.input.send(event);
     }
 
@@ -658,6 +729,7 @@ impl Client {
             lost: self.counters.lost.load(Ordering::Relaxed),
             keyframe_requests: self.counters.requests.load(Ordering::Relaxed),
             round_trip_us: self.counters.rtt.load(Ordering::Relaxed),
+            repaired: self.counters.repaired.load(Ordering::Relaxed),
         }
     }
 

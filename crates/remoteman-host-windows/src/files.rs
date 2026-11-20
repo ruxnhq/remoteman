@@ -35,17 +35,22 @@ fn part_of(done: &Path) -> PathBuf {
     done.with_file_name(name)
 }
 
-/// The user's Downloads folder, as Windows names it.
-fn downloads() -> PathBuf {
-    // SAFETY: the path comes back in memory of the shell's, which is freed here.
+/// The user's Downloads folder, as Windows names it: for a host the service started as SYSTEM,
+/// the one of whoever is signed in at the console (`None` while nobody is: not SYSTEM's own).
+fn downloads() -> Option<PathBuf> {
+    let user = if crate::desk::is_system() { Some(crate::desk::console_user()?) } else { None };
+    // SAFETY: the path comes back in memory of the shell's, which is freed here; the token
+    // lives until after the call.
     let known = unsafe {
-        SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None).ok().and_then(|path| {
+        SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, user.as_ref().map(|u| u.0)).ok().and_then(|path| {
             let text = path.to_string().ok();
             CoTaskMemFree(Some(path.0 as *const _));
             text
         })
     };
-    known.map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Downloads"))
+    let known = known.map(PathBuf::from).filter(|p| p.is_absolute());
+    // (USERPROFILE is SYSTEM's own for a host the service started: never that.)
+    if user.is_some() { known } else { Some(known.unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Downloads"))) }
 }
 
 impl Files {
@@ -63,7 +68,9 @@ impl Files {
                 if !allowed {
                     return refuse("this computer doesn't take files from this device");
                 }
-                let folder = downloads();
+                let Some(folder) = downloads() else {
+                    return refuse("nobody is signed in on this computer to take the file");
+                };
                 if let Err(e) = std::fs::create_dir_all(&folder) {
                     return refuse(&format!("{}: {e}", folder.display()));
                 }

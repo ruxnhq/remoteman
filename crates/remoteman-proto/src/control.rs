@@ -125,12 +125,31 @@ pub enum Message {
         /// screen). A host with one way in takes no notice.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         way_in: Option<String>,
+        /// The client puts fragments back together with the help of parity datagrams (kind 7):
+        /// a host that lists `parity` in its features then sends them.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        parity: bool,
     },
     HostHello {
         proto: u32,
         name: String,
         os: String,
         features: Vec<String>,
+        /// `"totp"`: this host asks for a code from an authenticator app before anything else
+        /// is sent (docs/PROTOCOL.md, "Second factor"); the client answers with `second_factor`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        second_factor: Option<String>,
+    },
+    /// Client to host: the code from the authenticator app; `remember`: don't ask this device
+    /// again for 30 days.
+    SecondFactor {
+        code: String,
+        #[serde(default)]
+        remember: bool,
+    },
+    /// Host to client: that code didn't work; this many tries are left.
+    SecondFactorWrong {
+        left: u32,
     },
     /// What the video datagrams of `epoch` carry. `index` 1: the second display's picture
     /// (docs/PROTOCOL.md, "A second display"), whose epochs count by themselves.

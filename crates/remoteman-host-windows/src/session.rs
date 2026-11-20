@@ -1,6 +1,6 @@
 //! What the host does for a client: the monitor brought to its size, the picture out, its input
 //! in, the cursor apart if it asks. The connection itself is the shared core's. Built like the
-//! Linux agent's session, with less: no camera, no second display, no unlocking, and the
+//! Linux agent's session, with less: no second display, no unlocking, and the
 //! display is the driver's one monitor brought to the device's size, not a monitor of its own.
 
 use std::collections::BTreeMap;
@@ -52,9 +52,12 @@ struct Live {
     /// What the picture is encoded as: a second display's picture is the same.
     mode: Mode,
     /// The client's second display, while it has one: its picture, and its pointer's way in.
-    second: Option<(Pipeline, Injector)>,
+    second: Option<(Pipeline, Injector, Option<Cursor>)>,
     /// Which of its displays the client's pointer is on (0, or 1 for the second).
     target: u8,
+    /// HDR switched on for the client's monitor, put back as it was when this goes (held for
+    /// that alone).
+    _hdr: Option<crate::hdr::Switched>,
 }
 
 pub struct Host {
@@ -72,12 +75,69 @@ pub struct Host {
     /// many came, how many were missing in between, and the last one's number.
     microphone: Option<Microphone>,
     mic_count: (u32, u32, Option<u32>),
+    /// The device's camera, as a camera on this PC.
+    camera: crate::camera::Feed,
     live: Option<Live>,
+    /// The PC was locked when this client came and was unlocked with its password: it is
+    /// locked again when the client goes.
+    unlocked_for_client: bool,
+    /// Wrong passwords for unlocking in a row, and until when no more are taken.
+    wrong: (u32, Option<std::time::Instant>),
+    /// The PC is kept awake while a device is connected (`awake.rs`).
+    awake: Option<crate::awake::Awake>,
+    /// The PC's speakers are switched to Steam's while the device listens (`speakers.rs`).
+    switched: Option<crate::speakers::Switched>,
 }
+
+/// How many wrong passwords in a row before none are taken for a while (Windows' own limit on
+/// wrong tries counts them too), and for how long.
+const WRONG_TRIES: u32 = 5;
+const WRONG_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 impl Host {
     pub fn new(screen: Screen, bitrate: u32, fit: Fit, allowed: Allowed) -> Self {
-        Self { screen, bitrate, fit, allowed, clipboard_wanted: false, copies: Arc::default(), sound: None, microphone: None, mic_count: (0, 0, None), live: None }
+        Self { screen, bitrate, fit, allowed, clipboard_wanted: false, copies: Arc::default(), sound: None, microphone: None, mic_count: (0, 0, None), camera: Default::default(), live: None, unlocked_for_client: false, wrong: (0, None), awake: None, switched: None }
+    }
+
+    /// A device has come to a locked PC (or one at its sign-in screen), which Windows shows on
+    /// the PC's main screen only. As on the other hosts (docs/PROTOCOL.md, "A locked host"):
+    /// the device is asked for the password (or PIN) of the PC's user, and with it the host
+    /// types it into Windows' lock screen, as its owner would. `Err` is what the device is
+    /// told; one that starts "locked: " invites it to try again with the password.
+    fn unlock_for(&mut self, client: &ClientInfo) -> Result<(), String> {
+        if !crate::desk::locked() {
+            return Ok(());
+        }
+        if !crate::desk::is_system() {
+            return Err("this computer is locked, and this host can't unlock it (it wasn't started by its service)".into());
+        }
+        // A device that keeps guessing is kept waiting.
+        if let Some(until) = self.wrong.1.filter(|until| *until > std::time::Instant::now()) {
+            let minutes = (until - std::time::Instant::now()).as_secs() / 60 + 1;
+            return Err(format!("this computer is locked, and after too many wrong passwords it takes no more for {minutes} min"));
+        }
+        let user = crate::desk::user_name().map_or_else(|| "its user".to_string(), |u| u.to_string());
+        let Some(password) = client.unlock.as_deref().filter(|p| !p.is_empty()) else {
+            tracing::info!(device = client.name, "this computer is locked: the device is asked for the password");
+            return Err(format!("locked: This computer is locked. Enter the password or PIN of {user} on it."));
+        };
+        match crate::desk::unlock_with(password) {
+            Ok(true) => {
+                self.wrong = (0, None);
+                self.unlocked_for_client = true;
+                tracing::info!(device = client.name, "this computer was locked: unlocked for a paired device; it locks again when the device leaves");
+                Ok(())
+            }
+            Ok(false) => {
+                self.wrong.0 += 1;
+                tracing::warn!(device = client.name, tries = self.wrong.0, "a wrong password for unlocking this computer");
+                if self.wrong.0 >= WRONG_TRIES {
+                    self.wrong = (0, Some(std::time::Instant::now() + WRONG_WAIT));
+                }
+                Err("locked: That password is not right.".into())
+            }
+            Err(e) => Err(format!("this computer is locked and couldn't be unlocked: {e:#}")),
+        }
     }
 
     /// What the picture is encoded at when the client's ceiling is `ceiling`.
@@ -100,11 +160,19 @@ impl Host {
         if screen.width % 2 != 0 || screen.height % 2 != 0 || screen.width < 64 || screen.height < 64 || screen.width > 8192 || screen.height > 8192 {
             return Err("display sizes must be even, from 64 to 8192".into());
         }
-        // The client's scale (how large the desktop is drawn) isn't acted on: Windows has no
-        // documented way to set a monitor's scale for the user.
+        // The client's scale (how large the desktop is drawn) is given to the device's monitor
+        // as Windows' scale once it is on the desktop (`dpi.rs`).
         let want = display::Mode { width: screen.width, height: screen.height, refresh: screen.refresh.clamp(1, 240) };
         // A device that asks to mirror is shown the monitor as it is, no faster than it asked.
+        // Not on a PC with screens of its own: the driver's monitor isn't one of them, so there
+        // is nothing there to mirror yet, and the device gets an extra display instead.
         let mirror = screen.placement == Placement::Mirror;
+        // On a PC with screens of its own that is its main screen as it is, taken as the desktop
+        // shows it (`mirror.rs`); nothing is added to the desktop, moved on it or switched.
+        let real = mirror && self.screen.pc();
+        if self.screen.only_mirrors() && !real {
+            return Err("this host only mirrors the PC's screen".into());
+        }
         // Otherwise a monitor of its own where the driver has one to give, else the driver's
         // one monitor at the device's size.
         let place = match screen.placement {
@@ -113,16 +181,59 @@ impl Host {
             _ => Place::Beside,
         };
         let own = if mirror || self.fit == Fit::Keep { None } else { self.screen.give(want, place).inspect_err(|e| tracing::warn!("couldn't give the device a monitor of its own: {e:#}")).ok().flatten() };
-        let got = match own {
-            Some(mode) => mode,
-            None => self.screen.fit(want, if mirror { Fit::Keep } else { self.fit }).map_err(|e| format!("{e:#}"))?,
+        // The PC's screen that is mirrored: its Windows name, mode and place. (A device's monitor
+        // from an earlier picture is given back first; on a first connect there is none.)
+        let mirrored = if real {
+            self.screen.release_given();
+            let found = self.screen.mirror_output().map_err(|e| format!("{e:#}"))?;
+            tracing::info!(screen = found.0, width = found.1.width, height = found.1.height, refresh = found.1.refresh, left = found.2.left, top = found.2.top, "the device mirrors the PC's main screen as it is");
+            Some(found)
+        } else {
+            None
         };
-        let (_, at) = self.screen.now().map_err(|e| format!("{e:#}"))?;
+        self.screen.set_mirrored(real);
+        let (got, at) = match &mirrored {
+            Some((_, mode, at)) => (*mode, *at),
+            None => {
+                let got = match own {
+                    Some(mode) => mode,
+                    None => self.screen.fit(want, if mirror { Fit::Keep } else { self.fit }).map_err(|e| format!("{e:#}"))?,
+                };
+                (got, self.screen.now().map_err(|e| format!("{e:#}"))?.1)
+            }
+        };
+        // The output the picture, the pointer and the input are of.
+        let output = mirrored.as_ref().map_or_else(|| self.screen.device().to_owned(), |m| m.0.clone());
+        // A display that asked for HDR: the monitor shows it (if the encoder can say so), and
+        // its picture is BT.2020 PQ. A mirrored monitor is left as its owner has it.
+        let hdr_wanted = screen.hdr && self.allowed.hdr.load(Ordering::Relaxed);
+        // A device's own monitor is brought to what the device asked, either way (a host stopped
+        // in the middle of a session may have left it in HDR), and left with HDR off; the PC's
+        // own monitor, used when there is no monitor to give, is switched only for a device
+        // that asked, and put back as it was.
+        let hdr = match (mirror, own.is_some()) {
+            (true, _) => None,
+            (false, true) => crate::hdr::Switched::to(self.screen.device(), hdr_wanted, Some(false)),
+            (false, false) if hdr_wanted => crate::hdr::Switched::to(self.screen.device(), true, None),
+            _ => None,
+        };
+        if hdr.is_some() {
+            // Windows takes a moment to give the monitor its wide surface.
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        }
+        // The device's own monitor gets the Windows scale the device asked for (never a PC screen).
+        if !mirror && mirrored.is_none() {
+            crate::dpi::apply(self.screen.device(), screen.scale);
+        }
+        let sdr_white = crate::hdr::sdr_white(&output);
         let area = Arc::new(Mutex::new(at));
+        // A client that doesn't draw the pointer gets it drawn into the picture.
+        let drawn = Arc::new(crate::cursor::Drawn::default());
         let refresh = if mirror { got.refresh.min(want.refresh) } else { got.refresh }.clamp(1, 240);
-        let (device, shared) = (self.screen.device().to_owned(), area.clone());
+        let (device, shared) = (output.clone(), area.clone());
         let settings = pipeline::Settings {
             driver: self.screen.driver(),
+            duplicate: mirrored.as_ref().map(|m| m.0.clone()),
             monitor: self.screen.monitor(),
             modes: modes.clone(),
             fps: refresh,
@@ -131,6 +242,9 @@ impl Host {
             expect: Some((at.width, at.height)),
             held,
             status: true,
+            hdr: hdr_wanted,
+            pointer: (!cursor_apart).then(|| drawn.clone()),
+            sdr_white,
             // The monitor changed under the stream: input and the cursor follow it.
             resized: Box::new(move |width, height| {
                 let now = display::current(&device).map(|(_, a)| a).unwrap_or(Area { width, height, ..*shared.lock().unwrap() });
@@ -140,6 +254,8 @@ impl Host {
         let (pipeline, started) = match Pipeline::start(settings, link.clone()) {
             Ok(p) => p,
             Err(e) => {
+                // HDR back while the monitor is still on the desktop.
+                drop(hdr);
                 self.screen.release();
                 return Err(format!("{e:#}"));
             }
@@ -149,11 +265,11 @@ impl Host {
             let mut a = area.lock().unwrap();
             (a.width, a.height) = (started.width, started.height);
         }
-        let cursor = if cursor_apart { Cursor::start(link.clone(), area.clone()).inspect_err(|e| tracing::warn!("couldn't start reporting the cursor: {e}")).ok() } else { None };
+        let cursor = Cursor::start(cursor_apart.then(|| link.clone()), area.clone(), (!cursor_apart).then(|| drawn.clone())).inspect_err(|e| tracing::warn!("couldn't start following the cursor: {e}")).ok();
         if !cursor_apart {
-            tracing::warn!("this client doesn't draw the cursor itself, and the driver keeps it out of the frames: it will see no cursor");
+            tracing::info!("this client doesn't draw the pointer: it is drawn into the picture");
         }
-        self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, common: modes, ceiling, name: name.clone(), files: Files::default(), clipboard: None, copied: BTreeMap::new(), mode: started.mode, second: None, target: 0 });
+        self.live = Some(Live { pipeline, cursor, injector: Injector::new(area), link, screen, decoders, cursor_apart, common: modes, ceiling, name: name.clone(), files: Files::default(), clipboard: None, copied: BTreeMap::new(), mode: started.mode, second: None, target: 0, _hdr: hdr });
         // A new picture shares the clipboard anew.
         self.share_clipboard(self.clipboard_wanted);
         {
@@ -162,7 +278,7 @@ impl Host {
             // A new picture for the same client keeps the time it came.
             let since = now.as_ref().filter(|n| n.name == name).map_or(since, |n| n.since);
             let mode = started.mode;
-            let picture = format!("{} {}-bit{}", if mode.codec == Codec::Av1 { "AV1" } else { "HEVC" }, mode.depth, if mode.chroma == Chroma::C444 { " 4:4:4" } else { "" });
+            let picture = format!("{} {}-bit{}{}", if mode.codec == Codec::Av1 { "AV1" } else { "HEVC" }, mode.depth, if mode.chroma == Chroma::C444 { " 4:4:4" } else { "" }, if started.hdr.is_some() { " HDR" } else { "" });
             // (Every placement but `mirror` is, for now, the one monitor at the device's size.)
             *now = Some(Now { name, since, width: started.width, height: started.height, refresh, placement: match (mirror, own.is_some(), place) {
                 (true, ..) => "mirror",
@@ -172,14 +288,17 @@ impl Host {
                 _ => "only",
             }, picture, sound: self.sound.is_some() });
         }
-        Ok(Accept { mode: started.mode, width: started.width, height: started.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 })
+        if let Some((white, peak)) = started.hdr {
+            tracing::info!(sdr_white = white, peak, "the picture is HDR: BT.2020 PQ");
+        }
+        Ok(started.accept(refresh))
     }
 
     /// Stop the picture, let go of the client's keys, and put the monitor back.
     fn stop(&mut self) -> Option<Live> {
         let mut l = self.live.take()?;
         // The second display goes with the first.
-        if let Some((pipeline, mut injector)) = l.second.take() {
+        if let Some((pipeline, mut injector, _)) = l.second.take() {
             injector.release_all();
             drop(pipeline);
             self.screen.take_second();
@@ -194,11 +313,10 @@ impl Host {
 
     /// Give the client a second display beside everything else, or take it away. It gets a
     /// monitor of its own (the driver's third) and a picture of its own in the codec of the
-    /// first. Its pointer is NOT drawn into the picture, as the protocol asks: this host can't
-    /// draw a cursor into a picture yet.
+    /// first, with the pointer drawn into it, as the protocol asks.
     fn second_display(&mut self, on: bool, display: Option<Display>, side: remoteman_core::Side) {
         let Some(l) = self.live.as_mut() else { return };
-        if let Some((pipeline, mut injector)) = l.second.take() {
+        if let Some((pipeline, mut injector, _)) = l.second.take() {
             injector.release_all();
             drop(pipeline);
             self.screen.take_second();
@@ -210,6 +328,9 @@ impl Host {
             tracing::warn!("no second display for the device: {why}");
             link.send_message(Message::Display { index: 1, on: false, display: None, side: Default::default(), message: why })
         };
+        if self.screen.mirrored() {
+            return gone("no second display while the device mirrors the PC's screen".into());
+        }
         if screen.width % 2 != 0 || screen.height % 2 != 0 || screen.width < 64 || screen.height < 64 || screen.width > 8192 || screen.height > 8192 {
             return gone("display sizes must be even, from 64 to 8192".into());
         }
@@ -223,9 +344,11 @@ impl Host {
         // Said before its first frame can be sent.
         second.restart(Accept { mode: l.mode, width: mode.width, height: mode.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
         let area = Arc::new(Mutex::new(at));
+        let drawn = Arc::new(crate::cursor::Drawn::default());
         let settings = pipeline::Settings {
             driver: self.screen.driver(),
             monitor,
+            duplicate: None,
             modes: vec![l.mode],
             fps: refresh,
             bitrate: self.bitrate.min(40_000_000),
@@ -233,10 +356,17 @@ impl Host {
             expect: Some((at.width, at.height)),
             held: false,
             status: false,
+            hdr: false,
+            // The protocol has no cursor channel for a second display: it is drawn in.
+            pointer: Some(drawn.clone()),
+            sdr_white: crate::hdr::USUAL_SDR_WHITE,
             resized: Box::new(|_, _| {}),
         };
         match Pipeline::start(settings, second) {
-            Ok((pipeline, _)) => l.second = Some((pipeline, Injector::new(area))),
+            Ok((pipeline, _)) => {
+                let cursor = Cursor::start(None, area.clone(), Some(drawn)).inspect_err(|e| tracing::warn!("couldn't follow the cursor for the second display: {e}")).ok();
+                l.second = Some((pipeline, Injector::new(area), cursor));
+            }
             Err(e) => {
                 self.screen.take_second();
                 gone(format!("{e:#}"))
@@ -268,7 +398,7 @@ impl Host {
     }
 
     /// A clipboard blob from the client: what was copied on the device becomes what the
-    /// desktop pastes. Text only.
+    /// desktop pastes: text, or a picture as a PNG.
     fn copied(&mut self, event: &BlobEvent) {
         let Some(l) = self.live.as_mut() else { return };
         match event {
@@ -289,10 +419,14 @@ impl Host {
             }
             BlobEvent::Close { id, complete } => {
                 let (Some((mime, bytes)), Some(clipboard), true) = (l.copied.remove(id), l.clipboard.as_ref(), *complete) else { return };
-                if !mime.starts_with("text/plain") {
-                    return tracing::info!(kind = mime, "the device copied something this host doesn't take (text only)");
-                }
-                clipboard.offer(String::from_utf8_lossy(&bytes).into_owned());
+                let mime = if mime.starts_with("text/plain") {
+                    crate::clipboard::TEXT
+                } else if mime == crate::clipboard::PNG {
+                    crate::clipboard::PNG
+                } else {
+                    return tracing::info!(kind = mime, "the device copied something this host doesn't take (text and PNG only)");
+                };
+                clipboard.offer(crate::clipboard::Copied { mime, bytes });
             }
         }
     }
@@ -300,7 +434,13 @@ impl Host {
     /// Send the desktop's sound to the client, or stop.
     fn send_sound(&mut self, on: bool) {
         self.sound = None;
+        self.switched = None;
         let (Some(l), true) = (self.live.as_ref(), on) else { return };
+        // The PC's own speakers go quiet while the device listens (if the owner allows it and
+        // Steam's speakers exist); the sound is then recorded from those.
+        if self.allowed.speakers_follow.load(Ordering::Relaxed) {
+            self.switched = crate::speakers::Switched::engage();
+        }
         l.link.send_message(Message::SoundFormat { codec: "opus".into(), rate: sound::SAMPLE_RATE, channels: 2, frame_us: sound::FRAME_US as u32 });
         match Speaker::start(l.link.clone()) {
             Ok(speaker) => self.sound = Some(speaker),
@@ -371,11 +511,30 @@ impl Host {
 }
 
 impl HostHandler for Host {
+    fn default_bitrate(&mut self) -> u32 {
+        self.bitrate
+    }
+
+    /// The core follows the network below the client's ceiling: the running encoder takes the
+    /// new rate at its next turn, with no keyframe (the pipeline tells the client with `status`).
+    fn bitrate(&mut self, bits_per_second: u32) {
+        if let Some(l) = self.live.as_ref() {
+            l.pipeline.set_bitrate(bits_per_second.clamp(*BITRATE.start(), *BITRATE.end()));
+        }
+    }
+
     fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
-        self.left();
+        self.end(false);
+        if self.allowed.paused.load(Ordering::Relaxed) {
+            tracing::info!(name = %client.name, "a device came while sharing is off: turned away");
+            return Err("sharing is switched off on this computer".into());
+        }
+        self.unlock_for(client)?;
         let screen = client.display;
         tracing::info!(name = %client.name, ?screen, decoders = ?client.decoders, cursor_apart = client.cursor, "client");
-        self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link, false).inspect_err(|e| tracing::error!("couldn't start the picture: {e}"))
+        let accepted = self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link, false).inspect_err(|e| tracing::error!("couldn't start the picture: {e}"))?;
+        self.awake = crate::awake::Awake::new();
+        Ok(accepted)
     }
 
     fn message(&mut self, message: &Message) {
@@ -392,14 +551,32 @@ impl HostHandler for Host {
                 }
             }
             Message::Mic { on, .. } => self.take_microphone(*on),
+            Message::Camera { on, codec, .. } => {
+                if let (Some(l), true) = (self.live.as_ref(), *on) {
+                    let (name, link) = (l.name.clone(), l.link.clone());
+                    self.camera.take(true, codec, &name, link);
+                } else {
+                    self.camera.clear();
+                }
+            }
+            // The device's word on a file this computer sent it.
+            Message::FileResult { ok, message, .. } => {
+                tracing::info!(ok, said = message, "the device answered for a file sent to it");
+                let mut sent = self.allowed.sent.lock().unwrap();
+                *sent = (sent.0 + 1, *ok, message.clone());
+            }
             Message::Display { index: 1, on, display, side, .. } => self.second_display(*on, *display, *side),
             Message::DisplayKeyframe { index: 1 } => {
-                if let Some((pipeline, _)) = self.live.as_ref().and_then(|l| l.second.as_ref()) {
+                if let Some((pipeline, ..)) = self.live.as_ref().and_then(|l| l.second.as_ref()) {
                     pipeline.request_keyframe();
                 }
             }
             _ => {}
         }
+    }
+
+    fn camera(&mut self, frame: &remoteman_core::Frame) {
+        self.camera.frame(frame);
     }
 
     fn mic(&mut self, packet: &Packet) {
@@ -457,20 +634,41 @@ impl HostHandler for Host {
         // The pointer and touches go to the display they are on; keys to the desktop.
         let pointing = matches!(event, Event::PointerTo { .. } | Event::PointerBy { .. } | Event::Button { .. } | Event::Scroll { .. } | Event::Touch { .. });
         match &mut l.second {
-            Some((_, injector)) if l.target == 1 && pointing => injector.inject(&event),
+            Some((_, injector, _)) if l.target == 1 && pointing => injector.inject(&event),
             _ => l.injector.inject(&event),
         }
     }
 
     fn left(&mut self) {
+        self.end(true);
+    }
+}
+
+impl Host {
+    /// The session ends. `last`: no other device is about to take its place (then the setting
+    /// "lock when a device disconnects" applies).
+    fn end(&mut self, last: bool) {
         *self.allowed.now.lock().unwrap() = None;
         self.clipboard_wanted = false;
         self.take_microphone(false);
+        self.camera.clear();
         self.sound = None;
+        // The speakers back as they were, after the sound has stopped recording from Steam's.
+        self.switched = None;
+        self.awake = None;
+        let was_up = self.live.is_some();
         if let Some(l) = self.stop() {
             drop(l);
             self.screen.release();
             tracing::info!("the client is gone");
+        }
+        // Unlocked for that device: locked again now that it has gone.
+        if std::mem::take(&mut self.unlocked_for_client) {
+            let locked = crate::desk::lock_now();
+            tracing::info!(locked, "the device that unlocked this computer has gone: locked again");
+        } else if last && was_up && self.allowed.lock_on_leave.load(Ordering::Relaxed) && !crate::desk::locked() {
+            let locked = crate::desk::lock_now();
+            tracing::info!(locked, "the device has gone: this computer is locked (the owner's setting)");
         }
     }
 }

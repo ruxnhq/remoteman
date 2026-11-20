@@ -4,9 +4,10 @@
 /// What is known of a computer before it is tried.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reach {
-    /// Nothing can tell yet (`Features::presence`).
-    #[allow(dead_code)]
+    /// Its key is advertised on this network now (`nearby.rs`).
     Online,
+    /// Nothing tells it yet: one that isn't seen may be asleep or off, so a computer that
+    /// didn't answer and can be woken is offered waking instead.
     Asleep,
     /// It didn't answer when it was last tried.
     Unreachable,
@@ -17,7 +18,7 @@ pub enum Reach {
 pub enum Problem {
     /// Nothing answered; with what came of the attempt.
     Unreachable(String),
-    /// Known to be asleep and wakeable. Nothing can tell yet (`Features::presence`).
+    /// Known to be asleep and wakeable. Nothing tells it yet (see `Reach::Asleep`).
     Asleep,
     /// The computer doesn't trust this PC, or this PC has no key for it.
     NotPaired,
@@ -63,6 +64,10 @@ pub fn classify(error: &str) -> Problem {
 
 /// Sort out why a session ended. `shown`: it had shown a picture by then.
 pub fn ended(reason: &str, shown: bool) -> Problem {
+    // The computer closed after too many wrong codes, or never got one: its words, as they are.
+    if let Some(words) = reason.strip_prefix("second_factor: ") {
+        return Problem::Refused(words.to_owned());
+    }
     // What the computer said as it closed: `closed by peer: WORDS (code N)`.
     let said = reason.split_once("closed by peer: ").map(|(_, m)| m.rsplit_once(" (code ").map_or(m, |(m, _)| m));
     match said {

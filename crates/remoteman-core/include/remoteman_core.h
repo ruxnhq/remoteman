@@ -164,6 +164,31 @@ void rm_client_scroll(const rm_client *client, float dx, float dy);             
 void rm_client_key(const rm_client *client, uint16_t usage, uint8_t down);       // USB HID usage, page 7
 void rm_client_touch(const rm_client *client, uint8_t phase, uint8_t slot, float x, float y); // 0 down, 1 move, 2 up
 void rm_client_text(const rm_client *client, const char *utf8);
+// Pen (docs/PROTOCOL.md, "Pen"): phase 0 down, 1 move in contact, 2 up, 3 hover, 4 left range;
+// buttons bit 0 barrel, bit 1 eraser; x, y fractions of the display; pressure 0..1; tilt degrees
+// -90..90; twist 0..359. Returns 0 and sends nothing when the host doesn't list "pen" in
+// rm_client_features (send touch or mouse instead), else 1.
+int32_t rm_client_pen(const rm_client *client, uint8_t phase, uint8_t buttons, float x, float y,
+                      float pressure, float tilt_x, float tilt_y, float twist);
+// A game controller's whole state (docs/PROTOCOL.md, "Game controllers"): pad 0..3; flags bit 0
+// connected (clear: that pad was unplugged); buttons in XInput's order (DPAD_UP 0x1, DOWN 0x2,
+// LEFT 0x4, RIGHT 0x8, START 0x10, BACK 0x20, LEFT_THUMB 0x40, RIGHT_THUMB 0x80, LEFT_SHOULDER
+// 0x100, RIGHT_SHOULDER 0x200, GUIDE 0x400, A 0x1000, B 0x2000, X 0x4000, Y 0x8000); triggers
+// 0..1; sticks -1..1, up and right positive. Send on every change, and every 100 ms while
+// anything is off neutral. Returns 0 and sends nothing when the host doesn't list "gamepad" in
+// rm_client_features, else 1.
+int32_t rm_client_gamepad(const rm_client *client, uint8_t pad, uint8_t flags, uint16_t buttons,
+                          float lt, float rt, float lx, float ly, float rx, float ry);
+
+// The second factor, client side (docs/PROTOCOL.md, "Second factor"). A host that asks for a code
+// from an authenticator app (rm_client_second_factor_wanted) sends nothing more until it has
+// one. on_ask(ctx, left): -1 the first time, after a wrong code the tries left; it is called at
+// once if the host is already waiting, so set it right after rm_client_connect. Answer with
+// rm_client_second_factor (six digits; remember non-zero: don't ask this device for 30 days).
+// Too many wrong codes: the connection closes with "second_factor: ..." in on_closed.
+void rm_client_set_second_factor_callback(const rm_client *client, void (*on_ask)(void *ctx, int32_t left), void *ctx);
+int32_t rm_client_second_factor_wanted(const rm_client *client);
+int32_t rm_client_second_factor(const rm_client *client, const char *code, uint8_t remember);
 
 // Leave and free the client. `on_closed` is called before this returns or shortly after.
 void rm_client_close(rm_client *client);
@@ -210,7 +235,7 @@ typedef struct rm_accept {
 
 // One input event (docs/PROTOCOL.md, Input). Fields a kind doesn't use are zero.
 typedef struct rm_input {
-    uint8_t kind;             // 1 pointer to, 2 pointer by, 3 button, 4 scroll, 5 key, 6 touch, 7 text
+    uint8_t kind;             // 1 pointer to, 2 pointer by, 3 button, 4 scroll, 5 key, 6 touch, 7 text, 8 display, 9 pen
     uint8_t button;           // 0 left, 1 right, 2 middle
     uint8_t down;
     uint8_t phase;            // touch: 0 down, 1 move, 2 up
@@ -218,6 +243,16 @@ typedef struct rm_input {
     uint16_t usage;           // key: USB HID usage, page 7
     float x, y;               // 1 and 6: fractions of the display; 2 and 4: display pixels
     const char *text;         // 7: UTF-8, valid only during the call
+    // Appended for kind 9 (pen; phase 0 down, 1 move, 2 up, 3 hover, 4 left range; button is the
+    // buttons byte, bit 0 barrel, bit 1 eraser; x, y fractions). Zero for the other kinds.
+    float pressure;           // 0 to 1
+    float tilt_x, tilt_y;     // degrees, -90 to 90
+    float twist;              // degrees, 0 to 359
+    // Appended for kind 10 (game controller): slot the pad (0..3), down the flags (bit 0
+    // connected), usage the buttons (XInput's mask), x, y the left stick; these the right stick
+    // and the triggers. Zero for the other kinds.
+    float right_x, right_y;
+    float left_trigger, right_trigger;
 } rm_input;
 
 // All called on one thread of the core's, one at a time; they may block.
@@ -262,6 +297,54 @@ void rm_host_info(const rm_host *host, char *out, size_t len);
 // on_message (replacing the hello's list); nothing is restarted and the client stays. Messages
 // for a feature that is off are the host's to ignore.
 void rm_host_set_features(const rm_host *host, const char *features);
+
+// Optional: have the core follow the network with the picture's bitrate. When the client reports
+// lost frames the core calls on_bitrate(ctx, bits_per_second) with a lower target, and with
+// higher ones after a clean stretch, never above the client's ceiling (its configure message)
+// or default_bps, what the host encodes at when the client set none (0: nothing is followed until
+// it sets one). It is called on the core's handler thread; change the encoder's rate live,
+// without a keyframe. The core sends the client `status` itself. Takes effect from the next
+// client. A host that never calls this behaves as before.
+void rm_host_set_bitrate_callback(const rm_host *host, uint32_t default_bps, void (*on_bitrate)(void *ctx, uint32_t bits_per_second), void *ctx);
+
+// What one device may do: 1 allowed, 0 not. `input` 0 is view-only: the device is shown the
+// picture and its input is dropped by the core. Everything is allowed until set otherwise.
+typedef struct rm_permissions {
+    uint8_t input;
+    uint8_t clipboard;
+    uint8_t files;
+    uint8_t sound;
+    uint8_t mic;
+    uint8_t camera;
+} rm_permissions;
+// What the device with this fingerprint may do, written to `out`. 1, or 0 on a null argument.
+int32_t rm_host_get_permissions(const rm_host *host, const char *fingerprint, rm_permissions *out);
+// Change what a device may do. Kept across restarts; the connected device is told at once
+// with a `features` message (the host's features less what it may not have) and, for sound,
+// mic, camera and clipboard taken away, on_message gets the matching `{"t":"...","on":false}`.
+// 1 done, 0 a null argument, -1 not saved.
+int32_t rm_host_set_permissions(const rm_host *host, const char *fingerprint, const rm_permissions *permissions);
+// The last `max` lines of the connection log as a JSON array, oldest first:
+// [{"time":"2026-11-19T10:15:00Z","event":"connected","name":"..","fingerprint":"..",
+//   "address":"1.2.3.4:5","duration":12,"reason":".."}]. `event` is paired, connected, left
+// or refused; `duration` (seconds) only with left; `reason` only when known. Free the result
+// with rm_string_free.
+char *rm_host_connections_json(const rm_host *host, size_t max);
+void rm_string_free(char *s);
+// Called when a device is paired, connected or refused, with that event as JSON (as above),
+// valid only during the call, on the core's handler thread. NULL removes it.
+void rm_host_set_notice_callback(const rm_host *host, void (*on_notice)(void *ctx, const char *json), void *ctx);
+
+// The second factor, host side: devices must also give a code from an authenticator app.
+// rm_host_second_factor: -1 off, else how many devices are remembered. _enable makes a secret and
+// copies "secret<TAB>grouped<TAB>otpauth-uri" into out (0, or -1 if it is on already); it is
+// asked for only once _confirm has had a right code (1, else 0). _disable throws the secret and
+// remembered devices away; _forget_remembered asks everyone again (both 0 or -1).
+int32_t rm_host_second_factor(const rm_host *host);
+int32_t rm_host_enable_second_factor(const rm_host *host, char *out, size_t len);
+int32_t rm_host_confirm_second_factor(const rm_host *host, const char *code);
+int32_t rm_host_disable_second_factor(const rm_host *host);
+int32_t rm_host_forget_remembered(const rm_host *host);
 
 // Pairing: let the next unknown device in (it is remembered and pairing turns itself off).
 void rm_host_set_pairing(const rm_host *host, int32_t on);
@@ -336,6 +419,13 @@ int32_t rm_host_restart(const rm_host *host, const rm_accept *accept);
 int32_t rm_host_second_start(const rm_host *host, const rm_accept *accept);
 int32_t rm_host_send_frame2(const rm_host *host, const uint8_t *data, size_t len, uint8_t key, uint64_t capture_us);
 int32_t rm_host_second_stop(const rm_host *host, const char *message);
+
+// What happens when a device connects while another is using this computer: 0 it takes over
+// (the default), 1 it watches, 2 it can control too (docs/PROTOCOL.md, "More than one device").
+// Kept with the host's state; takes effect for the next connection. The host program hears of
+// the first device only; a device that joined is served inside the core.
+void rm_host_set_second_device(const rm_host *host, uint8_t mode);
+uint8_t rm_host_second_device(const rm_host *host);
 
 // Stop listening, drop the client, and free the host.
 void rm_host_stop(rm_host *host);

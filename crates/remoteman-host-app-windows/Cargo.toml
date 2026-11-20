@@ -1,0 +1,43 @@
+[package]
+name = "remoteman-host-app-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Remoteman Host, the owner's app on Windows: the window (Sharing, Devices, About), the icon in
+# the notification area with its menu and notifications, and the question put to the owner when
+# a new device wants to pair. WinUI 3 through Microsoft's windows-reactor (vendor/windows-reactor).
+# It holds no rule of the product: it speaks to the running host (remoteman-host.exe) over the
+# host's control pipe in the host's words. Everything it needs is Windows-only, so on other
+# systems this crate builds to a stub.
+[[bin]]
+name = "remoteman-host-app"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+serde_json = "1"
+windows-reactor = { path = "../../vendor/windows-reactor" }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Stages the Windows App Runtime beside the exe and embeds the manifest that finds it there, so
+# the app runs on a PC that never installed the runtime (self-contained).
+windows-reactor-setup = { path = "../../vendor/windows-rs/reactor-setup" }
+# The exe's icon and its name in Windows (notifications show it).
+winresource = "0.1"

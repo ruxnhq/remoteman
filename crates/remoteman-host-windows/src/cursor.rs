@@ -10,8 +10,11 @@
 //! it doesn't draw a second one. Seen on a run in a Guesthouse guest (2026-11-18): the arrow
 //! is not in the captured frames, the text cursor is.
 //!
-//! The other side of it: a client that does not ask for the cursor gets a picture without one
-//! (except the inverting kind). Drawing it into the picture for such clients is not built.
+//! The other side of it: a client that does not ask for the cursor, and every second display
+//! (the protocol has no cursor channel for one), gets it drawn into the picture: the same
+//! image and place go into a [`Drawn`] that the picture's pipeline reads, and each change wakes
+//! the pipeline, which takes the driver's last frame again and encodes it with the pointer on
+//! it (the driver sends no new frame when only the pointer moves).
 //!
 //! Like input, this only works in the desktop's own session (see `input.rs`).
 
@@ -27,6 +30,49 @@ use windows::Win32::UI::WindowsAndMessaging::{CURSOR_SHOWING, CURSORINFO, GetCur
 
 use crate::display::Area;
 
+/// The pointer as a picture draws it: its image (RGBA, colour premultiplied), where its top
+/// left corner is in the picture's pixels, and whether it is shown. `serial` counts changes;
+/// `shape_serial` changes of the image alone.
+#[derive(Default)]
+pub struct Pointer {
+    pub shape: Option<CursorShape>,
+    pub shape_serial: u64,
+    pub x: i32,
+    pub y: i32,
+    pub visible: bool,
+    pub serial: u64,
+}
+
+/// A pointer drawn into a picture, shared between the cursor's thread and the picture's.
+#[derive(Default)]
+pub struct Drawn {
+    pub now: Mutex<Pointer>,
+    /// Wakes the picture's thread (set by the pipeline when it starts).
+    wake: Mutex<Option<Box<dyn Fn() + Send>>>,
+}
+
+impl Drawn {
+    pub fn set_wake(&self, wake: Box<dyn Fn() + Send>) {
+        *self.wake.lock().unwrap() = Some(wake);
+    }
+
+    fn changed(&self, change: impl FnOnce(&mut Pointer) -> bool) {
+        let woke = {
+            let mut p = self.now.lock().unwrap();
+            let did = change(&mut p);
+            if did {
+                p.serial += 1;
+            }
+            did
+        };
+        if woke {
+            if let Some(wake) = self.wake.lock().unwrap().as_ref() {
+                wake();
+            }
+        }
+    }
+}
+
 pub struct Cursor {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -35,7 +81,9 @@ pub struct Cursor {
 impl Cursor {
     /// Report the cursor to `link` for as long as this lives. `area` is where the client's
     /// display is on the Windows desktop.
-    pub fn start(link: Link, area: Arc<Mutex<Area>>) -> std::io::Result<Self> {
+    /// Report the cursor to `link` (the client draws it), or draw it into a picture through
+    /// `drawn`, or both.
+    pub fn start(link: Option<Link>, area: Arc<Mutex<Area>>, drawn: Option<Arc<Drawn>>) -> std::io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let thread = std::thread::Builder::new().name("cursor".into()).spawn(move || {
@@ -44,6 +92,9 @@ impl Cursor {
             let mut sent = None::<CursorShape>;
             let mut failed = false;
             while !stopped.load(Ordering::Relaxed) {
+                // The cursor of the desktop that takes input (the sign-in screen's too, for a
+                // host the service started).
+                crate::desk::follow();
                 let mut info = CURSORINFO { cbSize: size_of::<CURSORINFO>() as u32, ..Default::default() };
                 // SAFETY: `info` is sized as the call wants.
                 match unsafe { GetCursorInfo(&mut info) } {
@@ -58,14 +109,35 @@ impl Cursor {
                             // as a cursor of its own making, which comes back here under a new
                             // handle, and sending that on went round 250 times a second.
                             if sent.as_ref() != Some(&shape) {
-                                link.cursor_shape(shape.clone());
+                                if let Some(link) = &link {
+                                    link.cursor_shape(shape.clone());
+                                }
+                                if let Some(d) = &drawn {
+                                    let s2 = shape.clone();
+                                    d.changed(|p| {
+                                        p.shape = Some(s2);
+                                        p.shape_serial += 1;
+                                        true
+                                    });
+                                }
                                 sent = Some(shape);
                             }
                         }
                         let a = *area.lock().unwrap();
                         let (x, y) = (info.ptScreenPos.x - a.left, info.ptScreenPos.y - a.top);
                         let on = x >= 0 && y >= 0 && (x as u32) < a.width && (y as u32) < a.height;
-                        link.cursor_at(x as f32 / a.width.max(1) as f32, y as f32 / a.height.max(1) as f32, showing && on);
+                        if let Some(link) = &link {
+                            link.cursor_at(x as f32 / a.width.max(1) as f32, y as f32 / a.height.max(1) as f32, showing && on);
+                        }
+                        if let Some(d) = &drawn {
+                            let (hx, hy) = sent.as_ref().map_or((0, 0), |s| (s.hot_x, s.hot_y));
+                            let (cx, cy, visible) = (x - hx, y - hy, showing && on);
+                            d.changed(|p| {
+                                let moved = (p.x, p.y, p.visible) != (cx, cy, visible);
+                                (p.x, p.y, p.visible) = (cx, cy, visible);
+                                moved
+                            });
+                        }
                     }
                     // The desktop isn't the user's just now (a permission prompt, the lock
                     // screen), or this isn't the desktop's session.
@@ -73,7 +145,9 @@ impl Cursor {
                         if !std::mem::replace(&mut failed, true) {
                             tracing::warn!("Windows wouldn't say where the cursor is ({e}). Said once.");
                         }
-                        link.cursor_at(0.0, 0.0, false);
+                        if let Some(link) = &link {
+                            link.cursor_at(0.0, 0.0, false);
+                        }
                     }
                 }
                 // About 250 times a second; the core sends a position only when it changed.

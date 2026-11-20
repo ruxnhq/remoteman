@@ -18,6 +18,12 @@ use remoteman_proto::video::{CursorAt, Reassembler, fragment};
 use remoteman_transport::{Connection, Identity, RecvStream, Trust, listen, peer_fingerprint, read_message, write_message};
 
 use crate::blob::{self, BlobEvent, BlobSender, Chunk};
+pub use crate::permissions::{ConnectionEvent, Permissions};
+pub use crate::join::SecondDevice;
+use crate::join::{self, Lead, LeadEnd, LeadSlot};
+use crate::permissions::{ConnectionLog, PermissionStore};
+use crate::second_factor::{self, Check, SecondFactorStore};
+use crate::rate::RateController;
 use crate::{CursorShape, Display, Mode};
 
 pub struct HostOptions {
@@ -58,6 +64,24 @@ pub struct ClientInfo {
     pub attach_only: bool,
 }
 
+/// What [`Host::second_factor`] says when it is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecondFactorStatus {
+    /// Devices told "don't ask again" and not yet expired.
+    pub remembered: usize,
+}
+
+/// What the owner needs to put the second factor into an authenticator app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecondFactorSetup {
+    /// Base32.
+    pub secret: String,
+    /// The secret in groups of four, for typing in.
+    pub grouped: String,
+    /// `otpauth://totp/remoteman:<name>?secret=...&issuer=remoteman`, for a QR code or a link.
+    pub uri: String,
+}
+
 /// What the host will send, in answer to a client's hello.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Accept {
@@ -88,6 +112,21 @@ pub trait HostHandler: Send + 'static {
         let _ = (first, last);
         self.keyframe();
     }
+    /// What the host encodes at when the client has set no ceiling, in bits a second. A host that
+    /// follows the network (see [`Self::bitrate`]) says it here; 0 (the default) means it
+    /// doesn't, and nothing below is ever called.
+    fn default_bitrate(&mut self) -> u32 {
+        0
+    }
+    /// The picture should be encoded at this many bits a second from now on: the core lowers it
+    /// when the client reports loss and raises it again after a clean stretch, never above the
+    /// ceiling (what the client set with `configure`, or [`Self::default_bitrate`]); see
+    /// docs/PROTOCOL.md, "Settings". Change the encoder's rate live, with no keyframe. A ceiling
+    /// the client sets is applied by the host itself through [`Self::message`], as before; this
+    /// is called only for the steps below it. The core tells the client with `status`.
+    fn bitrate(&mut self, bits_per_second: u32) {
+        let _ = bits_per_second;
+    }
     /// The client's input, in order.
     fn input(&mut self, event: Event);
     /// One of the feature messages from the client (`sound`, `mic`, `camera`, `configure`,
@@ -105,6 +144,10 @@ pub trait HostHandler: Send + 'static {
     fn blob(&mut self, _event: &BlobEvent) {}
     /// The client is gone (or was replaced): stop the picture and take the display away.
     fn left(&mut self);
+    /// Something the host's owner may want to be told of: a device `paired`, `connected` or
+    /// was `refused` (see [`Host::connections`]). Called on the handler's thread, in turn with
+    /// everything else, so the core never waits for it; keep it short anyway.
+    fn notice(&mut self, _event: &ConnectionEvent) {}
 }
 
 /// One encoded frame on its way to the client.
@@ -241,7 +284,7 @@ impl Link {
     }
 }
 
-enum Call {
+pub(crate) enum Call {
     Connected(ClientInfo, Link, tokio::sync::oneshot::Sender<Result<Accept, String>>),
     Keyframe,
     Lost(u32, u32),
@@ -252,6 +295,125 @@ enum Call {
     /// With what holds the sender back until the handler has dealt with it.
     Blob(BlobEvent, Option<tokio::sync::OwnedSemaphorePermit>),
     Left,
+    Notice(ConnectionEvent),
+}
+
+/// The permissions and the log, shared by the host's tasks. A [`Gate`] asks them about one
+/// device.
+pub(crate) struct State {
+    perms: PermissionStore,
+    log: ConnectionLog,
+    /// Called, on the handler's thread, with each notice (see [`Host::set_notice_hook`]).
+    notice: Mutex<Option<Box<dyn FnMut(&ConnectionEvent) + Send>>>,
+    /// The second factor (docs/PROTOCOL.md, "Second factor"): the secret, the devices that need
+    /// not be asked, the count of wrong codes.
+    factor: SecondFactorStore,
+    /// How long a device has to answer the host's ask for a code (60 s; [`Host::set_second_factor_wait`]).
+    factor_wait: std::sync::atomic::AtomicU64,
+    /// This computer's name, for the authenticator app's list.
+    name: String,
+    /// What a device that connects while another is using the computer does
+    /// ([`SecondDevice`], as 0, 1, 2), kept in `host/second_device`.
+    second: std::sync::atomic::AtomicU8,
+    second_path: PathBuf,
+}
+
+impl State {
+    fn second_device(&self) -> SecondDevice {
+        SecondDevice::from_u8(self.second.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or_default()
+    }
+}
+
+/// What the device being served may do, asked again at each use so a change applies at once.
+#[derive(Clone)]
+pub(crate) struct Gate {
+    pub(crate) state: Arc<State>,
+    pub(crate) fingerprint: String,
+}
+
+impl Gate {
+    pub(crate) fn get(&self) -> Permissions {
+        self.state.perms.get(&self.fingerprint)
+    }
+}
+
+/// Whether a message from the client is one its permissions let through. Asking for a thing
+/// to start is what is refused; saying it stopped always goes through.
+fn message_allowed(m: &Message, p: &Permissions) -> bool {
+    match m {
+        Message::Sound { on } => !on || p.sound,
+        Message::Mic { on, .. } => !on || p.mic,
+        Message::Camera { on, .. } => !on || p.camera,
+        Message::Clipboard { on } => !on || p.clipboard,
+        Message::FileResult { .. } => p.files,
+        _ => true,
+    }
+}
+
+/// What a host program that isn't a [`HostHandler`] with its own `bitrate` gives the core to
+/// follow the network with instead (see [`Host::set_bitrate_hook`]): its default rate, and what
+/// to call with each new target.
+struct BitrateHook {
+    default: u32,
+    apply: Box<dyn FnMut(u32) + Send>,
+}
+
+/// Every host the core runs lists `parity` (docs/PROTOCOL.md, "Parity"): the core cuts the
+/// datagrams, and sends parity only to a client that asked for it.
+fn with_parity(mut features: Vec<String>) -> Vec<String> {
+    if !features.iter().any(|f| f == "parity") {
+        features.push("parity".into());
+    }
+    features
+}
+
+/// The bitrate following the network, for the connected client, on the handler's thread.
+#[derive(Default)]
+struct Follow {
+    /// Whether anything takes the new targets.
+    follows: bool,
+    /// What the host encodes at when the client set no ceiling.
+    default: u32,
+    /// The ceiling the client set (0: none).
+    asked: u32,
+    control: Option<RateController>,
+}
+
+impl Follow {
+    fn start(handler: &mut dyn HostHandler, hook: &Mutex<Option<BitrateHook>>) -> Self {
+        let own = handler.default_bitrate();
+        let hooked = hook.lock().unwrap().as_ref().map(|h| h.default);
+        let default = if own > 0 { own } else { hooked.unwrap_or(0) };
+        let mut f = Self { follows: own > 0 || hooked.is_some(), default, asked: 0, control: None };
+        f.rebuild();
+        f
+    }
+
+    fn rebuild(&mut self) {
+        let ceiling = if self.asked > 0 { self.asked } else { self.default };
+        self.control = (self.follows && ceiling > 0).then(|| RateController::new(ceiling));
+    }
+
+    /// The client's `configure`: the host applied its ceiling itself, and the picture may have
+    /// started afresh at it, so the target starts again from there.
+    fn configured(&mut self, bitrate: Option<u32>) {
+        if let Some(b) = bitrate {
+            self.asked = b;
+        }
+        self.rebuild();
+    }
+
+    /// Put a new target into effect: the host's encoder, and the client's `status`.
+    fn apply(&self, step: Option<u32>, handler: &mut dyn HostHandler, hook: &Mutex<Option<BitrateHook>>, link: &Mutex<Option<Link>>) {
+        let Some(target) = step else { return };
+        match hook.lock().unwrap().as_mut() {
+            Some(h) if handler.default_bitrate() == 0 => (h.apply)(target),
+            _ => handler.bitrate(target),
+        }
+        if let Some(link) = link.lock().unwrap().as_ref() {
+            link.send_message(Message::Status { bitrate: Some(target) });
+        }
+    }
 }
 
 /// A device this host trusts.
@@ -261,8 +423,10 @@ pub struct Device {
     pub fingerprint: String,
     /// The name it gave in its last hello, or the address it paired from until it has said one.
     pub name: String,
-    /// It is the client connected right now.
+    /// It is a client connected right now (the one being served, or one that joined it).
     pub connected: bool,
+    /// It is connected as a second device that joined the session of another.
+    pub joined: bool,
 }
 
 /// The connection of the client being served, and its fingerprint.
@@ -291,17 +455,26 @@ struct Confirm {
     /// trusted as soon as it connects while pairing is open.
     wanted: std::sync::atomic::AtomicBool,
     waiting: Mutex<Option<(PendingDevice, Instant, tokio::sync::oneshot::Sender<bool>)>>,
+    /// When [`Host::pending`] was last asked: the sign that somebody (the owner's app) is there to
+    /// answer. With `approver_wait` (ms, 0: off) a device that waits that long with nobody having
+    /// asked is turned away at once instead of after the full minute.
+    last_look: Mutex<Option<Instant>>,
+    approver_wait: std::sync::atomic::AtomicU64,
 }
 
 pub struct Host {
+    /// The session joiners join, while one is up.
+    lead: LeadSlot,
     confirm: Arc<Confirm>,
     runtime: Option<tokio::runtime::Runtime>,
     endpoint: remoteman_transport::Endpoint,
     trust: Arc<Trust>,
     link: Arc<Mutex<Option<Link>>>,
+    hook: Arc<Mutex<Option<BitrateHook>>>,
     who: Who,
     /// What this host can do, as the next hello will say it.
     features: Arc<Mutex<Vec<String>>>,
+    pub(crate) state: Arc<State>,
     calls: Mutex<mpsc::Sender<Call>>,
     /// Told once the handler thread has ended and let go of everything it held.
     handler_done: Mutex<mpsc::Receiver<()>>,
@@ -328,24 +501,65 @@ impl Host {
         let (calls, call_rx) = mpsc::channel::<Call>();
         let mut handler: Box<dyn HostHandler> = Box::new(handler);
         let (done, handler_done) = mpsc::channel::<()>();
+        let link: Arc<Mutex<Option<Link>>> = Arc::default();
+        let hook: Arc<Mutex<Option<BitrateHook>>> = Arc::default();
+        let state = Arc::new(State { perms: PermissionStore::load(&options.state.join("host/permissions.json")), log: ConnectionLog::open(&options.state.join("connections.log")), notice: Mutex::default(), factor: SecondFactorStore::load(&options.state.join("host/second_factor.json")), factor_wait: 60_000.into(), name: options.name.clone(), second: (std::fs::read_to_string(options.state.join("host/second_device")).ok().and_then(|s| SecondDevice::parse(&s)).unwrap_or_default() as u8).into(), second_path: options.state.join("host/second_device") });
+        let (thread_link, thread_hook, thread_state) = (link.clone(), hook.clone(), state.clone());
         std::thread::Builder::new().name("remoteman host".into()).spawn(move || {
-            while let Ok(call) = call_rx.recv() {
+            let (link, hook, state) = (thread_link, thread_hook, thread_state);
+            let clock = Instant::now();
+            let mut follow = Follow::default();
+            loop {
+                let call = match call_rx.recv_timeout(Duration::from_millis(250)) {
+                    Ok(call) => Some(call),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                let now = clock.elapsed().as_millis() as u64;
+                // The bitrate following the network: a step up after a clean stretch.
+                let mut step = follow.control.as_mut().and_then(|c| c.tick(now));
+                let Some(call) = call else {
+                    follow.apply(step, &mut *handler, &hook, &link);
+                    continue;
+                };
                 match call {
-                    Call::Connected(client, link, reply) => {
-                        let _ = reply.send(handler.connected(&client, link));
+                    Call::Connected(client, link_to_client, reply) => {
+                        let answer = handler.connected(&client, link_to_client);
+                        follow = if answer.is_ok() { Follow::start(&mut *handler, &hook) } else { Follow::default() };
+                        step = None;
+                        let _ = reply.send(answer);
                     }
                     Call::Keyframe => handler.keyframe(),
-                    Call::Lost(first, last) => handler.lost(first, last),
+                    Call::Lost(first, last) => {
+                        handler.lost(first, last);
+                        step = follow.control.as_mut().and_then(|c| c.loss(now)).or(step);
+                    }
                     Call::Input(event) => handler.input(event),
-                    Call::Message(message) => handler.message(&message),
+                    Call::Message(message) => {
+                        handler.message(&message);
+                        if let Message::Configure { bitrate, .. } = &message {
+                            follow.configured(*bitrate);
+                        }
+                    }
                     Call::Mic(packet) => handler.mic(&packet),
                     Call::Camera(frame) => handler.camera(&frame),
                     Call::Blob(event, held) => {
                         handler.blob(&event);
                         drop(held);
                     }
-                    Call::Left => handler.left(),
+                    Call::Notice(event) => {
+                        handler.notice(&event);
+                        if let Some(f) = state.notice.lock().unwrap().as_mut() {
+                            f(&event);
+                        }
+                    }
+                    Call::Left => {
+                        handler.left();
+                        follow = Follow::default();
+                        step = None;
+                    }
                 }
+                follow.apply(step, &mut *handler, &hook, &link);
             }
             // Nothing more will come: whatever the handler still holds is let go of here,
             // and whoever is stopping the host is told when that is done.
@@ -353,12 +567,12 @@ impl Host {
             let _ = done.send(());
         })?;
 
-        let link: Arc<Mutex<Option<Link>>> = Arc::default();
         let who = Who::default();
-        let features = Arc::new(Mutex::new(options.features.clone()));
+        let features = Arc::new(Mutex::new(with_parity(options.features.clone())));
         let confirm = Arc::new(Confirm { own: identity.fingerprint.clone(), ..Confirm::default() });
-        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone(), confirm.clone()));
-        Ok(Self { confirm, runtime: Some(runtime), endpoint, trust, link, who, features, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
+        let lead = LeadSlot::default();
+        runtime.spawn(accept_loop(endpoint.clone(), trust.clone(), options, calls.clone(), link.clone(), who.clone(), features.clone(), confirm.clone(), state.clone(), lead.clone()));
+        Ok(Self { lead, confirm, runtime: Some(runtime), endpoint, trust, link, hook, who, features, state, calls: Mutex::new(calls), handler_done: Mutex::new(handler_done), fingerprint: identity.fingerprint, address })
     }
 
     /// Let the next unknown device in (it is remembered and pairing turns itself off), or stop
@@ -377,8 +591,17 @@ impl Host {
         self.confirm.wanted.store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// For a host that runs where nobody may be there to answer (a Windows service at the sign-in
+    /// screen): a new device that has waited this long without anybody having called [`Host::pending`]
+    /// since it came is refused, with "Nobody is signed in on this PC to accept the device", rather
+    /// than left waiting out the minute. The owner's app asks about once a second, so it is "there".
+    pub fn set_approver_wait(&self, wait: Option<Duration>) {
+        self.confirm.approver_wait.store(wait.map_or(0, |w| w.as_millis() as u64), std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// The device waiting to be confirmed, if there is one.
     pub fn pending(&self) -> Option<PendingDevice> {
+        *self.confirm.last_look.lock().unwrap() = Some(Instant::now());
         let waiting = self.confirm.waiting.lock().unwrap();
         let (device, since, _) = waiting.as_ref()?;
         Some(PendingDevice { seconds: CONFIRM_SECONDS.saturating_sub(since.elapsed().as_secs() as u32), ..device.clone() })
@@ -397,10 +620,111 @@ impl Host {
     /// message; nothing is restarted. Messages for a feature that is off are the handler's
     /// to ignore.
     pub fn set_features(&self, features: Vec<String>) {
-        *self.features.lock().unwrap() = features.clone();
-        if let Some(link) = self.link() {
+        let features = with_parity(features);
+        *self.features.lock().unwrap() = features;
+        self.send_features();
+    }
+
+    /// Tell the connected client what it may use now: the host's features less what its
+    /// permissions take away.
+    fn send_features(&self) {
+        let fingerprint = self.who.lock().unwrap().as_ref().map(|(fp, _)| fp.clone());
+        if let (Some(link), Some(fp)) = (self.link(), fingerprint) {
+            let features = self.state.perms.get(&fp).filter(&self.features.lock().unwrap());
             link.send_message(Message::Features { features });
         }
+    }
+
+    /// What a device may do (everything, for one nobody has restricted).
+    pub fn permissions(&self, fingerprint: &str) -> Permissions {
+        self.state.perms.get(fingerprint)
+    }
+
+    /// Change what a device may do. Kept across restarts. If it is the connected one it is
+    /// told at once with a `features` message, and the handler is told to switch off what was
+    /// taken away (sound, microphone, camera and clipboard sharing, as if the client had
+    /// stopped them); input, files and the rest are dropped by the core from this moment.
+    pub fn set_permissions(&self, fingerprint: &str, permissions: Permissions) -> Result<()> {
+        let before = self.state.perms.get(fingerprint);
+        self.state.perms.set(fingerprint, permissions)?;
+        let connected = self.who.lock().unwrap().as_ref().is_some_and(|(fp, _)| fp == fingerprint);
+        if connected {
+            self.send_features();
+            if before.sound && !permissions.sound {
+                self.tell_handler(Message::Sound { on: false });
+            }
+            if before.mic && !permissions.mic {
+                self.tell_handler(Message::Mic { on: false, codec: String::new(), rate: 0, channels: 0, frame_us: 0 });
+            }
+            if before.camera && !permissions.camera {
+                self.tell_handler(Message::Camera { on: false, codec: String::new(), width: 0, height: 0, fps: 0 });
+            }
+            if before.clipboard && !permissions.clipboard {
+                self.tell_handler(Message::Clipboard { on: false });
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether devices must give a code from an authenticator app (`Some`, with how many are
+    /// remembered so as not to be asked), or not (`None`).
+    pub fn second_factor(&self) -> Option<SecondFactorStatus> {
+        self.state.factor.enabled().then(|| SecondFactorStatus { remembered: self.state.factor.remembered(second_factor::now()) })
+    }
+
+    /// Start turning the second factor on: a new secret, which the owner puts into an authenticator
+    /// app. It is asked for only after [`Host::confirm_second_factor`] has had a right code. Fails
+    /// if it is on already.
+    pub fn enable_second_factor(&self) -> Result<SecondFactorSetup> {
+        let secret = self.state.factor.enable()?;
+        Ok(SecondFactorSetup { uri: second_factor::otpauth_uri(&self.state.name, &secret), grouped: second_factor::grouped(&secret), secret })
+    }
+
+    /// The code the app shows for the secret of [`Host::enable_second_factor`]: if it is right the
+    /// second factor is on from now.
+    pub fn confirm_second_factor(&self, code: &str) -> bool {
+        self.state.factor.confirm(code, second_factor::now()).unwrap_or(false)
+    }
+
+    /// Turn the second factor off and throw the secret and the remembered devices away.
+    pub fn disable_second_factor(&self) -> Result<()> {
+        self.state.factor.disable()
+    }
+
+    /// Ask every device for a code again, even those told "don't ask again".
+    pub fn forget_remembered(&self) -> Result<()> {
+        self.state.factor.forget_remembered()
+    }
+
+    /// For tests: how long a device has to answer the ask for a code.
+    pub fn set_second_factor_wait(&self, wait: Duration) {
+        self.state.factor_wait.store(wait.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// For a host program whose handler doesn't implement [`HostHandler::notice`] (the C
+    /// interface): `notice` is called, on the handler's thread, with each event the handler's
+    /// own `notice` would get.
+    pub fn set_notice_hook(&self, notice: impl FnMut(&ConnectionEvent) + Send + 'static) {
+        *self.state.notice.lock().unwrap() = Some(Box::new(notice));
+    }
+
+    /// Take the hook of [`Self::set_notice_hook`] away.
+    pub fn clear_notice_hook(&self) {
+        *self.state.notice.lock().unwrap() = None;
+    }
+
+    /// The last `n` lines of the connection log, oldest first.
+    pub fn connections(&self, n: usize) -> Vec<ConnectionEvent> {
+        self.state.log.last(n)
+    }
+
+    /// Make the core lower and raise the picture's bitrate with the network for a host program
+    /// whose handler doesn't implement [`HostHandler::bitrate`] (the C interface): `apply` is
+    /// called, on the handler's thread, with each new target in bits a second, never above the
+    /// client's ceiling or `default` (what the host encodes at when the client set none; 0:
+    /// nothing is followed until the client sets one). Takes effect for the next client.
+    pub fn set_bitrate_hook(&self, default: u32, apply: impl FnMut(u32) + Send + 'static) {
+        *self.hook.lock().unwrap() = Some(BitrateHook { default, apply: Box::new(apply) });
     }
 
     /// Hand the handler a message as if the client had sent it, on the handler's own thread
@@ -411,16 +735,33 @@ impl Host {
         let _ = self.calls.lock().unwrap().send(Call::Message(message));
     }
 
+    /// What a device that connects while another is using this computer does. Takes effect for
+    /// the next connection; kept with the host's state.
+    pub fn set_second_device(&self, mode: SecondDevice) {
+        self.state.second.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::write(&self.state.second_path, mode.as_str());
+    }
+
+    pub fn second_device(&self) -> SecondDevice {
+        self.state.second_device()
+    }
+
     /// Every device this host trusts, in the order they were paired.
     pub fn devices(&self) -> Vec<Device> {
         let connected = self.who.lock().unwrap().as_ref().map(|(fp, _)| fp.clone());
-        self.trust.list().into_iter().map(|(fingerprint, name)| Device { connected: connected.as_deref() == Some(&fingerprint), fingerprint, name }).collect()
+        let joined = self.lead.lock().unwrap().as_ref().map(|l| l.joined()).unwrap_or_default();
+        self.trust.list().into_iter().map(|(fingerprint, name)| Device { connected: connected.as_deref() == Some(&fingerprint) || joined.contains(&fingerprint), joined: joined.contains(&fingerprint), fingerprint, name }).collect()
     }
 
     /// Stop trusting a device. It is dropped if it is the one connected, and refused from now
     /// on until it is paired again. Says whether it was trusted.
     pub fn revoke(&self, fingerprint: &str) -> Result<bool> {
         let was = self.trust.remove(fingerprint)?;
+        let _ = self.state.perms.forget(fingerprint);
+        let _ = self.state.factor.forget_device(fingerprint);
+        if let Some(lead) = self.lead.lock().unwrap().as_ref() {
+            lead.close_device(fingerprint, CLOSE_REVOKED, b"this device is no longer trusted here");
+        }
         let who = self.who.lock().unwrap();
         if let Some((fp, conn)) = who.as_ref() {
             if fp == fingerprint {
@@ -436,6 +777,19 @@ impl Host {
         match self.who.lock().unwrap().as_ref() {
             Some((_, conn)) => {
                 conn.close(CLOSE_DROPPED.into(), b"the host ended the connection");
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop the connected client with these words as the closing reason (one that begins
+    /// `locked: ` asks the client for its user's password, as an `error` with that code does;
+    /// docs/PROTOCOL.md, "A locked host"). It stays trusted. Says whether there was one.
+    pub fn close_client(&self, reason: &str) -> bool {
+        match self.who.lock().unwrap().as_ref() {
+            Some((_, conn)) => {
+                conn.close(CLOSE_DROPPED.into(), reason.as_bytes());
                 true
             }
             None => false,
@@ -480,7 +834,7 @@ impl Drop for Host {
 pub const CLOSE_DROPPED: u32 = 2;
 pub const CLOSE_REVOKED: u32 = 3;
 
-async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>, who: Who, features: Arc<Mutex<Vec<String>>>, confirm: Arc<Confirm>) {
+async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>, options: HostOptions, calls: mpsc::Sender<Call>, current_link: Arc<Mutex<Option<Link>>>, who: Who, features: Arc<Mutex<Vec<String>>>, confirm: Arc<Confirm>, state: Arc<State>, lead_slot: LeadSlot) {
     let options = Arc::new(options);
     let mut current: Option<(tokio::task::JoinHandle<()>, Connection)> = None;
     while let Some(incoming) = endpoint.accept().await {
@@ -490,13 +844,33 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
         // Only reachable while pairing: a device nobody knows. It is trusted here and now,
         // or held until the host's owner has confirmed it (in `serve`, once it has said its name).
         let mut held = None;
+        let mut fresh = false;
         if !trust.contains(&fingerprint) {
             trust.set_pairing(false);
             if confirm.wanted.load(std::sync::atomic::Ordering::Relaxed) {
                 held = Some(confirm.clone());
             } else {
                 let _ = trust.add(&fingerprint, &conn.remote_address().ip().to_string());
+                fresh = true;
             }
+        }
+        // With the host set to `watch` or `control`, a device that isn't the lead's own joins
+        // the lead's session instead of ending it (docs/PROTOCOL.md, "More than one device").
+        let second = state.second_device();
+        let lead = if second == SecondDevice::TakeOver { None } else { lead_slot.lock().unwrap().clone().filter(|l| l.is_open() && l.fingerprint != fingerprint) };
+        if let Some(lead) = lead {
+            let (options, calls, trust, state) = (options.clone(), calls.clone(), trust.clone(), state.clone());
+            let offered = features.lock().unwrap().clone();
+            let (lead_slot, current_link) = (lead_slot.clone(), current_link.clone());
+            tokio::spawn(async move {
+                let started = serve(&conn, fingerprint, &options, &calls, &current_link, &lead_slot, &trust, &state, offered, held, fresh, Some((lead, second == SecondDevice::Control))).await;
+                if let Err((_, e)) = started {
+                    if conn.close_reason().is_none() {
+                        conn.close(1u32.into(), format!("{e:#}").as_bytes());
+                    }
+                }
+            });
+            continue;
         }
         // The newest client takes over. The old session is closed and left to finish by
         // itself, so the handler hears `left` for it exactly once, and before the new `connected`.
@@ -504,17 +878,17 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
             old_conn.close(0u32.into(), b"another device took over");
             let _ = old.await;
         }
-        let (options, calls, current_link) = (options.clone(), calls.clone(), current_link.clone());
+        let (options, calls, current_link, lead_slot) = (options.clone(), calls.clone(), current_link.clone(), lead_slot.clone());
         let session_conn = conn.clone();
         *who.lock().unwrap() = Some((fingerprint.clone(), conn.clone()));
         // Revoked between its handshake and here: it doesn't get a session.
         if held.is_none() && !trust.contains(&fingerprint) {
             conn.close(CLOSE_REVOKED.into(), b"this device is no longer trusted here");
         }
-        let (who, trust) = (who.clone(), trust.clone());
+        let (who, trust, state) = (who.clone(), trust.clone(), state.clone());
         let offered = features.lock().unwrap().clone();
         current = Some((tokio::spawn(async move {
-            let started = serve(&conn, fingerprint, &options, &calls, &current_link, &trust, offered, held).await;
+            let started = serve(&conn, fingerprint, &options, &calls, &current_link, &lead_slot, &trust, &state, offered, held, fresh, None).await;
             {
                 let mut who = who.lock().unwrap();
                 if who.as_ref().is_some_and(|(_, c)| c.stable_id() == conn.stable_id()) {
@@ -538,6 +912,97 @@ async fn accept_loop(endpoint: remoteman_transport::Endpoint, trust: Arc<Trust>,
     }
 }
 
+/// Ends when a device that began waiting at `since` has waited the host's `approver_wait` with
+/// nobody having asked [`Host::pending`] since; never, when that is off or somebody did.
+async fn nobody_asks(confirm: &Confirm, since: Instant) {
+    let wait = Duration::from_millis(confirm.approver_wait.load(std::sync::atomic::Ordering::Relaxed));
+    if wait.is_zero() {
+        return std::future::pending().await;
+    }
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let looked = confirm.last_look.lock().unwrap().is_some_and(|l| l >= since);
+        if looked {
+            return std::future::pending().await;
+        }
+        if since.elapsed() >= wait {
+            return;
+        }
+    }
+}
+
+/// The second factor's turn at admission: wait for `second_factor` messages from the client until
+/// one is right (and then go on), or too many are wrong (error `second_factor`, the device refused
+/// for 10 minutes), or the time is up (a client that doesn't know the message never answers).
+async fn ask_second_factor(send: &mut remoteman_transport::SendStream, recv: &mut RecvStream, state: &State, fingerprint: &str, name: &str, address: &str, record: &(dyn Fn(ConnectionEvent) + Sync)) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(state.factor_wait.load(std::sync::atomic::Ordering::Relaxed));
+    let fail = |code: &str, message: &str, event: &str| {
+        let mut e = ConnectionEvent::new(event, name, fingerprint, address);
+        e.reason = message.into();
+        record(e);
+        Message::Error { code: code.into(), message: message.into() }
+    };
+    loop {
+        let message = match tokio::time::timeout_at(deadline, read_message(recv)).await {
+            Err(_) => {
+                let error = fail("second_factor", "This computer asks for a code from an authenticator app; update remoteman", "refused");
+                let _ = write_message(send, &error).await;
+                let _ = send.finish();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                bail!("no second-factor code came in time");
+            }
+            Ok(m) => m?.context("the client left before giving a code")?,
+        };
+        let Message::SecondFactor { code, remember } = message else { continue };
+        match state.factor.check(fingerprint, &code, remember, second_factor::now()) {
+            Check::Right => {
+                record(ConnectionEvent::new("second_factor_ok", name, fingerprint, address));
+                return Ok(());
+            }
+            Check::Wrong(left) => {
+                record(ConnectionEvent::new("second_factor_wrong", name, fingerprint, address));
+                write_message(send, &Message::SecondFactorWrong { left }).await?;
+            }
+            Check::Refused => {
+                let error = fail("second_factor", "Too many wrong codes. Try again in 10 minutes.", "second_factor_wrong");
+                let _ = write_message(send, &error).await;
+                let _ = send.finish();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                bail!("too many wrong second-factor codes");
+            }
+        }
+    }
+}
+
+/// Writes the `left` line of the connection log when a session ends, however it ends.
+pub(crate) struct LeftLog {
+    state: Arc<State>,
+    conn: Connection,
+    name: String,
+    fingerprint: String,
+    address: String,
+    since: Instant,
+    joined: bool,
+}
+
+impl LeftLog {
+    pub(crate) fn new(state: Arc<State>, conn: Connection, name: String, fingerprint: String, address: String, joined: bool) -> Self {
+        Self { state, conn, name, fingerprint, address, since: Instant::now(), joined }
+    }
+}
+
+impl Drop for LeftLog {
+    fn drop(&mut self) {
+        let mut event = ConnectionEvent::new("left", &self.name, &self.fingerprint, &self.address);
+        event.duration = Some(self.since.elapsed().as_secs());
+        event.joined = self.joined;
+        if let Some(reason) = self.conn.close_reason() {
+            event.reason = reason.to_string();
+        }
+        self.state.log.append(&event);
+    }
+}
+
 /// A frame that nothing has followed for this long is sent once more. On a desktop where
 /// nothing moves no later frame comes, and a later frame is the only way a client notices that
 /// one went missing: without this, whatever the network lost of the last frame before the
@@ -546,11 +1011,20 @@ const REPEAT_AFTER: Duration = Duration::from_millis(100);
 
 /// One client's session. The flag in the result says whether the handler's `connected` ran (and
 /// so whether `left` is owed).
-async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, trust: &Trust, features: Vec<String>, held: Option<Arc<Confirm>>) -> Result<bool, (bool, anyhow::Error)> {
+async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, calls: &mpsc::Sender<Call>, current_link: &Mutex<Option<Link>>, lead_slot: &LeadSlot, trust: &Trust, state: &Arc<State>, features: Vec<String>, held: Option<Arc<Confirm>>, fresh: bool, join: Option<(Arc<Lead>, bool)>) -> Result<bool, (bool, anyhow::Error)> {
     let no = |e: anyhow::Error| (false, e);
+    let gate = Gate { state: state.clone(), fingerprint: fingerprint.clone() };
+    let address = conn.remote_address().to_string();
+    // Writes the event to the log and tells the handler (which may show a notice).
+    let record = |event: ConnectionEvent| {
+        state.log.append(&event);
+        if event.event != "left" {
+            let _ = calls.send(Call::Notice(event));
+        }
+    };
     let clock = Instant::now();
     let (mut send, mut recv) = conn.accept_bi().await.context("control stream").map_err(no)?;
-    let Some(Message::ClientHello { proto, name, display, decoders, cursor, unlock, way_in }) = read_message(&mut recv).await.map_err(no)? else {
+    let Some(Message::ClientHello { proto, name, display, decoders, cursor, unlock, way_in, parity }) = read_message(&mut recv).await.map_err(no)? else {
         return Err(no(anyhow::anyhow!("the first message wasn't client_hello")));
     };
     // A new device, held for the owner's word: it is told to wait (and can show the code),
@@ -560,9 +1034,11 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         let (answer, answered) = tokio::sync::oneshot::channel::<bool>();
         *confirm.waiting.lock().unwrap() = Some((device, Instant::now(), answer));
         write_message(&mut send, &Message::Pairing { seconds: CONFIRM_SECONDS }).await.map_err(no)?;
+        let mut nobody = false;
         let decision = tokio::select! {
             said = tokio::time::timeout(Duration::from_secs(CONFIRM_SECONDS as u64), answered) => said.ok().and_then(|s| s.ok()),
             _ = conn.closed() => Some(false),
+            _ = nobody_asks(&confirm, Instant::now()) => { nobody = true; None }
         };
         // Whatever came of it, nobody is waiting any more (unless a newer device already is).
         {
@@ -572,9 +1048,15 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             }
         }
         match decision {
-            Some(true) => trust.add(&fingerprint, name.trim()).map_err(no)?,
+            Some(true) => {
+                trust.add(&fingerprint, name.trim()).map_err(no)?;
+                record(ConnectionEvent::new("paired", name.trim(), &fingerprint, &address));
+            }
             other => {
-                let message = if other.is_some() { "pairing was declined on the computer" } else { "nobody confirmed the pairing on the computer in time" };
+                let message = if other.is_some() { "pairing was declined on the computer" } else if nobody { "Nobody is signed in on this PC to accept the device" } else { "nobody confirmed the pairing on the computer in time" };
+                let mut event = ConnectionEvent::new("refused", name.trim(), &fingerprint, &address);
+                event.reason = message.into();
+                record(event);
                 let _ = write_message(&mut send, &Message::Error { code: "not_paired".into(), message: message.into() }).await;
                 let _ = send.finish();
                 // (Time for the reason to arrive before the connection goes.)
@@ -584,7 +1066,30 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             }
         }
     }
-    write_message(&mut send, &Message::HostHello { proto: remoteman_proto::PROTO, name: options.name.clone(), os: options.os.clone(), features }).await.map_err(no)?;
+    if fresh {
+        record(ConnectionEvent::new("paired", name.trim(), &fingerprint, &address));
+    }
+    // What this device may do: its features are the host's less what it isn't allowed.
+    // A paired device must also give a code from an authenticator app, when that is on and the
+    // device was not told "don't ask again" (docs/PROTOCOL.md, "Second factor").
+    let factor = state.factor.required_for(&fingerprint, second_factor::now());
+    if factor && state.factor.is_refused(&fingerprint, second_factor::now()) {
+        let message = "Too many wrong codes. Try again in 10 minutes.";
+        let mut event = ConnectionEvent::new("refused", name.trim(), &fingerprint, &address);
+        event.reason = message.into();
+        record(event);
+        let _ = write_message(&mut send, &Message::Error { code: "second_factor".into(), message: message.into() }).await;
+        let _ = send.finish();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        return Err(no(anyhow::anyhow!("the device is refused for wrong second-factor codes")));
+    }
+    let mut features = gate.get().filter(&features);
+    if let Some((_, control)) = &join {
+        features = join::features(features, *control);
+    }
+    // Parity only where both sides said so.
+    let parity = parity && features.iter().any(|f| f == "parity");
+    write_message(&mut send, &Message::HostHello { proto: remoteman_proto::PROTO, name: options.name.clone(), os: options.os.clone(), features, second_factor: factor.then(|| "totp".to_owned()) }).await.map_err(no)?;
     // The list of trusted devices shows the name the device gives itself.
     if !name.trim().is_empty() {
         let _ = trust.rename(&fingerprint, name.trim());
@@ -595,10 +1100,21 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         return Err(no(anyhow::anyhow!("the client speaks protocol {proto}")));
     }
 
+    // Nothing more is sent, and the handler hears nothing, until the code is right.
+    if factor {
+        ask_second_factor(&mut send, &mut recv, state, &gate.fingerprint, name.trim(), &address, &record).await.map_err(no)?;
+    }
+
+    // A device that joins another's session has no handler session of its own.
+    if let Some((lead, control)) = join {
+        return join::serve(conn, send, recv, &lead, control, name.trim().to_owned(), &decoders, parity, calls, gate, address, &record).await;
+    }
+
     let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Out>(4);
     let (cursor_tx, mut cursor_rx) = tokio::sync::mpsc::unbounded_channel::<CursorMsg>();
     let link = Link { frames: frame_tx, cursor: cursor_tx, clock, second: false };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let client_name = name.trim().to_owned();
     let info = ClientInfo { name, fingerprint, display, decoders, cursor, unlock, attach_only: way_in.as_deref() == Some("attach") };
     // Reachable through `Host::link` before the handler hears of the client, so nothing it
     // sends from the start is lost.
@@ -620,18 +1136,27 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                 ("failed", message.as_str())
             };
             let _ = write_message(&mut send, &Message::Error { code: code.into(), message: said.to_owned() }).await;
+            let mut event = ConnectionEvent::new("refused", &client_name, &gate.fingerprint, &address);
+            event.reason = message.clone();
+            record(event);
             // The handler refused, so it holds nothing for this client.
             return Err(no(anyhow::anyhow!(message)));
         }
         Err(_) => return Err(no(anyhow::anyhow!("the host is shutting down"))),
     };
+    record(ConnectionEvent::new("connected", &client_name, &gate.fingerprint, &address));
+    // However this session ends, it is logged once as having left.
+    let _left = LeftLog::new(state.clone(), conn.clone(), client_name, gate.fingerprint.clone(), address.clone(), false);
     let yes = |e: anyhow::Error| (true, e);
     // Counts up each time the picture starts afresh.
     let epoch = std::sync::atomic::AtomicU32::new(1);
     let now = || epoch.load(std::sync::atomic::Ordering::Relaxed) as u16;
-    write_message(&mut send, &Message::Stream { epoch: now(), mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour, index: 0, sdr_white: accept.sdr_white, peak: accept.peak })
-        .await
-        .map_err(yes)?;
+    let first_stream = Message::Stream { epoch: now(), mode: accept.mode, width: accept.width, height: accept.height, refresh: accept.refresh, colour: accept.colour, index: 0, sdr_white: accept.sdr_white, peak: accept.peak };
+    write_message(&mut send, &first_stream).await.map_err(yes)?;
+    // From here devices may join this session; it ends for them when it ends.
+    let lead = Arc::new(Lead::new(gate.fingerprint.clone(), first_stream));
+    *lead_slot.lock().unwrap() = Some(lead.clone());
+    let _lead_end = LeadEnd { lead: lead.clone(), slot: lead_slot.clone() };
     // Three things write to the control stream: answers to the client, cursor shapes, and a
     // new stream description when the picture starts afresh.
     let send = tokio::sync::Mutex::new(send);
@@ -704,12 +1229,20 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     answer.store(0, std::sync::atomic::Ordering::Relaxed);
                     last[0] = None;
                     let m = Message::Stream { epoch: now(), mode: a.mode, width: a.width, height: a.height, refresh: a.refresh, colour: a.colour, index: 0, sdr_white: a.sdr_white, peak: a.peak };
+                    lead.restart(&m);
                     write_message(&mut *send.lock().await, &m).await?;
                     continue;
                 }
             };
+            lead.frame(&f.data, f.key, f.capture_us, now(), number);
             let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
-            for d in fragment(&f.data, f.key, f.recovery, now(), number, f.capture_us, max) {
+            // With parity the data is cut a little smaller, and a copy sent later is cut so too.
+            let (datagrams, cut) = if parity {
+                (remoteman_proto::video::fragment_with_parity(&f.data, f.key, f.recovery, now(), number, f.capture_us, max, remoteman_proto::video::PARITY_GROUP), remoteman_proto::video::parity_cut(max))
+            } else {
+                (fragment(&f.data, f.key, f.recovery, now(), number, f.capture_us, max), max)
+            };
+            for d in datagrams {
                 sent = sent.wrapping_add(1);
                 if drop_one_in.is_some_and(|n| sent % n == 0) {
                     continue;
@@ -719,7 +1252,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             if f.key || f.recovery {
                 answer.store(number.wrapping_add(1), std::sync::atomic::Ordering::Relaxed);
             }
-            last[0] = Some((f, now(), number, tokio::time::Instant::now() + REPEAT_AFTER, max));
+            last[0] = Some((f, now(), number, tokio::time::Instant::now() + REPEAT_AFTER, cut));
             number = number.wrapping_add(1);
         }
         // The handler dropped its link without the client leaving: nothing more to send.
@@ -747,7 +1280,10 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                 }
                 Message::Ping { id, client_us } => write_message(&mut *send.lock().await, &Message::Pong { id, client_us, host_us: clock.elapsed().as_micros() as u64 }).await?,
                 m @ (Message::Sound { .. } | Message::Mic { .. } | Message::Camera { .. } | Message::Configure { .. } | Message::Clipboard { .. } | Message::FileResult { .. } | Message::Display { .. } | Message::DisplayKeyframe { .. }) => {
-                    let _ = calls.send(Call::Message(m));
+                    // What the device isn't allowed is dropped here, whatever it was told.
+                    if message_allowed(&m, &gate.get()) {
+                        let _ = calls.send(Call::Message(m));
+                    }
                 }
                 _ => {}
             }
@@ -762,18 +1298,28 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
             match c {
                 CursorMsg::Shape(s) => {
                     let m = Message::Cursor { width: s.width, height: s.height, hot_x: s.hot_x, hot_y: s.hot_y, rgba: encode_bytes(&s.rgba) };
+                    lead.cursor_shape(&m);
                     write_message(&mut *send.lock().await, &m).await?;
                 }
                 CursorMsg::At { x, y, visible } => {
                     let at = CursorAt { epoch: now(), visible, x, y };
                     if last != Some(at) {
                         last = Some(at);
-                        let _ = conn.send_datagram(at.write().into());
+                        let w = at.write();
+                        lead.cursor_at(&w);
+                        let _ = conn.send_datagram(w.into());
                     }
                 }
-                CursorMsg::Message(m) => write_message(&mut *send.lock().await, &m).await?,
+                CursorMsg::Message(m) => {
+                    if matches!(m, Message::SoundFormat { .. }) {
+                        lead.sound_format(&m);
+                    }
+                    write_message(&mut *send.lock().await, &m).await?
+                }
                 CursorMsg::Sound(packet) => {
-                    let _ = conn.send_datagram(packet.write().into());
+                    let w = packet.write();
+                    lead.sound(&w);
+                    let _ = conn.send_datagram(w.into());
                 }
                 CursorMsg::Blob { kind, header, content } => {
                     tokio::spawn(blob::send(conn.clone(), kind, header, content));
@@ -793,7 +1339,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         loop {
             let mut stream = conn.accept_uni().await?;
             blob_id = blob_id.wrapping_add(1);
-            let (calls, room, id) = (calls.clone(), room.clone(), blob_id);
+            let (calls, room, id, gate) = (calls.clone(), room.clone(), blob_id, gate.clone());
             // Each stream is read by a task of its own from its very first byte: a stream is
             // announced as soon as a later one carries data, so the input stream can turn up
             // here long before the client has typed anything.
@@ -803,6 +1349,12 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     return;
                 }
                 if first[0] >= media::BLOB_FIRST {
+                    // A clipboard or a file the device isn't allowed to send is turned away.
+                    let p = gate.get();
+                    if (first[0] == media::BLOB_CLIPBOARD && !p.clipboard) || (first[0] == media::BLOB_FILE && !p.files) {
+                        let _ = stream.stop(2u32.into());
+                        return;
+                    }
                     blob::receive(stream, first[0], id, move |event| {
                         let (calls, room) = (calls.clone(), room.clone());
                         async move {
@@ -812,7 +1364,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                     })
                     .await;
                 } else {
-                    let _ = read_input(stream, first[0], &calls).await;
+                    let _ = read_input(stream, first[0], &calls, &gate).await;
                 }
             });
         }
@@ -827,6 +1379,8 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         loop {
             let d = conn.read_datagram().await?;
             match d.first() {
+                Some(&media::KIND_MIC) if !gate.get().mic => {}
+                Some(&media::KIND_CAMERA) if !gate.get().camera => {}
                 Some(&media::KIND_MIC) => {
                     if let Ok(packet) = Packet::parse(&d) {
                         let _ = calls.send(Call::Mic(packet));
@@ -896,14 +1450,20 @@ fn take_events(buf: &mut Vec<u8>, mut sink: impl FnMut(Event)) -> Result<()> {
     result
 }
 
-async fn read_input(mut stream: RecvStream, first: u8, calls: &mpsc::Sender<Call>) -> Result<()> {
+pub(crate) async fn read_input(mut stream: RecvStream, first: u8, calls: &mpsc::Sender<Call>, gate: &Gate) -> Result<()> {
     // `first` was read off the stream to see what it was.
     let mut buf = vec![first];
     let mut chunk = [0u8; 4096];
     while let Some(n) = stream.read(&mut chunk).await? {
         buf.extend_from_slice(&chunk[..n]);
         let mut gone = false;
-        take_events(&mut buf, |event| gone |= calls.send(Call::Input(event)).is_err())?;
+        // A view-only device's events (of every kind) are read and thrown away.
+        let input = gate.get().input;
+        take_events(&mut buf, |event| {
+            if input {
+                gone |= calls.send(Call::Input(event)).is_err();
+            }
+        })?;
         if gone {
             bail!("the host is shutting down");
         }

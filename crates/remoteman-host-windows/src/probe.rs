@@ -43,7 +43,9 @@ pub fn run(picture: bool) -> Result<()> {
         let mode = display::current(&o.device).map(|(m, a)| format!("{}x{} at {} Hz, at {},{}", m.width, m.height, m.refresh, a.left, a.top)).unwrap_or_else(|e| format!("{e:#}"));
         say!("output {}{}: {} [{}], {mode}", o.device, if o.primary { " (primary)" } else { "" }, o.description, o.id);
     }
-    let output = match display::find_output() {
+    // (On a PC with screens of its own the driver's monitors are off the desktop while no device
+    // is here: then its first monitor's output, which shows no frames until a device comes.)
+    let output = match display::find_output().or_else(|e| display::driver_output(0).map(|o| (o, true)).ok_or(e)) {
         Ok((o, sure)) => {
             say!("the driver's monitor is taken to be {} ({})", o.device, if sure { "its adapter is the driver's" } else { "no adapter looks like the driver's; this is the primary display" });
             let modes = display::modes(&o.device);
@@ -129,9 +131,9 @@ pub fn run(picture: bool) -> Result<()> {
     }
 
     // 5. Convert one frame.
-    let (input, note) = convert::input_for(meta.format, meta.is_hdr != 0).inspect_err(|e| say!("FAILED: {e:#}"))?;
+    let (input, note) = convert::input_for(meta.format, meta.is_hdr != 0, crate::hdr::USUAL_SDR_WHITE).inspect_err(|e| say!("FAILED: {e:#}"))?;
     say!("conversion: the surface is read as {input:?}{}", note.map(|n| format!(" ({n})")).unwrap_or_default());
-    let converter = Converter::new(&gpu, meta.width, meta.height, input).inspect_err(|e| say!("FAILED: {e:#}"))?;
+    let converter = Converter::new(&gpu, meta.width, meta.height, input, convert::Output::Sdr, false).inspect_err(|e| say!("FAILED: {e:#}"))?;
     say!("conversion: shaders compiled, P010 target made");
     let mut converted = false;
     for attempt in 0..20 {
@@ -173,18 +175,41 @@ pub fn run(picture: bool) -> Result<()> {
         Ok(from) => say!("encoder library: {from}"),
         Err(e) => say!("FAILED: {e:#}"),
     }
-    for mode in encode::MODES {
-        let settings = encode::Settings { mode, width: meta.width, height: meta.height, fps: 60, bitrate: 20_000_000 };
+    // Each mode, and HDR where the mode has it, with an input of its own layout (4:4:4: RGB
+    // that NVENC converts).
+    let tries: Vec<(remoteman_core::Mode, bool)> = encode::MODES.into_iter().flat_map(|m| vec![(m, false), (m, true)]).collect();
+    for (mode, hdr) in tries {
+        let layout = mode.chroma == remoteman_core::Chroma::C444;
+        let settings = encode::Settings { mode, width: meta.width, height: meta.height, fps: 60, bitrate: 20_000_000, hdr, light: hdr.then(|| encode::hdr_light(&meta, crate::hdr::USUAL_SDR_WHITE)) };
+        let output = if hdr { convert::Output::Pq { sdr_white: crate::hdr::USUAL_SDR_WHITE } } else { convert::Output::Sdr };
+        let mode_name = format!("{:?} {:?}{}", mode.codec, mode.chroma, if hdr { " HDR" } else { "" });
+        let converter = match Converter::new(&gpu, meta.width, meta.height, input, output, layout) {
+            Ok(c) => {
+                let _ = source.take(&gpu, true, |view, _| c.convert(&gpu, view));
+                c
+            }
+            Err(e) => {
+                say!("FAILED: conversion for {mode_name}: {e:#}");
+                continue;
+            }
+        };
         match encode::open(&gpu, &converter.output, &settings) {
             Ok(mut encoder) => {
                 let note = encoder.note().to_owned();
                 let (short, long) = (encoder.short_term(), encoder.long_term());
                 match encoder.encode_how(0, 0, remoteman_encode::How { idr: true, ..Default::default() }) {
-                    Ok(made) => say!("encoder {:?}: opened ({note}; {short} recent and {long} long-term frames); one frame is {} bytes, keyframe {}", mode.codec, made.data.len(), made.key),
-                    Err(e) => say!("FAILED: encoder {:?} opened ({note}) but didn't encode: {e:#}", mode.codec),
+                    Ok(made) => {
+                        say!("encoder {mode_name}: opened ({note}; {short} recent and {long} long-term frames); one frame is {} bytes, keyframe {}", made.data.len(), made.key);
+                        // The frame, for decoding elsewhere (REMOTEMAN_PROBE_DUMP=DIR).
+                        if let Some(dir) = std::env::var_os("REMOTEMAN_PROBE_DUMP") {
+                            let name = mode_name.replace([' ', '(', ')'], "_");
+                            let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{name}.{}", if mode.codec == remoteman_core::Codec::Av1 { "obu" } else { "h265" })), &made.data);
+                        }
+                    }
+                    Err(e) => say!("FAILED: encoder {mode_name} opened ({note}) but didn't encode: {e:#}"),
                 }
             }
-            Err(e) => say!("FAILED: encoder {:?}: {e:#}", mode.codec),
+            Err(e) => say!("FAILED: encoder {mode_name}: {e:#}"),
         }
     }
     say!("probe done");
