@@ -3,7 +3,7 @@
 # "Desktop development with C++"), the headers and libraries from the Windows Driver Kit's NuGet
 # packages. Nothing needs an administrator.
 #
-#   powershell -ExecutionPolicy Bypass -File build.ps1 [-Kit FOLDER] [-Out FOLDER] [-Version 0.1.0.0]
+#   powershell -ExecutionPolicy Bypass -File build.ps1 [-Kit FOLDER] [-Out FOLDER] [-Version 0.1.1.0]
 #
 # -Kit is a folder holding the three NuGet packages unpacked, each in a folder named
 # <id>.<version> (as nuget.exe or `nuget install` leaves them):
@@ -18,7 +18,7 @@
 # (Build Tools doesn't have it unless its component is added) and code analysis.
 param([string]$Kit = $(if ($env:REMOTEMAN_WDK) { $env:REMOTEMAN_WDK } else { 'C:\rm\wdk\packages' }),
       [string]$Out = (Join-Path $PSScriptRoot 'out'),
-      [string]$Version = '0.1.0.0')
+      [string]$Version = '0.1.1.0')
 $ErrorActionPreference = 'Stop'
 $src = Join-Path $PSScriptRoot 'RemotemanDisplay'
 

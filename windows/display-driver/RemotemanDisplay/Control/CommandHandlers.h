@@ -21,6 +21,7 @@ void HandleSetGpuCommand(wchar_t *param);
 void HandleSetDisplayCountCommand(wchar_t *param);
 void HandleCreateMonitorCommand(wchar_t *param);
 void HandleDestroyMonitorCommand(wchar_t *param);
+void HandlePlugMonitorCommand(wchar_t *param);
 void HandleRefreshModesCommand(wchar_t *param);
 void HandleSetModesCommand(wchar_t *param);
 void HandleUnknownCommand(wchar_t *buffer);

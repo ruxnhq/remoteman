@@ -33,6 +33,7 @@ void DispatchVddCommandBuffer(wchar_t *buffer)
 		{L"SETMODES", 8, HandleSetModesCommand},
 		{L"CREATEMONITOR", 13, HandleCreateMonitorCommand},
 		{L"DESTROYMONITOR", 14, HandleDestroyMonitorCommand},
+		{L"PLUGMONITOR", 11, HandlePlugMonitorCommand},
 	};
 
 	for (const auto &cmd : commands)
