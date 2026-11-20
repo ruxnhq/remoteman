@@ -50,6 +50,10 @@ pub enum Dialog {
     /// owner confirms there before `until`.
     Code { name: String, code: String, until: Instant },
     Paired { target: Target, key: String },
+    /// The computer asks for a code from an authenticator app (`left`: tries left, after a wrong
+    /// one). Answered with `DialogOk`; `remember` (the locked page's flag) is "don't ask again
+    /// on this device for 30 days".
+    SecondFactor { name: String, left: Option<u32> },
     Forget(String),
     Address { address: String, problem: Option<String> },
     About,
@@ -251,6 +255,13 @@ impl Session {
 
     pub fn offers(&self, feature: &str) -> bool {
         self.features.iter().any(|f| f == feature)
+    }
+
+    /// The computer left `input` out of what it offers this device: the owner allows it to see
+    /// the screen and nothing more. Nothing is sent to control it then (a made-up or played
+    /// session has no computer and is never view-only).
+    pub fn view_only(&self) -> bool {
+        self.client.is_some() && !self.offers("input")
     }
 }
 
@@ -478,6 +489,16 @@ impl App {
 
     pub fn client(&self) -> Option<&Arc<Client>> {
         self.session.as_ref().and_then(|s| s.client.as_ref())
+    }
+
+    /// The client to send input to: none when the computer allows this device to view only.
+    pub fn input_client(&self) -> Option<&Arc<Client>> {
+        if self.session.as_ref().is_some_and(|s| s.view_only()) { None } else { self.client() }
+    }
+
+    /// The session is view only (see [`Session::view_only`]).
+    pub fn view_only(&self) -> bool {
+        self.session.as_ref().is_some_and(|s| s.view_only())
     }
 
     /// The session's bar is not part of the window but comes out over the picture.
@@ -833,6 +854,14 @@ impl App {
             self.dialog = Some(Dialog::Code { name: host_part(&target.address).to_owned(), code, until: Instant::now() + Duration::from_secs(seconds as u64) });
             self.dirty = true;
         }
+        if let Some(left) = self.session.as_ref().and_then(|s| s.shared.second_factor.lock().unwrap().take()) {
+            say!("the computer asks for a code from an authenticator app{}", left.map(|n| format!(" (wrong; {n} tries left)")).unwrap_or_default());
+            let name = self.session.as_ref().map(|s| s.target.name.clone()).unwrap_or_default();
+            self.dialog = Some(Dialog::SecondFactor { name, left });
+            self.fields.insert(id("second.code"), Field::default());
+            self.focus(id("second.code"), false);
+            self.dirty = true;
+        }
         if let Some(features) = self.session.as_ref().and_then(|s| s.shared.features.lock().unwrap().take()) {
             say!("the computer now offers {features:?}");
             self.session.as_mut().unwrap().features = features;
@@ -900,6 +929,13 @@ impl App {
     fn hold(&mut self, client: Client, shared: Arc<Shared>, target: Target, display: Display) {
         let (_, quality, bitrate) = self.choices(&target.address);
         let (features, os) = (client.host_features.clone(), client.host_os.clone());
+        // A computer that wants a code from an authenticator app says so through this, at once if
+        // it already has: `poll` shows the dialog.
+        let asked = shared.clone();
+        client.on_second_factor(move |left| {
+            *asked.second_factor.lock().unwrap() = Some(left);
+            asked.scene.wake_window();
+        });
         self.session = Some(Session::new(Some(Arc::new(client)), shared, target, features, display, quality, bitrate, os));
     }
 
@@ -953,6 +989,16 @@ impl App {
         if s.clipboard_on && !s.offers("clipboard") {
             s.clipboard_on = false;
         }
+        let (mic, camera) = (s.mic_on && !s.offers("mic"), s.camera_on && !s.offers("camera"));
+        // The window says whether this device may control the computer.
+        let title = format!("{}{} - remoteman", s.target.name, if s.view_only() { " (view only)" } else { "" });
+        if mic {
+            self.set_microphone(false);
+        }
+        if camera {
+            self.set_camera(false);
+        }
+        self.effects.push(Effect::Title(title));
     }
 
     /// Play the computer's sound here, or stop.
@@ -1222,7 +1268,8 @@ impl App {
         *self.scene.session.lock().unwrap() = Some(s.shared.clone());
         self.scene.poke();
         self.effects.push(Effect::ForgetCursor);
-        self.effects.push(Effect::Title(format!("{name} - remoteman")));
+        let view_only = self.session.as_ref().is_some_and(|s| s.view_only());
+        self.effects.push(Effect::Title(format!("{name}{} - remoteman", if view_only { " (view only)" } else { "" })));
         // Room for the picture, if the list's window was small.
         if !self.maximised && !self.fullscreen && self.args.host.is_none() && (self.size.0 < 1224.0 || self.size.1 < 744.0) && self.front_size.is_none() {
             self.front_size = Some(self.size);
@@ -1264,6 +1311,9 @@ impl App {
     pub fn stop(&mut self, reason: Option<&str>) {
         let Some(s) = &self.session else { return };
         let (target, shown) = (s.target.clone(), s.shared.presented_total.load(Ordering::Relaxed) > 0);
+        if matches!(self.dialog, Some(Dialog::SecondFactor { .. })) {
+            self.dialog = None;
+        }
         self.end(false);
         self.summary.as_mut().unwrap().ended = reason.map(str::to_owned);
         match reason {
@@ -1466,7 +1516,7 @@ impl App {
             Msg::Disconnect => self.stop(None),
             Msg::SendKeys(codes) => {
                 self.menu = None;
-                if let Some(client) = self.client() {
+                if let Some(client) = self.input_client() {
                     let usages: Vec<u16> = codes.iter().filter_map(|c| keys::linux_to_hid(*c)).collect();
                     for usage in &usages {
                         client.send(Event::Key { usage: *usage, down: true });
@@ -1673,6 +1723,18 @@ impl App {
                 self.start_attempt(target, true, true);
             }
             Some(Dialog::Pair { .. }) | Some(Dialog::Code { .. }) => {}
+            Some(Dialog::SecondFactor { .. }) => {
+                let typed = self.fields.get(&id("second.code")).map(|f| f.string()).unwrap_or_default();
+                let code: String = typed.chars().filter(|c| !c.is_whitespace()).collect();
+                // Six digits, or the dialog stays as it is.
+                if code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()) {
+                    if let Some(client) = self.session.as_ref().and_then(|s| s.client.clone()) {
+                        client.second_factor(&code, self.remember);
+                    }
+                    self.dialog = None;
+                    self.remember = false;
+                }
+            }
             Some(Dialog::Paired { .. }) => {
                 // If the connection has gone meanwhile, `poll` has already let it go.
                 self.dialog = None;
@@ -1722,6 +1784,11 @@ impl App {
             Some(Dialog::Pair { waiting: Some(_), .. }) | Some(Dialog::Code { .. }) => self.give_up(),
             // The connection kept from pairing isn't wanted now.
             Some(Dialog::Paired { .. }) => self.end(false),
+            // Not giving the code: the session is over.
+            Some(Dialog::SecondFactor { .. }) => {
+                self.remember = false;
+                self.stop(None);
+            }
             _ => {}
         }
         self.dirty = true;

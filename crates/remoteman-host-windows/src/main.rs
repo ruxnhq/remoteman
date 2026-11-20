@@ -44,6 +44,8 @@
 #[cfg(windows)]
 mod advertise;
 #[cfg(windows)]
+mod camera;
+#[cfg(windows)]
 mod awake;
 #[cfg(windows)]
 mod speakers;
@@ -78,6 +80,7 @@ mod enctest;
 #[cfg(windows)]
 mod hdr;
 #[cfg(windows)]
+mod gamepad;
 mod input;
 #[cfg(windows)]
 mod mf;
@@ -415,6 +418,7 @@ mod windows_main {
         allowed.paused.store(saved.paused, Ordering::Relaxed);
         allowed.lock_on_leave.store(saved.lock_on_leave, Ordering::Relaxed);
         allowed.speakers_follow.store(saved.speakers_follow, Ordering::Relaxed);
+        allowed.notify.store(saved.notify, Ordering::Relaxed);
         allowed.real_screens.store(screen.pc(), Ordering::Relaxed);
         // A host that died while a device listened left the speakers switched: put them back.
         crate::speakers::init(&state);
@@ -445,6 +449,9 @@ mod windows_main {
         tracing::info!(?features, "what this host does");
         let options = HostOptions { listen, state: state.clone(), name, os: "windows".into(), features, pair, test_drop_one_in: drop_one_in };
         let host = std::sync::Arc::new(Host::start(options, session::Host::new(screen, bitrate * 1_000_000, fit, allowed.clone()))?);
+        // What the core says of devices (paired, connected, refused) is kept for the app's notifications.
+        let noted = allowed.clone();
+        host.set_notice_hook(move |event| crate::control::note(&noted, event));
         crate::control::serve(host.address.port(), std::sync::Arc::downgrade(&host), allowed, state);
         tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
         watch_lock(std::sync::Arc::downgrade(&host));
@@ -452,6 +459,11 @@ mod windows_main {
         let _advert = (!mirror_only).then(|| crate::advertise::start(crate::control::NAME.get().map_or("windows", String::as_str), host.address.port(), &host.fingerprint));
         if pair {
             tracing::info!("pairing: the next unknown device to connect will be trusted");
+        }
+        // Without the owner's app (nobody signed in, at the sign-in screen) a new device is
+        // refused after 30 s instead of 60: the app asks about waiting devices every second.
+        if !ask {
+            host.set_approver_wait(Some(Duration::from_secs(30)));
         }
         if ask {
             tracing::info!("pairing: each new device is asked about on the desktop");

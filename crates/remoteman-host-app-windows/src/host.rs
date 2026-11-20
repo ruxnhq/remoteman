@@ -61,6 +61,72 @@ pub struct Device {
     pub name: String,
     pub fingerprint: String,
     pub connected: bool,
+    pub permissions: Permissions,
+}
+
+/// What a device may do here (all of it, unless the host says otherwise).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Permissions {
+    /// False: view only.
+    pub input: bool,
+    pub clipboard: bool,
+    pub files: bool,
+    pub sound: bool,
+    pub mic: bool,
+    pub camera: bool,
+}
+
+impl Default for Permissions {
+    fn default() -> Self {
+        Self { input: true, clipboard: true, files: true, sound: true, mic: true, camera: true }
+    }
+}
+
+/// One line of the host's connection log: `paired`, `connected`, `left` or `refused`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Connection {
+    /// Which one this is, counting from the host's start (0 for a line of the log).
+    pub seq: u64,
+    /// UTC, `2026-11-19T10:15:00Z`.
+    pub time: String,
+    pub event: String,
+    pub name: String,
+    pub address: String,
+    pub duration: Option<u64>,
+    pub reason: String,
+}
+
+impl Connection {
+    /// What it says in a list or a notification: "Anna's iPad connected".
+    pub fn words(&self) -> String {
+        match self.event.as_str() {
+            "connected" => format!("{} connected", self.name),
+            "left" => match self.duration {
+                Some(s) => format!("{} left after {}", self.name, span(s)),
+                None => format!("{} left", self.name),
+            },
+            "refused" => format!("{} was refused", self.name),
+            "paired" => format!("{} was paired", self.name),
+            other => format!("{} {other}", self.name),
+        }
+    }
+
+    /// When, as a list shows it: `2026-11-19 10:15 UTC`.
+    pub fn when(&self) -> String {
+        let t = self.time.replace('T', " ");
+        format!("{} UTC", t.trim_end_matches('Z').get(..16).unwrap_or(&t))
+    }
+}
+
+/// A length of time in words: "40 s", "12 min", "1 h 5 min".
+fn span(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{seconds} s")
+    } else if seconds < 3600 {
+        format!("{} min", seconds / 60)
+    } else {
+        format!("{} h {} min", seconds / 3600, (seconds % 3600) / 60)
+    }
 }
 
 /// The device being served.
@@ -103,7 +169,16 @@ pub struct Status {
     pub lock_on_leave: bool,
     pub speakers_follow: bool,
     pub microphone: bool,
+    /// Tell the owner when a device connects (on unless the host says otherwise).
+    pub notify: bool,
+    /// A code from an authenticator app is asked for on top of a device's key: `Some`, with how
+    /// many devices were told "don't ask again" and not yet expired.
+    pub second_factor: Option<usize>,
     pub devices: Vec<Device>,
+    /// What the host reported since it started, oldest first, for notifications.
+    pub notices: Vec<Connection>,
+    /// The last lines of its connection log, oldest first.
+    pub connections: Vec<Connection>,
     pub client: Option<Client>,
     pub pending: Option<Pending>,
     /// What the device said of files sent to it: how many it answered for, and the last.
@@ -121,11 +196,26 @@ impl Status {
         let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
         let b = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
         let n = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        let yes = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(true);
         let devices = o
             .get("devices")
             .and_then(|d| d.as_array())
-            .map(|list| list.iter().map(|d| Device { name: s(d, "name"), fingerprint: s(d, "fingerprint"), connected: b(d, "connected") }).collect())
+            .map(|list| {
+                list.iter()
+                    .map(|d| {
+                        let p = d.get("permissions").cloned().unwrap_or_default();
+                        let permissions = Permissions { input: yes(&p, "input"), clipboard: yes(&p, "clipboard"), files: yes(&p, "files"), sound: yes(&p, "sound"), mic: yes(&p, "mic"), camera: yes(&p, "camera") };
+                        Device { name: s(d, "name"), fingerprint: s(d, "fingerprint"), connected: b(d, "connected"), permissions }
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
+        let events = |key: &str| -> Vec<Connection> {
+            o.get(key)
+                .and_then(|d| d.as_array())
+                .map(|list| list.iter().map(|e| Connection { seq: n(e, "seq"), time: s(e, "time"), event: s(e, "event"), name: s(e, "name"), address: s(e, "address"), duration: e.get("duration").and_then(|x| x.as_u64()), reason: s(e, "reason") }).collect())
+                .unwrap_or_default()
+        };
         let client = o.get("client").filter(|c| c.is_object()).map(|c| Client {
             name: s(c, "name"),
             since: n(c, "since"),
@@ -149,6 +239,10 @@ impl Status {
             lock_on_leave: b(&o, "lock_on_leave"),
             speakers_follow: b(&o, "speakers_follow"),
             microphone: b(&o, "microphone"),
+            notify: yes(&o, "notify"),
+            second_factor: o.get("second_factor").filter(|v| v.is_object()).map(|v| n(v, "remembered") as usize),
+            notices: events("notices"),
+            connections: events("connections"),
             devices,
             client,
             pending,
@@ -231,14 +325,20 @@ mod tests {
     use super::*;
 
     /// As `crates/remoteman-host-windows/src/control.rs` writes it.
-    const SAID: &str = r#"{"address":"0.0.0.0:7791","fingerprint":"c41e77a09b2d5f36aa","pairing":false,"pending":{"name":"Studio Mac","fingerprint":"ab","code":"482913","seconds":51},"devices":[{"fingerprint":"ab","name":"iPad Pro","connected":true}],"daemon":false,"paused":false,"name":"DEN-PC","clipboard":true,"files":false,"microphone":true,"client":{"name":"iPad Pro","since":100,"width":2752,"height":2064,"refresh":120,"placement":"extra","picture":"HEVC 10-bit","sound":true},"sent":{"answered":2,"ok":true,"said":"Downloads/a.txt"}}"#;
+    const SAID: &str = r#"{"address":"0.0.0.0:7791","fingerprint":"c41e77a09b2d5f36aa","pairing":false,"pending":{"name":"Studio Mac","fingerprint":"ab","code":"482913","seconds":51},"devices":[{"fingerprint":"ab","name":"iPad Pro","connected":true,"permissions":{"input":false,"clipboard":true,"files":true,"sound":true,"mic":false,"camera":true}}],"notify":true,"notices":[{"seq":7,"time":"2026-11-19T10:15:00Z","event":"connected","name":"iPad Pro","fingerprint":"ab","address":"10.0.0.5:5000"}],"connections":[{"time":"2026-11-19T10:15:00Z","event":"connected","name":"iPad Pro","fingerprint":"ab","address":"10.0.0.5:5000"},{"time":"2026-11-19T10:27:00Z","event":"left","name":"iPad Pro","fingerprint":"ab","address":"10.0.0.5:5000","duration":720}],"daemon":false,"paused":false,"name":"DEN-PC","clipboard":true,"files":false,"microphone":true,"client":{"name":"iPad Pro","since":100,"width":2752,"height":2064,"refresh":120,"placement":"extra","picture":"HEVC 10-bit","sound":true},"sent":{"answered":2,"ok":true,"said":"Downloads/a.txt"}}"#;
 
     #[test]
     fn reads_the_hosts_status() {
         let s = Status::parse(SAID).unwrap();
         assert_eq!(s.name, "DEN-PC");
         assert!(s.clipboard && !s.files && s.microphone && !s.paused);
-        assert_eq!(s.devices, vec![Device { name: "iPad Pro".into(), fingerprint: "ab".into(), connected: true }]);
+        assert_eq!(s.devices, vec![Device { name: "iPad Pro".into(), fingerprint: "ab".into(), connected: true, permissions: Permissions { input: false, mic: false, ..Permissions::default() } }]);
+        assert!(s.notify);
+        assert_eq!(s.notices.len(), 1);
+        assert_eq!(s.notices[0].seq, 7);
+        assert_eq!(s.notices[0].words(), "iPad Pro connected");
+        assert_eq!(s.connections[1].words(), "iPad Pro left after 12 min");
+        assert_eq!(s.connections[0].when(), "2026-11-19 10:15 UTC");
         assert_eq!(s.pending.as_ref().unwrap().code, "482913");
         assert_eq!(s.client.as_ref().unwrap().width, 2752);
         assert_eq!((s.answered, s.sent_ok, s.said.as_str()), (2, true, "Downloads/a.txt"));

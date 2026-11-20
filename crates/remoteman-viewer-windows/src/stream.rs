@@ -124,6 +124,9 @@ pub struct Shared {
     /// The computer is asking its owner about this PC: the code both sides show, and the
     /// seconds its owner has.
     pub pairing: Mutex<Option<(String, u32)>>,
+    /// The computer wants a code from an authenticator app: `Some(None)` the first time,
+    /// `Some(Some(n))` after a wrong one, with `n` tries left; taken by the window.
+    pub second_factor: Mutex<Option<Option<u32>>>,
     /// What was copied on the computer (its kind, `text/plain…` or `image/png`, and its
     /// bytes), until the window puts it on this clipboard.
     pub copies: Mutex<Vec<(String, Vec<u8>)>>,
@@ -199,6 +202,7 @@ impl Shared {
             features: Mutex::default(),
             bitrate: AtomicU32::default(),
             pairing: Mutex::default(),
+            second_factor: Mutex::default(),
             copies: Mutex::default(),
             results: Mutex::default(),
             received: Mutex::default(),

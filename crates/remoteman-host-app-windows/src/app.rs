@@ -62,12 +62,16 @@ pub struct HostApp {
     news: Option<String>,
     /// The device whose pairing question is showing.
     asking: Option<Pending>,
+    /// The second factor being turned on: the secret to put into an authenticator app, and the
+    /// first code typed to confirm it (it is on only after the host has had a right code).
+    second_factor: Option<crate::window::SecondFactorSetup>,
     /// The fingerprint of the device asked about last, so it is asked once.
     asked: Option<String>,
     /// How many files the device had answered for when last seen.
     answered: Option<u64>,
-    /// Whether a device was connected when last seen.
-    had_client: Option<bool>,
+    /// The number of the newest host report about a device seen so far (none before the first
+    /// answer: what happened before the app started is not announced).
+    seen_notice: Option<u64>,
     jobs: Sender<Job>,
     icons: Icons,
     theme: WindowTheme,
@@ -86,6 +90,12 @@ pub enum AppMessage {
     Files(bool),
     LockOnLeave(bool),
     Speakers(bool),
+    Notify(bool),
+    /// The switch "Ask for a code from an authenticator app".
+    SecondFactor(bool),
+    /// What was typed into the code field.
+    SecondFactorCode(Rc<str>),
+    SecondFactorConfirm,
     Answer(ContentDialogResult),
     NewsClosed,
     SendFile,
@@ -105,6 +115,35 @@ impl HostApp {
         let words = words.into();
         crate::log::say(&format!("telling the host: {words}"));
         let _ = self.jobs.send(Job::Tell(words));
+    }
+
+    /// The host answered one of the `second-factor` words.
+    fn second_factor_told(&mut self, words: &str, said: Result<String, Unreached>) {
+        let Ok(said) = said else {
+            self.news = Some("The host isn't running, so nothing was changed.".into());
+            return;
+        };
+        if words.starts_with("second-factor on") {
+            // JSON with the secret, or a sentence saying why not.
+            match serde_json::from_str::<serde_json::Value>(&said) {
+                Ok(v) if v.get("secret").is_some() => {
+                    let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+                    self.second_factor = Some(crate::window::SecondFactorSetup { grouped: s("grouped"), uri: s("uri"), code: String::new() });
+                }
+                _ => self.news = Some(said),
+            }
+        } else if words.starts_with("second-factor confirm") {
+            if said.starts_with("ok") {
+                self.second_factor = None;
+                self.news = Some("Devices are asked for a code from the authenticator app from now on.".into());
+            } else {
+                self.news = Some("That code didn't work. Check the code in the app and try again.".into());
+            }
+        } else if words == "second-factor forget" && said.starts_with("ok") {
+            self.news = Some("Every device will be asked for a code again.".into());
+        } else if !said.starts_with("ok") {
+            self.news = Some(said);
+        }
     }
 
     fn open(&mut self, page: Option<Page>, context: &ApplicationContext<Self>) {
@@ -141,13 +180,33 @@ impl HostApp {
             self.answered = Some(s.answered);
         }
         // A device that just connected (not one already connected when the app started).
-        let client = status.as_ref().ok().and_then(|s| s.client.clone());
-        if self.had_client == Some(false)
-            && let Some(c) = &client
-        {
-            self.notify(context, &format!("{} connected", c.name), &format!("It has {} on {pc}.", host::placement_phrase(&c.placement)));
+        // What the host reported about devices since the last answer (not what happened before
+        // the app started): a device connected, was refused, or was paired. Said when the owner
+        // wants to be told.
+        if let Ok(s) = &status {
+            let newest = s.notices.iter().map(|n| n.seq).max();
+            if let Some(mut seen) = self.seen_notice {
+                // The numbers start again when the host does.
+                if newest.unwrap_or(0) < seen {
+                    seen = 0;
+                }
+                for n in s.notices.iter().filter(|n| n.seq > seen) {
+                    if s.notify {
+                        let text = match n.event.as_str() {
+                            "connected" => match s.client.as_ref().filter(|c| c.name == n.name) {
+                                Some(c) => format!("It has {} on {pc}.", host::placement_phrase(&c.placement)),
+                                None => format!("{} is now connected to {pc}.", n.name),
+                            },
+                            "refused" if n.reason.is_empty() => format!("{} tried to connect to {pc} and was turned away.", n.name),
+                            "refused" => format!("{} tried to connect to {pc}: {}", n.name, n.reason),
+                            _ => format!("{} can now connect to {pc}.", n.name),
+                        };
+                        self.notify(context, &n.words(), &text);
+                    }
+                }
+            }
+            self.seen_notice = Some(newest.unwrap_or(0));
         }
-        self.had_client = Some(client.is_some());
         // A device that wants to pair is put to the owner, once.
         match status.as_ref().ok().and_then(|s| s.pending.clone()) {
             Some(p) if self.asked.as_deref() != Some(p.fingerprint.as_str()) => {
@@ -242,9 +301,10 @@ impl Application for HostApp {
             page: start.page,
             news: None,
             asking: None,
+            second_factor: None,
             asked: None,
             answered: None,
-            had_client: None,
+            seen_notice: None,
             jobs,
             icons: system::icons(),
             theme: start.theme,
@@ -266,7 +326,9 @@ impl Application for HostApp {
                     Err(Unreached::NoHost) => "(no host)",
                     Err(Unreached::Refused) => "(refused)",
                 }));
-                if words.starts_with("send ") {
+                if words.starts_with("second-factor ") {
+                    self.second_factor_told(&words, said);
+                } else if words.starts_with("send ") {
                     self.news = Some(match said {
                         Ok(s) if s == "ok" => "Sending the file".into(),
                         Ok(s) => s,
@@ -313,6 +375,31 @@ impl Application for HostApp {
             AppMessage::Speakers(on) => {
                 if matches!(&self.status, Ok(s) if s.speakers_follow != on) {
                     self.tell(format!("set speakers {}", if on { "on" } else { "off" }));
+                }
+            }
+            AppMessage::Notify(on) => {
+                if matches!(&self.status, Ok(s) if s.notify != on) {
+                    self.tell(format!("set notify {}", if on { "on" } else { "off" }));
+                }
+            }
+            AppMessage::SecondFactor(on) => {
+                let is_on = matches!(&self.status, Ok(s) if s.second_factor.is_some());
+                if on && !is_on && self.second_factor.is_none() {
+                    self.tell("second-factor on json");
+                } else if !on && (is_on || self.second_factor.is_some()) {
+                    self.second_factor = None;
+                    self.tell("second-factor off");
+                }
+            }
+            AppMessage::SecondFactorCode(code) => {
+                if let Some(setup) = &mut self.second_factor {
+                    setup.code = code.to_string();
+                }
+            }
+            AppMessage::SecondFactorConfirm => {
+                if let Some(setup) = &self.second_factor {
+                    let words = format!("second-factor confirm {}", setup.code.trim());
+                    self.tell(words);
                 }
             }
             AppMessage::Answer(result) => {
@@ -363,6 +450,7 @@ impl Application for HostApp {
             page: self.page,
             news: self.news.clone(),
             asking: self.asking.clone(),
+            second_factor: self.second_factor.clone(),
             theme: self.theme,
             icon: Rc::from(self.icons.sharing.as_str()),
             on: Callbacks {
@@ -373,6 +461,10 @@ impl Application for HostApp {
                 files: context.callback(AppMessage::Files),
                 lock_on_leave: context.callback(AppMessage::LockOnLeave),
                 speakers: context.callback(AppMessage::Speakers),
+                notify: context.callback(AppMessage::Notify),
+                second_factor: context.callback(AppMessage::SecondFactor),
+                second_factor_code: context.callback(AppMessage::SecondFactorCode),
+                second_factor_confirm: context.callback(|()| AppMessage::SecondFactorConfirm),
                 answer: context.callback(AppMessage::Answer),
                 news_closed: context.callback(|()| AppMessage::NewsClosed),
                 send_file: context.callback(|()| AppMessage::SendFile),

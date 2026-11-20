@@ -13,6 +13,8 @@
 
 #![cfg_attr(not(windows), allow(unused))]
 #![allow(dead_code)]
+// The engine's state is one large json! (ngine.rs).
+#![recursion_limit = "256"]
 
 #[cfg(windows)]
 #[macro_use]
@@ -55,6 +57,8 @@ mod monitor;
 mod mic;
 #[cfg(windows)]
 mod nearby;
+#[cfg(windows)]
+mod pads;
 #[cfg(windows)]
 mod pages;
 #[cfg(windows)]

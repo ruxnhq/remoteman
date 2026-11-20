@@ -25,6 +25,24 @@ The code is made from both keys: the first four bytes of SHA-256 over the text `
 
 For pairing by scanning a code instead of typing an address, a host may show a link (as a QR code): `remoteman://pair?v=0&name=<name>&addr=<addr[:port]>[,<addr[:port]>...]&fp=<the whole fingerprint of the host key, hex>`. A device adds the computer at the first address that answers, pairing as usual (the host still has to have pairing open, and still asks for the six digits where it does), and after connecting forgets the computer again if the key it met is not the one in the link. There is no secret in the link. (Defined by the Apple apps, which show and scan it; the Linux programs don't yet.)
 
+## Second factor
+
+A host's owner may ask for a code from an authenticator app (TOTP, RFC 6238: HMAC-SHA-1, six digits, 30-second steps) on top of the device's key. Off unless the owner turns it on (it is turned on by confirming one right code, so a secret mistyped into the app never locks the owner out). The host keeps the secret, and the devices told "don't ask again" with their expiry, in `<state>/host/second_factor.json`; without that file it is off.
+
+With it on, for a paired device that is not remembered, the host's `host_hello` carries `"second_factor":"totp"` and the host sends nothing more (no `stream`, no feature data; the handler behind the host hears nothing) until the client answers:
+
+```
+client -> host  {"t":"second_factor","code":"123456","remember":true}
+host -> client  {"t":"second_factor_wrong","left":4}
+host -> client  {"t":"error","code":"second_factor","message":"..."}   then it closes
+```
+
+- A right code (the current step, or one either side of it) lets the session go on as without it: the next thing from the host is `stream`. There is no message of its own for "right". `remember: true` lets the host skip asking this device (by certificate fingerprint) for 30 days.
+- A wrong code is answered with `second_factor_wrong` and the number of tries left; the client may try again. After 5 wrong codes in 10 minutes from one device, or 20 from all devices, the host answers with the error `second_factor` and closes, and refuses that device (everyone, for the 20) for 10 minutes: a device that connects meanwhile gets the same error in place of a hello.
+- A client that doesn't know the field never answers: the host closes after 60 seconds with the error `second_factor` and the message "This computer asks for a code from an authenticator app; update remoteman". Clients show an error's message as they do for any.
+- A device that is new (pairing, with or without the owner's confirmation) is asked afterwards, in the same connection, as any other.
+- The log (`connections.log`) gets `second_factor_ok` and `second_factor_wrong` lines (and `refused` for a lockout or a timeout), with the device's name and address; never the code.
+- A client's core API: `Client::on_second_factor(callback)` (`callback(None)` when asked, `callback(Some(left))` after a wrong code) and `Client::second_factor(code, remember)`; in the C interface `rm_client_set_second_factor_callback`, `rm_client_second_factor_wanted` and `rm_client_second_factor`. The connection is made (`connect` returns) before the code is asked for, because the hello is what says so.
 ## A locked host
 
 A host whose desktop is locked may let a paired device in all the same, if its owner has said so: by the device's key alone, or with the password of the host's user as well.
@@ -156,9 +174,11 @@ The host reports every move, the client's own included, a pipeline's delay later
 
 Everything beside the picture and input. Three rules hold for all of it:
 
-- **A host lists what it has** in its hello's `features`: `sound`, `mic`, `camera`, `configure`, `clipboard`, `files`, `parity`, `pen`. A client offers only those.
+- **A host lists what it has** in its hello's `features`: `sound`, `mic`, `camera`, `configure`, `clipboard`, `files`, `parity`, `pen`, `gamepad`. A client offers only those.
 - **Nothing of a feature is sent to a side that hasn't asked for it.** Each starts with a message from the client, so a client or host that knows nothing of a feature is never handed a datagram or a stream it can't read. (A client must still ignore datagram kinds it doesn't know.)
 - **When the desktop behind the connection changes** (a new stream epoch because the login screen gave way to the session), what the client had switched on stays on: the host side carries it over, and the client hears `sound_format` again.
+
+**What a device may do.** A host's owner can allow each paired device some of this and not the rest, and the list in a device's hello (and any later `features`) is the host's features less what that device isn't allowed: `input` (and `pen` with it), `clipboard`, `files`, `sound`, `mic`, `camera`. A host may leave `input` out of a device's features: the device is shown the picture only (view-only); a client must not send input then, and shows that it is view-only. Whatever an old client sends anyway is dropped by the host (input events of every kind, clipboard and file messages and blobs, microphone and camera datagrams, requests to start sound, microphone or camera).
 
 A host whose owner switches a feature on or off while a client is connected sends `{"t":"features","features":[...]}`: the whole list as it is now, replacing the hello's. A client enables and disables its controls to match, and stops what was switched off.
 
@@ -200,7 +220,7 @@ A blob is a stream that begins with a kind byte, then a `u32` length and that ma
 ### Camera (`camera`)
 
 - Client → host: `{"t":"camera","on":true,"codec":"h264","width":1280,"height":720,"fps":30}`, then camera datagrams; `{"t":"camera","on":false}` to stop. `h264` at 1280×720 and 30 a second is the mode every host takes; `hevc` is for hosts that say so later. Frames are Annex-B with the parameter sets in front of every keyframe and no B-frames; the size may change at a keyframe (a device turned on its side).
-- Host → client: `{"t":"camera_keyframe"}` when it lost a frame; the client's next frame is a keyframe. (The client also sends one every 2 s or so, which makes most losses heal by themselves.) The host presents the camera as one that programs on the desktop can pick. It keeps the size it was started with for as long as it is on: a picture of another size (the device turned) is scaled to fit and centred on black, because camera programs pick one size when they open a camera and don't follow a change.
+- Host → client: `{"t":"camera_keyframe"}` when it lost a frame; the client's next frame is a keyframe. (The client also sends one every 2 s or so, which makes most losses heal by themselves.) The host presents the camera as one that programs on the desktop can pick (the Windows host as a Windows 11 virtual camera, which its installer sets up: it lists `camera` only where that is registered). It keeps the size it was started with for as long as it is on: a picture of another size (the device turned) is scaled to fit and centred on black, because camera programs pick one size when they open a camera and don't follow a change.
 
 ### Settings (`configure`)
 
@@ -256,6 +276,7 @@ A sequence of events on the input stream, each a `u8` type and then its fields:
 | 6 touch | `u8 phase, u8 slot, f32 x, f32 y` | Phase 0 down, 1 move, 2 up. `slot` tells fingers apart. Position as for type 1. |
 | 7 text | `u16 length`, then UTF-8 | Text typed through an on-screen keyboard or input method, put in as typed. |
 | 9 pen | `u8 phase, u8 buttons, f32 x, f32 y, f32 pressure, f32 tilt_x, f32 tilt_y, f32 twist` | See Pen. 27 bytes with the type. |
+| 10 gamepad | `u8 pad, u8 flags, u16 buttons, f32 left_trigger, f32 right_trigger, f32 left_x, f32 left_y, f32 right_x, f32 right_y` | See Game controllers. 29 bytes with the type. |
 
 ### Pen
 
@@ -267,6 +288,17 @@ A client sends type 9 only to a host that lists `pen` in its features, and falls
 - `pressure`: 0 to 1, 0 while hovering. `tilt_x`, `tilt_y`: degrees, -90 to 90, as Windows pointer input has them. `twist`: degrees, 0 to 359, 0 if unknown.
 
 A host that can inject a pen lists `pen`, and lifts the pen if the client leaves mid-stroke.
+
+### Game controllers (`gamepad`)
+
+A client sends type 10 only to a host that lists `gamepad` in its features. A controller held at the client drives a virtual Xbox-style controller on the host. Fields, little-endian:
+
+- `pad`: 0 to 3, which of the client's controllers. A host that can show only one controller takes pad 0 and ignores the rest.
+- `flags`: bit 0 connected. A state with bit 0 clear says that pad was unplugged; the other fields are then 0.
+- `buttons`: a bit mask in XInput's order: DPAD_UP 0x0001, DPAD_DOWN 0x0002, DPAD_LEFT 0x0004, DPAD_RIGHT 0x0008, START/MENU 0x0010, BACK/VIEW 0x0020, LEFT_THUMB 0x0040, RIGHT_THUMB 0x0080, LEFT_SHOULDER 0x0100, RIGHT_SHOULDER 0x0200, GUIDE 0x0400, A 0x1000, B 0x2000, X 0x4000, Y 0x8000. (A host may have no use for GUIDE.)
+- `left_trigger`, `right_trigger`: 0 to 1. `left_x`, `left_y`, `right_x`, `right_y`: -1 to 1, right and up positive.
+
+Each event is the whole state of the pad. The client sends one whenever the state changes, and repeats the current state every 100 ms while any input is off neutral. Events go on the input stream, which is reliable and ordered, so the repeat is not for a lost packet but keeps a host's view fresh and settles a host that missed the start of a session. When the client's window loses the keyboard, or the session ends, a client sends a neutral state for each pad that was in use; a host lets go of every pad when the client leaves. (Rumble back to the device isn't in the protocol yet.)
 
 A host ignores event types it doesn't know only if it can skip them, so new types go into a new protocol version.
 

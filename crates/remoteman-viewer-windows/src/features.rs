@@ -55,6 +55,8 @@ pub struct Features {
     pub scroll_direction: bool,
     /// Touchscreen touches sent as touches (`touch.rs`, `engine::touch`).
     pub touch: bool,
+    /// Game controllers held here sent to the computer (pads.rs).
+    pub gamepad: bool,
     /// Alt+Tab, the Windows key and the like sent to the other computer.
     pub system_shortcuts: bool,
     /// Choosing which keys act as Super, Ctrl and Command.
@@ -90,6 +92,7 @@ pub const FEATURES: Features = Features {
     ctrl_as_command: true,
     scroll_direction: true,
     touch: true,
+    gamepad: true,
     system_shortcuts: true,
     key_mapping: true,
     release_shortcut: true,
@@ -99,6 +102,12 @@ pub const FEATURES: Features = Features {
 };
 
 pub const NOT_YET: &str = "Not available yet";
+
+/// For a control that sends input to the computer: greyed out, and saying why, when the
+/// computer shows this device the picture only.
+pub fn control(view_only: bool) -> En {
+    En { on: !view_only, why: if view_only { "View only: this computer lets you see its screen, not control it" } else { "" } }
+}
 
 /// For a control of something that may not exist yet: usable if it does, otherwise greyed out
 /// and saying so.

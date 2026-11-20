@@ -549,6 +549,7 @@ fn settings(app: &App, ui: &mut Ui) {
         &[
             row("set.pointer", "Pointer", "Captured sends raw movement, which games and 3D apps need. Ctrl+Alt+Shift lets it go", chosen(app, Choice::Pointer), gate(FEATURES.pointer_capture)),
             row("set.scroll", "Scroll direction", "", chosen(app, Choice::Scroll), gate(FEATURES.scroll_direction)),
+            row("set.gamepad", "Game controllers go to the computer", "A controller held here plays there while this window is in front", Ctl::Toggle(s.gamepad, Some(Msg::Set("game-controllers", None))), gate(FEATURES.gamepad)),
             row("set.touch", "Send touchscreen touches as touch", "Fingers arrive as fingers, so gestures on the computer work", Ctl::Toggle(s.touch, Some(Msg::Set("touch", None))), gate(FEATURES.touch)),
         ],
     );
@@ -813,6 +814,25 @@ pub fn dialog(app: &App, ui: &mut Ui, dialog: &Dialog) {
                 }
                 c.gap(16.0);
                 c.para(&format!("After pairing, this PC and {name} keep each other's key. Nothing else has to be typed again."), Font::Caption, t.t2);
+            });
+        }
+        Dialog::SecondFactor { name, left } => {
+            sheet(ui, Some(("Connect", Look::Accent, ON)), "Cancel", &|c| {
+                c.para("This computer asks for a code from your authenticator app", Font::Subtitle, t.tx);
+                c.gap(16.0);
+                c.para(&format!("Open the authenticator app and type the six digits it shows for {name}."), Font::Body, t.tx);
+                c.gap(16.0);
+                if let (Some(r), Some(field)) = (c.room(32.0), app.fields.get(&id("second.code"))) {
+                    c.ui.field(id("second.code"), r, field, ON);
+                }
+                c.gap(12.0);
+                if let Some(r) = c.room(24.0) {
+                    c.ui.toggle(id("second.remember"), r.x, r.y, app.remember, "Don't ask again on this device for 30 days", Msg::ToggleRemember, ON);
+                }
+                if let Some(n) = left {
+                    c.gap(12.0);
+                    c.para(&format!("That code didn't work ({n} {} left)", if *n == 1 { "try" } else { "tries" }), Font::Body, t.bad);
+                }
             });
         }
         Dialog::Paired { target, key } => {

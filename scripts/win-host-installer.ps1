@@ -19,7 +19,7 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue) -and (Test-Path $cmak
 
 Push-Location $root
 try {
-  & cargo build --release --locked -p remoteman-host-windows
+  & cargo build --release --locked -p remoteman-host-windows -p remoteman-vcam-windows
   if ($LASTEXITCODE -ne 0) { throw "the host's build failed ($LASTEXITCODE)" }
 } finally { Pop-Location }
 
@@ -31,7 +31,7 @@ $work = Join-Path ([IO.Path]::GetTempPath()) "remoteman-hostpkg-$PID"
 New-Item -ItemType Directory -Force "$work\native" | Out-Null
 try {
   Copy-Item (Join-Path $root 'windows\host-installer\*') $work
-  Copy-Item (Join-Path $root 'target\release\remoteman-host.exe') "$work\native\"
+  Copy-Item (Join-Path $root 'target\release\remoteman-host.exe'), (Join-Path $root 'target\release\remoteman_vcam_windows.dll') "$work\native\"
   foreach ($f in 'RemotemanDisplay.dll', 'RemotemanDisplay.inf', 'vdd_settings.xml', 'LICENSE', 'LICENSE-MS-PL') { Copy-Item (Join-Path $driverOut $f) "$work\native\" }
   & powershell -NoProfile -ExecutionPolicy Bypass -File "$work\build.ps1" -Version $Version -Out $Out
   if ($LASTEXITCODE -ne 0) { throw "the installer's build failed ($LASTEXITCODE)" }

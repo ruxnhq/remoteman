@@ -33,6 +33,8 @@ pub struct Shown {
     pub news: Option<String>,
     /// The device whose pairing question is showing.
     pub asking: Option<Pending>,
+    /// The second factor being turned on (the secret to show, and the first code typed).
+    pub second_factor: Option<SecondFactorSetup>,
     pub theme: WindowTheme,
     pub icon: Rc<str>,
     pub on: Callbacks,
@@ -48,10 +50,24 @@ pub struct Callbacks {
     pub files: Callback<bool>,
     pub lock_on_leave: Callback<bool>,
     pub speakers: Callback<bool>,
+    pub notify: Callback<bool>,
+    pub second_factor: Callback<bool>,
+    pub second_factor_code: Callback<Rc<str>>,
+    pub second_factor_confirm: Callback<()>,
     /// The pairing question was answered (or taken away).
     pub answer: Callback<ContentDialogResult>,
     pub news_closed: Callback<()>,
     pub send_file: Callback<()>,
+}
+
+/// What the owner needs to put into an authenticator app, and the code typed to confirm it.
+#[derive(Clone, PartialEq)]
+pub struct SecondFactorSetup {
+    /// The key in groups of four, for typing in (no QR code: the app has no encoder for one).
+    pub grouped: String,
+    /// The `otpauth://` link; some apps open it from the clipboard.
+    pub uri: String,
+    pub code: String,
 }
 
 pub struct HostWindow {
@@ -225,11 +241,29 @@ impl HostWindow {
                     }
                     let device = d.clone();
                     actions.push(push("Revoke…", context.callback(move |()| Message::Revoke(device.clone())), false).automation_name(format!("Revoke {}", d.name)).into());
-                    page.push(row(&d.name, Some(if d.connected { "Connected now" } else { "Paired" }), Some(StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children(actions).into())));
+                    let state = if !d.permissions.input { "View only" } else if d.connected { "Connected now" } else { "Paired" };
+                    let state = if d.connected && !d.permissions.input { "Connected now · view only".to_string() } else { state.to_string() };
+                    page.push(row(&d.name, Some(&state), Some(StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children(actions).into())));
+                    page.push(permissions_card(input, d));
                 }
             }
         }
         page.push(caption("A revoked device has to be paired again before it can connect.").margin(Thickness::new(1.0, 4.0, 0.0, 0.0)).into());
+
+        page.push(heading("Security"));
+        let on = s.is_some_and(|s| s.second_factor.is_some());
+        page.push(row(
+            "Ask for a code from an authenticator app",
+            Some("Besides its key, a paired device has to give the six-digit code from an app such as Microsoft Authenticator or Google Authenticator"),
+            Some(switch(on || input.second_factor.is_some(), s.is_some(), "Ask for a code from an authenticator app", input.on.second_factor.clone())),
+        ));
+        if let Some(setup) = &input.second_factor {
+            page.push(second_factor_card(input, setup));
+        }
+        if let Some(remembered) = s.and_then(|s| s.second_factor) {
+            let words = if remembered == 0 { "No device has been told not to ask again".to_string() } else { format!("{remembered} device(s) are not asked for a code for 30 days") };
+            page.push(row("Forget remembered devices", Some(&words), Some(push("Forget", tell(input, "second-factor forget"), false).is_enabled(remembered > 0).into())));
+        }
 
         page.push(heading("Clipboard and files"));
         page.push(row(
@@ -250,6 +284,24 @@ impl HostWindow {
             Some("Needs Steam's Streaming Speakers: they become the default output meanwhile, and the sound goes to the device"),
             Some(switch(s.is_some_and(|s| s.speakers_follow), s.is_some(), "Silence this PC's speakers while a device listens", input.on.speakers.clone())),
         ));
+
+        page.push(row(
+            "Tell me when a device connects",
+            Some("A notification when a device connects, is paired, or is turned away"),
+            Some(switch(s.is_some_and(|s| s.notify), s.is_some(), "Tell me when a device connects", input.on.notify.clone())),
+        ));
+
+        page.push(heading("Recent connections"));
+        match s {
+            Some(s) if !s.connections.is_empty() => {
+                for c in s.connections.iter().rev().take(10) {
+                    let detail = if c.reason.is_empty() { format!("{} · {}", c.when(), c.address) } else { format!("{} · {} · {}", c.when(), c.address, c.reason) };
+                    page.push(row(&c.words(), Some(&detail), None));
+                }
+            }
+            Some(_) => page.push(row("Nobody has connected yet", None, None)),
+            None => page.push(row("Shown while the host is running", None, None)),
+        }
 
         page.push(heading("Address and key"));
         let reach = s.map(|s| crate::system::reach(&s.address));
@@ -347,6 +399,85 @@ fn row(heading: &str, subtitle: Option<&str>, right: Option<View>) -> View {
         .margin(Thickness::new(0.0, 0.0, 0.0, 2.0))
         .min_height(64.0)
         .content(Grid::new().columns([GridLength::STAR, GridLength::Auto]).column_spacing(16.0).children(cells))
+        .into()
+}
+
+/// What one device may do: a switch for each, in a card under its row. A change is told to the
+/// host in its words (`device FINGERPRINT view-only on`, `device FINGERPRINT allow files off`);
+/// a switch that reports itself as toggled to what it already was says nothing.
+fn permissions_card(input: &Shown, d: &Device) -> View {
+    let p = d.permissions;
+    let line = |label: &str, on: bool, words: String| -> View {
+        let tell = input.on.tell.clone();
+        let toggled = Callback::new(move |now: bool| {
+            if now != on {
+                tell.call(format!("{words} {}", if now { "on" } else { "off" }));
+            }
+        });
+        let name = format!("{label} for {}", d.name);
+        Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto])
+            .column_spacing(16.0)
+            .children((TextBlock::new().text(label).vertical_alignment(VerticalAlignment::Center), Border::new().grid_column(1).content(switch(on, true, &name, toggled))))
+            .into()
+    };
+    let fp = &d.fingerprint;
+    // "View only" is the opposite of the device's right to control this PC.
+    let view_only = {
+        let tell = input.on.tell.clone();
+        let words = format!("device {fp} view-only");
+        let toggled = Callback::new(move |now: bool| {
+            if now != !p.input {
+                tell.call(format!("{words} {}", if now { "on" } else { "off" }));
+            }
+        });
+        let name = format!("View only for {}", d.name);
+        Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto])
+            .column_spacing(16.0)
+            .children((TextBlock::new().text("View only (it sees the screen but can't control this PC)").vertical_alignment(VerticalAlignment::Center), Border::new().grid_column(1).content(switch(!p.input, true, &name, toggled))))
+            .into()
+    };
+    let lines: Vec<View> = vec![
+        view_only,
+        line("Clipboard", p.clipboard, format!("device {fp} allow clipboard")),
+        line("Files", p.files, format!("device {fp} allow files")),
+        line("Sound", p.sound, format!("device {fp} allow sound")),
+        line("Microphone", p.mic, format!("device {fp} allow mic")),
+        line("Camera", p.camera, format!("device {fp} allow camera")),
+    ];
+    Border::new()
+        .background(ThemeBrush::CardBackground)
+        .border_brush(ThemeBrush::CardStroke)
+        .border_thickness(1.0)
+        .corner_radius(6.0)
+        .padding(Thickness::new(16.0, 8.0, 16.0, 8.0))
+        .margin(Thickness::new(24.0, 0.0, 0.0, 8.0))
+        .content(StackPanel::new().spacing(2.0).children(lines))
+        .into()
+}
+
+/// Turning the second factor on: the key to put into the app, and the first code from it.
+fn second_factor_card(input: &Shown, setup: &SecondFactorSetup) -> View {
+    let ready = setup.code.trim().len() == 6;
+    Border::new()
+        .background(ThemeBrush::CardBackground)
+        .border_brush(ThemeBrush::CardStroke)
+        .border_thickness(1.0)
+        .corner_radius(6.0)
+        .padding(Thickness::new(16.0, 12.0, 16.0, 12.0))
+        .margin(Thickness::new(24.0, 0.0, 0.0, 8.0))
+        .content(StackPanel::new().spacing(10.0).children((
+            TextBlock::new().text("In the authenticator app, add an account and choose to enter a setup key. Give it this key (spaces don't matter; the account type is time-based):").text_wrapping(TextWrapping::Wrap),
+            TextBlock::new().text(setup.grouped.clone()).font_family("Consolas").font_size(22.0).font_weight(FontWeight::SEMI_BOLD).is_text_selection_enabled(true),
+            caption(&format!("Or, for an app that takes a link: {}", setup.uri)).is_text_selection_enabled(true),
+            TextBox::new().header("The six-digit code the app shows now").placeholder_text("123456").width(220.0).text(setup.code.clone()).automation_name("Code from the authenticator app").on_text_changed(input.on.second_factor_code.clone()),
+            StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
+                push("Turn on", input.on.second_factor_confirm.clone(), true).is_enabled(ready),
+                push("Cancel", { let c = input.on.second_factor.clone(); Callback::new(move |()| c.call(false)) }, false),
+            )),
+            caption("Devices are asked for a code only after you have typed one that the app shows."),
+        )))
         .into()
 }
 

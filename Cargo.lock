@@ -1707,6 +1707,7 @@ dependencies = [
  "anyhow",
  "remoteman-proto",
  "remoteman-transport",
+ "ring",
  "serde",
  "serde_json",
  "tokio",
@@ -1789,6 +1790,7 @@ dependencies = [
  "png",
  "remoteman-core",
  "remoteman-encode",
+ "remoteman-vcam-windows",
  "serde_json",
  "tracing",
  "tracing-subscriber",
@@ -1839,6 +1841,14 @@ dependencies = [
  "ksni",
  "libadwaita",
  "serde_json",
+]
+
+[[package]]
+name = "remoteman-vcam-windows"
+version = "0.1.0"
+dependencies = [
+ "windows",
+ "windows-core 0.62.2",
 ]
 
 [[package]]

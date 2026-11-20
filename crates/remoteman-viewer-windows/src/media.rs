@@ -72,6 +72,10 @@ impl App {
                 self.store.settings.touch = flip(self.store.settings.touch);
                 self.store.save_settings();
             }
+            ("game-controllers", None) => {
+                self.store.settings.gamepad = flip(self.store.settings.gamepad);
+                self.store.save_settings();
+            }
             ("allow-microphone", None) => {
                 self.store.settings.allow_microphone = flip(self.store.settings.allow_microphone);
                 self.store.save_settings();
