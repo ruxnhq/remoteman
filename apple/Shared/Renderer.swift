@@ -364,6 +364,7 @@ final class VideoRenderer {
             if !reportedNoDrawable { reportedNoDrawable = true; print("remoteman: the layer gave no drawable (format \(layer.pixelFormat.rawValue))") }
             return
         }
+        #if !targetEnvironment(simulator)  // the simulator's drawables have no presented handler
         if let fresh {
             // When the screen really showed it, against when it came.
             let came = fresh.receivedNs
@@ -375,6 +376,7 @@ final class VideoRenderer {
                 self.lock.unlock()
             }
         }
+        #endif
         let keep = encode(frame?.pixelBuffer, into: drawable.texture, format: layer.pixelFormat, commandBuffer: cb)
         cb.present(drawable)
         // With no picture left to show, the decoded pictures the texture cache still holds go
