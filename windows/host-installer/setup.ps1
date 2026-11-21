@@ -1,6 +1,17 @@
 # What the host's installer does once its files are in place, and what its uninstaller undoes.
-# Run by the installer (remoteman-host.iss), elevated, hidden; never by hand except to repair:
+# Run by the installer (remoteman-host-setup.exe, or remoteman-host.iss), elevated, hidden; never
+# by hand except to repair:
 #   powershell -ExecutionPolicy Bypass -File setup.ps1 install|uninstall|steam
+#              [-Trust FILE] [-Encoder auto|nvenc|mf|d3d12] [-NoPair]      (install only)
+# -Trust FILE:  the host's trust list (one line per viewer: the SHA-256 of its certificate in hex,
+#               a space, its name), put in place of the host's own (STATE\host\trusted) before
+#               the service starts.
+# -Encoder E:   the service's host is started with --encoder E.
+# -NoPair:      the service's host is started with --no-pair (no --ask either): nobody new can be
+#               let in, only the trust list's devices.
+# Each install writes the service's command line from its own options: one without them goes back
+# to the defaults (no --encoder; --ask when Remoteman Host isn't installed), and leaves the trust
+# list as it is.
 # install:   the display driver (remoteman's own user-mode display driver, windows/display-driver,
 #            signed here with a certificate made on this machine, trusted only on it, its private
 #            key deleted at once), the inbound firewall rule for the host's port, the service
@@ -17,7 +28,13 @@
 # What install made is written to installed.json beside this script, so that uninstall takes
 # away exactly that (a display device that was here before is left, with the driver it had).
 # Exit code 0, or 1 with the reason as the last line of setup.log.
-param([Parameter(Mandatory)][ValidateSet('install', 'uninstall', 'steam')][string]$Verb)
+param(
+  [Parameter(Mandatory)][ValidateSet('install', 'uninstall', 'steam')][string]$Verb,
+  [string]$Trust = '',
+  # The names remoteman-host.exe's --encoder takes (crates/remoteman-host-windows/src/main.rs).
+  [ValidateSet('auto', 'nvenc', 'mf', 'd3d12')][string]$Encoder,
+  [switch]$NoPair
+)
 $ErrorActionPreference = 'Stop'
 $app = $PSScriptRoot
 $exe = Join-Path $app 'remoteman-host.exe'
@@ -127,6 +144,26 @@ function Unregister-Camera($made) {
   Remove-Item -Recurse -Force $vcamFolder -ErrorAction SilentlyContinue
 }
 
+# -Trust: the file given becomes the host's trust list, STATE\host\trusted, as the host reads it
+# (crates/remoteman-transport/src/identity.rs, Trust): one line per viewer, the SHA-256 of its
+# certificate as 64 hex digits, a space, its name. Every line is checked; the fingerprints are
+# written in lower case, as the host compares them, in UTF-8 without a byte-order mark.
+function Write-Trust([string]$file) {
+  if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "the trust list $file isn't there" }
+  $lines = @()
+  foreach ($line in [IO.File]::ReadAllLines($file)) {
+    $line = $line.Trim()
+    if (-not $line) { continue }
+    if ($line -notmatch '^([0-9A-Fa-f]{64})(\s+(.*))?$') { throw "the trust list $file has a line that isn't a fingerprint and a name: $line" }
+    $lines += "$($Matches[1].ToLowerInvariant()) $($Matches[3])".TrimEnd()
+  }
+  if ($lines.Count -eq 0) { throw "the trust list $file has no fingerprints" }
+  $folder = Join-Path $state 'host'
+  New-Item -ItemType Directory -Force $folder | Out-Null
+  [IO.File]::WriteAllText((Join-Path $folder 'trusted'), (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
+  Say "trust list from ${file}: $($lines.Count) device(s), $(($lines | ForEach-Object { $_.Substring(0, 12) }) -join ', ')"
+}
+
 function Install {
   Say "install from $app"
   $made = Load-Record
@@ -226,15 +263,25 @@ function Install {
   # The service: from boot, as SYSTEM, it keeps the host running in the console's session
   # (the sign-in screen's, the lock screen's, whoever is signed in), with these options.
   # New devices are asked about by the owner's app (Remoteman Host) when it is installed beside
-  # the host; without it, by the host itself in a window of Windows' own (--ask).
+  # the host; without it, by the host itself in a window of Windows' own (--ask). With -NoPair,
+  # by nobody: only the trust list's devices get in.
   $hostArgs = "--state `"$state`" --log `"$state\host.log`""
-  if (-not (Test-Path (Join-Path $app 'app\remoteman-host-app.exe'))) { $hostArgs += ' --ask' }
+  if ($Encoder) { $hostArgs += " --encoder $Encoder" }
+  if ($NoPair) { $hostArgs += ' --no-pair' }
+  elseif (-not (Test-Path (Join-Path $app 'app\remoteman-host-app.exe'))) { $hostArgs += ' --ask' }
   $binary = "`"$exe`" service $hostArgs"
   $existing = Get-Service -Name $name -ErrorAction SilentlyContinue
+  # The host down before its trust list is written: a running one writes it back from memory.
+  if ($existing -and $existing.Status -ne 'Stopped') { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue }
+  if ($Trust) { Write-Trust $Trust }
+  # The host's identity, made now if there is none (an earlier install's is kept, so its
+  # fingerprint stays the same), and said here, before the service starts.
+  $fingerprint = & $exe fingerprint --state $state
+  if ($LASTEXITCODE -ne 0) { throw "the host's identity couldn't be made in $state (remoteman-host fingerprint ended with $LASTEXITCODE)" }
+  Say "host fingerprint: $($fingerprint -join '')"
   if ($existing) {
     # Installed over an earlier install: the command line straight into the service's key
     # (sc.exe can't be handed one with quotes in it from here).
-    if ($existing.Status -ne 'Stopped') { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue }
     Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\$name" -Name ImagePath -Value $binary -Type ExpandString
     Set-Service -Name $name -StartupType Automatic
   } else {

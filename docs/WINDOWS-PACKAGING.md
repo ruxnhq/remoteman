@@ -376,6 +376,61 @@ runtime (the module check is the stand-in); a downloaded file (with its zone mar
 relaunch skips the zone check (`SEE_MASK_NOZONECHECKS`) so that it is not asked about twice:
 the first thing to watch in the real test.
 
+### Installing with nobody there (a script, a deployment tool, SYSTEM)
+
+Added 2026-11-21 for programs that install the host for someone, in a VM say, from a scheduled
+task running as SYSTEM with nobody signed in. Run as an administrator who is already elevated,
+or as SYSTEM, the installer **asks Windows for nothing**: no `runas`, no UAC prompt (which as
+SYSTEM never came back, and the install hung), no other process unless it is the uninstaller
+leaving its own folder; it is the elevated part itself (`launch::handover`). With `--silent` it
+shows nothing at all, no page and no message box, whatever goes wrong.
+
+    remoteman-host-setup-VERSION.exe --silent --log FILE [--trust FILE] [--encoder NAME] [--no-pair]
+
+- `--trust FILE`: the host's trust list, put in place of the host's own
+  (`C:\ProgramData\remoteman\host\host\trusted`) before the service starts. One line per viewer:
+  the SHA-256 of the viewer's certificate (DER) as 64 hex digits, a space, a name. Checked before
+  anything is done (a file that can't be read, isn't UTF-8, has a line that isn't that, or has no
+  fingerprint ends the run with 1), and again by setup.ps1, which writes the fingerprints in lower
+  case, as the host compares them, in UTF-8 without a byte-order mark.
+- `--encoder NAME`: the service starts the host with `--encoder NAME`: `auto`, `nvenc`, `mf` or
+  `d3d12`, as `remoteman-host.exe` takes them. Another name ends the run with 1 before anything
+  is done.
+- `--no-pair`: the service starts the host with `--no-pair` (and never `--ask`, which would wait
+  on a window nobody sees): nobody new can be let in while it runs. `ctl pair on`, which
+  Remoteman Host uses, answers "pairing is switched off on this host" (and `ctl status` says
+  `"no_pair": true`); only the trust list's devices get in.
+
+Each install writes the service's command line from its own options; one without them goes back
+to the defaults (no `--encoder`, `--ask` when Remoteman Host isn't installed) and leaves the trust
+list as it is. The exit code is 0 (installed) or 1 (not); the setup exe is a windowed program, so
+a script waits for it and reads the code with
+`(Start-Process -FilePath ... -ArgumentList ... -Wait -PassThru).ExitCode`.
+
+**The log:** the installer's own is the `--log` file (without it, `remoteman-host-setup.log` in
+the Temp folder of whoever runs it, which for SYSTEM is a folder of Windows'; give `--log`).
+Once the install folder exists, the same lines and setup.ps1's go to
+`C:\Program Files\remoteman host\setup.log` too, which also says the trust list's devices and the
+host's fingerprint (`host fingerprint: ...`).
+
+**Installing again keeps the host's identity.** An install over an install stops the host,
+replaces the files (in `app\`, what the new version doesn't have goes; nothing else is deleted)
+and runs setup.ps1 install, which never deletes `C:\ProgramData\remoteman\host`: the identity
+(`host\cert.der`, `host\key.der`) and the paired devices stay, so the fingerprint is the same
+after every reinstall or upgrade. Only uninstalling deletes them. setup.ps1 also makes the
+identity before the service first starts (`remoteman-host fingerprint`), so that nothing races
+to make it. *Checked by reading setup.ps1 and the steps, and by the tests below; no real
+install or reinstall was run (that needs elevation, which this PC's shell doesn't have).*
+
+**The fingerprint** (what a viewer checks the host against), printed by the host itself:
+
+    "C:\Program Files\remoteman host\remoteman-host.exe" fingerprint --state C:\ProgramData\remoteman\host
+
+64 lower-case hex digits and a line end, the identity made first if there is none. `--state` is
+the host's own option: without it the folder is the user's `%LOCALAPPDATA%\remoteman`, as for a
+host started by hand, not the service's. It needs to read (and maybe write) the state folder,
+which is Administrators' and SYSTEM's only.
+
 **What Reactor couldn't do, and how it is done instead:** no closing event, so the steps can't
 veto a close: the window's procedure is wrapped (`SetWindowLongPtrW`) and `WM_CLOSE` is refused
 while they run, with a line saying why; `LocalSender` isn't `Send`, so the steps' events come

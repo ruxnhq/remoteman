@@ -256,6 +256,14 @@ impl Drop for OwnedProcess {
     }
 }
 
+/// Starts `exe` (this program's copy) as this process is, elevated if it is, with no shell and
+/// so no prompt of any kind, not waiting.
+pub fn spawn(exe: &Path, args: &[String], dir: &Path) -> io::Result<OwnedProcess> {
+    use std::os::windows::io::IntoRawHandle;
+    let child = std::process::Command::new(exe).args(args).current_dir(dir).spawn()?;
+    Ok(OwnedProcess(HANDLE(child.into_raw_handle())))
+}
+
 /// Starts `exe`, this program's own file (or its copy), again through the shell: `runas` asks
 /// for elevation (the UAC prompt), `open` doesn't. With no zone check: a downloaded file the
 /// user has just opened would otherwise be asked about a second time, before the UAC prompt.

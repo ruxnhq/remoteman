@@ -68,6 +68,33 @@ pub struct Ctx {
     /// Install Steam's sound devices from the owner's Steam folder, if Steam is there and they
     /// aren't (the checkbox on the first page).
     pub install_steam: bool,
+    /// The service's options (`--trust`, `--encoder`, `--no-pair`), for setup.ps1 install.
+    pub service: ServiceOptions,
+}
+
+/// What the service is set up with, beside its defaults (src/main.rs says what each does).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ServiceOptions {
+    pub trust: Option<PathBuf>,
+    pub encoder: Option<String>,
+    pub no_pair: bool,
+}
+
+impl ServiceOptions {
+    /// setup.ps1's parameters for them.
+    pub fn setup_args(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(trust) = &self.trust {
+            out.extend(["-Trust".to_string(), trust.to_string_lossy().into_owned()]);
+        }
+        if let Some(encoder) = &self.encoder {
+            out.extend(["-Encoder".to_string(), encoder.clone()]);
+        }
+        if self.no_pair {
+            out.push("-NoPair".into());
+        }
+        out
+    }
 }
 
 impl Ctx {
@@ -82,6 +109,7 @@ impl Ctx {
             real_dir,
             dir,
             install_steam: false,
+            service: ServiceOptions { trust: args.trust.clone(), encoder: args.encoder.clone(), no_pair: args.no_pair },
         }
     }
 
@@ -489,7 +517,10 @@ impl Run<'_> {
         let script = self.ctx.dir.join("setup.ps1");
         let setup_log = self.ctx.dir.join("setup.log");
         let ps = system::powershell();
-        let args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &script.to_string_lossy(), verb].map(|s| s.to_string());
+        let mut args: Vec<String> = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &script.to_string_lossy(), verb].map(|s| s.to_string()).into();
+        if verb == "install" {
+            args.extend(self.ctx.service.setup_args());
+        }
         if self.ctx.dry_run {
             self.would(&format!("run {} {} (hidden, in {})", ps.display(), args.join(" "), self.ctx.real_dir.display()));
             // What setup.ps1 would write, so that the page shows lines as it does.
@@ -825,7 +856,7 @@ mod tests {
 
     /// Not a dry run: what only a real install runs, in a folder of the test's own.
     fn real_in(dir: &Path, source: PathBuf) -> Ctx {
-        Ctx { mode: Mode::Install, dry_run: false, fail_at: None, source, real_dir: dir.to_path_buf(), dir: dir.to_path_buf(), install_steam: false }
+        Ctx { mode: Mode::Install, dry_run: false, fail_at: None, source, real_dir: dir.to_path_buf(), dir: dir.to_path_buf(), install_steam: false, service: ServiceOptions::default() }
     }
 
     fn facts() -> Facts {
@@ -871,6 +902,32 @@ mod tests {
         assert!(!lines.iter().any(|l| l.contains("PowerShell said")), "{lines:?}");
         let text = std::fs::read_to_string(dir.join("setup.log")).unwrap();
         assert!(text.contains("setup.exe:   PowerShell said:"), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The service's options reach setup.ps1 install as its parameters (a path with a space
+    /// in it too), and nothing of them reaches uninstall.
+    #[test]
+    fn service_options_reach_setup_ps1() {
+        let _serial = SERIAL.lock().unwrap();
+        let dir = folder("setup-options");
+        std::fs::write(
+            dir.join("setup.ps1"),
+            "param([string]$Verb, [string]$Trust = '', [string]$Encoder = '', [switch]$NoPair)\r\n\
+             Add-Content -Path (Join-Path $PSScriptRoot 'setup.log') -Value \"$(Get-Date -Format s) $Verb trust=[$Trust] encoder=[$Encoder] nopair=[$NoPair]\"\r\n\
+             exit 0\r\n",
+        )
+        .unwrap();
+        let trust = dir.join("a folder").join("trusted.txt");
+        let (mut ctx, facts) = (real_in(&dir, PathBuf::new()), facts());
+        ctx.service = ServiceOptions { trust: Some(trust.clone()), encoder: Some("d3d12".into()), no_pair: true };
+        let mut events = Vec::new();
+        let mut emit = |e: Event| events.push(e);
+        let mut run = Run { ctx: &ctx, facts: &facts, emit: &mut emit, at_restart: 0, setup_log: false };
+        assert!(run.setup("install", StepId::Setup).is_ok());
+        assert!(run.setup("uninstall", StepId::Unsetup).is_ok());
+        let lines: Vec<&str> = events.iter().filter_map(|e| if let Event::Detail(_, l) = e { Some(l.as_str()) } else { None }).collect();
+        assert_eq!(lines, [format!("install trust=[{}] encoder=[d3d12] nopair=[True]", trust.display()).as_str(), "uninstall trust=[] encoder=[] nopair=[False]"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
