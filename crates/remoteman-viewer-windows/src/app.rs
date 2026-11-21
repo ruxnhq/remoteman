@@ -537,8 +537,6 @@ impl App {
         self.reach.get(address).copied().filter(|r| FEATURES.presence || *r == Reach::Unreachable)
     }
 
-    /// How this display is to sit among a computer's own, which stream to ask it for, and the
-    /// most that may use.
     /// A placement was picked for this computer: it wins from now on over one the command line
     /// gave.
     fn drop_given_placement(&mut self, address: &str) {
@@ -547,6 +545,14 @@ impl App {
         }
     }
 
+    /// The computer's key fingerprint: the one `remoteman connect` gave for it, or the one kept
+    /// from pairing. What a kept password is filed under.
+    fn key_of(&self, address: &str) -> Option<String> {
+        self.args.given_for(address).map(|g| g.expect.clone()).or_else(|| self.store.key(address))
+    }
+
+    /// How this display is to sit among a computer's own, which stream to ask it for, and the
+    /// most that may use.
     pub fn choices(&self, address: &str) -> (Placement, Quality, u32) {
         let placement = placement(&self.args, &self.store, address);
         match self.store.find(address) {
@@ -1209,7 +1215,7 @@ impl App {
                 say!("the computer is locked: {said}");
                 self.fields.insert(id("locked.password"), Field::default());
                 self.focus(id("locked.password"), false);
-                let computer = self.store.key(&target.address).unwrap_or_default();
+                let computer = self.key_of(&target.address).unwrap_or_default();
                 // What became of the password that was just tried, if one was: one kept here
                 // that the computer says is wrong is out of date.
                 let tried = self.unlocking.take();
@@ -1462,7 +1468,7 @@ impl App {
             Msg::Unlock => {
                 let typed = self.fields.insert(id("locked.password"), Field::default()).map(|f| f.string()).unwrap_or_default();
                 if let (false, Screen::Problem(target, _)) = (typed.is_empty(), self.screen.clone()) {
-                    let computer = self.store.key(&target.address).unwrap_or_default();
+                    let computer = self.key_of(&target.address).unwrap_or_default();
                     self.unlocking = Some(Unlocking { remember: self.remember && !computer.is_empty(), computer, password: typed.clone(), kept: false });
                     self.unlock = Some(typed);
                     self.connect(target, false);

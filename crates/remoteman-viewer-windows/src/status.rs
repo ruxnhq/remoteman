@@ -88,3 +88,17 @@ pub fn ended(reason: &str, shown: bool) -> Problem {
         None => Problem::Ended(reason.to_owned()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_other_than_the_one_given_isnt_a_changed_computer() {
+        // As the core says them (remoteman-core's `Client::start` and the transport's check).
+        let expected = format!("172.29.1.2:7791 isn't the host that was expected: its certificate's fingerprint isn't {}", "ab".repeat(32));
+        assert_eq!(classify(&expected), Problem::Unexpected);
+        let paired = "connect: aborted by peer: the cryptographic handshake failed: error 42: this isn't the host that was paired";
+        assert_eq!(classify(paired), Problem::Changed);
+    }
+}
