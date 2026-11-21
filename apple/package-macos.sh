@@ -98,7 +98,16 @@ pack() {
     echo "$OUT/$dmg"
 }
 
-build host RemotemanHost remoteman-host.app
-build viewer RemotemanMac remoteman.app
-pack host remoteman-host.app "remoteman host $VERSION"
-pack viewer remoteman.app "remoteman $VERSION"
+# With Developer ID the host carries remoteman's camera (a system extension, installed from its
+# Settings); signed ad hoc it can't, since the extension needs Developer ID provisioning.
+[ "$SIGN" = devid ] && HOST_SCHEME=${HOST_SCHEME:-RemotemanHostCamera}
+HOST_SCHEME=${HOST_SCHEME:-RemotemanHost}
+# ONLY=host or ONLY=viewer builds just that one.
+if [ "${ONLY:-host}" = host ]; then
+    build host "$HOST_SCHEME" remoteman-host.app
+    pack host remoteman-host.app "remoteman host $VERSION"
+fi
+if [ "${ONLY:-viewer}" = viewer ]; then
+    build viewer RemotemanMac remoteman.app
+    pack viewer remoteman.app "remoteman $VERSION"
+fi
