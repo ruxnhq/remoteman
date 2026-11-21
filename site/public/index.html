@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>remoteman</title>
+<meta name="description" content="See and control your own computers from your other devices. Windows, Mac, Linux, iPhone and iPad.">
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fff; --muted: #6e6e73; --line: #d2d2d7; --card: #f5f5f7; --accent: #0066cc; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --bg: #111; --muted: #a1a1a6; --line: #38383a; --card: #1c1c1e; --accent: #4da3ff; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 48px 16px 64px; }
+  h1 { font-size: 40px; letter-spacing: -0.02em; margin: 0 0 6px; }
+  .lede { font-size: 19px; color: var(--muted); margin: 0 0 36px; }
+  h2 { font-size: 20px; margin: 0 0 4px; }
+  .platform { background: var(--card); border-radius: 14px; padding: 20px 20px 14px; margin: 0 0 16px; }
+  .platform > p { margin: 0 0 12px; color: var(--muted); font-size: 14px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+  li a.file { color: var(--accent); font-weight: 600; text-decoration: none; }
+  li a.file:hover { text-decoration: underline; }
+  li .what { flex: 1 1 260px; }
+  li .size, li a.sum { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  li a.sum { text-decoration: none; }
+  li a.sum:hover { text-decoration: underline; }
+  .soon { color: var(--muted); font-weight: 600; }
+  .note { font-size: 14px; color: var(--muted); margin: 28px 0 0; }
+  footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 14px; color: var(--muted); }
+  footer a { color: var(--muted); }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>remoteman</h1>
+  <p class="lede">See and control your own computers from your other devices, directly and encrypted end to end. No accounts, no servers in between.</p>
+
+  <p class="note" style="margin:0 0 20px">Version 0.1.0. On the computer you want to reach, install the <strong>host</strong>. On the device you reach it from, install the <strong>viewer</strong>.</p>
+
+  <section class="platform" aria-labelledby="windows">
+    <h2 id="windows">Windows</h2>
+    <p>Windows 11, x64. The installers aren't code-signed yet: if Windows says it protected your PC, choose More info, then Run anyway.</p>
+    <ul>
+      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-host-setup-0.1.0.exe">Host</a><span class="what">remoteman-host-setup-0.1.0.exe</span><span class="size">20.7 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-host-setup-0.1.0.exe.sha256">SHA-256</a></li>
+      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-setup-0.1.0.exe">Viewer</a><span class="what">remoteman-viewer-setup-0.1.0.exe</span><span class="size">48.7 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-setup-0.1.0.exe.sha256">SHA-256</a></li>
+      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-windows-0.1.0.zip">Viewer, no install</a><span class="what">remoteman-viewer-windows-0.1.0.zip</span><span class="size">67.7 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-windows-0.1.0.zip.sha256">SHA-256</a></li>
+    </ul>
+  </section>
+
+  <section class="platform" aria-labelledby="mac">
+    <h2 id="mac">Mac</h2>
+    <p>Apple silicon. Signed and notarized by Apple. Open the disk image and drag the app to Applications.</p>
+    <ul>
+      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-macos.dmg">Host</a><span class="what">remoteman-host-0.1.0-macos.dmg</span><span class="size">2.3 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-macos.dmg.sha256">SHA-256</a></li>
+      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-macos.dmg">Viewer</a><span class="what">remoteman-viewer-0.1.0-macos.dmg</span><span class="size">2.5 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-macos.dmg.sha256">SHA-256</a></li>
+    </ul>
+  </section>
+
+  <section class="platform" aria-labelledby="linux">
+    <h2 id="linux">Linux</h2>
+    <p>GNOME on x86_64, with GTK 4.20 and libadwaita 1.6 or newer. Make the AppImage executable, then open it.</p>
+    <ul>
+      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-gnome-x86_64.AppImage">Host</a><span class="what">remoteman-host-0.1.0-gnome-x86_64.AppImage</span><span class="size">18.0 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-gnome-x86_64.AppImage.sha256">SHA-256</a></li>
+      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-gnome-x86_64.AppImage">Viewer</a><span class="what">remoteman-viewer-0.1.0-gnome-x86_64.AppImage</span><span class="size">10.3 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-gnome-x86_64.AppImage.sha256">SHA-256</a></li>
+    </ul>
+  </section>
+
+  <section class="platform" aria-labelledby="ios">
+    <h2 id="ios">iPhone and iPad</h2>
+    <p>The viewer, through Apple's TestFlight.</p>
+    <ul>
+      <li><span class="soon">TestFlight</span><span class="what">The public test link opens here once Apple has reviewed the beta.</span></li>
+    </ul>
+  </section>
+
+  <p class="note">Each SHA-256 file holds the download's checksum, to check the file you got is the one published.</p>
+
+  <footer>
+    <a href="/privacy/">Privacy</a> · Questions: <a href="mailto:x@ruxn.com">x@ruxn.com</a> · © 2026 RUXN LLC · MIT licence
+  </footer>
+</main>
+</body>
+</html>
