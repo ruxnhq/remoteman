@@ -35,6 +35,8 @@ thread_local! {
     /// The bar window, once it has been asked for, and a way to tell it things.
     static BAR: RefCell<Option<LocalSender<Msg>>> = const { RefCell::new(None) };
     static BAR_ASKED: Cell<bool> = const { Cell::new(false) };
+    /// The engine said to close: what the window shows stays as it is until it has gone.
+    static CLOSING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The bar window's size, in the app's units.
@@ -499,8 +501,17 @@ impl Viewer {
             return;
         }
         let effects = state.get_mut("effects").map(Value::take).unwrap_or(Value::Null);
-        for effect in effects.as_array().map(Vec::as_slice).unwrap_or(&[]) {
+        let effects = effects.as_array().map(Vec::as_slice).unwrap_or(&[]);
+        for effect in effects {
             self.effect(effect, context);
+        }
+        // Closing: the window keeps what it shows rather than show the page the engine went
+        // back to (`remoteman connect`'s session left: the list of computers) as it goes.
+        if effects.iter().any(|e| matches!(e.s("do"), "close" | "quit")) {
+            CLOSING.set(true);
+        }
+        if CLOSING.get() {
+            return;
         }
         let kind = state.o("screen").s("kind").to_owned();
         if kind != self.state.o("screen").s("kind") {

@@ -389,6 +389,8 @@ pub struct App {
     logging_in: u32,
     /// When to try the computer on the problem page again by itself.
     pub retry_at: Option<Instant>,
+    /// The window is up and the computer the command line names has been tried (`start`).
+    started_on_host: bool,
     /// The stream's size and rate as the bar last said them.
     shown_format: Option<(u32, u32, u32)>,
     /// The password being tried on a locked computer, until it is known whether it worked.
@@ -419,6 +421,8 @@ impl App {
     pub fn new(args: Args, gpu: Gpu, scene: Arc<Scene>, decoders: Vec<Mode>, dark: bool) -> anyhow::Result<Self> {
         let store = Store::load(&args.state);
         let now = Instant::now();
+        // `remoteman connect` never shows the list, not even before its window is up.
+        let screen = if args.given.is_some() { Screen::Connecting } else { Screen::Computers };
         Ok(Self {
             fonts: Fonts::new()?,
             store,
@@ -428,7 +432,7 @@ impl App {
             scale: 1.0,
             maximised: false,
             fullscreen: false,
-            screen: Screen::Computers,
+            screen,
             dialog: None,
             menu: None,
             fields: HashMap::new(),
@@ -465,6 +469,7 @@ impl App {
             unlock: None,
             logging_in: 0,
             retry_at: None,
+            started_on_host: false,
             unlocking: None,
             remember: false,
             captured: false,
@@ -712,6 +717,20 @@ impl App {
         if let Some(host) = self.args.host.clone() {
             let target = self.target_of(&with_port(&host));
             self.connect(target, self.args.pair);
+            self.started_on_host = true;
+        }
+    }
+
+    /// `remoteman connect` shows its one computer and never the list: where another run comes
+    /// back to the list (Disconnect, Back from a problem page, Cancel while connecting), it ends.
+    /// A computer that went away or can't be reached keeps its page, with Try again, until the
+    /// window is closed or Back is pressed. Looked at each time the state is published.
+    pub fn end_connect_run(&mut self) {
+        if connect_run_over(self.args.given.is_some(), self.started_on_host, &self.screen) && self.code.is_none() {
+            say!("connect: back at the list of computers, which this run doesn't show: leaving");
+            self.dialog = None;
+            self.menu = None;
+            self.quit(0);
         }
     }
 
@@ -2393,9 +2412,28 @@ fn placement(args: &Args, store: &Store, address: &str) -> Placement {
     }
 }
 
+/// Whether a `remoteman connect` run (`given`) is over: started, and on the list of computers.
+fn connect_run_over(given: bool, started: bool, screen: &Screen) -> bool {
+    given && started && *screen == Screen::Computers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_connect_run_ends_where_others_show_the_list() {
+        let problem = Screen::Problem(Target { address: "172.29.1.2:7791".into(), name: "guest".into() }, Problem::Ended("gone".into()));
+        // Before the window is up the screen is the list's; then connecting, the session, a
+        // problem page (with Try again) all stay; the list ends it.
+        assert!(!connect_run_over(true, false, &Screen::Computers));
+        for screen in [Screen::Connecting, Screen::Session, problem.clone(), Screen::Settings] {
+            assert!(!connect_run_over(true, true, &screen), "{screen:?}");
+        }
+        assert!(connect_run_over(true, true, &Screen::Computers));
+        // Any other run goes back to the list as before.
+        assert!(!connect_run_over(false, true, &Screen::Computers));
+    }
 
     #[test]
     fn the_placement_given_wins_over_the_computers_own() {

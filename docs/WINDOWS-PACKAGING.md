@@ -166,7 +166,10 @@ virtual machines, so it needn't write remoteman's state folder by hand:
 - `--state DIR`: where the viewer keeps its settings, as before.
 
 All of it holds for every connection to that computer in the run (trying again, connecting again
-for another placement), and for no other computer picked from the list. The words are checked
+for another placement). A `connect` run shows that computer and never the list of computers: when
+the session is left (Disconnect, Cancel while connecting, Back from a page) the viewer ends, as it
+does when its window is closed; a computer that closes the connection or can't be reached keeps
+its page, with Try again, until then. The words are checked
 before the window does anything, and what is wrong is said in the window: the computer without its
 port, a fingerprint that isn't 64 hex digits, a file that can't be read, a key that isn't the
 certificate's, a placement there isn't.
