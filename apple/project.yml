@@ -12,7 +12,7 @@ settings:
     SWIFT_VERSION: "5.0"
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: R82PLAJ45H
-    MARKETING_VERSION: "0.1"
+    MARKETING_VERSION: "0.1.0"
     ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     CURRENT_PROJECT_VERSION: "1"
     DEAD_CODE_STRIPPING: YES
@@ -55,6 +55,8 @@ targetTemplates:
     info:
       path: Host/Info.plist
       properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: remoteman host
         LSUIElement: true
         NSLocalNetworkUsageDescription: remoteman host lets your own devices connect to this Mac to show and control its desktop.
@@ -79,6 +81,8 @@ targets:
     info:
       path: Support/Mac-Info.plist
       properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: remoteman
         LSApplicationCategoryType: public.app-category.utilities
         NSLocalNetworkUsageDescription: remoteman connects to your PC on the local network to show and control its desktop.
@@ -104,6 +108,8 @@ targets:
     info:
       path: Support/iOS-Info.plist
       properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDisplayName: remoteman
         UILaunchScreen: {}
         # A second session in a window of its own, on iPad.
