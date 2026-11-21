@@ -3,82 +3,308 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>remoteman</title>
-<meta name="description" content="See and control your own computers from your other devices. Windows, Mac, Linux, iPhone and iPad.">
+<title>remoteman: your computers, from any of your devices</title>
+<meta name="description" content="remoteman streams your computer's desktop to your other devices at full quality, with sound, microphone, camera, pen and game controllers. Direct and encrypted end to end. Windows, Mac, Linux, iPhone and iPad.">
+<meta name="theme-color" content="#070b1a">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
 <style>
-  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fff; --muted: #6e6e73; --line: #d2d2d7; --card: #f5f5f7; --accent: #0066cc; }
-  @media (prefers-color-scheme: dark) { :root { --fg: #f5f5f7; --bg: #111; --muted: #a1a1a6; --line: #38383a; --card: #1c1c1e; --accent: #4da3ff; } }
+  :root {
+    --bg: #070b1a; --ink: #eef1fb; --ink-2: #aab3cf; --ink-3: #7480a3;
+    --blue: #2458f5; --blue-2: #5b84ff; --line: rgba(160, 178, 230, 0.14); --card: rgba(255, 255, 255, 0.035);
+    --radius: 18px; --font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", Roboto, sans-serif;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  main { max-width: 760px; margin: 0 auto; padding: 48px 16px 64px; }
-  h1 { font-size: 40px; letter-spacing: -0.02em; margin: 0 0 6px; }
-  .lede { font-size: 19px; color: var(--muted); margin: 0 0 36px; }
-  h2 { font-size: 20px; margin: 0 0 4px; }
-  .platform { background: var(--card); border-radius: 14px; padding: 20px 20px 14px; margin: 0 0 16px; }
-  .platform > p { margin: 0 0 12px; color: var(--muted); font-size: 14px; }
-  ul { list-style: none; margin: 0; padding: 0; }
-  li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 10px 0; border-top: 1px solid var(--line); }
-  li a.file { color: var(--accent); font-weight: 600; text-decoration: none; }
-  li a.file:hover { text-decoration: underline; }
-  li .what { flex: 1 1 260px; }
-  li .size, li a.sum { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
-  li a.sum { text-decoration: none; }
-  li a.sum:hover { text-decoration: underline; }
-  .soon { color: var(--muted); font-weight: 600; }
-  .note { font-size: 14px; color: var(--muted); margin: 28px 0 0; }
-  footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 14px; color: var(--muted); }
-  footer a { color: var(--muted); }
-  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 var(--font); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+  a { color: inherit; }
+  a:focus-visible { outline: 2px solid var(--blue-2); outline-offset: 3px; border-radius: 10px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+
+  /* The light behind the top of the page: a soft blue glow and a faint grid that fades out. */
+  .sky { position: absolute; inset: 0 0 auto 0; height: 1100px; pointer-events: none; z-index: 0; overflow: hidden; }
+  .sky::before { content: ""; position: absolute; left: 50%; top: -340px; width: 1400px; height: 900px; transform: translateX(-50%);
+    background: radial-gradient(closest-side, rgba(36, 88, 245, 0.55), rgba(36, 88, 245, 0.12) 55%, transparent 75%); filter: blur(10px); }
+  .sky::after { content: ""; position: absolute; inset: 0;
+    background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 64px 64px; -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 20%, #000 20%, transparent 70%); mask-image: radial-gradient(ellipse 70% 60% at 50% 20%, #000 20%, transparent 70%); opacity: 0.55; }
+
+  header.nav { position: sticky; top: 0; z-index: 10; -webkit-backdrop-filter: saturate(160%) blur(14px); backdrop-filter: saturate(160%) blur(14px); background: rgba(7, 11, 26, 0.62); border-bottom: 1px solid var(--line); }
+  .nav .wrap { display: flex; align-items: center; gap: 28px; height: 64px; }
+  .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 700; font-size: 18px; letter-spacing: -0.01em; }
+  .brand img { width: 30px; height: 30px; border-radius: 8px; }
+  .nav nav { display: flex; gap: 22px; margin-left: auto; font-size: 15px; }
+  .nav nav a { color: var(--ink-2); text-decoration: none; }
+  .nav nav a:hover { color: var(--ink); }
+  .button { display: inline-flex; align-items: center; gap: 8px; padding: 12px 20px; border-radius: 12px; font-weight: 600; font-size: 15px; text-decoration: none; white-space: nowrap; transition: transform .15s ease, background .15s ease; }
+  .button.primary { background: var(--blue); color: #fff; box-shadow: 0 8px 30px -8px rgba(36, 88, 245, 0.9), inset 0 1px 0 rgba(255,255,255,.25); }
+  .button.primary:hover { background: #3466ff; transform: translateY(-1px); }
+  .button.ghost { background: rgba(255,255,255,.06); color: var(--ink); border: 1px solid var(--line); }
+  .button.ghost:hover { background: rgba(255,255,255,.1); }
+  .nav .button { padding: 8px 14px; font-size: 14px; }
+
+  main { position: relative; z-index: 1; }
+  .hero { text-align: center; padding: 96px 0 0; }
+  .eyebrow { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255,255,255,.04); color: var(--ink-2); font-size: 13px; font-weight: 500; }
+  .eyebrow b { color: var(--blue-2); font-weight: 600; }
+  h1 { font-size: clamp(44px, 7.4vw, 88px); line-height: 1.02; letter-spacing: -0.045em; margin: 22px auto; max-width: 13ch; font-weight: 750;
+    background: linear-gradient(180deg, #fff 30%, #b9c6f5 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { font-size: clamp(17px, 2vw, 21px); color: var(--ink-2); max-width: 640px; margin: 0 auto 34px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+  .platforms-line { margin: 26px 0 0; color: var(--ink-3); font-size: 14px; }
+
+  /* The screenshot, in a window, lit from behind. */
+  .stage { position: relative; margin: 64px auto 0; max-width: 1120px; }
+  .stage::before { content: ""; position: absolute; inset: 8% 6% -6%; background: radial-gradient(closest-side, rgba(36,88,245,.6), transparent); filter: blur(60px); z-index: -1; }
+  .window { border-radius: 16px; overflow: hidden; border: 1px solid rgba(190, 205, 255, 0.18); background: #000; box-shadow: 0 60px 120px -40px rgba(0,0,0,.9); }
+  .window .titlebar { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px; background: linear-gradient(#1b2033, #141828); border-bottom: 1px solid rgba(255,255,255,.06); }
+  .window .titlebar i { width: 11px; height: 11px; border-radius: 50%; background: #3a4058; }
+  .window .titlebar span { margin-left: 10px; font-size: 12px; color: var(--ink-3); }
+  .window img { display: block; width: 100%; height: auto; }
+  .caption { text-align: center; color: var(--ink-3); font-size: 13px; margin: 16px 0 0; }
+
+  section { padding: 110px 0 0; }
+  .section-head { max-width: 680px; margin: 0 0 44px; }
+  .kicker { color: var(--blue-2); font-weight: 600; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; margin: 0 0 10px; }
+  h2 { font-size: clamp(32px, 4.4vw, 52px); line-height: 1.08; letter-spacing: -0.035em; margin: 0 0 14px; font-weight: 720; }
+  .section-head p, .body { color: var(--ink-2); font-size: 18px; margin: 0; }
+
+  .facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; margin-top: 80px; text-align: left; }
+  .facts div { background: var(--bg); padding: 26px 24px; }
+  .facts b { display: block; font-size: 24px; letter-spacing: -0.02em; }
+  .facts span { color: var(--ink-3); font-size: 14px; }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .card { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 28px 26px 26px; overflow: hidden; }
+  .card::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: radial-gradient(400px 160px at 0% 0%, rgba(36,88,245,.14), transparent 70%); pointer-events: none; }
+  .card svg { width: 30px; height: 30px; color: var(--blue-2); margin-bottom: 16px; }
+  .card h3 { font-size: 19px; margin: 0 0 8px; letter-spacing: -0.01em; }
+  .card p { margin: 0; color: var(--ink-2); font-size: 15.5px; }
+  .card.wide { grid-column: span 2; }
+
+  .private { display: grid; grid-template-columns: 1.1fr 1fr; gap: 48px; align-items: center; }
+  .flow { display: flex; align-items: center; gap: 14px; padding: 40px 28px; border-radius: var(--radius); border: 1px solid var(--line); background: linear-gradient(135deg, rgba(36,88,245,.16), rgba(11,20,55,.4)); }
+  .flow .node { flex: 0 0 auto; text-align: center; font-size: 13px; color: var(--ink-2); }
+  .flow .node div { width: 72px; height: 72px; border-radius: 18px; display: grid; place-items: center; background: rgba(255,255,255,.06); border: 1px solid var(--line); margin: 0 auto 10px; }
+  .flow .node svg { width: 34px; height: 34px; color: var(--ink); }
+  .flow .line { flex: 1; height: 2px; background: linear-gradient(90deg, transparent, var(--blue-2), transparent); position: relative; }
+  .flow .line span { position: absolute; left: 50%; top: -30px; transform: translateX(-50%); white-space: nowrap; font-size: 12px; color: var(--blue-2); font-weight: 600; letter-spacing: .04em; }
+  .checks { list-style: none; padding: 0; margin: 26px 0 0; display: grid; gap: 12px; }
+  .checks li { display: flex; gap: 12px; color: var(--ink-2); }
+  .checks li::before { content: ""; flex: 0 0 20px; height: 20px; border-radius: 50%; margin-top: 3px;
+    background: var(--blue) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M5.5 10.5l3 3 6-7' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/20px no-repeat; }
+  .more { display: inline-block; margin: 22px 0 0; color: var(--blue-2); text-decoration: none; font-weight: 600; }
+  .more:hover { text-decoration: underline; }
+
+  .downloads { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+  .platform { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 26px; display: flex; flex-direction: column; }
+  .platform header { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .platform header svg { width: 26px; height: 26px; color: var(--ink); }
+  .platform h3 { margin: 0; font-size: 21px; letter-spacing: -0.01em; }
+  .platform .req { color: var(--ink-3); font-size: 14px; margin: 0 0 18px; }
+  .files { display: grid; gap: 10px; margin-top: auto; }
+  .file { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,.04); border: 1px solid var(--line); text-decoration: none; transition: background .15s, border-color .15s; }
+  a.file:hover { background: rgba(36,88,245,.16); border-color: rgba(91,132,255,.5); }
+  .file svg { width: 18px; height: 18px; color: var(--blue-2); flex: 0 0 auto; }
+  .file .name { font-weight: 600; }
+  .file .meta { margin-left: auto; color: var(--ink-3); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .sums { margin: 12px 0 0; font-size: 13px; color: var(--ink-3); }
+  .sums a { color: var(--ink-3); }
+  .note { color: var(--ink-3); font-size: 14px; margin: 22px 0 0; }
+
+  .cta { margin: 120px 0 0; padding: 64px 32px; text-align: center; border-radius: 28px; border: 1px solid var(--line);
+    background: radial-gradient(600px 260px at 50% 0%, rgba(36,88,245,.45), transparent 70%), linear-gradient(180deg, #0d1640, #090e24); }
+  .cta h2 { margin-bottom: 10px; }
+  .cta p { color: var(--ink-2); margin: 0 0 28px; font-size: 18px; }
+
+  footer.foot { margin-top: 96px; border-top: 1px solid var(--line); padding: 28px 0 48px; color: var(--ink-3); font-size: 14px; }
+  footer.foot .wrap { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: center; }
+  footer.foot a { color: var(--ink-2); text-decoration: none; }
+  footer.foot a:hover { color: var(--ink); }
+  footer.foot .brand { font-size: 15px; } footer.foot .brand img { width: 22px; height: 22px; border-radius: 6px; }
+  footer.foot .right { margin-left: auto; }
+
+  @media (max-width: 900px) {
+    .grid { grid-template-columns: 1fr 1fr; } .card.wide { grid-column: span 2; }
+    .private { grid-template-columns: 1fr; } .facts { grid-template-columns: 1fr 1fr; } .downloads { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 600px) {
+    .wrap { padding: 0 16px; } .nav nav { display: none; } .hero { padding-top: 64px; }
+    .grid { grid-template-columns: 1fr; } .card.wide { grid-column: auto; } .facts { grid-template-columns: 1fr; }
+    .flow { padding: 30px 14px; } .flow .node div { width: 56px; height: 56px; } .flow .line span { font-size: 10px; }
+    .file .meta { font-size: 12px; } footer.foot .right { margin-left: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .button, .file { transition: none; } }
 </style>
 </head>
 <body>
+<div class="sky" aria-hidden="true"></div>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/icon.svg" alt="">remoteman</a>
+    <nav aria-label="Sections">
+      <a href="#features">Features</a>
+      <a href="#private">Privacy</a>
+      <a href="#download">Download</a>
+    </nav>
+    <a class="button primary" href="#download">Download</a>
+  </div>
+</header>
+
 <main>
-  <h1>remoteman</h1>
-  <p class="lede">See and control your own computers from your other devices, directly and encrypted end to end. No accounts, no servers in between.</p>
+  <section class="hero">
+    <div class="wrap">
+      <span class="eyebrow"><b>0.1.0</b> Windows · Mac · Linux · iPhone · iPad</span>
+      <h1>Your computers, on every screen you own.</h1>
+      <p class="lede">remoteman streams your computer's desktop to your other devices at full quality, with its sound, your microphone and camera, your pen and your game controller. Straight from device to computer, encrypted end to end. No accounts. Nothing in between.</p>
+      <div class="actions">
+        <a class="button primary" href="#download">Download for free</a>
+        <a class="button ghost" href="#features">See what it does</a>
+      </div>
+      <p class="platforms-line">A host for the computer you reach. A viewer for the device you reach it from.</p>
 
-  <p class="note" style="margin:0 0 20px">Version 0.1.0. On the computer you want to reach, install the <strong>host</strong>. On the device you reach it from, install the <strong>viewer</strong>.</p>
+      <div class="stage">
+        <div class="window">
+          <div class="titlebar" aria-hidden="true"><i></i><i></i><i></i><span>remoteman viewer on Windows</span></div>
+          <img src="/shots/windows-viewer.jpg" width="1904" height="1124" alt="The remoteman viewer on Windows showing another computer's Windows 11 desktop at 1920 by 1080 and 240 Hz, with its session bar: Disconnect, Send keys, Display, Picture, sound, microphone, camera and sharing.">
+        </div>
+        <p class="caption">A Windows 11 computer's desktop in the remoteman viewer, 1920 × 1080 at 240 Hz.</p>
+      </div>
 
-  <section class="platform" aria-labelledby="windows">
-    <h2 id="windows">Windows</h2>
-    <p>Windows 11, x64. The installers aren't code-signed yet: if Windows says it protected your PC, choose More info, then Run anyway.</p>
-    <ul>
-      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-host-setup-0.1.0.exe">Host</a><span class="what">remoteman-host-setup-0.1.0.exe</span><span class="size">20.7 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-host-setup-0.1.0.exe.sha256">SHA-256</a></li>
-      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-setup-0.1.0.exe">Viewer</a><span class="what">remoteman-viewer-setup-0.1.0.exe</span><span class="size">48.7 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-setup-0.1.0.exe.sha256">SHA-256</a></li>
-      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-windows-0.1.0.zip">Viewer, no install</a><span class="what">remoteman-viewer-windows-0.1.0.zip</span><span class="size">67.7 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-windows-0.1.0.zip.sha256">SHA-256</a></li>
-    </ul>
+      <div class="facts">
+        <div><b>AV1 · HEVC · H.264</b><span>Encoded on the computer's graphics card</span></div>
+        <div><b>10-bit HDR</b><span>When both screens can show it</span></div>
+        <div><b>Up to 240 Hz</b><span>Follows the screen you watch on</span></div>
+        <div><b>TLS 1.3 over QUIC</b><span>Encrypted end to end, direct</span></div>
+      </div>
+    </div>
   </section>
 
-  <section class="platform" aria-labelledby="mac">
-    <h2 id="mac">Mac</h2>
-    <p>Apple silicon. Signed and notarized by Apple. Open the disk image and drag the app to Applications.</p>
-    <ul>
-      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-macos.dmg">Host</a><span class="what">remoteman-host-0.1.0-macos.dmg</span><span class="size">2.3 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-macos.dmg.sha256">SHA-256</a></li>
-      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-macos.dmg">Viewer</a><span class="what">remoteman-viewer-0.1.0-macos.dmg</span><span class="size">2.5 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-macos.dmg.sha256">SHA-256</a></li>
-    </ul>
+  <section id="features">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="kicker">Features</p>
+        <h2>Everything a computer does, wherever you are.</h2>
+        <p>Not a picture of a screen: the whole computer, with what you hear, say, draw and play.</p>
+      </div>
+      <div class="grid">
+        <article class="card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="2.5"/><path d="M8 21h8M12 17v4"/></svg>
+          <h3>A picture worth sitting in front of</h3>
+          <p>The computer encodes its desktop on its own graphics card, in AV1, HEVC or H.264, up to 10-bit HDR, at the refresh rate of the screen you watch on. Text stays sharp when nothing moves, and motion stays smooth when it does.</p>
+        </article>
+        <article class="card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><path d="M13 17h8M17 13v8"/></svg>
+          <h3>A display of its own</h3>
+          <p>Your device becomes another display of the computer, its main display, or its only one, as you choose.</p>
+        </article>
+        <article class="card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+          <h3>Sound, both ways</h3>
+          <p>Hear the computer on your device, and talk through your device's microphone as the computer's own.</p>
+        </article>
+        <article class="card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 10l4.6-2.3A1 1 0 0 1 21 8.6v6.8a1 1 0 0 1-1.4.9L15 14"/><rect x="3" y="6" width="12" height="12" rx="2.5"/></svg>
+          <h3>Your camera as its webcam</h3>
+          <p>Calls on the computer see you through your phone, tablet or laptop camera, as a camera every app can pick.</p>
+        </article>
+        <article class="card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 11h4M8 9v4"/><circle cx="15.5" cy="10.5" r="1"/><circle cx="17.5" cy="12.5" r="1"/><path d="M7.5 6h9a5 5 0 0 1 4.8 6.3l-1 3.7a2.6 2.6 0 0 1-4.5 1L14 15h-4l-1.8 2a2.6 2.6 0 0 1-4.5-1l-1-3.7A5 5 0 0 1 7.5 6z"/></svg>
+          <h3>Pen, touch and controllers</h3>
+          <p>Draw with pressure, scroll with your fingers, and play with the game controller in your hands.</p>
+        </article>
+        <article class="card">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="3" width="11" height="14" rx="2"/><path d="M5 7v11a2 2 0 0 0 2 2h9"/></svg>
+          <h3>Clipboard and files</h3>
+          <p>Copy on one, paste on the other, and send files across, when you switch it on.</p>
+        </article>
+      </div>
+    </div>
   </section>
 
-  <section class="platform" aria-labelledby="linux">
-    <h2 id="linux">Linux</h2>
-    <p>GNOME on x86_64, with GTK 4.20 and libadwaita 1.6 or newer. Make the AppImage executable, then open it.</p>
-    <ul>
-      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-gnome-x86_64.AppImage">Host</a><span class="what">remoteman-host-0.1.0-gnome-x86_64.AppImage</span><span class="size">18.0 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-gnome-x86_64.AppImage.sha256">SHA-256</a></li>
-      <li><a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-gnome-x86_64.AppImage">Viewer</a><span class="what">remoteman-viewer-0.1.0-gnome-x86_64.AppImage</span><span class="size">10.3 MB</span><a class="sum" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-gnome-x86_64.AppImage.sha256">SHA-256</a></li>
-    </ul>
+  <section id="private">
+    <div class="wrap private">
+      <div>
+        <p class="kicker">Private by design</p>
+        <h2>Just your devices. Nobody in the middle.</h2>
+        <p class="body">remoteman has no accounts and no servers of ours. Your device pairs with your computer once, and from then on they talk to each other directly, on your network or one you choose.</p>
+        <ul class="checks">
+          <li>Encrypted end to end with TLS 1.3 over QUIC, each side proven by its own key.</li>
+          <li>Nothing about you is collected: no analytics, no crash reports, no tracking.</li>
+          <li>Your pairings and settings stay on your devices.</li>
+        </ul>
+        <a class="more" href="/privacy/">Read the privacy policy →</a>
+      </div>
+      <div class="flow" role="img" aria-label="Your device connects directly to your computer, encrypted end to end.">
+        <div class="node"><div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="2.5" width="14" height="19" rx="3"/><path d="M10.5 18.5h3"/></svg></div>Your device</div>
+        <div class="line"><span>DIRECT · ENCRYPTED</span></div>
+        <div class="node"><div><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="2.5"/><path d="M8 21h8M12 17v4"/></svg></div>Your computer</div>
+      </div>
+    </div>
   </section>
 
-  <section class="platform" aria-labelledby="ios">
-    <h2 id="ios">iPhone and iPad</h2>
-    <p>The viewer, through Apple's TestFlight.</p>
-    <ul>
-      <li><span class="soon">TestFlight</span><span class="what">The public test link opens here once Apple has reviewed the beta.</span></li>
-    </ul>
+  <section id="download">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="kicker">Download</p>
+        <h2>Free, on everything you use.</h2>
+        <p>Install the host on the computer you want to reach, and the viewer on the device you reach it from. Version 0.1.0.</p>
+      </div>
+      <div class="downloads">
+        <article class="platform">
+          <header><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.5l7.5-1v7H3zM11.5 4.4 21 3v8.5h-9.5zM3 12.5h7.5v7L3 18.5zM11.5 12.5H21V21l-9.5-1.4z"/></svg><h3>Windows</h3></header>
+          <p class="req">Windows 11, x64. Not code-signed yet: if Windows says it protected your PC, choose More info, then Run anyway.</p>
+          <div class="files">
+            <a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-host-setup-0.1.0.exe"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span class="name">Host</span><span class="meta">Installer · 20.7 MB</span></a>
+            <a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-setup-0.1.0.exe"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span class="name">Viewer</span><span class="meta">Installer · 48.7 MB</span></a>
+            <a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-windows-0.1.0.zip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span class="name">Viewer, no install</span><span class="meta">Zip · 67.7 MB</span></a>
+          </div>
+          <p class="sums">SHA-256: <a href="https://files.ruxn.com/p/remoteman/remoteman-host-setup-0.1.0.exe.sha256">host</a> · <a href="https://files.ruxn.com/p/remoteman/remoteman-viewer-setup-0.1.0.exe.sha256">viewer</a> · <a href="https://files.ruxn.com/p/remoteman/remoteman-viewer-windows-0.1.0.zip.sha256">zip</a></p>
+        </article>
+        <article class="platform">
+          <header><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.4 12.6c0-2.5 2-3.6 2.1-3.7-1.2-1.7-3-1.9-3.6-2-1.5-.2-3 .9-3.8.9-.8 0-2-.9-3.3-.8-1.7 0-3.3 1-4.2 2.5-1.8 3.1-.5 7.7 1.3 10.2.9 1.2 1.9 2.6 3.2 2.6 1.3-.1 1.8-.8 3.3-.8 1.6 0 2 .8 3.4.8 1.4 0 2.3-1.3 3.1-2.5 1-1.4 1.4-2.8 1.4-2.9-.1 0-2.8-1-2.9-4.3zM13.9 5.1c.7-.9 1.2-2 1-3.1-1 0-2.2.7-2.9 1.5-.6.7-1.2 1.9-1 3 1.1.1 2.2-.6 2.9-1.4z"/></svg><h3>Mac</h3></header>
+          <p class="req">Apple silicon. Signed and notarized by Apple: open the disk image and drag the app to Applications.</p>
+          <div class="files">
+            <a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-macos.dmg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span class="name">Host</span><span class="meta">Disk image · 2.3 MB</span></a>
+            <a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-macos.dmg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span class="name">Viewer</span><span class="meta">Disk image · 2.5 MB</span></a>
+          </div>
+          <p class="sums">SHA-256: <a href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-macos.dmg.sha256">host</a> · <a href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-macos.dmg.sha256">viewer</a></p>
+        </article>
+        <article class="platform">
+          <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3c-2.2 0-3.4 1.9-3.4 4.4 0 1.6-.6 2.6-1.6 4-1.3 1.8-2.5 3.8-2.5 6.1 0 .9.4 1.6 1.2 1.9M12 3c2.2 0 3.4 1.9 3.4 4.4 0 1.6.6 2.6 1.6 4 1.3 1.8 2.5 3.8 2.5 6.1 0 .9-.4 1.6-1.2 1.9"/><path d="M8.5 20.5c1-1 2.2-1.5 3.5-1.5s2.5.5 3.5 1.5"/><circle cx="10.5" cy="7.5" r=".6" fill="currentColor"/><circle cx="13.5" cy="7.5" r=".6" fill="currentColor"/></svg><h3>Linux</h3></header>
+          <p class="req">GNOME on x86_64, with GTK 4.20 and libadwaita 1.6 or newer. Make the AppImage executable, then open it.</p>
+          <div class="files">
+            <a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-gnome-x86_64.AppImage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span class="name">Host</span><span class="meta">AppImage · 18.0 MB</span></a>
+            <a class="file" href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-gnome-x86_64.AppImage"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg><span class="name">Viewer</span><span class="meta">AppImage · 10.3 MB</span></a>
+          </div>
+          <p class="sums">SHA-256: <a href="https://files.ruxn.com/p/remoteman/remoteman-host-0.1.0-gnome-x86_64.AppImage.sha256">host</a> · <a href="https://files.ruxn.com/p/remoteman/remoteman-viewer-0.1.0-gnome-x86_64.AppImage.sha256">viewer</a></p>
+        </article>
+        <article class="platform">
+          <header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="2.5" width="14" height="19" rx="3"/><path d="M10.5 18.5h3"/></svg><h3>iPhone and iPad</h3></header>
+          <p class="req">The viewer, in beta through Apple's TestFlight.</p>
+          <div class="files">
+            <span class="file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span class="name">TestFlight</span><span class="meta">Public link soon</span></span>
+          </div>
+          <p class="sums">The public test link opens here once Apple has reviewed the beta.</p>
+        </article>
+      </div>
+      <p class="note">Each SHA-256 file holds the download's checksum, to check that the file you got is the one published.</p>
+
+      <div class="cta">
+        <h2>Pick up where your computer is.</h2>
+        <p>Install the host once. Then every device you own is a way in.</p>
+        <a class="button primary" href="#download">Choose your download</a>
+      </div>
+    </div>
   </section>
-
-  <p class="note">Each SHA-256 file holds the download's checksum, to check the file you got is the one published.</p>
-
-  <footer>
-    <a href="/privacy/">Privacy</a> · Questions: <a href="mailto:x@ruxn.com">x@ruxn.com</a> · © 2026 RUXN LLC · MIT licence
-  </footer>
 </main>
+
+<footer class="foot">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/icon.svg" alt="">remoteman</a>
+    <span>© 2026 RUXN LLC · MIT licence</span>
+    <span class="right"><a href="/privacy/">Privacy</a> · <a href="mailto:x@ruxn.com">x@ruxn.com</a></span>
+  </div>
+</footer>
 </body>
 </html>
