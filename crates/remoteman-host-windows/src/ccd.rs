@@ -13,17 +13,19 @@
 //! told apart by the monitor's device path, which stays the same across restarts
 //! (`\\?\DISPLAY#AUSAA06#5&56b7e85&0&UID4353#{…}`; the driver's monitors are `…RMN0001…UID256…`).
 //! Windows' rule, found by asking it to validate: a path switched on without a target mode
-//! must leave its refresh rate at 0 (Windows chooses); a rate is then set on the output with
-//! `ChangeDisplaySettingsEx`.
+//! must leave its refresh rate at 0 and its scan-line order unspecified (Windows chooses); a
+//! rate is then set on the output with `ChangeDisplaySettingsEx`. A path on the desktop is read
+//! with both, so one taken from there at another size (a device's monitor given a new size) was
+//! refused with error 87 until its scan-line order was cleared too (2026-11-21).
 
 use std::collections::HashSet;
 
 use anyhow::{Context, Result, bail};
 use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_DEVICE_INFO_TYPE, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
-    DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_PIXELFORMAT_32BPP, DISPLAYCONFIG_RATIONAL, DISPLAYCONFIG_ROTATION_IDENTITY, DISPLAYCONFIG_SCALING_PREFERRED, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_PIXELFORMAT_32BPP, DISPLAYCONFIG_RATIONAL, DISPLAYCONFIG_ROTATION_IDENTITY, DISPLAYCONFIG_SCALING_PREFERRED, DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
     DISPLAYCONFIG_SOURCE_MODE, DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS, QUERY_DISPLAY_CONFIG_FLAGS, QueryDisplayConfig,
-    SDC_ALLOW_CHANGES, SDC_APPLY, SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE, SetDisplayConfig,
+    SDC_ALLOW_CHANGES, SDC_APPLY, SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SDC_VALIDATE, SET_DISPLAY_CONFIG_FLAGS, SetDisplayConfig,
 };
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, LUID, POINTL};
 use windows::Win32::Graphics::Gdi::{CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_DISPLAYFREQUENCY, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW};
@@ -203,6 +205,36 @@ pub fn arrange(wants: &[Want]) -> Result<()> {
     anyhow::ensure!(!wants.is_empty(), "an arrangement with no screen");
     anyhow::ensure!(wants.iter().any(|w| (w.left, w.top) == (0, 0)), "an arrangement with no screen at 0,0 (Windows' main display is there)");
     crate::desk::follow();
+    let (paths, modes) = supplied(wants)?;
+    let valid = validate(&paths, &modes);
+    if valid != 0 {
+        bail!("Windows won't take this arrangement (SetDisplayConfig validating: error {valid}): {wants:?}");
+    }
+    // SAFETY: arrays of whole structures, read during the call.
+    let done = unsafe { SetDisplayConfig(Some(&paths), Some(&modes), SUPPLIED | SDC_APPLY | SDC_SAVE_TO_DATABASE) };
+    if done != 0 {
+        bail!("Windows refused this arrangement (SetDisplayConfig: error {done}): {wants:?}");
+    }
+    for w in wants.iter().filter(|w| w.refresh != 0) {
+        if let Err(e) = set_refresh(&w.device, w.refresh) {
+            tracing::warn!("{e:#}");
+        }
+    }
+    check(wants)
+}
+
+/// How an arrangement is given to Windows: all of it, and Windows may choose what it isn't told.
+const SUPPLIED: SET_DISPLAY_CONFIG_FLAGS = SET_DISPLAY_CONFIG_FLAGS(SDC_USE_SUPPLIED_DISPLAY_CONFIG.0 | SDC_ALLOW_CHANGES.0);
+
+/// Would Windows take these paths and modes? 0, or its error. Nothing changes.
+fn validate(paths: &[DISPLAYCONFIG_PATH_INFO], modes: &[DISPLAYCONFIG_MODE_INFO]) -> i32 {
+    // SAFETY: arrays of whole structures, read during the call.
+    unsafe { SetDisplayConfig(Some(paths), Some(modes), SUPPLIED | SDC_VALIDATE) }
+}
+
+/// The paths and modes for [`arrange`]: each wanted output on its monitor, with a source mode
+/// of the wanted size and place, and the target mode it has now where that is still right.
+fn supplied(wants: &[Want]) -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>)> {
     let all = query(QDC_ALL_PATHS)?;
     let active = query(QDC_ONLY_ACTIVE_PATHS)?;
     let (mut paths, mut modes) = (Vec::new(), Vec::new());
@@ -243,10 +275,7 @@ pub fn arrange(wants: &[Want]) -> Result<()> {
                 path.targetInfo.Anonymous.modeInfoIdx = (modes.len() - 1) as u32;
                 path.targetInfo.refreshRate = rate;
             }
-            None => {
-                path.targetInfo.Anonymous.modeInfoIdx = MODE_IDX_INVALID;
-                path.targetInfo.refreshRate = DISPLAYCONFIG_RATIONAL { Numerator: 0, Denominator: 0 };
-            }
+            None => no_target_mode(&mut path),
         }
         if path.targetInfo.rotation.0 == 0 {
             path.targetInfo.rotation = DISPLAYCONFIG_ROTATION_IDENTITY;
@@ -256,23 +285,15 @@ pub fn arrange(wants: &[Want]) -> Result<()> {
         }
         paths.push(path);
     }
-    let flags = SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES;
-    // SAFETY: arrays of whole structures, read during the call.
-    let valid = unsafe { SetDisplayConfig(Some(&paths), Some(&modes), flags | SDC_VALIDATE) };
-    if valid != 0 {
-        bail!("Windows won't take this arrangement (SetDisplayConfig validating: error {valid}): {wants:?}");
-    }
-    // SAFETY: as above.
-    let done = unsafe { SetDisplayConfig(Some(&paths), Some(&modes), flags | SDC_APPLY | SDC_SAVE_TO_DATABASE) };
-    if done != 0 {
-        bail!("Windows refused this arrangement (SetDisplayConfig: error {done}): {wants:?}");
-    }
-    for w in wants.iter().filter(|w| w.refresh != 0) {
-        if let Err(e) = set_refresh(&w.device, w.refresh) {
-            tracing::warn!("{e:#}");
-        }
-    }
-    check(wants)
+    Ok((paths, modes))
+}
+
+/// A path that leaves its target mode to Windows, and with it the rate and the scan-line order
+/// (see the top). A path on the desktop is read with both, which Windows then refuses.
+fn no_target_mode(path: &mut DISPLAYCONFIG_PATH_INFO) {
+    path.targetInfo.Anonymous.modeInfoIdx = MODE_IDX_INVALID;
+    path.targetInfo.refreshRate = DISPLAYCONFIG_RATIONAL { Numerator: 0, Denominator: 0 };
+    path.targetInfo.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED;
 }
 
 /// Is the desktop exactly `wants` (every refresh aside)? An error says how it isn't.
@@ -332,6 +353,7 @@ pub fn drop_driver(main: Option<&str>) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Devices::Display::DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
 
     #[test]
     fn patterns_match_in_order() {
@@ -342,5 +364,36 @@ mod tests {
         assert!(!matches(r"\\?\display#ausaa06#5&56b7e85&0&uid4353#{x}", &driver_monitor(0)));
         // In order: the product first, then the number.
         assert!(!matches(r"\\?\display#uid256#rmn0001", &driver_monitor(0)));
+    }
+
+    #[test]
+    fn a_path_without_its_target_mode_says_nothing_of_one() {
+        // As a path on the desktop is read: a target mode, its rate and its scan-line order.
+        let mut path = DISPLAYCONFIG_PATH_INFO { flags: PATH_ACTIVE, ..Default::default() };
+        path.targetInfo.Anonymous.modeInfoIdx = 3;
+        path.targetInfo.refreshRate = DISPLAYCONFIG_RATIONAL { Numerator: 240016, Denominator: 1000 };
+        path.targetInfo.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
+        no_target_mode(&mut path);
+        // SAFETY: as in `source_mode`.
+        assert_eq!(unsafe { path.targetInfo.Anonymous.modeInfoIdx }, MODE_IDX_INVALID);
+        assert_eq!((path.targetInfo.refreshRate.Numerator, path.targetInfo.refreshRate.Denominator), (0, 0));
+        assert_eq!(path.targetInfo.scanLineOrdering, DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED);
+    }
+
+    /// The screens on the desktop now, each wanted at a rate it isn't at, so that none keeps its
+    /// target mode (as a device's monitor on the desktop that is given another size): Windows,
+    /// only asked whether it would take that, says yes. Nothing on the desktop changes. Passes
+    /// by itself where there is no desktop to ask.
+    #[test]
+    fn screens_on_the_desktop_without_their_target_modes_validate() {
+        let Ok(now) = shown() else { return };
+        if now.is_empty() || now.iter().enumerate().any(|(i, s)| now[..i].iter().any(|o| o.device == s.device)) {
+            return;
+        }
+        let wants: Vec<Want> = now.iter().map(|s| Want { device: s.device.clone(), monitor: s.monitor.clone(), width: s.width, height: s.height, refresh: s.refresh + 1, left: s.left, top: s.top }).collect();
+        let (paths, modes) = supplied(&wants).unwrap();
+        // SAFETY: as in `source_mode`.
+        assert!(paths.iter().all(|p| unsafe { p.targetInfo.Anonymous.modeInfoIdx } == MODE_IDX_INVALID));
+        assert_eq!(validate(&paths, &modes), 0, "Windows won't take {wants:?}");
     }
 }
