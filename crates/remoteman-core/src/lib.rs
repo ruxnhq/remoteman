@@ -62,6 +62,26 @@ pub struct Options {
     pub attach_only: bool,
 }
 
+/// What one connection is given instead of what [`Options::state`] keeps
+/// ([`Client::connect_given`]), for a program that holds the keys itself and starts a viewer
+/// with them.
+#[derive(Clone, Default)]
+pub struct Given {
+    /// This device's certificate and its key (PKCS #8), both DER, instead of the identity kept
+    /// in `state/client`, which is then neither read nor made nor changed.
+    pub identity: Option<(Vec<u8>, Vec<u8>)>,
+    /// The host's fingerprint (the SHA-256 of its certificate, in hex): only the host with
+    /// exactly that certificate is accepted, whatever `state/client/hosts` keeps for the address
+    /// or [`Options::pair`] says, and nothing is written there.
+    pub expect: Option<String>,
+}
+
+/// Checks a certificate and key (DER, as [`Given::identity`] takes them) belong together, and
+/// gives the certificate's fingerprint.
+pub fn check_identity(cert: &[u8], key: &[u8]) -> Result<String> {
+    Ok(Identity::from_der(cert.to_vec(), key.to_vec())?.fingerprint)
+}
+
 /// The host's cursor image: premultiplied RGBA, rows top to bottom. Zero size: no cursor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CursorShape {
@@ -273,27 +293,43 @@ impl Ask {
 impl Client {
     /// Connect and say hello. Returns once the host has answered; `handler` then gets the stream.
     pub fn connect(options: Options, handler: impl Handler) -> Result<Self> {
+        Self::connect_given(options, Given::default(), handler)
+    }
+
+    /// As [`Client::connect`], with this device's identity or the host's fingerprint (or both)
+    /// given for this connection rather than taken from `options.state` ([`Given`]).
+    pub fn connect_given(options: Options, given: Given, handler: impl Handler) -> Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_name("remoteman").enable_all().build()?;
-        let mut this = runtime.block_on(Self::start(options, Box::new(handler)))?;
+        let mut this = runtime.block_on(Self::start(options, given, Box::new(handler)))?;
         this.runtime = Some(runtime);
         Ok(this)
     }
 
-    async fn start(o: Options, mut handler: Box<dyn Handler>) -> Result<Self> {
+    async fn start(o: Options, given: Given, mut handler: Box<dyn Handler>) -> Result<Self> {
         handler.stage(Stage::Lookup);
         let addr = o.host.to_socket_addrs().with_context(|| format!("look up {}", o.host))?.next().context("no such host")?;
-        let identity = Identity::load_or_create(&o.state.join("client"))?;
+        let identity = match given.identity {
+            Some((cert, key)) => Identity::from_der(cert, key).context("the identity given")?,
+            None => Identity::load_or_create(&o.state.join("client"))?,
+        };
         let known = known_host(&o.state, &o.host);
-        let expect = match std::fs::read_to_string(&known) {
-            Ok(fp) => Expect::Fingerprint(fp.trim().to_owned()),
-            Err(_) if o.pair => Expect::Anyone,
-            Err(_) => bail!("{} isn't paired yet", o.host),
+        let expected = given.expect.map(|fp| fp.trim().to_ascii_lowercase());
+        let expect = match (&expected, std::fs::read_to_string(&known)) {
+            // Given: that host and no other, whatever is kept for the address or `pair` says.
+            (Some(fp), _) => Expect::Fingerprint(fp.clone()),
+            (None, Ok(fp)) => Expect::Fingerprint(fp.trim().to_owned()),
+            (None, Err(_)) if o.pair => Expect::Anyone,
+            (None, Err(_)) => bail!("{} isn't paired yet", o.host),
         };
         let o_drop = o.test_drop_one_in.filter(|n| *n > 1);
         let o_delay = o.test_delay_lost_ms.filter(|ms| *ms > 0);
         handler.stage(Stage::Handshake);
-        let (endpoint, conn, fingerprint) = connect(addr, &identity, expect).await?;
-        let new_here = !known.exists();
+        let (endpoint, conn, fingerprint) = connect(addr, &identity, expect).await.map_err(|e| match &expected {
+            Some(fp) if format!("{e:#}").contains("isn't the host that was paired") => anyhow::anyhow!("{} isn't the host that was expected: its certificate's fingerprint isn't {fp}", o.host),
+            _ => e,
+        })?;
+        // A host given by its fingerprint is nothing this device paired with: nothing is kept.
+        let new_here = expected.is_none() && !known.exists();
         if new_here {
             std::fs::create_dir_all(known.parent().unwrap())?;
             std::fs::write(&known, &fingerprint)?;
