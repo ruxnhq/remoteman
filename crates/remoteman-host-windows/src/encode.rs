@@ -92,22 +92,31 @@ pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<B
     }
     let any = || crate::mf::Encoder::open(gpu, input, settings).map(|e| Box::new(e) as Box<dyn FrameEncoder>).with_context(|| format!("Media Foundation's encoder on {}", gpu.adapter));
     let nvenc = || nvidia::open(gpu, input, settings).with_context(|| format!("NVENC on {}", gpu.adapter));
+    let d3d12 = || crate::d3d12enc::Encoder::open(gpu, input, settings).map(|e| Box::new(e) as Box<dyn FrameEncoder>).with_context(|| format!("Direct3D 12 Video Encode on {}", gpu.adapter));
     match WHICH.load(std::sync::atomic::Ordering::Relaxed) {
         NVENC => nvenc(),
         ANY_MAKERS => any(),
         // The card's own best first; on an NVIDIA card whose NVENC won't open, the other.
         _ if gpu.vendor == NVIDIA => nvenc().or_else(|first| any().map_err(|second| anyhow::anyhow!("{first:#}; and {second:#}"))),
+        // AMD's: Direct3D 12 Video Encode, which on a Radeon (the Ryzen 9 9950X3D's, RDNA 2) passed
+        // every test of `d3d12test.rs` and a 3200-picture run, with loss recovery without a
+        // keyframe and live rate changes that Media Foundation's AMD encoder lacks (it overshot
+        // the rate by 40% on busy pictures). HEVC 4:2:0 SDR only: for AV1, or when it won't open,
+        // Media Foundation's.
+        _ if gpu.vendor == AMD => d3d12().or_else(|first| any().map_err(|second| anyhow::anyhow!("{first:#}; and {second:#}"))),
         _ => any(),
     }
 }
 
 /// NVIDIA's PCI id.
 const NVIDIA: u32 = 0x10de;
+/// AMD's.
+const AMD: u32 = 0x1002;
 pub const AUTO: u8 = 0;
 pub const NVENC: u8 = 1;
 pub const ANY_MAKERS: u8 = 2;
 /// Direct3D 12 Video Encode (`d3d12enc.rs`): any maker's GPU, with loss recovery and live
-/// rate changes. Asked for with `--encoder d3d12`; not yet the default anywhere.
+/// rate changes. Asked for with `--encoder d3d12`; the default on AMD cards (HEVC, SDR).
 pub const D3D12: u8 = 3;
 /// Which encoder `--encoder` asked for; the card's own by default.
 pub static WHICH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(AUTO);

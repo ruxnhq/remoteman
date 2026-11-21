@@ -4508,6 +4508,15 @@ impl GeneratedHandle {
                     "Pin" => native::InputSystemCursorShape::Pin,
                     "Person" => native::InputSystemCursorShape::Person,
                     "AppStarting" => native::InputSystemCursorShape::AppStarting,
+                    // remoteman patch (VENDORED.md, patch 9): no cursor, from the app's resource 1.
+                    "Hidden" => {
+                        return Some((|| -> Result<(), WinUiError> {
+                            // Never an error that brings the app down: the default cursor then.
+                            let cursor = super::resource_cursor::from_resource(1).ok();
+                            object.value.cast::<native::IUIElementProtected>()?.SetProtectedCursor(cursor.as_ref())?;
+                            Ok(())
+                        })());
+                    }
                     _ => unreachable!("validated enum variant"),
                 };
                 Some((|| -> Result<(), WinUiError> {

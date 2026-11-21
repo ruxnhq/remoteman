@@ -236,3 +236,24 @@ screen mode" in the NVIDIA Control Panel (not tried; the owner's setting).
   only"), the lead undisturbed. It counted 464 frames lost at the join (the lead's frames before
   it came): fixed in the reassembler (losses count from the first frame seen, edef240, 5f59877).
   The second factor: the owner chose not to test it here. The test client is unpaired again.
+- 10:00: the Mac session installed e5d3856 (the Apple side of the new features, on the pushed
+  core) on the owner's everyday Mac host (restarted on 7791, same key, "it takes over"), the iPad
+  and the iPhone; the Mac viewer runs from its build folder, already this build. All new settings
+  start at the old behaviour.
+
+## AMD (10:10-10:50)
+The owner installed AMD's driver for the Ryzen's Radeon iGPU (RDNA2, 32.0.21044.64): the first
+AMD GPU the host's non-NVIDIA encoders ever ran on (encoder level, synthetic frames; 0afd199):
+- Media Foundation ("AMDh265Encoder"): works. HEVC Main 10 from P010 textures, 46.3 dB at 1080p,
+  4.4 ms; a forced keyframe carries VPS/SPS/PPS; 3200 frames in order (a 4-bit picture count, no
+  2048-frame issue). Fixed: its streams came tagged BT.2020 PQ (now BT.709 limited), and the
+  parameter sets went in front of its access-unit delimiters. Not fixed: it overshoots its
+  bitrate by about 40 % below 60 Mbit/s. No AV1 encoder on this iGPU.
+- Direct3D 12: works after five AMD fixes (coding-unit depth 4 found by search; references
+  marked encode-only; references listed newest first; pictures coded at a 64-aligned size and
+  cropped; asymmetric partitions declared). 1080p at 20 Mbit/s: 41.7 KB a frame against 41.67,
+  31.7 dB, 11.2 ms; 20 → 5 Mbit/s exact; recovery without a keyframe decodes 117 of 117; 3200
+  frames clean at 640x360 and 1280x720. The 5090 gives the same results as before.
+- AMD's default is now Direct3D 12 (Media Foundation if it won't open, and for AV1); Intel stays
+  on Media Foundation (untested). On this PC the display driver renders on the 5090, so the host
+  doesn't take the AMD path here; HDR, 4:4:4 and AV1 on AMD are untested.

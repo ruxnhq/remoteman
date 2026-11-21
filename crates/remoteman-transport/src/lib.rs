@@ -44,14 +44,90 @@ pub enum Expect {
 /// Connect to a host. Returns the endpoint (keep it alive), the connection and the host's
 /// fingerprint.
 pub async fn connect(addr: SocketAddr, identity: &Identity, expect: Expect) -> Result<(Endpoint, Connection, String)> {
-    let bind: SocketAddr = if addr.is_ipv6() { "[::]:0".parse()? } else { "0.0.0.0:0".parse()? };
-    let mut endpoint = Endpoint::client(bind)?;
+    connect_any(&[addr], identity, expect).await
+}
+
+/// How long one address is given before the next is tried beside it.
+const NEXT_ADDRESS: Duration = Duration::from_millis(250);
+
+/// The order a name's addresses are tried in: IPv4 on a local network first (the hosts listen on
+/// IPv4, and a `.local` name lists a computer's VPN and virtual-switch addresses too, often
+/// before its LAN one), then other IPv4 (a VPN's), then IPv6, link-local last.
+pub fn connect_order(addrs: impl IntoIterator<Item = SocketAddr>) -> Vec<SocketAddr> {
+    use std::net::IpAddr;
+    let rank = |a: &SocketAddr| match a.ip() {
+        IpAddr::V4(ip) if ip.is_loopback() || ip.is_private() => 0,
+        IpAddr::V4(ip) if ip.is_link_local() => 2,
+        IpAddr::V4(_) => 1,
+        IpAddr::V6(ip) if ip.is_loopback() => 0,
+        IpAddr::V6(ip) if ip.segments()[0] & 0xffc0 == 0xfe80 => 4,
+        IpAddr::V6(_) => 3,
+    };
+    let mut out: Vec<SocketAddr> = Vec::new();
+    for a in addrs {
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    }
+    out.sort_by_key(rank);
+    out
+}
+
+/// Connect to a host that may be at any of these addresses (all of one name's, in
+/// [`connect_order`]): each is tried [`NEXT_ADDRESS`] after the one before it (at once if that
+/// one has already failed), and the first that completes the handshake is kept. If none does,
+/// the error is a refusal or a wrong key if any address gave one, or else the first address's.
+pub async fn connect_any(addrs: &[SocketAddr], identity: &Identity, expect: Expect) -> Result<(Endpoint, Connection, String)> {
+    anyhow::ensure!(!addrs.is_empty(), "no address to connect to");
     let mut config = quinn::ClientConfig::new(Arc::new(tls::client(identity, expect)?));
     config.transport_config(Arc::new(transport()?));
-    endpoint.set_default_client_config(config);
-    let conn = endpoint.connect(addr, "remoteman")?.await.context("connect")?;
-    let fp = peer_fingerprint(&conn).context("the host sent no certificate")?;
-    Ok((endpoint, conn, fp))
+    let attempt = |addr: SocketAddr, config: quinn::ClientConfig| async move {
+        let bind: SocketAddr = if addr.is_ipv6() { "[::]:0".parse()? } else { "0.0.0.0:0".parse()? };
+        let mut endpoint = Endpoint::client(bind)?;
+        endpoint.set_default_client_config(config);
+        let conn = endpoint.connect(addr, "remoteman")?.await.context("connect")?;
+        let fp = peer_fingerprint(&conn).context("the host sent no certificate")?;
+        anyhow::Ok((endpoint, conn, fp))
+    };
+    if let [addr] = addrs {
+        return attempt(*addr, config).await;
+    }
+    let mut tries = tokio::task::JoinSet::new();
+    let mut waiting = addrs.iter().copied().enumerate();
+    let mut next = tokio::time::Instant::now();
+    let mut errors: Vec<(usize, SocketAddr, anyhow::Error)> = Vec::new();
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(next), if waiting.len() > 0 => {
+                let (i, addr) = waiting.next().unwrap();
+                let config = config.clone();
+                tries.spawn(async move { (i, addr, attempt(addr, config).await) });
+                next = tokio::time::Instant::now() + NEXT_ADDRESS;
+            }
+            Some(done) = tries.join_next() => match done {
+                Ok((_, addr, Ok(won))) => {
+                    tries.abort_all();
+                    if addrs.len() > 1 {
+                        tracing::info!(%addr, of = addrs.len(), "connected (of the name's addresses)");
+                    }
+                    return Ok(won);
+                }
+                Ok((i, addr, Err(e))) => {
+                    errors.push((i, addr, e));
+                    next = tokio::time::Instant::now();
+                }
+                Err(_) => next = tokio::time::Instant::now(),
+            },
+            else => break,
+        }
+    }
+    let timed_out = |e: &anyhow::Error| matches!(e.downcast_ref::<quinn::ConnectionError>(), Some(quinn::ConnectionError::TimedOut));
+    errors.sort_by_key(|(i, ..)| *i);
+    let pick = errors.iter().position(|(.., e)| !timed_out(e)).unwrap_or(0);
+    // (Not wrapped in more words: the apps tell the problems apart by what the error says.)
+    let (_, addr, e) = errors.swap_remove(pick);
+    tracing::info!(%addr, of = addrs.len(), "none of the name's addresses answered; the error is this one's");
+    Err(e)
 }
 
 /// The fingerprint of the other side's certificate.

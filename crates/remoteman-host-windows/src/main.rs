@@ -82,6 +82,8 @@ mod d3d12enc;
 #[cfg(all(windows, test))]
 mod d3d12test;
 #[cfg(all(windows, test))]
+mod mftest;
+#[cfg(all(windows, test))]
 mod enctest;
 #[cfg(windows)]
 mod hdr;

@@ -1399,6 +1399,7 @@ pub fn property_contract(kind: ObjectType, id: PropertyId) -> Option<PropertyCon
                     "Pin",
                     "Person",
                     "AppStarting",
+                    "Hidden",
                 ],
             },
         }),

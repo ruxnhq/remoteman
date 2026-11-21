@@ -26,6 +26,11 @@ fn windows_only() {
     println!("cargo:rerun-if-changed=assets/viewer.ico");
     let icon = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/viewer.ico");
     res.set_icon(icon.to_str().expect("icon path"));
+    // Cursor resource 1: blank (32x32, nothing drawn), what Reactor's `InputSystemCursorShape::Hidden`
+    // wears; the picture wears it while the pointer is captured (the computer's is drawn instead).
+    println!("cargo:rerun-if-changed=assets/blank.cur");
+    let blank = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/blank.cur");
+    res.append_rc_content(&format!("1 CURSOR \"{}\"", blank.to_str().expect("cursor path").replace('\\', "\\\\")));
     res.set("ProductName", "remoteman");
     res.set("FileDescription", "remoteman");
     res.set("OriginalFilename", "remoteman.exe");

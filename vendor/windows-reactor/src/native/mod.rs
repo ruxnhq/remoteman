@@ -29,6 +29,8 @@ mod local;
 )]
 mod menu_items;
 mod notifyicon;
+// remoteman patch (VENDORED.md, patch 9): a cursor from the app's resources.
+mod resource_cursor;
 mod transient_menu;
 mod winui;
 

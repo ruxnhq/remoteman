@@ -384,7 +384,7 @@ impl Component for Viewer {
         let session = self.session_view;
         let mut layers: Vec<View> = Vec::new();
         // The picture: always there (its panel keeps its swap chain), seen only in a session.
-        layers.push(self.picture.view(&self.panel, session).grid_row_span(2).into());
+        layers.push(self.picture.view(&self.panel, session, session && self.state.b("captured")).grid_row_span(2).into());
         if session {
             layers.push(Border::new().grid_row_span(2).content(crate::session::figures(&self.state)).into());
             layers.push(Border::new().grid_row_span(2).content(crate::session::pill(self, context)).into());

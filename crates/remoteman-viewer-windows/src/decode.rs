@@ -321,6 +321,9 @@ pub struct Picture {
     /// The frame's age when its decoding was done, if the clocks have been compared.
     pub age_us: Option<i64>,
     pub decoded: std::time::Instant,
+    /// When its frame came to this program (for measuring: the draw thread times the way from
+    /// there to the screen).
+    pub arrived: Option<std::time::Instant>,
 }
 
 // SAFETY: the frame is reference counted and may be freed from any thread; the texture belongs
@@ -559,26 +562,26 @@ impl Decoder {
                     let (width, height) = (f.width as u32, f.height as u32);
                     ffi::av_frame_unref(self.frame);
                     let ([texture, cb, cr], msb, semi) = put?;
-                    return Ok(Some(Picture { hold: ptr::null_mut(), texture, chroma: Some((cb, cr)), msb, semi, slice: 0, width, height, age_us, decoded: std::time::Instant::now() }));
+                    return Ok(Some(Picture { hold: ptr::null_mut(), texture, chroma: Some((cb, cr)), msb, semi, slice: 0, width, height, age_us, decoded: std::time::Instant::now(), arrived: None }));
                 }
                 if f.format == ffi::AVPixelFormat::AV_PIX_FMT_YUV444P10LE as i32 && std::env::var("REMOTEMAN_Y410").as_deref() == Ok("1") {
                 let put = upload.put_y410(f);
                 let (width, height) = (f.width as u32, f.height as u32);
                 ffi::av_frame_unref(self.frame);
-                return Ok(Some(Picture { hold: ptr::null_mut(), texture: put?, chroma: None, msb: false, semi: false, slice: 0, width, height, age_us, decoded: std::time::Instant::now() }));
+                return Ok(Some(Picture { hold: ptr::null_mut(), texture: put?, chroma: None, msb: false, semi: false, slice: 0, width, height, age_us, decoded: std::time::Instant::now(), arrived: None }));
             }
             let put = upload.put(f);
                 let (width, height) = (f.width as u32, f.height as u32);
                 ffi::av_frame_unref(self.frame);
                 let [texture, cb, cr] = put?;
-                return Ok(Some(Picture { hold: ptr::null_mut(), texture, chroma: Some((cb, cr)), msb: false, semi: false, slice: 0, width, height, age_us, decoded: std::time::Instant::now() }));
+                return Ok(Some(Picture { hold: ptr::null_mut(), texture, chroma: Some((cb, cr)), msb: false, semi: false, slice: 0, width, height, age_us, decoded: std::time::Instant::now(), arrived: None }));
             }
             anyhow::ensure!(f.format == ffi::AVPixelFormat::AV_PIX_FMT_D3D11 as i32, "the decoder gave a picture that isn't on the card");
             let raw = f.data[0] as *mut std::ffi::c_void;
             let texture = ID3D11Texture2D::from_raw_borrowed(&raw).context("a picture with no texture")?.clone();
             let hold = ffi::av_frame_clone(self.frame);
             anyhow::ensure!(!hold.is_null(), "out of memory");
-            let picture = Picture { hold, texture, chroma: None, msb: false, semi: false, slice: f.data[1] as usize as u32, width: f.width as u32, height: f.height as u32, age_us, decoded: std::time::Instant::now() };
+            let picture = Picture { hold, texture, chroma: None, msb: false, semi: false, slice: f.data[1] as usize as u32, width: f.width as u32, height: f.height as u32, age_us, decoded: std::time::Instant::now(), arrived: None };
             ffi::av_frame_unref(self.frame);
             Ok(Some(picture))
         }

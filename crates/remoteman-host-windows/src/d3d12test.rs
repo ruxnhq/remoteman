@@ -20,22 +20,28 @@ use crate::d3d12enc::Encoder;
 use crate::encode::Settings;
 
 /// The tests share one folder for their streams and one encoder's worth of the card: one at a time.
-static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-const W: u32 = 1920;
-const H: u32 = 1080;
-const FPS: u32 = 60;
+pub(crate) const W: u32 = 1920;
+pub(crate) const H: u32 = 1080;
+pub(crate) const FPS: u32 = 60;
 
-fn gpu() -> Option<Gpu> {
+/// The GPU the tests run on: the one `REMOTEMAN_TEST_ADAPTER` (or, as it was first called,
+/// `REMOTEMAN_D3D12_VENDOR`) names, by PCI vendor id in hex (`1002` AMD, `10de` NVIDIA, `8086`
+/// Intel) or by a part of its name; else the first hardware one DXGI lists.
+pub(crate) fn gpu() -> Option<Gpu> {
     // SAFETY: plain DXGI enumeration.
     let (luid, name) = unsafe {
         let f: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
-        let want = std::env::var("REMOTEMAN_D3D12_VENDOR").ok().and_then(|v| u32::from_str_radix(&v, 16).ok());
+        let asked = std::env::var("REMOTEMAN_TEST_ADAPTER").or_else(|_| std::env::var("REMOTEMAN_D3D12_VENDOR")).ok();
+        let want = asked.as_deref().and_then(|v| u32::from_str_radix(v, 16).ok().filter(|_| v.len() <= 4));
+        let by_name = asked.as_deref().filter(|_| want.is_none()).map(str::to_lowercase);
         let mut best = None;
         let mut i = 0;
         while let Ok(a) = f.EnumAdapters1(i) {
             let d = a.GetDesc1().ok()?;
-            if d.Flags & 2 == 0 && want.is_none_or(|w| w == d.VendorId) && best.is_none() {
+            let title = String::from_utf16_lossy(&d.Description).to_lowercase();
+            if d.Flags & 2 == 0 && want.is_none_or(|w| w == d.VendorId) && by_name.as_ref().is_none_or(|n| title.contains(n.as_str())) && best.is_none() {
                 best = Some(((d.AdapterLuid.LowPart, d.AdapterLuid.HighPart), String::from_utf16_lossy(&d.Description)));
             }
             i += 1;
@@ -46,24 +52,31 @@ fn gpu() -> Option<Gpu> {
     Gpu::on_adapter(luid).ok()
 }
 
-fn ffmpeg() -> PathBuf {
+/// A GPU without a Direct3D 12 encoder skips the test, unless the test was told which GPU to run
+/// on (`REMOTEMAN_D3D12_VENDOR`): then that is a failure.
+fn no_encoder(e: &anyhow::Error) {
+    assert!(std::env::var_os("REMOTEMAN_D3D12_VENDOR").is_none(), "no Direct3D 12 encoder on the GPU asked for: {e:?}");
+    eprintln!("no Direct3D 12 encoder: {e:?}");
+}
+
+pub(crate) fn ffmpeg() -> PathBuf {
     std::env::var_os("REMOTEMAN_FFMPEG").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ffmpeg\bin\ffmpeg.exe"))
 }
 
-fn out_dir() -> (PathBuf, bool) {
+pub(crate) fn out_dir() -> (PathBuf, bool) {
     match std::env::var_os("REMOTEMAN_TEST_OUT") {
         Some(d) => (d.into(), true),
         None => (std::env::temp_dir().join(format!("remoteman-d3d12-{}", std::process::id())), false),
     }
 }
 
-struct Source {
-    tex: ID3D11Texture2D,
-    view: ID3D11ShaderResourceView,
-    staging: ID3D11Texture2D,
+pub(crate) struct Source {
+    pub tex: ID3D11Texture2D,
+    pub view: ID3D11ShaderResourceView,
+    pub staging: ID3D11Texture2D,
 }
 
-fn source(gpu: &Gpu) -> Source {
+pub(crate) fn source(gpu: &Gpu) -> Source {
     // SAFETY: Direct3D calls as documented.
     unsafe {
         let desc = D3D11_TEXTURE2D_DESC { Width: W, Height: H, MipLevels: 1, ArraySize: 1, Format: DXGI_FORMAT_R10G10B10A2_UNORM, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 }, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32, ..Default::default() };
@@ -80,7 +93,7 @@ fn source(gpu: &Gpu) -> Source {
 }
 
 /// A moving picture: a gradient, drifting stripes, a box that travels, some texture.
-fn paint(gpu: &Gpu, s: &Source, f: u32) {
+pub(crate) fn paint(gpu: &Gpu, s: &Source, f: u32) {
     let mut px = vec![0u32; (W * H) as usize];
     let (bx, by) = ((f * 9) % (W - 400), 200 + (f * 4) % 500);
     for y in 0..H {
@@ -104,7 +117,7 @@ fn paint(gpu: &Gpu, s: &Source, f: u32) {
     unsafe { gpu.context.UpdateSubresource(&s.tex, 0, None, px.as_ptr() as *const _, W * 4, 0) };
 }
 
-fn dump(gpu: &Gpu, s: &Source, converted: &ID3D11Texture2D, out: &mut dyn Write) {
+pub(crate) fn dump(gpu: &Gpu, s: &Source, converted: &ID3D11Texture2D, out: &mut dyn Write) {
     // SAFETY: a staging texture mapped for reading, rows copied out within its pitch.
     unsafe {
         gpu.context.CopyResource(&s.staging, converted);
@@ -119,7 +132,7 @@ fn dump(gpu: &Gpu, s: &Source, converted: &ID3D11Texture2D, out: &mut dyn Write)
 }
 
 /// NAL types in a frame's data.
-fn nal_types(d: &[u8]) -> Vec<u8> {
+pub(crate) fn nal_types(d: &[u8]) -> Vec<u8> {
     let mut v = Vec::new();
     let mut i = 0;
     while i + 4 < d.len() {
@@ -173,13 +186,13 @@ fn run(gpu: &Gpu, count: u32, bitrate: u32, mut lost_at: impl FnMut(u32) -> Opti
     Ok((frames, note))
 }
 
-fn decode(path: &std::path::Path, raw: &std::path::Path) -> (String, u64) {
+pub(crate) fn decode(path: &std::path::Path, raw: &std::path::Path) -> (String, u64) {
     let o = Command::new(ffmpeg()).args(["-v", "error", "-y", "-i"]).arg(path).args(["-f", "rawvideo", "-pix_fmt", "p010le"]).arg(raw).output().expect("ffmpeg");
     let size = std::fs::metadata(raw).map(|m| m.len()).unwrap_or(0);
     (String::from_utf8_lossy(&o.stderr).into_owned(), size / (W as u64 * H as u64 * 3))
 }
 
-fn psnr(src: &std::path::Path, stream: &std::path::Path) -> String {
+pub(crate) fn psnr(src: &std::path::Path, stream: &std::path::Path) -> String {
     let o = Command::new(ffmpeg())
         .args(["-hide_banner", "-f", "rawvideo", "-pix_fmt", "p010le", "-video_size", &format!("{W}x{H}"), "-i"])
         .arg(src)
@@ -228,13 +241,14 @@ fn plain_stream() {
     let Some((gpu, dir, keep)) = setup() else { return eprintln!("no GPU: skipped") };
     let srcp = dir.join("src.p010");
     let mut w = std::io::BufWriter::new(std::fs::File::create(&srcp).unwrap());
-    let (frames, note) = match run(&gpu, frames_wanted(), 20_000_000, |_| None, |_| None, Some(&mut w)) {
+    let bitrate = std::env::var("REMOTEMAN_TEST_BITRATE").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000_000);
+    let (frames, note) = match run(&gpu, frames_wanted(), bitrate, |_| None, |_| None, Some(&mut w)) {
         Ok(x) => x,
-        Err(e) => return eprintln!("no Direct3D 12 encoder: {e:?}"),
+        Err(e) => return no_encoder(&e),
     };
     w.flush().unwrap();
     eprintln!("{note}");
-    stats("plain", &frames, 20_000_000);
+    stats("plain", &frames, bitrate);
     let stream = dir.join("plain.h265");
     std::fs::write(&stream, join(&frames, 1000..=1000)).unwrap();
     let (err, n) = decode(&stream, &dir.join("plain.yuv"));
@@ -252,7 +266,7 @@ fn live_rate_change() {
     let Some((gpu, dir, keep)) = setup() else { return eprintln!("no GPU: skipped") };
     let (frames, _) = match run(&gpu, 120, 20_000_000, |_| None, |f| (f == 60).then_some(5_000_000), None) {
         Ok(x) => x,
-        Err(e) => return eprintln!("no Direct3D 12 encoder: {e:?}"),
+        Err(e) => return no_encoder(&e),
     };
     let avg = |a: usize, b: usize| frames[a..b].iter().map(|f| f.data.len()).sum::<usize>() / (b - a);
     eprintln!("rate change at 60: bytes/frame 30..60 {} (20 Mbit/s = {}), 90..120 {} (5 Mbit/s = {})", avg(30, 60), 20_000_000 / 8 / FPS, avg(90, 120), 5_000_000 / 8 / FPS);
@@ -276,7 +290,7 @@ fn recovery_without_a_keyframe() {
     // Frames 60 to 62 are lost; the report reaches the host before frame 63.
     let (frames, _) = match run(&gpu, 120, 20_000_000, |f| (f == 63).then_some((60, 62)), |_| None, None) {
         Ok(x) => x,
-        Err(e) => return eprintln!("no Direct3D 12 encoder: {e:?}"),
+        Err(e) => return no_encoder(&e),
     };
     let t63 = nal_types(&frames[63].data);
     eprintln!("frame 63: key {} recovery {} NAL types {t63:?}, {} bytes (frame 62: {})", frames[63].key, frames[63].recovery, frames[63].data.len(), frames[62].data.len());
