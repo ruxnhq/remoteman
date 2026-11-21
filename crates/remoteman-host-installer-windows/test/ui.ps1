@@ -26,10 +26,12 @@ if (-not $global:UiLog) { $global:UiLog = "C:\rm\shots-setup\walk.log" }
 function Ui-Say([string]$line) { Add-Content $global:UiLog ("{0} {1}" -f (Get-Date -Format "HH:mm:ss.fff"), $line) }
 function Check([bool]$ok, [string]$what) { Ui-Say ($(if ($ok) { "ok: " } else { "FAIL: " }) + $what) }
 
-# The pages' process: the setup exe started with --ui, a descendant of the starter.
+# The pages' process: the setup exe started with --ui, a descendant of the starter (the viewer's
+# installer's when $global:SetupExeName says remoteman-viewer-setup.exe).
 function Ui-Pid([int]$seconds = 20) {
+  $exeName = if ($global:SetupExeName) { $global:SetupExeName } else { 'remoteman-host-setup.exe' }
   for ($i = 0; $i -lt $seconds * 5; $i++) {
-    $p = Get-CimInstance Win32_Process -Filter "Name='remoteman-host-setup.exe'" | Where-Object { $_.CommandLine -match ' --ui ' } | Select-Object -First 1
+    $p = Get-CimInstance Win32_Process -Filter "Name='$exeName'" | Where-Object { $_.CommandLine -match ' --ui ' } | Select-Object -First 1
     if ($p) { return [int]$p.ProcessId }
     Start-Sleep -Milliseconds 200
   }

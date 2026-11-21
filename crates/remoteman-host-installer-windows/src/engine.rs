@@ -1,7 +1,9 @@
 //! The steps of installing and of uninstalling, run on a thread of their own (the pages hear
-//! of each through events) or, silently, on the main one. The system's own steps are
+//! of each through events) or, silently, on the main one. The host's system steps are
 //! setup.ps1's (windows/host-installer/setup.ps1): this only stops what is running, puts the
 //! files in place, runs setup.ps1, and keeps Settings > Apps and the start at sign-in in order.
+//! The viewer's are fewer: what runs from its folder closed, the files, its Settings > Apps
+//! entry and its Start menu shortcut, all its user's own.
 //!
 //! Every change to the system goes through `Ctx::dry_run`: in a dry run it is written to the
 //! log as what would be done, and the files go into a folder in %TEMP% instead of Program Files.
@@ -12,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::archive::{self, Archive};
-use crate::log;
 use crate::system::{self, ServiceState};
+use crate::{Product, log, product};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -61,7 +63,7 @@ pub struct Ctx {
     pub fail_at: Option<String>,
     /// The setup file the files to install are read from.
     pub source: PathBuf,
-    /// `C:\Program Files\remoteman host`.
+    /// `C:\Program Files\remoteman host` (the viewer's: `%LOCALAPPDATA%\Programs\remoteman`).
     pub real_dir: PathBuf,
     /// Where the files go: `real_dir`, or in a dry run a folder in %TEMP%.
     pub dir: PathBuf,
@@ -120,7 +122,24 @@ impl Ctx {
 
 /// Where a dry run puts the files.
 pub fn dry_run_dir() -> PathBuf {
-    std::env::temp_dir().join("remoteman-host-setup-dry-run").join("remoteman host")
+    std::env::temp_dir().join(format!("{}-dry-run", product().setup_name())).join(product().name())
+}
+
+/// The program the product starts the user with, under an install folder: the host's app
+/// (Remoteman Host), or the viewer itself.
+pub fn app_exe(dir: &Path) -> PathBuf {
+    match product() {
+        Product::Host => dir.join(r"app\remoteman-host-app.exe"),
+        Product::Viewer => dir.join("remoteman.exe"),
+    }
+}
+
+/// The product's shortcut in Start: the host's for everyone, the viewer's for its user.
+fn shortcut() -> Option<PathBuf> {
+    match product() {
+        Product::Host => system::common_programs().map(|p| p.join(system::SHORTCUT)),
+        Product::Viewer => system::user_programs().map(|p| p.join(system::VIEWER_SHORTCUT)),
+    }
 }
 
 /// What is there before anything is done.
@@ -143,19 +162,22 @@ pub struct Installed {
 }
 
 pub fn facts(ctx: &Ctx, archive: Option<&Archive>) -> Facts {
-    let ours = system::open_key(system::UNINSTALL_KEY, system::VIEW64).map(|k| k.get_str("DisplayVersion").unwrap_or_default());
-    let inno = [system::VIEW64, system::VIEW32].into_iter().find_map(|view| system::open_key(system::INNO_KEY, view)).map(|k| k.get_str("DisplayVersion").unwrap_or_default());
+    let host = product() == Product::Host;
+    let ours = system::open_key(&system::uninstall_key(), system::VIEW64).map(|k| k.get_str("DisplayVersion").unwrap_or_default());
+    let inno = [system::VIEW64, system::VIEW32].into_iter().filter(|_| host).find_map(|view| system::open_key(system::INNO_KEY, view)).map(|k| k.get_str("DisplayVersion").unwrap_or_default());
+    // Files there with no entry (an entry deleted by hand, an install stopped half way).
+    let left = ctx.real_dir.join(if host { "setup.ps1" } else { "remoteman.exe" }).exists();
     let installed = match (ours, inno) {
         (Some(v), _) => Some(Installed { version: v, inno: false }),
         (None, Some(v)) => Some(Installed { version: v, inno: true }),
-        (None, None) if ctx.real_dir.join("setup.ps1").exists() => Some(Installed { version: String::new(), inno: false }),
+        (None, None) if left => Some(Installed { version: String::new(), inno: false }),
         _ => None,
     };
     Facts {
         version: archive.map(|a| a.index.version.clone()).unwrap_or_default(),
-        has_app: archive.is_some_and(|a| a.has_app()),
+        has_app: host && archive.is_some_and(|a| a.has_app()),
         installed,
-        app_installed: ctx.real_dir.join(r"app\remoteman-host-app.exe").exists(),
+        app_installed: host && app_exe(&ctx.real_dir).exists(),
     }
 }
 
@@ -169,6 +191,21 @@ pub struct StepInfo {
 pub fn plan(ctx: &Ctx, facts: &Facts) -> Vec<StepInfo> {
     let step = |id, title: &str, caption: &str| StepInfo { id, title: title.into(), caption: caption.into() };
     let dir = ctx.real(&ctx.real_dir);
+    if product() == Product::Viewer {
+        return match ctx.mode {
+            Mode::Install => vec![
+                step(StepId::Stop, "remoteman", "Closed first, if it is open, so that its files can be replaced"),
+                step(StepId::Register, "Settings > Apps", "An entry to remove it again, for you: first, so that whatever happens next can be undone"),
+                step(StepId::Files, "Files", &format!("Into {dir}")),
+                step(StepId::App, "Start", "A shortcut, remoteman, in your Start menu"),
+            ],
+            Mode::Uninstall => vec![
+                step(StepId::CloseApp, "remoteman", "Closed, if it is open"),
+                step(StepId::Delete, "Files", &format!("{dir}, deleted")),
+                step(StepId::Entries, "Settings > Apps", "The entry and the shortcut in Start, removed"),
+            ],
+        };
+    }
     match ctx.mode {
         Mode::Install => {
             let mut steps = vec![
@@ -239,13 +276,14 @@ type StepResult = Result<(String, Option<String>), String>;
 pub fn run(ctx: &Ctx, facts: &Facts, emit: &mut dyn FnMut(Event)) -> Outcome {
     let steps = plan(ctx, facts);
     log::say(&format!(
-        "{} remoteman host {}{} ({})",
+        "{} {} {}{} ({})",
         if ctx.mode == Mode::Install { "installing" } else { "uninstalling" },
+        product().name(),
         facts.version,
         if ctx.dry_run { ", DRY RUN: nothing is changed" } else { "" },
         ctx.dir.display()
     ));
-    if !ctx.dry_run {
+    if !ctx.dry_run && product().per_machine() {
         system::enable_debug_privilege();
     }
     let mut run = Run { ctx, facts, emit, at_restart: 0, setup_log: false };
@@ -340,6 +378,10 @@ impl Run<'_> {
     /// installer's PrepareToInstall did), and Remoteman Host, which holds its runtime's files.
     fn stop(&mut self) -> StepResult {
         let dir = &self.ctx.real_dir;
+        if product() == Product::Viewer {
+            let n = self.end(&app_exe(dir))?;
+            return Ok(if n > 0 { ("Closed".into(), None) } else { ("Not open".into(), None) });
+        }
         let mut stopped = Vec::new();
         match system::service_state(system::SERVICE) {
             ServiceState::Missing | ServiceState::Stopped => {}
@@ -383,14 +425,19 @@ impl Run<'_> {
         }
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
 
-        // Remoteman Host's folder holds only this version's files: what an earlier one had and
-        // this one doesn't is deleted (the rest of the install folder is left, installed.json
-        // above all, which tells setup.ps1 what the earlier install made).
-        let app = dir.join("app");
-        if app.exists() {
-            let keep: std::collections::HashSet<String> = archive.index.payload.iter().map(|e| e.path.to_lowercase()).collect();
+        // Remoteman Host's folder (the viewer's: its whole folder, less the uninstaller and the
+        // log) holds only this version's files: what an earlier one had and this one doesn't is
+        // deleted (the rest of the host's install folder is left, installed.json above all,
+        // which tells setup.ps1 what the earlier install made).
+        let (stale_root, also_kept): (PathBuf, &[&str]) = match product() {
+            Product::Host => (dir.join("app"), &[]),
+            Product::Viewer => (dir.clone(), &["uninstall.exe", "setup.log"]),
+        };
+        if stale_root.exists() {
+            let mut keep: std::collections::HashSet<String> = archive.index.payload.iter().map(|e| e.path.to_lowercase()).collect();
+            keep.extend(also_kept.iter().map(|k| k.to_string()));
             let mut stale = 0;
-            for file in walk(&app) {
+            for file in walk(&stale_root) {
                 let rel = file.strip_prefix(&dir).unwrap().to_string_lossy().to_lowercase();
                 if !keep.contains(&rel) {
                     std::fs::remove_file(&file).map_err(|e| format!("{}: {e}", file.display()))?;
@@ -398,7 +445,7 @@ impl Run<'_> {
                 }
             }
             if stale > 0 {
-                log::say(&format!("  {stale} files of the earlier Remoteman Host deleted"));
+                log::say(&format!("  {stale} files of the earlier version deleted"));
             }
         }
 
@@ -439,7 +486,7 @@ impl Run<'_> {
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         log::also(Some(dir.join("setup.log")));
         self.setup_log = true;
-        log::say(&format!("remoteman host setup {} into {}", archive.index.version, dir.display()));
+        log::say(&format!("{} {} into {}", product().setup_name(), archive.index.version, dir.display()));
         let written = dir.join("uninstall.exe");
         archive.write_uninstaller(&written).map_err(|e| format!("{}: {e}", written.display()))?;
         let check = Archive::open(&written).map_err(|e| format!("the uninstaller: {e}"))?;
@@ -452,11 +499,14 @@ impl Run<'_> {
         let payload: u64 = archive.index.payload.iter().filter_map(|e| sizes.get(e.sha256.as_str())).sum();
         let size_kb = (payload + std::fs::metadata(&written).map(|m| m.len()).unwrap_or(0)) / 1024;
         let uninstaller = real.join("uninstall.exe");
+        let icon = if product() == Product::Viewer { app_exe(real) } else { uninstaller.clone() };
+        let key_path = system::uninstall_key();
+        let hive = system::hive_name();
         let strings = [
-            ("DisplayName", "remoteman host".to_string()),
+            ("DisplayName", product().name().to_string()),
             ("DisplayVersion", self.facts.version.clone()),
             ("Publisher", "remoteman".to_string()),
-            ("DisplayIcon", format!("{},0", uninstaller.display())),
+            ("DisplayIcon", format!("{},0", icon.display())),
             ("InstallLocation", real.display().to_string()),
             ("UninstallString", format!("\"{}\" --uninstall", uninstaller.display())),
             ("QuietUninstallString", format!("\"{}\" --uninstall --silent", uninstaller.display())),
@@ -465,13 +515,13 @@ impl Run<'_> {
         let dwords = [("EstimatedSize", size_kb as u32), ("NoModify", 1), ("NoRepair", 1)];
         if self.ctx.dry_run {
             for (name, value) in &strings {
-                self.would(&format!(r"set HKLM\{}: {name} = {value}", system::UNINSTALL_KEY));
+                self.would(&format!(r"set {hive}\{key_path}: {name} = {value}"));
             }
             for (name, value) in &dwords {
-                self.would(&format!(r"set HKLM\{}: {name} = {value} (DWORD)", system::UNINSTALL_KEY));
+                self.would(&format!(r"set {hive}\{key_path}: {name} = {value} (DWORD)"));
             }
         } else {
-            let key = system::create_key(system::UNINSTALL_KEY).map_err(|e| e.to_string())?;
+            let key = system::create_key(&key_path).map_err(|e| e.to_string())?;
             for (name, value) in &strings {
                 key.set_str(name, value).map_err(|e| e.to_string())?;
             }
@@ -482,7 +532,8 @@ impl Run<'_> {
         // The Inno Setup installer's entry and its uninstaller go: this one is the uninstaller
         // now. Only those: its own uninstaller is never run (it would delete the host's state).
         let mut took_over = false;
-        for view in [system::VIEW64, system::VIEW32] {
+        let host = product() == Product::Host;
+        for view in [system::VIEW64, system::VIEW32].into_iter().filter(|_| host) {
             if system::open_key(system::INNO_KEY, view).is_some() {
                 took_over = true;
                 if self.ctx.dry_run {
@@ -493,7 +544,7 @@ impl Run<'_> {
                 }
             }
         }
-        for name in ["unins000.exe", "unins000.dat", "unins000.msg"] {
+        for name in ["unins000.exe", "unins000.dat", "unins000.msg"].into_iter().filter(|_| host) {
             let file = real.join(name);
             if file.exists() {
                 took_over = true;
@@ -659,8 +710,20 @@ impl Run<'_> {
     }
 
     fn app(&mut self) -> StepResult {
-        let exe = self.ctx.real_dir.join(r"app\remoteman-host-app.exe");
-        let link = system::common_programs().map(|p| p.join(system::SHORTCUT));
+        let exe = app_exe(&self.ctx.real_dir);
+        let link = shortcut();
+        if product() == Product::Viewer {
+            let Some(link) = link else { return Err("Windows didn't say where your Start menu is".into()) };
+            if self.ctx.dry_run {
+                self.would(&format!("make the shortcut {} to {}", link.display(), exe.display()));
+            } else {
+                if let Some(folder) = link.parent() {
+                    std::fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+                }
+                system::make_shortcut(&link, &exe, "remoteman: use your other computers from this PC").map_err(|e| format!("{}: {e}", link.display()))?;
+            }
+            return Ok(("Added".into(), None));
+        }
         if self.facts.has_app {
             let command = format!("\"{}\" --background", exe.display());
             if self.ctx.dry_run {
@@ -682,11 +745,12 @@ impl Run<'_> {
     }
 
     fn remove_app_entries(&mut self) -> Result<(), String> {
-        let link = system::common_programs().map(|p| p.join(system::SHORTCUT));
-        let run = system::open_key(system::RUN_KEY, system::VIEW64).and_then(|k| k.get_str(system::RUN_VALUE));
+        let link = shortcut();
+        // The start at sign-in is the host's app's only.
+        let run = system::open_key(system::RUN_KEY, system::VIEW64).filter(|_| product() == Product::Host).and_then(|k| k.get_str(system::RUN_VALUE));
         if self.ctx.dry_run {
             if run.is_some() {
-                self.would(&format!(r"delete HKLM\{}: {}", system::RUN_KEY, system::RUN_VALUE));
+                self.would(&format!(r"delete {}\{}: {}", system::hive_name(), system::RUN_KEY, system::RUN_VALUE));
             }
             if let Some(link) = link.filter(|l| l.exists()) {
                 self.would(&format!("delete {}", link.display()));
@@ -707,7 +771,7 @@ impl Run<'_> {
     // ---- Uninstalling ----
 
     fn close_app(&mut self) -> StepResult {
-        let n = self.end(&self.ctx.real_dir.join(r"app\remoteman-host-app.exe"))?;
+        let n = self.end(&app_exe(&self.ctx.real_dir))?;
         Ok(if n > 0 { ("Closed".into(), None) } else { ("Not open".into(), None) })
     }
 
@@ -718,7 +782,7 @@ impl Run<'_> {
         log::also(None);
         self.setup_log = false;
         if setup_log.exists() {
-            let kept = std::env::temp_dir().join("remoteman-host-setup-removed.log");
+            let kept = std::env::temp_dir().join(format!("{}-removed.log", product().setup_name()));
             let _ = std::fs::copy(&setup_log, &kept);
             log::say(&format!("  setup.log kept as {}", kept.display()));
         }
@@ -727,7 +791,7 @@ impl Run<'_> {
         }
         // Files in use go to a folder on the same drive (Windows' Temp; the user's in a dry run)
         // and when Windows restarts.
-        let trash = system::private_dir(!self.ctx.dry_run).ok();
+        let trash = system::private_dir(product().per_machine() && !self.ctx.dry_run).ok();
         let removed = system::remove_dir(&dir, trash.as_deref()).map_err(|e| e.to_string());
         if let Some(trash) = &trash
             && std::fs::remove_dir(trash).is_err()
@@ -750,10 +814,15 @@ impl Run<'_> {
 
     fn entries(&mut self) -> StepResult {
         self.remove_app_entries()?;
-        for (path, view) in [(system::UNINSTALL_KEY, system::VIEW64), (system::INNO_KEY, system::VIEW64), (system::INNO_KEY, system::VIEW32)] {
+        let ours = system::uninstall_key();
+        let mut keys = vec![(ours.as_str(), system::VIEW64)];
+        if product() == Product::Host {
+            keys.extend([(system::INNO_KEY, system::VIEW64), (system::INNO_KEY, system::VIEW32)]);
+        }
+        for (path, view) in keys {
             if system::open_key(path, view).is_some() {
                 if self.ctx.dry_run {
-                    self.would(&format!(r"delete HKLM\{path}"));
+                    self.would(&format!(r"delete {}\{path}", system::hive_name()));
                 } else {
                     system::delete_key(path, view).map_err(|e| e.to_string())?;
                 }
@@ -987,6 +1056,57 @@ mod tests {
         assert_eq!(std::fs::read(dir.join(r"app\remoteman-host-app.exe")).unwrap(), b"new app");
         assert_eq!(std::fs::read(dir.join(r"app\a.dll")).unwrap(), b"runtime dll");
         assert!(!dir.join(r"app\old.dll").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&build).unwrap();
+    }
+
+    /// The viewer's installer: its steps are its user's own (no setup.ps1, no service), its
+    /// files go over an install leaving only this version's (and the uninstaller and the log),
+    /// and it can't be packed without the viewer's program.
+    #[test]
+    fn the_viewer_installs_its_folder_alone() {
+        let _serial = SERIAL.lock().unwrap();
+        crate::TEST_PRODUCT.with(|p| p.set(Some(Product::Viewer)));
+        let dir = folder("viewer-files");
+        let build = folder("viewer-build");
+        let write = |root: &Path, rel: &str, bytes: &[u8]| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, bytes).unwrap();
+        };
+        write(&build, r"runtime\a.dll", b"runtime dll");
+        write(&build, r"payload\remoteman.exe", b"new viewer");
+        write(&build, r"payload\a.dll", b"runtime dll");
+        write(&build, r"payload\licenses\LICENSE.txt", b"MIT");
+        write(&build, "stub.exe", b"MZ stub");
+        write(&build, r"no-viewer\setup.ps1", b"param()");
+        let source = build.join("setup.exe");
+        let refused = crate::archive::pack(&build.join("stub.exe"), &build.join("runtime"), &build.join("no-viewer"), "9.9.9", &source).err().map(|e| e.to_string());
+        assert!(refused.as_deref().unwrap_or_default().contains("remoteman.exe"), "{refused:?}");
+        crate::archive::pack(&build.join("stub.exe"), &build.join("runtime"), &build.join("payload"), "9.9.9", &source).unwrap();
+        write(&dir, "remoteman.exe", b"old viewer");
+        write(&dir, "avcodec-62.dll", b"an earlier FFmpeg");
+        write(&dir, "uninstall.exe", b"the uninstaller");
+        write(&dir, "setup.log", b"the log");
+
+        let ctx = real_in(&dir, source);
+        let facts = Facts { version: "9.9.9".into(), has_app: false, installed: None, app_installed: false };
+        let ids: Vec<StepId> = plan(&ctx, &facts).iter().map(|s| s.id).collect();
+        assert_eq!(ids, [StepId::Stop, StepId::Register, StepId::Files, StepId::App]);
+        let uninstalling = Ctx { mode: Mode::Uninstall, ..ctx.clone() };
+        let ids: Vec<StepId> = plan(&uninstalling, &facts).iter().map(|s| s.id).collect();
+        assert_eq!(ids, [StepId::CloseApp, StepId::Delete, StepId::Entries]);
+        assert_eq!(app_exe(&dir), dir.join("remoteman.exe"));
+
+        let mut emit = |_: Event| {};
+        let mut run = Run { ctx: &ctx, facts: &facts, emit: &mut emit, at_restart: 0, setup_log: false };
+        let done = run.files();
+        crate::TEST_PRODUCT.with(|p| p.set(None));
+        assert!(done.is_ok(), "{done:?}");
+        assert_eq!(std::fs::read(dir.join("remoteman.exe")).unwrap(), b"new viewer");
+        assert_eq!(std::fs::read(dir.join(r"licenses\LICENSE.txt")).unwrap(), b"MIT");
+        assert!(!dir.join("avcodec-62.dll").exists());
+        assert!(dir.join("uninstall.exe").exists() && dir.join("setup.log").exists());
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&build).unwrap();
     }

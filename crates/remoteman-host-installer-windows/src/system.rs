@@ -20,7 +20,7 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
 use windows::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories};
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW,
     RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows::Win32::System::Services::{
@@ -32,19 +32,25 @@ use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateMutexW, GetCurrentProcess, GetExitCodeProcess, INFINITE, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
     QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
 };
-use windows::Win32::UI::Shell::{FOLDERID_CommonPrograms, FOLDERID_ProgramFiles, IShellLinkW, KF_FLAG_DEFAULT, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NOZONECHECKS, SHELLEXECUTEINFOW, SHGetKnownFolderPath, ShellExecuteExW, ShellLink};
+use windows::Win32::UI::Shell::{FOLDERID_CommonPrograms, FOLDERID_ProgramFiles, FOLDERID_Programs, FOLDERID_UserProgramFiles, IShellLinkW, KF_FLAG_DEFAULT, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NOZONECHECKS, SHELLEXECUTEINFOW, SHGetKnownFolderPath, ShellExecuteExW, ShellLink};
 use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MessageBoxW, SW_SHOWNORMAL};
 use windows::core::{GUID, HSTRING, Interface, PCWSTR, PWSTR, w};
 
+use crate::{Product, product};
+
 /// The service setup.ps1 registers, and the firewall rule's and the old logon task's name.
 pub const SERVICE: &str = "remoteman host";
-/// Our entry in Settings > Apps.
-pub const UNINSTALL_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\remoteman host";
+/// Our entry in Settings > Apps: the host's in HKLM, the viewer's in HKCU (`hive`).
+pub fn uninstall_key() -> String {
+    format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{}", product().name())
+}
 /// The Inno Setup installer's entry (remoteman-host.iss, AppId).
 pub const INNO_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{6A0F3C2E-5B7D-4E8A-9C1F-2D4B6E8A0C13}_is1";
 pub const RUN_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
 pub const RUN_VALUE: &str = "remoteman host";
 pub const SHORTCUT: &str = "Remoteman Host.lnk";
+/// The viewer's shortcut in its user's Start menu.
+pub const VIEWER_SHORTCUT: &str = "remoteman.lnk";
 
 fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain(Some(0)).collect()
@@ -111,14 +117,25 @@ fn known_folder(id: &GUID) -> Option<PathBuf> {
     }
 }
 
-/// `C:\Program Files\remoteman host`.
+/// `C:\Program Files\remoteman host`, or the viewer's `%LOCALAPPDATA%\Programs\remoteman`.
 pub fn install_dir() -> PathBuf {
-    known_folder(&FOLDERID_ProgramFiles).unwrap_or_else(|| PathBuf::from(r"C:\Program Files")).join("remoteman host")
+    match product() {
+        Product::Host => known_folder(&FOLDERID_ProgramFiles).unwrap_or_else(|| PathBuf::from(r"C:\Program Files")).join("remoteman host"),
+        Product::Viewer => known_folder(&FOLDERID_UserProgramFiles)
+            .or_else(|| std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Programs")))
+            .unwrap_or_else(|| std::env::temp_dir().join("Programs"))
+            .join("remoteman"),
+    }
 }
 
 /// The Start menu's folder for every user.
 pub fn common_programs() -> Option<PathBuf> {
     known_folder(&FOLDERID_CommonPrograms)
+}
+
+/// The Start menu's folder of the user who runs this.
+pub fn user_programs() -> Option<PathBuf> {
+    known_folder(&FOLDERID_Programs)
 }
 
 pub fn windows_dir() -> PathBuf {
@@ -153,7 +170,7 @@ pub fn private_dir(elevated: bool) -> io::Result<PathBuf> {
     let base = if elevated { windows_dir().join("Temp") } else { std::env::temp_dir() };
     for attempt in 0..20u32 {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
-        let dir = base.join(format!("remoteman-host-setup-{}-{:08x}", std::process::id(), nanos.wrapping_add(attempt)));
+        let dir = base.join(format!("{}-{}-{:08x}", product().setup_name(), std::process::id(), nanos.wrapping_add(attempt)));
         let made = if elevated {
             // SAFETY: the security descriptor lives until LocalFree, after the call.
             unsafe {
@@ -180,7 +197,7 @@ pub fn private_dir(elevated: bool) -> io::Result<PathBuf> {
 pub fn single_instance() -> bool {
     // SAFETY: the handle is kept for the life of the process on purpose.
     unsafe {
-        match CreateMutexW(None, true, w!("Local\\remoteman-host-setup")) {
+        match CreateMutexW(None, true, &HSTRING::from(format!("Local\\{}", product().setup_name()))) {
             Ok(_) => windows::Win32::Foundation::GetLastError() != windows::Win32::Foundation::ERROR_ALREADY_EXISTS,
             Err(_) => true,
         }
@@ -190,7 +207,7 @@ pub fn single_instance() -> bool {
 pub fn message(text: &str) {
     // SAFETY: plain call.
     unsafe {
-        MessageBoxW(None, &HSTRING::from(text), w!("remoteman host setup"), MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+        MessageBoxW(None, &HSTRING::from(text), &HSTRING::from(format!("{} setup", product().name())), MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
     }
 }
 
@@ -433,7 +450,18 @@ pub fn stop_service(name: &str, timeout: Duration) -> io::Result<()> {
     }
 }
 
-// ---- The registry (HKLM, 64-bit view unless said) ----
+// ---- The registry (the product's hive, 64-bit view unless said) ----
+
+/// HKLM for the host, which is installed for the whole PC; HKCU for the viewer, which is the
+/// user's own.
+fn hive() -> HKEY {
+    if product().per_machine() { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER }
+}
+
+/// The hive's short name, for what is logged and said.
+pub fn hive_name() -> &'static str {
+    if product().per_machine() { "HKLM" } else { "HKCU" }
+}
 
 pub struct Key(HKEY);
 
@@ -451,15 +479,15 @@ fn win32(code: windows::Win32::Foundation::WIN32_ERROR, what: &str) -> io::Resul
 pub fn open_key(path: &str, view: REG_SAM_FLAGS) -> Option<Key> {
     let mut key = HKEY::default();
     // SAFETY: the key is closed by Key.
-    let code = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, &HSTRING::from(path), None, KEY_READ | view, &mut key) };
+    let code = unsafe { RegOpenKeyExW(hive(), &HSTRING::from(path), None, KEY_READ | view, &mut key) };
     code.is_ok().then_some(Key(key))
 }
 
 pub fn create_key(path: &str) -> io::Result<Key> {
     let mut key = HKEY::default();
     // SAFETY: the key is closed by Key.
-    let code = unsafe { RegCreateKeyExW(HKEY_LOCAL_MACHINE, &HSTRING::from(path), None, PCWSTR::null(), REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, None, &mut key, None) };
-    win32(code, &format!(r"HKLM\{path}"))?;
+    let code = unsafe { RegCreateKeyExW(hive(), &HSTRING::from(path), None, PCWSTR::null(), REG_OPTION_NON_VOLATILE, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, None, &mut key, None) };
+    win32(code, &format!(r"{}\{path}", hive_name()))?;
     Ok(Key(key))
 }
 
@@ -469,17 +497,17 @@ pub fn delete_key(path: &str, view: REG_SAM_FLAGS) -> io::Result<()> {
     let mut parent = HKEY::default();
     // SAFETY: the key is closed.
     unsafe {
-        let code = RegOpenKeyExW(HKEY_LOCAL_MACHINE, &HSTRING::from(parent_path), None, KEY_READ | KEY_WRITE | view, &mut parent);
-        win32(code, &format!(r"HKLM\{parent_path}"))?;
+        let code = RegOpenKeyExW(hive(), &HSTRING::from(parent_path), None, KEY_READ | KEY_WRITE | view, &mut parent);
+        win32(code, &format!(r"{}\{parent_path}", hive_name()))?;
         let parent = Key(parent);
         let code = RegDeleteTreeW(parent.0, &HSTRING::from(name));
         if code == windows::Win32::Foundation::ERROR_FILE_NOT_FOUND {
             return Ok(());
         }
-        win32(code, &format!(r"HKLM\{path}"))?;
+        win32(code, &format!(r"{}\{path}", hive_name()))?;
         let code = windows::Win32::System::Registry::RegDeleteKeyExW(parent.0, &HSTRING::from(name), view.0, None);
         if code != windows::Win32::Foundation::ERROR_FILE_NOT_FOUND {
-            win32(code, &format!(r"HKLM\{path}"))?;
+            win32(code, &format!(r"{}\{path}", hive_name()))?;
         }
     }
     Ok(())
@@ -531,7 +559,7 @@ impl Key {
 pub fn open_key_writable(path: &str) -> Option<Key> {
     let mut key = HKEY::default();
     // SAFETY: the key is closed by Key.
-    let code = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, &HSTRING::from(path), None, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, &mut key) };
+    let code = unsafe { RegOpenKeyExW(hive(), &HSTRING::from(path), None, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, &mut key) };
     code.is_ok().then_some(Key(key))
 }
 

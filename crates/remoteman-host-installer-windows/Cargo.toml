@@ -5,16 +5,28 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# The host's installer for Windows: one downloadable file, remoteman-host-setup-VERSION.exe, and
-# the uninstaller Settings > Apps runs. Its pages are WinUI 3 through Microsoft's windows-reactor
-# (vendor/windows-reactor); the files it installs, and the Windows App Runtime its pages need,
-# are packed into the exe itself (src/archive.rs). It holds no rule of the product's: the system
-# steps are windows/host-installer/setup.ps1's, which it only runs. src/main.rs says how the one
-# file becomes the three processes it runs as. Everything it needs is Windows-only, so on other
-# systems this crate builds to a stub.
+# remoteman's installers for Windows, one engine (the library, src/lib.rs) and a program for each
+# product: the host's, one downloadable file, remoteman-host-setup-VERSION.exe, and the
+# uninstaller Settings > Apps runs; and the viewer's, remoteman-viewer-setup-VERSION.exe, for
+# those who want the viewer without the Store. Their pages are WinUI 3 through Microsoft's
+# windows-reactor (vendor/windows-reactor); the files each installs, and the Windows App Runtime
+# its pages need, are packed into the exe itself (src/archive.rs). It holds no rule of the host's:
+# the host's system steps are windows/host-installer/setup.ps1's, which it only runs. src/lib.rs
+# says how the one file becomes the processes it runs as. Everything it needs is Windows-only, so
+# on other systems this crate builds to a stub.
+[lib]
+name = "remoteman_setup"
+path = "src/lib.rs"
+# The indented command lines in its documentation are command lines, not Rust.
+doctest = false
+
 [[bin]]
 name = "remoteman-host-setup"
 path = "src/main.rs"
+
+[[bin]]
+name = "remoteman-viewer-setup"
+path = "src/viewer.rs"
 
 [target.'cfg(windows)'.dependencies]
 windows-reactor = { path = "../../vendor/windows-reactor" }

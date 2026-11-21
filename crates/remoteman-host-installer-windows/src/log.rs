@@ -13,13 +13,17 @@ static ALSO: Mutex<Option<PathBuf>> = Mutex::new(None);
 static GATE: Mutex<()> = Mutex::new(());
 
 pub fn init(file: Option<PathBuf>) {
-    let file = file.unwrap_or_else(|| std::env::temp_dir().join("remoteman-host-setup.log"));
-    let _ = FILE.set(file);
+    let _ = FILE.set(file.unwrap_or_else(default));
+}
+
+/// `%TEMP%\remoteman-host-setup.log` (`remoteman-viewer-setup.log` for the viewer's).
+fn default() -> PathBuf {
+    std::env::temp_dir().join(format!("{}.log", crate::product().setup_name()))
 }
 
 /// The installer's own log.
 pub fn path() -> PathBuf {
-    FILE.get().cloned().unwrap_or_else(|| std::env::temp_dir().join("remoteman-host-setup.log"))
+    FILE.get().cloned().unwrap_or_else(default)
 }
 
 /// Also write to this file (the install folder's setup.log), or stop.

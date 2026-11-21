@@ -444,6 +444,58 @@ the windows-rs git repository (Cargo resolves git sources for every platform: a 
 dependency) but compiles none of it. Built on Linux for Windows (cargo-xwin), the installer would
 have no runtime to pack and no manifest to find it: build it on Windows.
 
+## The viewer outside the Store: remoteman-viewer-setup
+
+Added 2026-11-21, for people who want the viewer installed without the Store. It is the host's
+installer's engine, pages and archive (`crates/remoteman-host-installer-windows`, now a library
+with two programs: `src/main.rs` the host's, `src/viewer.rs` the viewer's, `Product` in
+`src/lib.rs` saying what differs), around the folder `scripts\win-viewer-app.ps1` stages (the one
+that runs with nothing installed). Like the Store's package it is **per user and never
+elevated**: no UAC prompt, the starter runs the steps itself.
+
+- **Installing:** remoteman (if it runs from that folder) closed; `uninstall.exe` and the entry
+  in that user's Settings > Apps (`HKCU\...\Uninstall\remoteman`: DisplayName "remoteman",
+  DisplayVersion, Publisher, DisplayIcon `remoteman.exe`, InstallLocation, UninstallString
+  `"...\uninstall.exe" --uninstall`, QuietUninstallString with `--silent`, EstimatedSize, NoModify,
+  NoRepair), first, so that a failure later can still be undone; the files into
+  `%LOCALAPPDATA%\Programs\remoteman` (what an earlier version had and this one doesn't is
+  deleted; each file is read back and checked); a shortcut, `remoteman.lnk`, in that user's Start
+  menu. Done, "Open remoteman" starts it.
+- **Uninstalling** (Settings > Apps > remoteman, or `uninstall.exe --uninstall [--silent]`):
+  remoteman closed, the folder deleted, the entry and the shortcut removed. The viewer's own state,
+  `%APPDATA%\remoteman` (its key and the computers it has paired with), is the viewer's, not the
+  installer's, and stays.
+- `--silent`, `--dry-run`, `--fail-at`, `--theme` and `--log` as the host's (the log:
+  `%TEMP%\remoteman-viewer-setup.log`, and `setup.log` in the install folder); `--trust`,
+  `--encoder` and `--no-pair` are the host's and are refused.
+
+**Build:** with the release (below), which packs the release's viewer folder into
+`target\release\remoteman-viewer-setup.exe`:
+
+    remoteman-viewer-setup --pack --runtime DIR --payload VIEWER-FOLDER --version V --out FILE
+
+## A release: scripts\win-release.ps1
+
+    powershell -ExecutionPolicy Bypass -File scripts\win-release.ps1 -Version X.Y.Z [-Out target\windows-release]
+               [-Ffmpeg C:\ffmpeg] [-Libclang C:\rm\llvm\bin]
+
+From one run and one version: `remoteman-host-setup-X.Y.Z.exe` (`scripts\win-host-setup.ps1`),
+`remoteman-viewer-setup-X.Y.Z.exe` and `remoteman-viewer-windows-X.Y.Z.zip`, each with
+`FILE.sha256` beside it (`<lower-case hex>  <name>` and a line end, as `sha256sum` writes and
+`sha256sum -c` reads). The zip and the viewer's installer are made from **one folder, staged
+once**, so they can't differ: `scripts\win-viewer-app.ps1`'s folder plus `version.txt` and
+`licences\` (remoteman's `LICENSE`, MIT; FFmpeg's licence text from `-Ffmpeg`'s `LICENSE.txt`;
+`FFmpeg-SOURCE.txt`, which says the DLLs are FFmpeg's, unchanged, where its source is, and which
+build they are, from that folder's `ffmpeg.exe -version`). The zip holds it as
+`remoteman-viewer-windows-X.Y.Z\`; the installer installs its files.
+
+`-Version` must be the workspace's version (`[workspace.package]` in `Cargo.toml`), from which
+every program's version information is built (the script stops otherwise: bump it there first);
+it is then in the files' names, in each installer's archive (its pages, Settings > Apps) and in
+`version.txt`. What the build needs and this PC lacks (FFmpeg's DLLs, its licence or ffmpeg.exe,
+libclang, Build Tools, CMake, the driver kit) is said before anything is built. The work folder is
+`target\windows-release-work`.
+
 ## What an unsigned download shows a user
 
 Neither of these was seen here (the VM's files have no "downloaded from the internet" mark, and

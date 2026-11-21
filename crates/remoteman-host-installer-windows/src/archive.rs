@@ -355,8 +355,13 @@ pub fn pack(exe: &Path, runtime: &Path, payload: &Path, version: &str, out: &Pat
     };
     let ui = collect(runtime)?;
     let payload_entries = collect(payload)?;
-    if !payload_entries.iter().any(|e| e.path.eq_ignore_ascii_case("setup.ps1")) {
-        return Err(io::Error::other(format!("{} has no setup.ps1", payload.display())));
+    // What the product can't be installed without: the host's setup.ps1, the viewer's program.
+    let needed = match crate::product() {
+        crate::Product::Host => "setup.ps1",
+        crate::Product::Viewer => "remoteman.exe",
+    };
+    if !payload_entries.iter().any(|e| e.path.eq_ignore_ascii_case(needed)) {
+        return Err(io::Error::other(format!("{} has no {needed}", payload.display())));
     }
     let in_ui: std::collections::HashSet<&str> = ui.iter().map(|e| e.sha256.as_str()).collect();
     // Alike files together: by name, then by where they come from.
@@ -440,7 +445,7 @@ impl<W: Write> Write for Counter<'_, W> {
 pub fn pack_command(args: &crate::Args) -> i32 {
     crate::system::attach_console();
     let (Some(runtime), Some(payload), Some(version), Some(out)) = (&args.runtime, &args.payload, &args.version, &args.out) else {
-        println!("usage: remoteman-host-setup --pack --runtime DIR --payload DIR --version V --out FILE");
+        println!("usage: {} --pack --runtime DIR --payload DIR --version V --out FILE", crate::product().setup_name());
         return 2;
     };
     let exe = std::env::current_exe().expect("this exe");

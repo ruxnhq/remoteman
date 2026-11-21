@@ -3,8 +3,10 @@
 //! line under it, the buttons at the bottom right, Mica, light or dark as Windows is):
 //!
 //! - installing: what will be installed and where (Install), then each step as it goes, then
-//!   done (Open Remoteman Host) or what failed and where the log is;
+//!   done (Open Remoteman Host; the viewer's: Open remoteman) or what failed and where the log is;
 //! - uninstalling: what will be removed (Remove), each step, done or failed.
+//!
+//! The words are the host's or the viewer's (`product()`); the pages are the same.
 //!
 //! The steps run on a thread of their own (src/engine.rs); their events come back through a
 //! chain of Reactor background tasks, each waiting for the next event. The window can't be
@@ -22,7 +24,7 @@ use windows_reactor::*;
 
 use crate::archive::Archive;
 use crate::engine::{self, Ctx, Event, Facts, Mode, Outcome, StepId, StepInfo};
-use crate::{log, system};
+use crate::{Product, log, product, system};
 
 /// The mark from the design boards.
 const LOGO_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><rect x=".5" y=".5" width="15" height="15" rx="3.5" fill="#0B1437" stroke="#2458F5"/><rect x="3" y="5" width="7" height="5" rx="1.2" fill="#2458F5"/><path d="M11.5 6h2M11.5 7.8h2.5M11.5 9.5h1.5" stroke="#fff" stroke-width="1.1" stroke-linecap="round"/></svg>"##;
@@ -64,7 +66,7 @@ pub fn run(args: &crate::Args) -> i32 {
     if ctx.mode == Mode::Install && archive.is_err() {
         let e = archive.err().map(|e| e.to_string()).unwrap_or_default();
         log::say(&format!("pages: {e}"));
-        system::message(&format!("remoteman host can't be installed from this file: {e}"));
+        system::message(&format!("{} can't be installed from this file: {e}", product().name()));
         return EXIT_FAILED;
     }
     let facts = engine::facts(&ctx, archive.as_ref().ok());
@@ -75,7 +77,7 @@ pub fn run(args: &crate::Args) -> i32 {
         _ => WindowTheme::System,
     };
     // The window's icon is a file: beside this exe (a folder of this run's own).
-    let icon_path = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("setup.ico"))).unwrap_or_else(|| std::env::temp_dir().join("remoteman-host-setup.ico"));
+    let icon_path = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("setup.ico"))).unwrap_or_else(|| std::env::temp_dir().join(format!("{}.ico", product().setup_name())));
     if std::fs::read(&icon_path).ok().as_deref() != Some(ICON) {
         let _ = std::fs::write(&icon_path, ICON);
     }
@@ -266,7 +268,8 @@ impl Component for Installer {
 
     fn view(&self, start: &Start, context: &mut ViewContext<Self>) -> View {
         let uninstall = start.ctx.mode == Mode::Uninstall;
-        context.window_title(if uninstall { "Remove remoteman host" } else { "remoteman host setup" });
+        let name = product().name();
+        context.window_title(&if uninstall { format!("Remove {name}") } else { format!("{name} setup") });
         context.window_visuals(
             WindowVisuals::new()
                 .client_size(720.0, 680.0)
@@ -276,7 +279,7 @@ impl Component for Installer {
                 .icon(start.icon.clone()),
         );
         let title_bar = TitleBar::new()
-            .title(if uninstall { "remoteman host: remove" } else { "remoteman host setup" })
+            .title(if uninstall { format!("{name}: remove") } else { format!("{name} setup") })
             .icon(Icon::image_svg(EncodedImage::new(LOGO_SVG.to_vec())))
             .grid_row(0);
 
@@ -302,7 +305,7 @@ impl Component for Installer {
             (Page::Welcome, true) => self.confirm(start, &mut parts, &mut buttons, context),
             (Page::Running, _) => {
                 parts.push(heading(
-                    if uninstall { "Removing remoteman host" } else { "Installing remoteman host" },
+                    &if uninstall { format!("Removing {name}") } else { format!("Installing {name}") },
                     "This takes a minute or so. The window can be closed when it is done.",
                 ));
                 if self.close_refused {
@@ -335,6 +338,25 @@ impl Drop for Installer {
 impl Installer {
     fn welcome(&self, start: &Start, parts: &mut Vec<View>, buttons: &mut Vec<View>, context: &ViewContext<Self>) {
         let version = &start.facts.version;
+        if product() == Product::Viewer {
+            parts.push(heading(
+                "Install remoteman",
+                &format!("See and use your other computers from this PC. Version {version}, into {}, for you only: no administrator is needed.", start.ctx.real_dir.display()),
+            ));
+            if let Some(installed) = &start.facts.installed {
+                let what = if installed.version.is_empty() { "remoteman is installed here already".to_string() } else { format!("remoteman {} is installed here already", installed.version) };
+                parts.push(InfoBar::new().is_open(true).is_closable(false).severity(InfoBarSeverity::Informational).message(format!("{what}. It is replaced; your paired computers are kept.")).into());
+            }
+            let items = [
+                ("remoteman", "The app, with what it needs beside it: FFmpeg's video decoder and the Windows App Runtime. Nothing else on this PC is changed."),
+                ("Start", "A shortcut, remoteman, in your Start menu."),
+            ];
+            parts.push(card(items.iter().enumerate().map(|(i, (title, words))| row(badge(i + 1, State::Waiting), title, Some(words), None)).collect()));
+            parts.push(caption("Settings > Apps > remoteman removes it again.").into());
+            buttons.push(button("Cancel", context.message(Message::Cancel), false));
+            buttons.push(button("Install", context.message(Message::Go), true));
+            return;
+        }
         parts.push(heading(
             "Install remoteman host",
             &format!("It lets your paired devices see and control this PC. Version {version}, into {}.", start.ctx.real_dir.display()),
@@ -381,12 +403,22 @@ impl Installer {
     }
 
     fn confirm(&self, start: &Start, parts: &mut Vec<View>, buttons: &mut Vec<View>, context: &ViewContext<Self>) {
+        let name = product().name();
         let Some(installed) = &start.facts.installed else {
-            parts.push(heading("remoteman host isn't installed", &format!("Nothing of it was found on this PC ({} isn't there).", start.ctx.real_dir.display())));
+            parts.push(heading(&format!("{name} isn't installed"), &format!("Nothing of it was found on this PC ({} isn't there).", start.ctx.real_dir.display())));
             buttons.push(button("Close", context.message(Message::Close), true));
             return;
         };
         let version = if installed.version.is_empty() { String::new() } else { format!(" {}", installed.version) };
+        if product() == Product::Viewer {
+            parts.push(heading("Remove remoteman?", &format!("remoteman{version}, in {}:", start.ctx.real_dir.display())));
+            let items = [("The app", "Its folder, deleted."), ("Start and Settings > Apps", "Its shortcut and its entry.")];
+            parts.push(card(items.iter().enumerate().map(|(i, (title, words))| row(badge(i + 1, State::Waiting), title, Some(words), None)).collect()));
+            parts.push(caption("Your paired computers and settings stay (in your AppData\\Roaming\\remoteman), for when it is installed again.").into());
+            buttons.push(button("Cancel", context.message(Message::Cancel), false));
+            buttons.push(button("Remove", context.message(Message::Go), true));
+            return;
+        }
         parts.push(heading("Remove remoteman host?", &format!("remoteman host{version}, in {}. Everything its installer set up is taken away:", start.ctx.real_dir.display())));
         let mut items = vec![
             ("The host and its service", "Paired devices can no longer reach this PC."),
@@ -406,10 +438,19 @@ impl Installer {
         let outcome = self.outcome.as_ref();
         if start.ctx.mode == Mode::Uninstall {
             let later = outcome.map(|o| o.at_restart).unwrap_or(0);
-            let words = if later == 0 { "Nothing of it is left on this PC.".to_string() } else { format!("{later} of its files go when Windows restarts; nothing else of it is left.") };
-            parts.push(heading("remoteman host is removed", &words));
+            let words = match (later, product()) {
+                (0, Product::Viewer) => "Nothing of it is left but your paired computers and settings.".to_string(),
+                (0, _) => "Nothing of it is left on this PC.".to_string(),
+                _ => format!("{later} of its files go when Windows restarts; nothing else of it is left."),
+            };
+            parts.push(heading(&format!("{} is removed", product().name()), &words));
             parts.push(self.steps(start));
             buttons.push(button("Close", context.message(Message::Close), true));
+        } else if product() == Product::Viewer {
+            parts.push(heading("remoteman is installed", "Open it now, or later from Start. On another computer, install remoteman host, and pair this PC with it."));
+            parts.push(self.steps(start));
+            buttons.push(button("Close", context.message(Message::Close), false));
+            buttons.push(button("Open remoteman", context.message(Message::OpenApp), true));
         } else {
             let words = if start.facts.has_app {
                 "The host is running and starts with Windows. Pair a device in Remoteman Host: on the device, choose Pair a computer and pick this PC."
@@ -433,8 +474,9 @@ impl Installer {
     fn failed(&self, start: &Start, parts: &mut Vec<View>, buttons: &mut Vec<View>, context: &ViewContext<Self>) {
         let uninstall = start.ctx.mode == Mode::Uninstall;
         let outcome = self.outcome.as_ref();
+        let name = product().name();
         parts.push(heading(
-            if uninstall { "remoteman host couldn't be removed" } else { "remoteman host couldn't be installed" },
+            &if uninstall { format!("{name} couldn't be removed") } else { format!("{name} couldn't be installed") },
             "It stopped at the step that failed; nothing after it was done.",
         ));
         let (title, reason) = match outcome.and_then(|o| o.failed.as_ref()) {
@@ -445,9 +487,9 @@ impl Installer {
         let log = outcome.map(|o| o.log.clone()).unwrap_or_else(log::path);
         let done = |id: StepId| self.rows.iter().zip(&start.plan).any(|(r, s)| s.id == id && r.state == State::Done);
         let next = if uninstall {
-            "Settings > Apps > remoteman host tries again.".to_string()
+            format!("Settings > Apps > {name} tries again.")
         } else if done(StepId::Register) || start.facts.installed.is_some() {
-            "What was installed so far can be removed in Settings > Apps > remoteman host.".to_string()
+            format!("What was installed so far can be removed in Settings > Apps > {name}.")
         } else if outcome.and_then(|o| o.failed.as_ref()).is_some_and(|(id, _)| *id == StepId::Register) {
             format!("{} may be left on this PC; installing again replaces it.", start.ctx.real_dir.display())
         } else {

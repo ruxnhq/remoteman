@@ -4,6 +4,8 @@ Use an iPad or iPhone as a real display, keyboard and touchscreen for a Linux PC
 
 - Design and status: [docs/PLAN.md](docs/PLAN.md).
 - Wire protocol: [docs/PROTOCOL.md](docs/PROTOCOL.md).
+- Windows packages, installers and releases: [docs/WINDOWS-PACKAGING.md](docs/WINDOWS-PACKAGING.md).
+- Licence: MIT ([LICENSE](LICENSE)).
 
 So far the Linux host and the shared core exist; the iPad app doesn't.
 

@@ -1,11 +1,13 @@
-//! The starter and the elevated part (src/main.rs says how a run is three processes).
+//! The starter and the elevated part (src/lib.rs says how a run is three processes). The
+//! viewer's installer is never elevated: its starter is its "elevated part" itself, as an
+//! elevated host installer's is.
 
 use std::path::{Path, PathBuf};
 
 use crate::archive::Archive;
 use crate::engine::{self, Ctx, Event};
 use crate::ui::{EXIT_CANCELLED, EXIT_DONE, EXIT_FAILED, EXIT_OPEN_APP, EXIT_START_APP};
-use crate::{Args, log, system};
+use crate::{Args, Product, log, product, system};
 
 /// How the starter hands over to the elevated part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,10 +21,11 @@ pub enum Handover {
     Shell(&'static str),
 }
 
-/// Asks Windows for elevation only when this process hasn't got it. Run from the install
+/// Asks Windows for elevation only when this process hasn't got it and needs it (`enough`: it
+/// is elevated, or it is the viewer's installer, which needs no elevation). Run from the install
 /// folder (`inside`, the uninstaller), the rest always runs from a copy outside it.
-pub fn handover(elevated: bool, dry_run: bool, inside: bool) -> Handover {
-    match (elevated || dry_run, inside) {
+pub fn handover(enough: bool, dry_run: bool, inside: bool) -> Handover {
+    match (enough || dry_run, inside) {
         (false, _) => Handover::Shell("runas"),
         (true, false) => Handover::Here,
         (true, true) => Handover::Copy,
@@ -51,11 +54,11 @@ pub fn starter(args: &Args) -> i32 {
         EXIT_FAILED
     };
     if let Err(e) = Archive::open(&me) {
-        return fail(&format!("This file can't install or remove remoteman host: {e}"));
+        return fail(&format!("This file can't install or remove {}: {e}", product().name()));
     }
 
     let elevated = system::is_elevated();
-    let how = handover(elevated, args.dry_run, inside);
+    let how = handover(elevated || !product().per_machine(), args.dry_run, inside);
     log::say(&format!("elevated: {elevated}; the elevated part runs {how:?}"));
 
     let code = if how == Handover::Here {
@@ -71,11 +74,11 @@ pub fn starter(args: &Args) -> i32 {
             let _ = std::env::set_current_dir(&temp);
             let dir = match system::private_dir(elevated && !args.dry_run) {
                 Ok(d) => d,
-                Err(e) => return fail(&format!("remoteman host setup couldn't make a folder in Temp: {e}")),
+                Err(e) => return fail(&format!("{} couldn't make a folder in Temp: {e}", product().setup_name())),
             };
-            let copy = dir.join("remoteman-host-setup.exe");
+            let copy = dir.join(format!("{}.exe", product().setup_name()));
             if let Err(e) = std::fs::copy(&me, &copy) {
-                return fail(&format!("remoteman host setup couldn't copy itself to {}: {e}", copy.display()));
+                return fail(&format!("{} couldn't copy itself to {}: {e}", product().setup_name(), copy.display()));
             }
             copy_dir = Some(dir);
             copy
@@ -100,12 +103,12 @@ pub fn starter(args: &Args) -> i32 {
                     }
                     return if args.silent { EXIT_FAILED } else { EXIT_CANCELLED };
                 }
-                Err(e) => return fail(&format!("remoteman host setup couldn't start: {e}")),
+                Err(e) => return fail(&format!("{} couldn't start: {e}", product().setup_name())),
             },
             // As this process is (elevated, or a dry run), with no shell between.
             _ => match system::spawn(&target, &child_args, &cwd) {
                 Ok(p) => p,
-                Err(e) => return fail(&format!("remoteman host setup couldn't start: {e}")),
+                Err(e) => return fail(&format!("{} couldn't start: {e}", product().setup_name())),
             },
         };
 
@@ -139,9 +142,10 @@ pub fn starter(args: &Args) -> i32 {
 
 /// Remoteman Host, started as the user (this process is not elevated), so that its icon is there
 /// now and not only from the next sign-in: its window (Open Remoteman Host), or in the
-/// background as at sign-in (Close).
+/// background as at sign-in (Close). For the viewer's installer: the viewer (Open remoteman).
 fn open_app(install_dir: &Path, background: bool, dry_run: bool) {
-    let exe = install_dir.join(r"app\remoteman-host-app.exe");
+    let exe = engine::app_exe(install_dir);
+    let background = background && product() == Product::Host;
     let args: &[&str] = if background { &["--background"] } else { &[] };
     if dry_run {
         log::say(&format!("would start {} {}", exe.display(), args.join(" ")));
@@ -192,11 +196,11 @@ fn stage2_inner(args: &Args, me: &Path, elevated: bool) -> i32 {
         }
         EXIT_FAILED
     };
-    if !args.dry_run && !elevated {
-        return fail("remoteman host setup needs an administrator, and Windows didn't give it one.");
+    if !args.dry_run && !elevated && product().per_machine() {
+        return fail(&format!("{} setup needs an administrator, and Windows didn't give it one.", product().name()));
     }
     if !system::single_instance() {
-        return fail("remoteman host setup is already running.");
+        return fail(&format!("{} setup is already running.", product().name()));
     }
 
     if args.silent {
@@ -204,7 +208,7 @@ fn stage2_inner(args: &Args, me: &Path, elevated: bool) -> i32 {
         let archive = Archive::open(me).ok();
         let facts = engine::facts(&ctx, archive.as_ref());
         if ctx.mode == engine::Mode::Uninstall && facts.installed.is_none() {
-            log::say("remoteman host isn't installed: nothing to remove");
+            log::say(&format!("{} isn't installed: nothing to remove", product().name()));
             return EXIT_DONE;
         }
         let mut emit = |e: Event| {
@@ -228,13 +232,13 @@ fn stage2_inner(args: &Args, me: &Path, elevated: bool) -> i32 {
     };
     let dir = match system::private_dir(elevated) {
         Ok(d) => d,
-        Err(e) => return fail(&format!("remoteman host setup couldn't make its folder: {e}")),
+        Err(e) => return fail(&format!("{} couldn't make its folder: {e}", product().setup_name())),
     };
     let started = std::time::Instant::now();
-    let exe = dir.join("remoteman-host-setup.exe");
+    let exe = dir.join(format!("{}.exe", product().setup_name()));
     let unpacked = archive.unpack(&archive.index.ui, &dir, &mut |_| {}).and_then(|files| archive.write_exe(&exe).map(|()| files));
     let code = match unpacked {
-        Err(e) => fail(&format!("remoteman host setup couldn't unpack itself into {}: {e}", dir.display())),
+        Err(e) => fail(&format!("{} couldn't unpack itself into {}: {e}", product().setup_name(), dir.display())),
         Ok(files) => {
             log::say(&format!("unpacked the pages' runtime into {}: {} files in {:.1} s", dir.display(), files.len(), started.elapsed().as_secs_f64()));
             let mut ui_args = vec!["--ui".to_string(), "--source".into(), me.to_string_lossy().into_owned()];
@@ -242,7 +246,7 @@ fn stage2_inner(args: &Args, me: &Path, elevated: bool) -> i32 {
             system::allow_foreground();
             match std::process::Command::new(&exe).args(&ui_args).current_dir(&dir).status() {
                 Ok(status) => status.code().unwrap_or(EXIT_FAILED),
-                Err(e) => fail(&format!("remoteman host setup couldn't open its window: {e}")),
+                Err(e) => fail(&format!("{} couldn't open its window: {e}", product().setup_name())),
             }
         }
     };
