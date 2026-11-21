@@ -539,12 +539,19 @@ impl App {
 
     /// How this display is to sit among a computer's own, which stream to ask it for, and the
     /// most that may use.
+    /// A placement was picked for this computer: it wins from now on over one the command line
+    /// gave.
+    fn drop_given_placement(&mut self, address: &str) {
+        if let Some(given) = self.args.given.as_mut().filter(|g| g.address == address) {
+            given.placement = None;
+        }
+    }
+
     pub fn choices(&self, address: &str) -> (Placement, Quality, u32) {
+        let placement = placement(&self.args, &self.store, address);
         match self.store.find(address) {
-            Some(c) => (c.placement, c.quality.unwrap_or(self.store.settings.quality), c.bitrate),
-            // Not in the list: a computer named on the command line gets the placement last
-            // used; one being paired starts as an extra display.
-            None => (if self.args.host.is_some() { self.store.settings.placement } else { Placement::Extend }, self.store.settings.quality, 0),
+            Some(c) => (placement, c.quality.unwrap_or(self.store.settings.quality), c.bitrate),
+            None => (placement, self.store.settings.quality, 0),
         }
     }
 
@@ -792,10 +799,20 @@ impl App {
             attach_only: self.store.find(&target.address).is_some_and(|c| c.attach_only),
         };
         *shared.folder.lock().unwrap() = self.store.receive_folder();
-        say!("connecting to {} for {}x{} at {} Hz{}", target.address, display.width, display.height, display.refresh, if display.hdr { format!(", HDR (headroom {:.1})", display.headroom) } else { String::new() });
+        // `remoteman connect`: its keys for the computer it names, every time it is tried.
+        let given = self.args.given_for(&target.address).map(crate::args::Given::core).unwrap_or_default();
+        say!(
+            "connecting to {} for {}x{} at {} Hz{}{}",
+            target.address,
+            display.width,
+            display.height,
+            display.refresh,
+            if display.hdr { format!(", HDR (headroom {:.1})", display.headroom) } else { String::new() },
+            if given.expect.is_some() { ", with the keys given" } else { "" }
+        );
         let (id, tx, scene) = (self.attempt_id, self.results.0.clone(), self.scene.clone());
         let _ = std::thread::Builder::new().name("connect".into()).spawn(move || {
-            let result = Client::connect(options, feed).map_err(|e| format!("{e:#}"));
+            let result = Client::connect_given(options, given, feed).map_err(|e| format!("{e:#}"));
             let _ = tx.send((id, result));
             scene.wake_window();
         });
@@ -1263,7 +1280,10 @@ impl App {
                 client.send_message(Message::Configure { display: None, bitrate: Some(s.bitrate * 1_000_000), decoders: None });
             }
         }
-        self.store.settings.placement = display.placement;
+        // A placement given on the command line is that connection's, not the one last used.
+        if self.args.given_for(&address).is_none_or(|g| g.placement.is_none()) {
+            self.store.settings.placement = display.placement;
+        }
         self.store.save_settings();
         self.reach.remove(&address);
         let name = self.name_of(&address);
@@ -1552,6 +1572,7 @@ impl App {
                 if s.display.placement != placement {
                     let address = s.target.address.clone();
                     self.store.update(&address, |c| c.placement = placement);
+                    self.drop_given_placement(&address);
                     say!("placement: {} asked for, by connecting again", crate::store::placement_key(placement));
                     self.reconnect();
                 }
@@ -1675,7 +1696,10 @@ impl App {
                 self.store.settings.quality = QUALITIES[n.min(3)];
                 self.store.save_settings();
             }
-            Choice::Placement(address) => self.store.update(&address, |c| c.placement = PLACEMENT_NAMES[n.min(3)].0),
+            Choice::Placement(address) => {
+                self.store.update(&address, |c| c.placement = PLACEMENT_NAMES[n.min(3)].0);
+                self.drop_given_placement(&address);
+            }
             Choice::Size(address) => self.store.update(&address, |c| c.max_height = SIZES[n.min(3)].0),
             Choice::Scroll => {
                 self.store.settings.scroll_reversed = n == 1;
@@ -2346,4 +2370,48 @@ impl App {
 /// Let a connection go without making the window wait: saying goodbye can take a second.
 fn retire(client: Arc<Client>) {
     let _ = std::thread::Builder::new().name("goodbye".into()).spawn(move || drop(client));
+}
+
+/// How the display for the computer at `address` is to sit among its own: as `remoteman
+/// connect --placement` says for the computer it names, else as was chosen for that computer;
+/// one not in the list gets the placement last used if the command line names it, and one being
+/// paired starts as an extra display.
+fn placement(args: &Args, store: &Store, address: &str) -> Placement {
+    if let Some(given) = args.given_for(address).and_then(|g| g.placement) {
+        return given;
+    }
+    match store.find(address) {
+        Some(c) => c.placement,
+        None if args.host.is_some() => store.settings.placement,
+        None => Placement::Extend,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_placement_given_wins_over_the_computers_own() {
+        let dir = std::env::temp_dir().join(format!("remoteman-placement-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("viewer-computers"), "[computer]\nname=guest\naddress=172.29.1.2:7791\nplacement=extend\n[computer]\nname=other\naddress=10.0.0.9:7791\nplacement=only\n").unwrap();
+        std::fs::write(dir.join("viewer-settings"), "placement=mirror\n").unwrap();
+        let store = Store::load(&dir);
+        let words = |w: &str| w.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let mut args = crate::args::parse_from(words(&format!("172.29.1.2:7791 --state {}", dir.display()))).unwrap();
+        // As it was: the computer's own, and the last used for one the command line names.
+        assert_eq!(placement(&args, &store, "172.29.1.2:7791"), Placement::Extend);
+        assert_eq!(placement(&args, &store, "10.0.0.9:7791"), Placement::Only);
+        assert_eq!(placement(&args, &store, "10.0.0.10:7791"), Placement::Mirror);
+        // Given for the computer named: that, for it alone.
+        args.given = Some(crate::args::Given { address: "172.29.1.2:7791".into(), expect: "ab".repeat(32), cert: Vec::new(), key: Vec::new(), placement: Some(Placement::Main) });
+        assert_eq!(placement(&args, &store, "172.29.1.2:7791"), Placement::Main);
+        assert_eq!(placement(&args, &store, "10.0.0.9:7791"), Placement::Only);
+        // Picked in the session: the computer's own again.
+        args.given.as_mut().unwrap().placement = None;
+        assert_eq!(placement(&args, &store, "172.29.1.2:7791"), Placement::Extend);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

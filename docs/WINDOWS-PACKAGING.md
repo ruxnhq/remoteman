@@ -134,6 +134,43 @@ App Certification Kit, an upgrade, arm64 (the engine and FFmpeg are x64 only).
 versions keep the last field 0); real logos at every scale and the listing's art; the Windows App
 Certification Kit run on the package; the privacy policy and `runFullTrust` justification above.
 Then the unsigned `.msix` is uploaded as it is.
+
+## The viewer's command line, and `remoteman connect`
+
+People start `remoteman.exe` with nothing and pick a computer from its list. The rest of the
+command line is for tests and for other programs:
+
+    remoteman.exe [HOST:PORT] [--state DIR] [--pair] [--log FILE] [--window WxH] [--pos X,Y] [--dark|--light] [...]
+    remoteman.exe connect ADDRESS:PORT --expect FINGERPRINT --identity CERT.der KEY.der [--placement extend|main|only|mirror] [--state DIR] [...]
+
+The first connects at once to a computer this PC has paired with (or pairs with it, `--pair`),
+from what the state folder keeps (`%APPDATA%\remoteman`, or `--state DIR`; in the MSIX, the
+package's own folder). The whole list is `USAGE` in `crates/remoteman-viewer-windows/src/args.rs`.
+
+`connect` is for a program that holds a computer's keys itself, as Guesthouse does for its
+virtual machines, so it needn't write remoteman's state folder by hand:
+
+- `--expect FINGERPRINT`: the computer's certificate fingerprint, the SHA-256 of its DER
+  certificate as 64 hex digits. Only a computer with exactly that certificate is accepted, with no
+  pairing and no question. The key the state folder keeps for that address (`client\hosts`) is
+  neither read nor changed, and none is written. Any other certificate is turned away, and the
+  window says so ("This isn't the ... that was expected"). The computer still goes into the
+  viewer's list (`viewer-computers`) once a session starts, as any computer does.
+- `--identity CERT.der KEY.der`: this PC's certificate and key (PKCS #8) for the computer, DER, as
+  `client\cert.der` and `client\key.der` hold remoteman's own. Read once at the start; the identity
+  the state folder keeps is neither used nor overwritten.
+- `--placement extend|main|only|mirror`: where the display goes for this run (`main`: it becomes
+  the computer's main display, its own staying on as secondary ones). It wins over the placement
+  saved for that computer and isn't saved as the one last used. A placement picked in the session
+  (the bar's menu, the computer's settings) wins from then on.
+- `--state DIR`: where the viewer keeps its settings, as before.
+
+All of it holds for every connection to that computer in the run (trying again, connecting again
+for another placement), and for no other computer picked from the list. The words are checked
+before the window does anything, and what is wrong is said in the window: the computer without its
+port, a fingerprint that isn't 64 hex digits, a file that can't be read, a key that isn't the
+certificate's, a placement there isn't.
+
 ## The host: an installer of its own
 
 **The display driver is remoteman's own** (since 2026-11-19, on the owner's word that remoteman

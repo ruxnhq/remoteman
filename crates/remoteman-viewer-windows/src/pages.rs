@@ -333,6 +333,10 @@ fn trouble(app: &App, ui: &mut Ui, target: &Target, problem: &Problem) {
             acts.push(back);
             status(ui, area, Sign::Icon(Icon::Info), &format!("{name} has a different key"), &words, None, &acts);
         }
+        Problem::Unexpected => {
+            let words = format!("What answered at {} has a key other than the one remoteman was started with (--expect), so it wasn't let in.", short(&address));
+            status(ui, area, Sign::Icon(Icon::Info), &format!("This isn't the {name} that was expected"), &words, None, &[again("Try again"), back]);
+        }
         Problem::Refused(said) => {
             status(ui, area, Sign::Icon(Icon::Info), &format!("{name} closed the connection"), &format!("It answered, and said: {said}"), None, &[again("Connect again"), back]);
         }

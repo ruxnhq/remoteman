@@ -1,10 +1,15 @@
 //! remoteman for Windows: the app.
 //!
 //!     remoteman.exe [HOST:PORT] [the engine's words] [--window WxH] [--pos X,Y] [--dark|--light]
+//!     remoteman.exe connect ADDRESS:PORT --expect FINGERPRINT --identity CERT.der KEY.der
+//!         [--placement extend|main|only|mirror] [--state DIR] [the rest as above]
 //!
-//! Ordinary people start it with nothing; the rest is for tests. The engine takes the old
-//! program's words (HOST:PORT, --pair, --state, --log, --seconds, --size, --play, ...); these are
-//! the view's own: `--window` the window's size in the app's units, `--pos` where it goes in
+//! Ordinary people start it with nothing; the rest is for tests, and `connect` for a program
+//! that holds a computer's keys itself (Guesthouse): that computer is accepted by its
+//! certificate's fingerprint alone, with no pairing, and this PC proves itself with the
+//! identity given, the saved one left as it is (the engine's `args.rs`). The engine takes the
+//! old program's words (HOST:PORT, --pair, --state, --log, --seconds, --size, --play, ...); these
+//! are the view's own: `--window` the window's size in the app's units, `--pos` where it goes in
 //! pixels, `--dark` / `--light` the theme (the engine is told too).
 //!
 //! WinUI 3 through windows-reactor, the view only: what is on screen is the engine's state

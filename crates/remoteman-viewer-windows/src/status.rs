@@ -24,6 +24,9 @@ pub enum Problem {
     NotPaired,
     /// Something else answered with another key.
     Changed,
+    /// Something answered with a key other than the one the command line gave
+    /// (`remoteman connect --expect`).
+    Unexpected,
     /// The computer answered and said no; with its reason.
     Refused(String),
     /// The computer is logging its user in (or unlocking) for this PC and will take it in a
@@ -44,6 +47,8 @@ pub const LOGGING_IN_TRIES: u32 = 10;
 pub fn classify(error: &str) -> Problem {
     if error.contains("isn't the host that was paired") {
         Problem::Changed
+    } else if error.contains("isn't the host that was expected") {
+        Problem::Unexpected
     } else if error.contains("isn't paired") || error.contains("the host refused: not_paired") {
         Problem::NotPaired
     } else if let Some((_, said)) = error.split_once("the host refused: logging_in: ") {

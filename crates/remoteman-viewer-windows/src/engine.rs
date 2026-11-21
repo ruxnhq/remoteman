@@ -1465,6 +1465,7 @@ fn problem(p: &Problem) -> Value {
         Problem::Asleep => ("asleep", ""),
         Problem::NotPaired => ("not-paired", ""),
         Problem::Changed => ("changed", ""),
+        Problem::Unexpected => ("unexpected", ""),
         Problem::Refused(s) => ("refused", s.as_str()),
         Problem::LoggingIn(s) => ("logging-in", s.as_str()),
         Problem::Locked(s) => ("locked", s.as_str()),
