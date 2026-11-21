@@ -499,7 +499,8 @@ elevated**: no UAC prompt, the starter runs the steps itself.
   `"...\uninstall.exe" --uninstall`, QuietUninstallString with `--silent`, EstimatedSize, NoModify,
   NoRepair), first, so that a failure later can still be undone; the files into
   `%LOCALAPPDATA%\Programs\remoteman` (what an earlier version had and this one doesn't is
-  deleted; each file is read back and checked); a shortcut, `remoteman.lnk`, in that user's Start
+  deleted, and so is anything else in that folder, which is taken to be the installer's: a
+  folder copied there by hand is replaced; each file is read back and checked); a shortcut, `remoteman.lnk`, in that user's Start
   menu. Done, "Open remoteman" starts it.
 - **Uninstalling** (Settings > Apps > remoteman, or `uninstall.exe --uninstall [--silent]`):
   remoteman closed, the folder deleted, the entry and the shortcut removed. The viewer's own state,
