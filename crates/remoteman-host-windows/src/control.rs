@@ -195,6 +195,9 @@ pub fn pipe_name(port: u16) -> String {
 /// The host's log file, for `log` (set at the start when there is one).
 pub static LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
+/// `--no-pair`: `pair on` is refused, so nobody new is let in while this host runs.
+pub static NO_PAIR: AtomicBool = AtomicBool::new(false);
+
 /// Is this process SYSTEM, started by the service? Asked once.
 fn system() -> bool {
     static IS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -378,6 +381,7 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "address": host.address.to_string(),
                 "fingerprint": host.fingerprint,
                 "pairing": host.pairing(),
+                "no_pair": NO_PAIR.load(Ordering::Relaxed),
                 "second_device": host.second_device().as_str(),
                 "pending": host.pending(),
                 "devices": devices_json(host),
@@ -400,6 +404,7 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
         }
         // Pairing opened here waits for its owner's word on the device that comes (the code
         // is in `status`); `--pair` on the command line trusts the first to come.
+        (Some("pair"), Some("on"), _) if NO_PAIR.load(Ordering::Relaxed) => "pairing is switched off on this host (it was started with --no-pair)\n".into(),
         (Some("pair"), Some(word @ ("on" | "off")), _) => {
             host.set_confirm(true);
             host.set_pairing(word == "on");

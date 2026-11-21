@@ -484,6 +484,13 @@ pub struct Host {
     pub address: SocketAddr,
 }
 
+/// The fingerprint of the host whose state is in `state` (its identity is in `state/host`, as
+/// [`Host::start`] keeps it), the identity made first if there is none: what a viewer checks
+/// this host against, without starting it.
+pub fn fingerprint(state: &std::path::Path) -> Result<String> {
+    Ok(Identity::load_or_create(&state.join("host"))?.fingerprint)
+}
+
 impl Host {
     /// Start listening. `handler` is called on a thread of its own from here on.
     pub fn start(options: HostOptions, handler: impl HostHandler) -> Result<Self> {
@@ -1494,5 +1501,21 @@ mod tests {
         // A type nobody knows still ends it: its length can't be known.
         let mut buf = vec![99, 1, 2];
         assert!(take_events(&mut buf, |_| ()).is_err());
+    }
+
+    /// The fingerprint is made once and then read back: the same however often it is asked,
+    /// and the SHA-256 of the certificate kept where the host keeps it.
+    #[test]
+    fn fingerprint_is_made_once_and_kept() {
+        let state = std::env::temp_dir().join(format!("rm-host-fingerprint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let first = fingerprint(&state).unwrap();
+        let again = fingerprint(&state).unwrap();
+        assert_eq!(first, again);
+        assert_eq!(first.len(), 64);
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        let cert = std::fs::read(state.join("host").join("cert.der")).unwrap();
+        assert_eq!(first, remoteman_transport::fingerprint(&cert));
+        std::fs::remove_dir_all(&state).unwrap();
     }
 }

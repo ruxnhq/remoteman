@@ -1,11 +1,22 @@
 //! `remoteman-host`: the Windows host. It streams a monitor of the display driver to one client
 //! at a time (a new one takes over) and puts the client's input into the desktop.
 //!
-//!     remoteman-host [--listen ADDR:PORT] [--state DIR] [--pair] [--name NAME] [--log FILE]
-//!                    [--bitrate MBIT] [--mode keep|listed|any] [--allow files,clipboard]
-//!                    [--encoder auto|nvenc|mf] [--refine yes|no] [--seconds N]
+//!     remoteman-host [--listen ADDR:PORT] [--state DIR] [--pair | --ask | --no-pair] [--name NAME]
+//!                    [--log FILE] [--bitrate MBIT] [--mode keep|listed|any] [--allow files,clipboard]
+//!                    [--encoder auto|nvenc|mf|d3d12] [--refine yes|no] [--seconds N]
 //!     remoteman-host --probe | --probe-picture [--log FILE]
 //!     remoteman-host ctl [--port PORT] WORDS
+//!     remoteman-host fingerprint [--state DIR]
+//!
+//! `fingerprint` prints this host's fingerprint (the SHA-256 of its certificate, in lower-case
+//! hex: what a viewer checks it against) and nothing else, making its identity first if the
+//! state folder has none. Its `--state` is the host's: the installed service's is
+//! `C:\ProgramData\remoteman\host`, which must be said, as the default is the user's
+//! `%LOCALAPPDATA%\remoteman`.
+//!
+//! `--no-pair`: nobody new can be let in while this host runs, by any way: no `--pair` or
+//! `--ask`, and `ctl pair on` (Remoteman Host's way too) is refused. Only the devices already in
+//! the trust list (`STATE\host\trusted`) get in.
 //!
 //! `--ask` keeps pairing open and asks the owner, in a small window of Windows' own on the
 //! desktop, about each new device that comes: its name and the six-digit code it should be
@@ -181,6 +192,19 @@ mod windows_main {
             print!("{}", crate::control::ask(port, &words.join(" "))?);
             return Ok(());
         }
+        // Not a host either: this host's fingerprint, its identity made if there is none.
+        if args.peek().map(String::as_str) == Some("fingerprint") {
+            args.next();
+            let mut state = state_dir();
+            while let Some(a) = args.next() {
+                match a.as_str() {
+                    "--state" => state = args.next().context("--state needs a value")?.into(),
+                    other => anyhow::bail!("unknown option {other}: fingerprint [--state DIR]"),
+                }
+            }
+            println!("{}", remoteman_core::host::fingerprint(&state)?);
+            return Ok(());
+        }
         // For tests: announce this host on the network under NAME for SECONDS, with a made-up
         // fingerprint, and nothing else (no driver, no elevation): `--announce-test NAME SECONDS`.
         if args.peek().map(String::as_str) == Some("--announce-test") {
@@ -244,6 +268,7 @@ mod windows_main {
                 "--bitrate" => bitrate = value()?.parse().context("--bitrate in Mbit/s")?,
                 "--pair" => pair = true,
                 "--ask" => ask = true,
+                "--no-pair" => crate::control::NO_PAIR.store(true, Ordering::Relaxed),
                 // Set by the service when it starts this host: stop when that event is set.
                 "--stop-event" => stop_event = Some(value()?),
                 // Which encoder: the card's own (NVENC on NVIDIA, Media Foundation's on any
@@ -299,6 +324,9 @@ mod windows_main {
                 "--test-drop-one-in" => drop_one_in = Some(value()?.parse().context("--test-drop-one-in N")?),
                 other => anyhow::bail!("unknown option {other}"),
             }
+        }
+        if crate::control::NO_PAIR.load(Ordering::Relaxed) && (pair || ask) {
+            anyhow::bail!("--no-pair can't go with --pair or --ask");
         }
 
         let level = if std::env::var_os("REMOTEMAN_DEBUG").is_some() { tracing::Level::DEBUG } else { tracing::Level::INFO };
@@ -466,6 +494,9 @@ mod windows_main {
         watch_lock(std::sync::Arc::downgrade(&host));
         // On the network for viewers to find, until the host stops (dropped at the end of this function).
         let _advert = (!mirror_only).then(|| crate::advertise::start(crate::control::NAME.get().map_or("windows", String::as_str), host.address.port(), &host.fingerprint));
+        if crate::control::NO_PAIR.load(Ordering::Relaxed) {
+            tracing::info!("pairing: switched off (--no-pair); only the devices in the trust list get in");
+        }
         if pair {
             tracing::info!("pairing: the next unknown device to connect will be trusted");
         }
