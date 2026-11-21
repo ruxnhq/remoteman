@@ -372,11 +372,14 @@ unsafe fn read_instance(i: &DNS_SERVICE_INSTANCE) -> Found {
         let v4 = (!i.ip4Address.is_null()).then(|| Ipv4Addr::from((*i.ip4Address).to_ne_bytes())).filter(|a| !a.is_unspecified());
         let v6 = (!i.ip6Address.is_null()).then(|| Ipv6Addr::from((*i.ip6Address).IP6Byte)).filter(|a| !a.is_unspecified() && !a.is_unicast_link_local());
         let host = text(i.pszHostName);
+        // The host's name before any one address: the address the resolve gives is whichever of
+        // the computer's Windows picked (seen here: a Windows host's Tailscale address, not the
+        // LAN one it advertised), while the core, given the name (`.local` too), tries all of
+        // them, the LAN's first.
         let address = match (v4, v6) {
+            _ if !host.is_empty() && port != 0 => format!("{}:{port}", host.trim_end_matches('.')),
             (Some(a), _) => format!("{a}:{port}"),
             (None, Some(a)) => format!("[{a}]:{port}"),
-            // A name Windows itself can look up again (`.local` too).
-            _ if !host.is_empty() && port != 0 => format!("{}:{port}", host.trim_end_matches('.')),
             _ => String::new(),
         };
         Found { name, address, key, os, cards }
@@ -755,11 +758,11 @@ mod tests {
             assert_eq!(f.name, "remoteman test PC");
             assert_eq!((f.key.as_str(), f.os.as_str()), ("00112233aabbccdd", "windows"));
             assert_eq!(f.cards, ["02:00:00:00:00:01"]);
-            // One of this PC's addresses (Windows answers for itself with whichever of its
-            // networks' it picks: seen here, the VPN's rather than the one advertised).
-            let at: SocketAddr = f.address.parse().expect("an address the core can use");
-            assert_eq!(at.port(), 65001);
-            println!("advertised at {ip}, resolved as {at}");
+            // The advertised host name (this PC's), which the core looks up to all its addresses.
+            let at = std::net::ToSocketAddrs::to_socket_addrs(&f.address).expect("a name the core can look up").collect::<Vec<_>>();
+            assert!(f.address.ends_with(".local:65001"), "{}", f.address);
+            assert!(at.iter().any(|a| a.ip() == ip), "the advertised address {ip} isn't among {at:?}");
+            println!("advertised at {ip}, found as {} = {at:?}", f.address);
         }
     }
 
