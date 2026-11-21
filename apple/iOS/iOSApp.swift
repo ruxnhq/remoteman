@@ -238,6 +238,7 @@ struct RootView: View {
         }
         .ignoresSafeArea(edges: session.isActive ? .all : [])
         .modifier(UnlockPrompt(unlocker: model.unlocker))
+        .modifier(SecondFactorPrompt(session: session))
         .alert("Not the computer you scanned", isPresented: Binding(get: { model.scanMismatch != nil }, set: { if !$0 { model.scanMismatch = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {

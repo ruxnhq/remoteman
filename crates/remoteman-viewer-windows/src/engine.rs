@@ -181,6 +181,40 @@ pub(crate) fn engine() -> Option<Rc<Engine>> {
 
 // The computer's cursor over the picture in the app's window.
 
+/// For `--play-cursor`: an arrow like Windows' own, white with a black edge, as a computer sends a
+/// cursor (premultiplied RGBA), its hot spot at the tip.
+fn played_arrow() -> remoteman_core::CursorShape {
+    // The arrow's outline in pixels, the tip at (1, 1), leaving room for the edge.
+    const OUTLINE: [(f32, f32); 7] = [(1.0, 1.0), (1.0, 26.0), (7.0, 20.5), (11.5, 30.0), (15.5, 28.0), (11.0, 19.0), (18.5, 19.0)];
+    let inside = |x: f32, y: f32| {
+        // Even-odd: a ray to the left crosses the outline an odd number of times.
+        let mut odd = false;
+        for i in 0..OUTLINE.len() {
+            let ((xi, yi), (xj, yj)) = (OUTLINE[i], OUTLINE[(i + OUTLINE.len() - 1) % OUTLINE.len()]);
+            if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+                odd = !odd;
+            }
+        }
+        odd
+    };
+    let (w, h) = (20u32, 32u32);
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for py in 0..h {
+        for px in 0..w {
+            let (x, y) = (px as f32 + 0.5, py as f32 + 0.5);
+            let fill = inside(x, y);
+            let edge = !fill && [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-0.7, -0.7), (0.7, -0.7), (-0.7, 0.7), (0.7, 0.7)].iter().any(|(dx, dy)| inside(x + dx, y + dy));
+            let i = ((py * w + px) * 4) as usize;
+            if fill {
+                rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+            } else if edge {
+                rgba[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+    }
+    remoteman_core::CursorShape { width: w, height: h, hot_x: 1, hot_y: 1, rgba }
+}
+
 unsafe extern "system" fn worn(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM, _id: usize, _data: usize) -> LRESULT {
     if msg == WM_SETCURSOR && (l.0 & 0xFFFF) as u32 == HTCLIENT {
         if let Some(cursor) = engine().and_then(|e| e.windowed_cursor()) {
@@ -619,6 +653,7 @@ impl Engine {
         let colour = app.args.play_colour.clone();
         let (w, h) = app.args.size.unwrap_or((1920, 1080));
         let (mode, rate) = (app.args.play_mode, app.args.play_rate);
+        let cursor = app.args.play_cursor;
         say!("play: {} access units of {}, {mode:?}, {colour}, {}", units.len(), path.display(), if rate == 0 { "as fast as they are decoded".to_owned() } else { format!("{rate} a second") });
         let display = remoteman_core::Display { width: w, height: h, scale: 1.0, refresh: rate.max(1), placement: remoteman_core::Placement::Extend, hdr: colour != "bt709", headroom: 0.0 };
         let target = crate::app::Target { address: "test.invalid:7791".into(), name: format!("{} (played)", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()) };
@@ -631,17 +666,34 @@ impl Engine {
         std::thread::Builder::new().name("play".into()).spawn(move || {
             let info = StreamInfo { epoch: 1, mode, width: w, height: h, refresh: rate.max(1), colour, sdr_white: 203, peak: 1000 };
             feed.stream(&info);
+            if cursor {
+                feed.cursor_shape(&played_arrow());
+            }
             let mut number = 0u32;
             // Each frame at its time, not after the one before plus a sleep: the rate is the
             // rate asked for, however long feeding takes.
             let started = Instant::now();
+            // With `--play-cursor`, the cursor goes round a circle once every 4 s, moved twice
+            // between pictures (so a move with no new picture is drawn too).
+            let move_cursor = |feed: &mut crate::stream::Feed| {
+                if cursor {
+                    let turn = started.elapsed().as_secs_f32() / 4.0 * std::f32::consts::TAU;
+                    feed.cursor_at(0.5 + 0.3 * turn.cos(), 0.5 + 0.3 * turn.sin(), true);
+                }
+            };
             loop {
                 for (n, data) in units.iter().enumerate() {
                     let frame = remoteman_core::Frame { key: n == 0, recovery: false, epoch: 1, number, capture_us: 0, data: data.clone() };
                     feed.frame(&frame, None);
+                    move_cursor(&mut feed);
                     number += 1;
                     if rate > 0 {
                         let due = started + Duration::from_secs_f64(number as f64 / rate as f64);
+                        if cursor {
+                            let half = started + Duration::from_secs_f64((number as f64 - 0.5) / rate as f64);
+                            std::thread::sleep(half.saturating_duration_since(Instant::now()));
+                            move_cursor(&mut feed);
+                        }
                         std::thread::sleep(due.saturating_duration_since(Instant::now()));
                     }
                 }
@@ -926,9 +978,34 @@ impl Engine {
             }
         }
         say!("pointer: {}", if hold { "captured: its raw movement goes to the computer" } else { "let go" });
-        let mut app = self.app.borrow_mut();
-        app.captured = hold;
-        app.dirty = true;
+        {
+            let mut app = self.app.borrow_mut();
+            app.captured = hold;
+            app.dirty = true;
+        }
+        self.pointer_over_picture();
+        // This PC's own pointer goes while captured, and comes back after: at once in full
+        // screen (the engine's window answers WM_SETCURSOR). Over the app's panel WinUI sets its
+        // own cursor whatever is answered or ShowCursor says (measured: GetCursorInfo read the
+        // arrow all through a capture, with this thread's show count at -1), so there the app's
+        // picture wears a blank WinUI cursor while the state says "captured".
+        self.wear_now();
+    }
+
+    /// While the pointer is captured, the draw thread draws the computer's cursor over the
+    /// picture, in the panel and in full screen, where the computer says it is (the panel has no
+    /// interface layer to draw it in, and in full screen that layer would take the picture off
+    /// its own plane); otherwise nobody draws it, and the computer's shape is worn as a cursor.
+    fn pointer_over_picture(&self) {
+        let app = self.app.borrow();
+        let shape = if app.captured { app.remote_cursor.clone() } else { None };
+        let mut drawn = app.scene.pointer.lock().unwrap();
+        if drawn.as_ref().map(Arc::as_ptr) != shape.as_ref().map(Arc::as_ptr) {
+            say!("pointer: the computer's cursor {} over the picture", if shape.is_some() { "drawn" } else { "no longer drawn" });
+            *drawn = shape;
+            drop(drawn);
+            app.scene.poke();
+        }
     }
 
     /// This PC's clipboard changed: text, else a picture, goes to the computer.
@@ -965,6 +1042,7 @@ impl Engine {
         }
         let old = self.cursor.replace(made);
         self.got_shape.set(true);
+        self.pointer_over_picture();
         crate::full::set_cursor(self);
         self.wear_now();
         if let Some(old) = old {
@@ -984,7 +1062,7 @@ impl Engine {
     /// picture right now. `None`: not ours to say (the app's own cursors apply); `Some(None)`:
     /// no cursor (the host says it has none here).
     fn windowed_cursor(&self) -> Option<Option<HCURSOR>> {
-        if self.full.borrow().is_some() || !self.got_shape.get() {
+        if self.full.borrow().is_some() {
             return None;
         }
         let host = HWND(self.host.get() as *mut _);
@@ -997,11 +1075,19 @@ impl Engine {
             windows::Win32::Graphics::Gdi::ScreenToClient(host, &mut at).ok().ok()?;
         }
         let app = self.app.try_borrow().ok()?;
-        if app.captured || !app.forwarding() {
+        if !app.forwarding() {
             return None;
         }
         let (_, _, pw, ph) = self.panel.get();
         if at.x < px || at.y < py || at.x >= px + pw || at.y >= py + ph {
+            return None;
+        }
+        // A captured pointer (held in the panel): none of this PC's; the computer's is drawn
+        // over the picture by the draw thread.
+        if app.captured {
+            return Some(None);
+        }
+        if !self.got_shape.get() {
             return None;
         }
         let (x, y) = ((at.x - px) as f32 / sx.max(0.01), (at.y - py) as f32 / sy.max(0.01));

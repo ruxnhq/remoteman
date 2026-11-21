@@ -105,6 +105,7 @@ final class ViewerSession: ObservableObject {
     /// What the hello and configure say about HDR: asked for when the screen can show it and
     /// the person hasn't switched it off.
     static var hdrAsk: Float? {
+        if let f = forcedHeadroom { return f > 1.05 ? f : nil }  // a test asking as if it had this headroom
         let h = screenHeadroom
         return ViewerPrefs.hdr && h > 1.05 ? h : nil
     }
@@ -157,6 +158,15 @@ final class ViewerSession: ObservableObject {
     /// The computer is locked and wants its user's password: its words for people. Set as the
     /// session fails; cleared by the next connect.
     @Published private(set) var lockedAsk: String?
+    /// The computer wants a code from an authenticator app: `left` is -1 the first time, after a
+    /// wrong code the tries left. Answer with `answerSecondFactor`, or `disconnect` to give up.
+    struct SecondFactorAsk: Identifiable {
+        let id = UUID()
+        var left: Int
+    }
+    @Published var secondFactor: SecondFactorAsk?
+    /// A code to answer with without asking (--second-factor, for tests).
+    static var automaticCode: String?
     /// Why the host ended the last session (CoreClient.closeCode); -1 when it wasn't the host.
     @Published private(set) var closeCode = -1
     /// The computer took this device off its trust list: it has to be paired again.
@@ -331,6 +341,8 @@ final class ViewerSession: ObservableObject {
     @Published private(set) var transfers: [Transfer] = []
     /// What the host says the picture is encoded at, in bits a second (0: not told).
     @Published private(set) var hostBitrate = 0
+    /// The picture coming in is HDR (the computer said BT.2020 PQ): the session's controls say so.
+    @Published private(set) var streamHDR = false
     /// The ceiling this device asked for (0: the host chooses).
     @Published private(set) var bitrateLimit = 0
     /// Something for the user to read about a feature that didn't work.
@@ -342,6 +354,15 @@ final class ViewerSession: ObservableObject {
     /// The connected computer's address as settings are kept under it.
     var hostKey: String { target }
     private let sound = SoundPlayer()
+    private var hostOffsetUs: Int64?
+    private var soundAges: [Double] = []
+    /// Median age of the sound packets when they arrived, ms (nil before any).
+    func soundAgeMs() -> Double? {
+        statsLock.lock()
+        defer { statsLock.unlock() }
+        guard !soundAges.isEmpty else { return nil }
+        return soundAges.sorted()[soundAges.count / 2]
+    }
     private let soundSetup = DispatchQueue(label: "remoteman.sound.setup")
     private var mic: MicSender?
     private var sharing: Sharing?
@@ -599,6 +620,7 @@ final class ViewerSession: ObservableObject {
     private var lastTick = DispatchTime.now().uptimeNanoseconds
     private var lastPresented = 0
     private var timer: Timer?
+    private var gamepads: Gamepads?
 
     /// The decoders this device has in hardware, most preferred first, as the core wants them.
     static var decoders: String {
@@ -619,7 +641,13 @@ final class ViewerSession: ObservableObject {
         rm_forget_host(stateDir, host.contains(":") ? host : host + ":7791") == 1
     }
 
+    /// A state directory of its own for a test run (--state), so that it keeps its own paired hosts.
+    static var stateOverride: String?
     static var stateDir: String {
+        if let o = stateOverride {
+            try? FileManager.default.createDirectory(atPath: o, withIntermediateDirectories: true)
+            return o
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("remoteman", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -690,7 +718,18 @@ final class ViewerSession: ObservableObject {
                         DispatchQueue.main.async { if let self, self.generation == gen { self.pairingCode = code } }
                     }
                     c.onMessage = { [weak self] m in self?.message(m, sharing: sharing, generation: gen) }
-                    c.onSound = { [weak self] data, start, seq, _ in self?.sound.packet(data, start: start, seq: seq) }
+                    c.onSound = { [weak self] data, start, seq, timeUs in
+                        guard let self else { return }
+                        // The packet's age on arrival, on the host's clock as the frames give it.
+                        self.statsLock.lock()
+                        if let off = self.hostOffsetUs {
+                            let age = Double(Int64(DispatchTime.now().uptimeNanoseconds / 1000) + off - Int64(timeUs)) / 1000
+                            self.soundAges.append(age)
+                            if self.soundAges.count > 400 { self.soundAges.removeFirst(200) }
+                        }
+                        self.statsLock.unlock()
+                        self.sound.packet(data, start: start, seq: seq)
+                    }
                     c.onBlob = { what, id, kind, header, data, complete in
                         sharing.blob(what: what, id: id, kind: kind, header: header, data: data, complete: complete)
                     }
@@ -700,6 +739,12 @@ final class ViewerSession: ObservableObject {
                         self?.frame2(data, key: flags & 1 != 0, number: number, captureUs: captureUs, ageUs: ageUs)
                     }
                     c.onFrame = { [weak self] data, flags, number, captureUs, ageUs in
+                        // The host's clock against this one, from a frame whose age the core knows.
+                        if let self, ageUs >= 0 {
+                            self.statsLock.lock()
+                            self.hostOffsetUs = Int64(captureUs) + ageUs - Int64(DispatchTime.now().uptimeNanoseconds / 1000)
+                            self.statsLock.unlock()
+                        }
                         self?.frame(
                             data, key: flags & 1 != 0, recovery: flags & 2 != 0, number: number, captureUs: captureUs,
                             ageUs: ageUs)
@@ -734,6 +779,20 @@ final class ViewerSession: ObservableObject {
                     }
                     self.client = client
                     self.features = features
+                    client.onSecondFactor { [weak self, weak client] left in
+                        DispatchQueue.main.async {
+                            guard let self, let client, self.generation == gen else { return }
+                            if let code = Self.automaticCode {
+                                print("remoteman: second factor asked (\(left) tries left), answering with the given code")
+                                Self.automaticCode = left >= 0 ? nil : code
+                                client.secondFactor(code: code, remember: false)
+                            } else {
+                                self.secondFactor = SecondFactorAsk(left: left)
+                            }
+                        }
+                    }
+                    // A computer that lets this device watch only: say so once, since nothing it does will reach it.
+                    if !features.contains("input") { self.notice = "View only: this computer shows its screen but takes no input from this device." }
                     self.sharing = shared
                     shared?.transferChanged = { [weak self] t in
                         guard let self, self.generation == gen else { return }
@@ -743,6 +802,12 @@ final class ViewerSession: ObservableObject {
                     self.loggingIn = false
                     self.state = .streaming(hostName.isEmpty ? target : hostName)
                     self.startStats()
+                    let pads = Gamepads(wanted: { [weak self] in self?.has("gamepad") ?? false }) { [weak self] pad, flags, buttons, lt, rt, lx, ly, rx, ry in
+                        self?.client?.gamepad(pad: pad, flags: flags, buttons: buttons, lt: lt, rt: rt, lx: lx, ly: ly, rx: rx, ry: ry) ?? false
+                    }
+                    self.gamepads?.stop()
+                    self.gamepads = pads
+                    pads.start()
                     // What was on for this computer last time comes back on. The microphone and
                     // camera only for those who asked for that, and only where the system has
                     // already said yes (so that nothing is asked as a session starts).
@@ -818,8 +883,14 @@ final class ViewerSession: ObservableObject {
         }
     }
 
+    func answerSecondFactor(code: String, remember: Bool) {
+        secondFactor = nil
+        client?.secondFactor(code: code, remember: remember)
+    }
+
     func disconnect() {
         generation += 1
+        secondFactor = nil
         playing = false
         let c = client
         client = nil
@@ -853,6 +924,7 @@ final class ViewerSession: ObservableObject {
         guard gen == generation else { return }
         if comeBack(after: reason, generation: gen) { return }
         closeCode = client?.closeCode ?? -1
+        secondFactor = nil
         // On 3 the computer's key is kept: pairing again still checks it is the same computer.
         let c = client
         client = nil
@@ -863,7 +935,10 @@ final class ViewerSession: ObservableObject {
     }
 
     private func teardown() {
+        gamepads?.stop()
+        gamepads = nil
         pairingCode = nil
+        streamHDR = false
         loggingIn = false
         timer?.invalidate()
         timer = nil
@@ -909,6 +984,7 @@ final class ViewerSession: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.renderer?.headroom = { ViewerSession.headroomNow }
             self?.renderer?.setHDR(info.hdr)
+            self?.streamHDR = info.hdr
         }
         let d = VideoDecoder(
             info: info,
@@ -1052,6 +1128,8 @@ final class ViewerSession: ObservableObject {
         out += "  age at presentation ms: median \(pct(ages, 0.5)) p95 \(pct(ages, 0.95)) p99 \(pct(ages, 0.99)) max \(pct(ages, 1.0)) (\(ages.count) frames with a clock)\n"
         out += "  decode ms: median \(pct(dec, 0.5)) p95 \(pct(dec, 0.95)) p99 \(pct(dec, 0.99)) max \(pct(dec, 1.0))\n"
         out += "  gap between frames shown ms: median \(pct(gaps, 0.5)) p99 \(pct(gaps, 0.99)) max \(pct(gaps, 1.0))\n"
+        let onScreen = renderer?.takeOnScreenLog() ?? []
+        out += "  arrival to on screen ms: median \(pct(onScreen, 0.5)) p95 \(pct(onScreen, 0.95)) p99 \(pct(onScreen, 0.99)) (\(onScreen.count) frames; drawn \(VideoRenderer.onArrival ? "as they arrive" : "at the display's tick"))\n"
         statsLock.lock()
         let beats = rhythmSeen
         statsLock.unlock()
@@ -1105,7 +1183,15 @@ final class ViewerSession: ObservableObject {
             s += "shown \(f(shownFps, 0)) fps · received \(f(receivedFps, 0)) fps · replaced unseen \(replaced)\n"
             s += "decode \(f(decodeMedianMs, 2)) ms (max \(f(decodeMaxMs, 2))) · age \(f(ageMs)) ms\n"
             s += "lost \(lost) · loss reports \(keyframeRequests) · round trip \(f(roundTripMs, 2)) ms"
-            if soundOn { s += "\nsound buffer \(f(soundBufferMs, 0)) ms · concealed \(soundConcealed) · left out \(soundDropped)" }
+            if soundOn {
+                s += "\nsound buffer \(f(soundBufferMs, 0)) ms · concealed \(soundConcealed) · left out \(soundDropped)"
+                #if os(iOS)
+                    // What the device itself adds after the buffer, and where the sound goes.
+                    let a = AVAudioSession.sharedInstance()
+                    let route = a.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ",")
+                    s += "\nsound out \(route) · output \(f(a.outputLatency * 1000, 0)) ms · I/O \(f(a.ioBufferDuration * 1000, 1)) ms · \(wifiPausing ? "deep" : "shallow")"
+                #endif
+            }
             if decodeErrors > 0 { s += "\ndecode errors \(decodeErrors): \(lastError)" }
             if wifiPausing { s += "\nWi-Fi is pausing about twice a second (not the stream)" }
             return s

@@ -35,10 +35,36 @@ final class HostInput {
         0xE4: .maskControl, 0xE5: .maskShift, 0xE6: .maskAlternate, 0xE7: .maskCommand,
     ]
 
-    /// Count as user activity: wakes a dimmed or sleeping display.
+    /// Count as user activity: wakes a dimmed or sleeping display. At most once a second: each is a
+    /// call to the power manager, and a fast mouse sends thousands of events a second.
+    private static let wakeLock = NSLock()
+    private static var wokenAt = 0.0
     static func wake() {
+        let now = ProcessInfo.processInfo.systemUptime
+        wakeLock.lock()
+        let due = now - wokenAt >= 1
+        if due { wokenAt = now }
+        wakeLock.unlock()
+        guard due else { return }
         var id: IOPMAssertionID = 0
         IOPMAssertionDeclareUserActivity("remoteman input" as CFString, kIOPMUserActiveLocal, &id)
+    }
+
+    /// A pointer move waiting in the queue. Moves that come while it waits only change where it goes,
+    /// so the queue can't fall behind a fast mouse; anything else seals it, so that a click lands
+    /// where the pointer was when the click was made.
+    private final class Move {
+        var x: Float, y: Float
+        init(_ x: Float, _ y: Float) { self.x = x; self.y = y }
+    }
+    private let moveLock = NSLock()
+    private var waitingMove: Move?
+    /// The longest an event waited in the queue, and how many moves were merged, since last asked.
+    private var longestWait = 0.0, merged = 0
+    func takeQueueFigures() -> (longestWaitMs: Double, merged: Int) {
+        moveLock.lock()
+        defer { longestWait = 0; merged = 0; moveLock.unlock() }
+        return (longestWait * 1000, merged)
     }
 
     enum Event {
@@ -53,7 +79,38 @@ final class HostInput {
 
     func handle(_ e: Event) {
         HostInput.wake()
-        queue.async { [self] in
+        let queued = ProcessInfo.processInfo.systemUptime
+        moveLock.lock()
+        if case .pointerTo(let x, let y) = e {
+            if let m = waitingMove {
+                m.x = x
+                m.y = y
+                merged += 1
+                moveLock.unlock()
+                return
+            }
+            let m = Move(x, y)
+            waitingMove = m
+            moveLock.unlock()
+            queue.async { [self] in
+                moveLock.lock()
+                if waitingMove === m { waitingMove = nil }
+                moveLock.unlock()
+                run(.pointerTo(m.x, m.y), queued: queued)
+            }
+            return
+        }
+        waitingMove = nil
+        moveLock.unlock()
+        queue.async { [self] in run(e, queued: queued) }
+    }
+
+    private func run(_ e: Event, queued: TimeInterval) {
+        let waited = ProcessInfo.processInfo.systemUptime - queued
+        moveLock.lock()
+        longestWait = max(longestWait, waited)
+        moveLock.unlock()
+        do {
             guard let (b, scale) = display() else { return }
             func at(_ x: Float, _ y: Float) -> CGPoint {
                 CGPoint(
@@ -114,6 +171,71 @@ final class HostInput {
                 }
             }
         }
+    }
+
+    // MARK: Pen (input type 9, when the core has it)
+
+    /// The pen is in range of the device's screen (hovering or touching).
+    private var penNear = false
+
+    /// A pen event: phase 0 down, 1 move in contact, 2 up, 3 hover move, 4 left range. Pressure 0 to 1;
+    /// tilt in degrees (−90 to 90, x to the right, y towards the user); twist in degrees.
+    /// macOS takes it as mouse events carrying tablet fields, after a proximity event that says a
+    /// pen has come near; programs that know tablets read pressure and tilt from them.
+    func pen(phase: UInt8, buttons: UInt8, at p: CGPoint, pressure: Float, tiltX: Float, tiltY: Float, twist: Float) {
+        queue.async { [self] in
+            if phase != 4, !penNear {
+                proximity(true, eraser: buttons & 2 != 0)
+                penNear = true
+            }
+            let type: CGEventType
+            switch phase {
+            case 0: type = .leftMouseDown
+            case 1: type = .leftMouseDragged
+            case 2: type = .leftMouseUp
+            case 3: type = .mouseMoved
+            default:
+                if penNear { proximity(false, eraser: false) }
+                penNear = false
+                return
+            }
+            if phase == 0 { if !pressed.contains(.left) { pressed.append(.left) } }
+            if phase == 2 { pressed.removeAll { $0 == .left } }
+            last = p
+            movedAt = ProcessInfo.processInfo.systemUptime
+            guard let e = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: p, mouseButton: .left) else {
+                return hostLog("pen: no event for phase \(phase)")
+            }
+            e.setIntegerValueField(.mouseEventSubtype, value: Int64(CGEventMouseSubtype.tabletPoint.rawValue))
+            e.setDoubleValueField(.mouseEventPressure, value: Double(phase == 2 || phase == 3 ? 0 : pressure))
+            e.setDoubleValueField(.tabletEventPointPressure, value: Double(phase == 2 || phase == 3 ? 0 : pressure))
+            // Tilt as macOS has it: −1 to 1 for −90 to 90 degrees.
+            e.setDoubleValueField(.tabletEventTiltX, value: Double(max(-90, min(90, tiltX)) / 90))
+            e.setDoubleValueField(.tabletEventTiltY, value: Double(max(-90, min(90, tiltY)) / 90))
+            e.setDoubleValueField(.tabletEventRotation, value: Double(twist))
+            e.setIntegerValueField(.tabletEventPointButtons, value: Int64(phase == 0 || phase == 1 ? 1 : 0) | Int64(buttons & 1 != 0 ? 2 : 0))
+            e.setIntegerValueField(.tabletEventDeviceID, value: 1)
+            post(e)
+        }
+    }
+
+    /// A pen event with its place as fractions of the device's display.
+    func penAt(phase: UInt8, buttons: UInt8, x: Float, y: Float, pressure: Float, tiltX: Float, tiltY: Float, twist: Float) {
+        guard let (b, _) = display() else { return }
+        let p = CGPoint(x: b.minX + b.width * CGFloat(min(1, max(0, x))), y: b.minY + b.height * CGFloat(min(1, max(0, y))))
+        HostInput.wake()
+        pen(phase: phase, buttons: buttons, at: p, pressure: pressure, tiltX: tiltX, tiltY: tiltY, twist: twist)
+    }
+
+    private func proximity(_ near: Bool, eraser: Bool) {
+        guard let e = CGEvent(source: source) else { return }
+        e.type = .tabletProximity
+        e.setIntegerValueField(.tabletProximityEventEnterProximity, value: near ? 1 : 0)
+        e.setIntegerValueField(.tabletProximityEventDeviceID, value: 1)
+        e.setIntegerValueField(.tabletProximityEventPointerType, value: eraser ? 3 : 1)  // 1 pen, 3 eraser
+        e.setIntegerValueField(.tabletProximityEventCapabilityMask, value: 0x0400 | 0x0040 | 0x0020 | 0x0080)  // pressure, tilt x/y, rotation
+        e.setIntegerValueField(.tabletProximityEventSystemTabletID, value: 1)
+        post(e)
     }
 
     private func move(to p: CGPoint) {

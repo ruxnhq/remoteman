@@ -5,6 +5,7 @@
 // Adapted from espalier's ScreenController.
 import AppKit
 import CoreMedia
+import CryptoKit
 import Foundation
 import IOKit.pwr_mgt
 import RemotemanCore
@@ -57,6 +58,11 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var bitrate = 0
         /// Fill the virtual display with moving test content while a client is on.
         var testWindow = false
+        var testPen = false
+        /// A still picture is sent once more, sharper (off: `--refine no`).
+        var refine = true
+        /// Let the core lower and raise the bitrate as the network loses or doesn't (off: `--follow-loss no`).
+        var followLoss = true
         /// Offer this Mac's sound (--sound no leaves it out).
         var sound = true
         /// Silence this Mac's own speakers while a device plays its sound, so that it is heard in
@@ -92,6 +98,13 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         var testAllow: Double?
         var testDrop: Double?
         var testRevoke: Double?
+        /// What happens when a device connects while another is using this Mac: 0 it takes over, 1 it watches, 2 it can control too.
+        var secondDevice = 0
+        /// For tests: turn the second factor on at start and log its secret.
+        var secondFactorTest = false
+        /// For tests: make the first device that connects view-only, and log the connection log when sharing stops.
+        var testViewOnly = false
+        var logConnections = false
     }
 
     /// The device that is connected, as the interface shows it.
@@ -109,12 +122,14 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     /// once a second while a picture is going out, the frames and bits sent in that second.
     var onClient: ((Client?) -> Void)?
     var onStats: ((_ fps: Int, _ bitsPerSecond: Int) -> Void)?
+    /// A device was paired, connected or refused (the core's notice, as JSON), on the core's thread.
+    var onNotice: (([String: Any]) -> Void)?
 
     private var options: Options
 
     /// What this host offers now: the camera and the microphone only while remoteman's own are installed on this Mac.
     private var featureList: String {
-        "video,input,cursor,placement,configure,mirror,displays" + (MacHost.hdrCapture && options.tenBit ? ",hdr" : "") + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
+        "video,input,cursor,placement,configure,mirror,displays,pen" + (MacHost.hdrCapture && options.tenBit ? ",hdr" : "") + (options.sound ? ",sound" : "") + (options.allowClipboard ? ",clipboard" : "")
             + (options.allowFiles ? ",files" : "") + (HostCamera.installed ? ",camera" : "") + (HostMicrophone.installed ? ",mic" : "")
     }
     private var announced = ""
@@ -209,6 +224,68 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// What one device may do (everything, until the owner says otherwise).
+    struct Permissions: Equatable {
+        var input = true
+        var clipboard = true
+        var files = true
+        var sound = true
+        var mic = true
+        var camera = true
+    }
+
+    func permissions(for fingerprint: String) -> Permissions {
+        var p = rm_permissions(input: 1, clipboard: 1, files: 1, sound: 1, mic: 1, camera: 1)
+        if let h = host { _ = rm_host_get_permissions(h, fingerprint, &p) }
+        return Permissions(input: p.input != 0, clipboard: p.clipboard != 0, files: p.files != 0, sound: p.sound != 0, mic: p.mic != 0, camera: p.camera != 0)
+    }
+
+    /// The device is told at once if it is connected. False if it couldn't be saved.
+    @discardableResult
+    func setPermissions(_ p: Permissions, for fingerprint: String) -> Bool {
+        guard let h = host else { return false }
+        var raw = rm_permissions(
+            input: p.input ? 1 : 0, clipboard: p.clipboard ? 1 : 0, files: p.files ? 1 : 0, sound: p.sound ? 1 : 0,
+            mic: p.mic ? 1 : 0, camera: p.camera ? 1 : 0)
+        return rm_host_set_permissions(h, fingerprint, &raw) == 1
+    }
+
+    /// The last `max` lines of the connection log, oldest first: time, event (paired, connected,
+    /// left, refused), name, fingerprint, address, duration, reason.
+    func connections(_ max: Int) -> [[String: Any]] {
+        guard let h = host, let raw = rm_host_connections_json(h, max) else { return [] }
+        defer { rm_string_free(raw) }
+        return (try? JSONSerialization.jsonObject(with: Data(String(cString: raw).utf8))) as? [[String: Any]] ?? []
+    }
+
+    /// RFC 6238 (SHA-1, 30 s, six digits), for the test above only.
+    private static func totp(base32: String, at date: Date) -> String {
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+        var bits = 0, value = 0
+        var key = [UInt8]()
+        for ch in base32.uppercased() {
+            guard let i = alphabet.firstIndex(of: ch) else { continue }
+            value = (value << 5) | i
+            bits += 5
+            if bits >= 8 {
+                bits -= 8
+                key.append(UInt8((value >> bits) & 0xff))
+            }
+        }
+        var counter = UInt64(date.timeIntervalSince1970 / 30).bigEndian
+        let mac = withUnsafeBytes(of: &counter) {
+            Array(HMAC<Insecure.SHA1>.authenticationCode(for: Data($0), using: SymmetricKey(data: key)))
+        }
+        let o = Int(mac[19] & 0x0f)
+        let n = (UInt32(mac[o] & 0x7f) << 24) | (UInt32(mac[o + 1]) << 16) | (UInt32(mac[o + 2]) << 8) | UInt32(mac[o + 3])
+        return String(format: "%06d", n % 1_000_000)
+    }
+
+    func setSecondDevice(_ mode: Int) {
+        options.secondDevice = mode
+        if let h = host { rm_host_set_second_device(h, UInt8(clamping: mode)) }
+    }
+
     /// Stop trusting a device (it is dropped if connected). 1 done, 0 it wasn't trusted, -1 the list couldn't be saved.
     func revoke(_ fingerprint: String) -> Int {
         guard let h = host else { return 0 }
@@ -246,6 +323,36 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private var inputs = 0, inputMax = 0.0
     private var captureConfig: SCStreamConfiguration?, pacedFps = 0
     private var liveStream: SCStream?
+    /// Static refinement: when the screen has been still this long, the last picture once more, sharper.
+    private var lastCaptureAt = 0.0, refined = true, refineTimer: Timer?, refinements = 0
+    private func refineIfStill() {
+        lock.lock()
+        let still = CACurrentMediaTime() - lastCaptureAt
+        let go = options.refine && !refined && still >= 0.4 && lastBuffer != nil
+        if go { refined = true; refinements += 1 }
+        let enc = encoder, pb = lastBuffer, rate = followedRate > 0 ? followedRate : picture.map { bitrate(for: $0) } ?? 25_000_000
+        lock.unlock()
+        guard go, let enc, let pb else { return }
+        frames.async {
+            if let path = MacHost.sourceDump, !FileManager.default.fileExists(atPath: path) { MacHost.dumpLuma(pb, to: path) }
+            enc.refine(pb, pts: CMClockGetTime(CMClockGetHostTimeClock()), bitrate: rate)
+        }
+    }
+    /// For measuring (`--dump-source file`): the luma of the first picture refined, raw 16-bit.
+    static let sourceDump: String? = {
+        let a = CommandLine.arguments
+        return a.firstIndex(of: "--dump-source").flatMap { $0 + 1 < a.count ? a[$0 + 1] : nil }
+    }()
+    static func dumpLuma(_ pb: CVPixelBuffer, to path: String) {
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(pb, 0) else { return }
+        let w = CVPixelBufferGetWidthOfPlane(pb, 0), h = CVPixelBufferGetHeightOfPlane(pb, 0), row = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        var out = Data(capacity: w * h * 2)
+        for y in 0..<h { out.append(Data(bytes: base + y * row, count: w * 2)) }
+        try? out.write(to: URL(fileURLWithPath: path))
+        hostLog("host: source luma \(w)×\(h) written for measuring")
+    }
     /// For checking the stream with other decoders (`--dump file.hevc`): every frame as encoded.
     private let dumpFile: FileHandle? = {
         let args = CommandLine.arguments
@@ -313,8 +420,47 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         hostLog("host: listening on \(parts.first ?? options.listen), fingerprint \(parts.count > 1 ? parts[1] : "?"), pairing \(rm_host_pairing(h) != 0 ? "on" : "off")")
         listening = (parts.first ?? options.listen, parts.count > 1 ? parts[1] : "")
         if options.confirm { rm_host_set_confirm(h, 1) }
+        rm_host_set_second_device(h, UInt8(clamping: options.secondDevice))
+        hostLog("host: when a second device connects: \(["it takes over", "it watches", "it can control too"][min(max(options.secondDevice, 0), 2)])")
+        rm_host_set_notice_callback(h, { ctx, json in
+            guard let json, let m = (try? JSONSerialization.jsonObject(with: Data(String(cString: json).utf8))) as? [String: Any] else { return }
+            let me = Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue()
+            hostLog("host: notice: \(m["event"] as? String ?? "?") \(m["name"] as? String ?? "?") \((m["fingerprint"] as? String ?? "").prefix(8)) \(m["address"] as? String ?? "")\(m["reason"].map { " (\($0))" } ?? "")")
+            me.onNotice?(m)
+        }, Unmanaged.passUnretained(self).toOpaque())
+        if options.secondFactorTest {
+            _ = rm_host_disable_second_factor(h)  // a new secret each start
+            var out = [CChar](repeating: 0, count: 512)
+            let r = rm_host_enable_second_factor(h, &out, out.count)
+            let parts = String(cString: out).split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            hostLog("host: second factor test: enable \(r), secret \(parts.first ?? "") uri \(parts.count > 2 ? parts[2] : "")")
+            // A secret counts once a right code has been given: do that here, so that devices are asked.
+            if r == 0, let secret = parts.first {
+                let ok = rm_host_confirm_second_factor(h, Self.totp(base32: secret, at: Date()))
+                hostLog("host: second factor test: confirmed \(ok), devices are asked for a code now")
+            }
+        }
+        // The core follows loss: it lowers the rate when the device reports losses and raises it
+        // again while all is well, up to the device's ceiling or this; the encoder takes it live.
+        if options.followLoss {
+            rm_host_set_bitrate_callback(h, 40_000_000, { ctx, bits in
+                Unmanaged<MacHost>.fromOpaque(ctx!).takeUnretainedValue().followRate(Int(bits))
+            }, Unmanaged.passUnretained(self).toOpaque())
+        }
         advertise(options.advertise)
     }
+
+    /// The core's thread: the rate the network allows now.
+    private func followRate(_ bits: Int) {
+        lock.lock()
+        let enc = encoder
+        let changed = abs(bits - followedRate) * 10 > followedRate
+        followedRate = bits
+        lock.unlock()
+        enc?.setBitrate(bits)
+        if changed { hostLog("host: bitrate following the network: \(bits / 1000) kbit/s") }
+    }
+    private var followedRate = 0
 
     private var listening = ("", "")
     /// The device is shown this Mac's own screen as it is (it asked to mirror).
@@ -350,6 +496,7 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         teardown()
         // `host` stays set until the core has stopped: its last callbacks (the client leaving) use it.
         if let h = host {
+            if options.logConnections { hostLog("host: connection log: \(connections(20))") }
             rm_host_stop(h)
             host = nil
         }
@@ -834,6 +981,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         case 5: input.handle(.key(i.usage, i.down != 0))
         case 6: input.handle(.touch(phase: i.phase, slot: i.slot, i.x, i.y))
         case 7: if let t = i.text { input.handle(.text(String(cString: t))) }
+        case 9:
+            input.penAt(
+                phase: i.phase, buttons: i.button, x: i.x, y: i.y, pressure: i.pressure, tiltX: i.tilt_x, tiltY: i.tilt_y, twist: i.twist)
         default: break
         }
     }
@@ -984,8 +1134,24 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         lock.unlock()
         stream = s
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.stats() }
+        refineTimer?.invalidate()
+        refineTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.refineIfStill() }
         if cursorApart { startCursor() }
         if options.testWindow { testWindow.show(on: id) }
+        // For testing the pen without a device that sends one: a stroke across the middle, pressing
+        // harder and tilting as it goes.
+        if options.testPen {
+            for i in 0...40 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5 + Double(i) * 0.02) { [self] in
+                    // Where the display is now: a new display is moved beside the others after it appears.
+                    let b = CGDisplayBounds(id)
+                    let f = Float(i) / 40
+                    let p = CGPoint(x: b.minX + b.width * CGFloat(0.3 + 0.4 * f), y: b.midY)
+                    input.pen(phase: i == 0 ? 0 : i == 40 ? 2 : 1, buttons: 0, at: p, pressure: 0.1 + 0.8 * f, tiltX: 30 * f, tiltY: -20 * f, twist: 90 * f)
+                    if i == 40 { input.pen(phase: 4, buttons: 0, at: p, pressure: 0, tiltX: 0, tiltY: 0, twist: 0) }
+                }
+            }
+        }
         firstFrame(d, width: width, height: height, cursorApart: cursorApart, gen: gen)
         hostLog("host: sending \(width)×\(height) at \(fps) Hz, HEVC \(options.tenBit ? "Main10" : "Main (8-bit)") 4:2:0\(hdr ? " HDR (BT.2020, PQ)" : ""), \(bitrate / 1000) kbit/s, capture \(options.tenBit ? options.capture : "420v"), cursor \(cursorApart ? "apart" : "in the picture"), \(width * height * fps / 1_000_000) megapixels a second")
         return nil
@@ -1060,9 +1226,13 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func teardown(keepDisplay: Bool = false) {
         generation += 1
-        testWindow.close()
+        // A display changed in place keeps its test window, which follows the new size, so the
+        // desktop behind it never shows in between.
+        if !keepDisplay { testWindow.close() }
         statsTimer?.invalidate()
         statsTimer = nil
+        refineTimer?.invalidate()
+        refineTimer = nil
         cursorTimer?.invalidate()
         cursorTimer = nil
         input.release()
@@ -1190,6 +1360,8 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
         let enc = encoder
         let first = lastBuffer == nil
         lastBuffer = pb
+        lastCaptureAt = CACurrentMediaTime()
+        refined = false
         lock.unlock()
         if first {
             let f = CVPixelBufferGetPixelFormatType(pb)
@@ -1261,8 +1433,9 @@ final class MacHost: NSObject, SCStreamOutput, SCStreamDelegate {
     private func stats() {
         lock.lock()
         let counts = encoder?.takeCounts() ?? (late: 0, stale: 0)
+        let queueFigures = input.takeQueueFigures()
         let line = sent > 0 || dropped > 0 || inputs > 0
-            ? String(format: "host: %d fps, %d kbit/s, capture %.2f ms, encode %.2f ms, %.2f ms old when sent, send %.2f ms (longest %.2f), largest frame %d bytes, %d keyframes sent, longest wait for the screen %.0f ms, %d dropped (busy), %d of them sent late, %d times left stale, %d not taken by the core, %d keyframe requests, %d input events (longest %.2f ms)", sent, bytes * 8 / 1000, captureMs / Double(max(captured, 1)), encodeMs / Double(max(sent, 1)), ageMs / Double(max(sent, 1)), sendMs / Double(max(sent, 1)), sendMax, largest, keysSent, captureGap, dropped, counts.late, counts.stale, refused, keyframes, inputs, inputMax)
+            ? String(format: "host: %d fps, %d kbit/s, capture %.2f ms, encode %.2f ms, %.2f ms old when sent, send %.2f ms (longest %.2f), largest frame %d bytes, %d keyframes sent, longest wait for the screen %.0f ms, %d dropped (busy), %d of them sent late, %d times left stale, %d not taken by the core, %d keyframe requests, %d input events (longest %.2f ms), input queue wait at most %.2f ms, %d moves merged", sent, bytes * 8 / 1000, captureMs / Double(max(captured, 1)), encodeMs / Double(max(sent, 1)), ageMs / Double(max(sent, 1)), sendMs / Double(max(sent, 1)), sendMax, largest, keysSent, captureGap, dropped, counts.late, counts.stale, refused, keyframes, inputs, inputMax, queueFigures.longestWaitMs, queueFigures.merged)
             : nil
         // Asked for more than the encoder does in a frame time: said once a session.
         let frameMs = 1000 / Double(max(askedFps, 1)), took = encodeMs / Double(max(sent, 1))

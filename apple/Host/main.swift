@@ -70,6 +70,12 @@ while !args.isEmpty {
     case "--keep-last": HostEncoder.keepsLast = yes()
     case "--test-bright": TestWindow.bright = yes()
     case "--test-noise": TestWindow.noise = yes()
+    case "--test-bright-level": TestWindow.level = CGFloat(Double(value()) ?? 4)
+    case "--test-pen": options.testPen = yes()
+    case "--refine": options.refine = yes()
+    case "--dump-source": _ = value()
+    case "--refine-factor": HostEncoder.refineFactor = Int(value()) ?? 8
+    case "--follow-loss": options.followLoss = yes()
     case "--test-bursts": TestWindow.bursts = yes()
     case "--encoder": HostEncoder.testMode = value()
     case "--pace": options.pace = yes()
@@ -103,6 +109,11 @@ while !args.isEmpty {
     // For tests: so many seconds after a device connects, allow the clipboard and files; 4 s later, take them away.
     case "--test-allow": options.testAllow = Double(value())
     case "--test-drop": options.testDrop = Double(value())
+    // What happens when a second device connects while one is on: takeover, watch or control.
+    case "--second-device": options.secondDevice = ["takeover": 0, "watch": 1, "control": 2][value()] ?? 0
+    case "--second-factor-test": options.secondFactorTest = yes()
+    case "--test-view-only": options.testViewOnly = yes()
+    case "--log-connections": options.logConnections = yes()
     case "--test-revoke": options.testRevoke = Double(value())
     default:
         // AppKit passes arguments of its own (-NSDocumentRevisionsDebugMode and the like).

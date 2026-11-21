@@ -181,7 +181,7 @@ struct SessionScreen: View {
 
     private var subtitle: String {
         let hz = session.stats.label.split(separator: "@").last.map { " · \($0) Hz" } ?? ""
-        return "Attached" + hz
+        return "Attached" + hz + (session.streamHDR ? " · HDR" : "")
     }
 
     private var separator: some View { Rectangle().fill(.white.opacity(0.22)).frame(width: 1, height: 24).padding(.horizontal, 6) }

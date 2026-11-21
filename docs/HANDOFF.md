@@ -133,3 +133,70 @@ The Mac session fixed its test window not following an in-place display change (
 ## Full screen's bar and menus are WinUI's (2026-11-20)
 
 Full screen is still the engine's own window presenting into its own swap chain (VRR); its bar and menus are now the app's WinUI pill: the app opens a second `Viewer` (`Options.bar`) that shows only `session::pill`, a borderless, no-activate, topmost window at the top of the full-screen window (`system::bar_*`), hidden (`SW_HIDE`) except while wanted. The engine tells the app the pointer reached the top edge (`Effect::BarEdge`, JSON `bar-edge`; the `bar-edge` command stands for it in tests) and where its window is (`fullscreen` effect: `hwnd`, `rect`, `bar`); the app hides the bar 2 s after, unless the pointer or a flyout (a "Popup" window of the thread) is on it, and gives the keyboard back to the full window. `--kit-bar` keeps the old Direct2D bar and `menus.rs` (the kit still draws pages, dialogs, figures and toasts in full screen, and the Card/Choice menus of its pages, so `ui::` and `menus.rs` stay). Test: `crates/remoteman-viewer-app-windows/test/fsbar.ps1 [-Clip clip.hevc]`.
+
+## 2026-11-20 evening: the panel's latency measured on real monitors; the captured pointer drawn (branch `panel-latency`, not pushed)
+
+From the brief in the appsandbox repository (`docs/remoteman-panel-session-brief.md`). Everything is on branch `panel-latency`, cut from `main` at f33d2a2. Nothing was installed (the installed viewer is untouched) and nothing downloaded (no PresentMon: the viewer's own figures sufficed).
+
+**The instrument** (1d7bc3c): with `--watch-vblank`, the draw thread's line every five seconds now times each picture:
+- from its frame's arrival (`Feed::frame`) to `Present` returning (the old figures' "age when handed to the display", less the network), split into decoding, waiting for the draw thread, and drawing and presenting;
+- for each picture whose showing the swap chain reports, from arrival and from `Present` to the refresh that showed it (median / 95th percentile / most).
+
+Played clips (`--play`) are timed too. DXGI's frame statistics do report the panel's swap chain. An earlier "not shown" was the monitors asleep: the PC's display timeout is 5 minutes, and `WaitForVBlank` then returns at once.
+
+**Method.** The scripts are in `C:\rm\panel-latency`:
+- `run.ps1`: one run. It holds the display on, wakes it if idle, and starts `target\release\remoteman-app.exe` with `--play CLIP --play-rate R --size WxH --watch-vblank --stats`. Then it maximises the window or goes full screen, and brings it forward.
+- `matrix.ps1`: the 15 runs below, 30 s each.
+- `summary.ps1`: one line a run, the first 5 s left out. The logs are in `logs\`.
+
+The rest of the setup:
+- **Clips:** `C:\rm\clips-a\t420-1920x1080.hevc` and `t420-3840x2160.hevc`. The second was made for this with NVENC (4:2:0, 10-bit) and is in `C:\rm\panel-latency`.
+- **Colour:** SDR (`bt709`, shader mode 0) or `bt2020-pq`: mode 1 on the HDR DISPLAY1, mode 2 (tone-mapped) on DISPLAY3.
+- **Monitors:** DISPLAY1 is 3840x2160 at 240 Hz in HDR. DISPLAY3 (the ROG) runs at **60 Hz**, SDR, at 300 %.
+- **Test state:** copies of `C:\rm\state-viewer` with variable refresh off and on.
+- **Focus:** the Claude desktop app took the foreground now and then during windowed runs. That doesn't matter to the panel, and the full-screen runs kept the foreground.
+
+**Before** (all measured, ms; "to screen" is arrival to the refresh that showed it):
+
+| Run | Plane | Arrival to Present: median / most | Wait for room: most | To screen: median / 95th / most |
+|---|---|---|---|---|
+| Window 1532x922, DISPLAY1, 1080p SDR | own | 0.23 / 0.43 | 0.05 | 2.04 / 5.86 / 6.26 |
+| Maximised, DISPLAY1, 1080p SDR | own | 0.23 / 0.51 | 0.03 | 4.73 / 5.44 / 5.56 |
+| Maximised, DISPLAY1, 2160p SDR | own | 0.25 / 0.53 | 0.05 | 5.95 / 6.69 / 6.78 |
+| Maximised, DISPLAY1, 1080p PQ | own | 0.25 / 0.49 | 0.04 | 4.45 / 5.22 / 5.32 |
+| Maximised, DISPLAY1, 2160p PQ | own | 0.27 / 0.47 | 0.05 | 5.76 / 6.50 / 6.59 |
+| Maximised, DISPLAY1, 2160p PQ at 120 | own | 0.25 / 0.48 | 0.04 | 5.57 / 6.33 / 6.41 |
+| Full screen, DISPLAY1, 1080p SDR, VRR off | own | 0.23 / 0.45 | 0.11 | 5.25 / 5.81 / 5.92 |
+| Full screen, DISPLAY1, 2160p PQ, VRR off | own | 0.26 / 0.49 | 0.04 | 5.90 / 6.59 / 6.67 |
+| Full screen, DISPLAY1, 1080p SDR, VRR on | own, tearing | 0.41 / 0.94 | 0.03 | not timed (tearing) |
+| Full screen, DISPLAY1, 2160p PQ, VRR on | own, tearing | 0.43 / 0.84 | 0.04 | not timed (tearing) |
+| Maximised, DISPLAY3 60 Hz, 1080p SDR at 60 | own | **4.94** / 5.53 | 5.30 | **21.53** / 22.03 / 22.07 |
+| Maximised, DISPLAY3, 1080p SDR at 59 | own | 0.24 / 1.92 | 1.65 | 10.21 / 17.83 / 18.52 |
+| Maximised, DISPLAY3, 2160p PQ at 59 | own | 0.28 / 4.17 | 3.93 | 12.41 / 20.08 / 20.88 |
+| Full screen, DISPLAY3, 1080p SDR at 59 | own | 0.24 / 1.80 | 1.60 | 10.01 / 17.71 / 18.77 |
+| Full screen, DISPLAY3, 2160p PQ at 59 | own | 0.28 / 4.39 | 4.07 | 12.45 / 20.14 / 21.00 |
+
+Other measured figures:
+- **DISPLAY1's vertical blanks:** 1198 to 1200 of 1201 a refresh apart (4.17 ms) in every run except VRR on. With VRR on the monitor followed the pictures: 308 to 363 blanks in 5 s, about 62 to 72 Hz.
+- **DISPLAY3's vertical blanks:** 300 of 301 at 16.67 ms.
+- **Decoding:** 0.18 ms median for 1080p.
+
+**What it means.**
+- **At 240 Hz (measured):** no spike and no refresh missed. The panel stayed on its own plane even maximised at 2160p with the PQ shader. The GPU's draw is not late: Present to screen was never more than 6.6 ms, about one and a half refreshes after a present at any phase. The VM's 14 ms "throughout at 2160p" does not reproduce.
+- **At 60 Hz (measured on the ROG):** pictures wait for the swap chain's room. With the stream at exactly the display's rate, every picture waits, then shows a whole refresh after it was presented (Present to screen 16.59 ms, every one).
+- **Why (inferred):** with frame latency 1, the waitable is signalled at the refresh that shows the picture before. A picture presented then has just missed that refresh, and while the rates are equal every later picture lands the same way. That is the VM's pattern ("3 to 4 ms most seconds, 17 to 18 in others"): the phase moving into and out of the lock at 60 Hz.
+- **Its cost:** up to one refresh (16.7 ms) at 60 Hz, and only while the stream's rate equals the display's. At 240 Hz the room always comes back before the next picture.
+- **Tried, not kept:** presenting with sync interval 0 (no tearing), measured the same way (`logs\newest-*`). DISPLAY3 at 60 still locked (8.4 ms waits, 16.5 ms Present to screen); at 59 nothing changed; DISPLAY1 was unchanged (2160p PQ reached 8.9 ms once).
+- **Not tried:** drawing a new picture without waiting for room (Present would then wait inside the device's lock, which `draw.rs` avoids on purpose), and timing presents to the compositor's clock (`DCompositionWaitForCompositorClock`). The second is the next step if 60 Hz monitors matter.
+
+**The captured pointer.** The code is `draw.rs` (`PointerPass`, `Drawer::draw_pointer`), `Scene::pointer` (set by `Engine::pointer_over_picture` while captured), and `--play-cursor` for testing.
+- **What it does:** the computer's cursor is drawn into the picture's frame before `Present`, in the panel and in full screen. The kit's Direct2D pointer is skipped then, so full screen's interface layer no longer hangs over the picture while captured. Each move the computer reports pokes the draw thread.
+- **Checked (measured):** the viewer's `--shot` of its back buffer showed the arrow, white with its black edge, where the played computer put it (`C:\rm\panel-latency\shots\cursor-w.png`, the test window only). The log said "the computer's cursor drawn over the picture" and "let go".
+- **This PC's cursor in full screen:** hidden all through a capture (`GetCursorInfo`: flags 0, no cursor).
+- **This PC's cursor over the panel:** WinUI sets its own arrow, whatever the window answers to `WM_SETCURSOR` or `ShowCursor` says. Measured: the arrow all through a capture, with the thread's show count at -1, and the window under the cursor was WinUI's `DesktopChildSiteBridge` on the same thread.
+- **So the picture's border now wears a blank WinUI cursor** while the state says `captured`. This is Reactor patch 9: `InputSystemCursorShape::Hidden`, the exe's cursor resource 1 (`assets\blank.cur`), through `InputDesktopResourceCursor.CreateFromModule`. `Create` alone looked elsewhere and failed, which crashed the app once, so a failure now falls back to the default cursor.
+
+**Not verified:**
+- The blank cursor over the panel through a whole capture. One reading during an interrupted run showed the cursor hidden. The full check (`cursor.ps1 -Jiggle -Start 967,535`) holds the mouse in the test window for 12 s and was not run while the owner was using the PC.
+- The sprite against a real host's cursor (no host was used).
+- The old note that the host's cursor shape is worn over the panel (OVERNIGHT-WINDOWS.md) did not reproduce in these runs: `GetCursorInfo` read the arrow over the panel without capture too. It probably needs the same WinUI route (a WinUI cursor made from the host's shape), which WinUI offers no way to do from pixels.

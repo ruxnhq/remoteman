@@ -75,8 +75,10 @@ final class SoundPlayer {
     static var silent = false
 
     /// Frames kept ahead when starting or after running dry, and the most that may wait.
-    private var prime: Int { deep ? 4800 : 1200 }  // 100 ms or 25 ms
-    private var most: Int { deep ? 8160 : 3360 }  // 170 ms or 70 ms
+    // Deep: 60 and 110 ms (it was 100 and 170). Sound runs beside the computer's own speakers, where
+    // a long buffer is heard as an echo; a short gap the decoder covers is the better trade.
+    private var prime: Int { deep ? 2880 : 1200 }  // 60 ms or 25 ms
+    private var most: Int { deep ? 5280 : 3360 }  // 110 ms or 70 ms
 
     var running: Bool {
         lock.lock()
