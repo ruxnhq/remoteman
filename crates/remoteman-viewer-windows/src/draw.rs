@@ -354,17 +354,41 @@ pub fn panel_chain(gpu: &Gpu, width: u32, height: u32) -> Result<IDXGISwapChain1
 /// refresh needs), and when each was shown, from the swap chain's own figures. A monitor that
 /// varies its refresh shows pictures sent at an odd rate when they come; one at a fixed rate
 /// only on its refreshes, so the gaps between them are whole refreshes.
+///
+/// It also times each picture's way through this program, from its frame's arrival (`Feed::frame`)
+/// to `Present` returning (what the figures call the picture's age when handed to the display,
+/// less the network), split into decoding (with any wait for the decoder), waiting for the draw
+/// thread, and drawing and presenting; and, for a picture whose showing the swap chain reports,
+/// from arrival and from `Present` to the refresh that showed it.
 #[derive(Default)]
 struct Cadence {
     /// The present count and the time it was shown (QPC ticks), for each picture shown.
     shown: Vec<(u32, i64)>,
-    /// The present count and the time its picture began to be drawn (QPC ticks), for the latest
-    /// pictures presented; and how long each picture shown took from there to the screen, in ms.
-    sent: std::collections::VecDeque<(u32, i64)>,
+    /// The latest pictures presented, for matching with what the swap chain says was shown.
+    sent: std::collections::VecDeque<Sent>,
+    /// Per picture, in ms: from arrival to `Present` returning, and its three parts.
+    handoff: Vec<f64>,
+    decoding: Vec<f64>,
+    waiting: Vec<f64>,
+    presenting: Vec<f64>,
+    /// Per picture shown, in ms: from beginning to draw it, from its arrival, and from `Present`
+    /// returning, to the refresh that showed it.
     to_screen: Vec<f64>,
+    arrival_to_screen: Vec<f64>,
+    present_to_screen: Vec<f64>,
     presents: u32,
     since: Option<Instant>,
     failed: bool,
+}
+
+/// One picture presented: its present count and, in QPC ticks, when its frame arrived (if
+/// known), when its drawing began and when `Present` returned.
+#[derive(Clone, Copy)]
+struct Sent {
+    count: u32,
+    arrived: Option<i64>,
+    drawn: i64,
+    presented: i64,
 }
 
 /// Now, in QPC ticks.
@@ -375,12 +399,51 @@ fn qpc() -> i64 {
     now
 }
 
+/// QPC ticks a second.
+fn qpc_frequency() -> f64 {
+    static F: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *F.get_or_init(|| {
+        let mut f = 0i64;
+        // SAFETY: a plain query into a value that lives through it.
+        let _ = unsafe { windows::Win32::System::Performance::QueryPerformanceFrequency(&mut f) };
+        f.max(1) as f64
+    })
+}
+
+/// An `Instant` of the past as QPC ticks (what `Instant` is made of on Windows, but not given out).
+fn qpc_at(t: Instant) -> i64 {
+    qpc() - (t.elapsed().as_secs_f64() * qpc_frequency()) as i64
+}
+
+/// QPC ticks between two times, in ms.
+fn ms_between(from: i64, to: i64) -> f64 {
+    (to - from) as f64 * 1000.0 / qpc_frequency()
+}
+
+/// The median, 95th percentile and largest of some figures in ms, for the log.
+fn spread(figures: &mut Vec<f64>) -> String {
+    figures.sort_by(f64::total_cmp);
+    let at = |q: f64| figures.get(((figures.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or(0.0);
+    let line = format!("{:.2} / {:.2} / {:.2}", at(0.5), at(0.95), at(1.0));
+    figures.clear();
+    line
+}
+
 impl Cadence {
-    /// Just after a present of a picture that began to be drawn at `called` (QPC ticks).
-    fn sent(&mut self, swap: &IDXGISwapChain1, called: i64) {
+    /// Just after a present of `picture`, which began to be drawn at `drawn` (QPC ticks).
+    fn sent(&mut self, swap: &IDXGISwapChain1, picture: Option<&Picture>, drawn: i64) {
+        let presented = qpc();
+        let arrived = picture.and_then(|p| p.arrived).map(qpc_at);
+        let decoded = picture.map(|p| qpc_at(p.decoded));
+        if let (Some(a), Some(d)) = (arrived, decoded) {
+            self.handoff.push(ms_between(a, presented));
+            self.decoding.push(ms_between(a, d));
+            self.waiting.push(ms_between(d, drawn));
+            self.presenting.push(ms_between(drawn, presented));
+        }
         // SAFETY: a plain query.
         if let Ok(count) = unsafe { swap.GetLastPresentCount() } {
-            self.sent.push_back((count, called));
+            self.sent.push_back(Sent { count, arrived, drawn, presented });
             while self.sent.len() > 64 {
                 self.sent.pop_front();
             }
@@ -397,11 +460,12 @@ impl Cadence {
             Ok(()) if stats.SyncQPCTime != 0 => {
                 if self.shown.last().is_none_or(|l| l.0 != stats.PresentCount) {
                     self.shown.push((stats.PresentCount, stats.SyncQPCTime));
-                    if let Some((_, called)) = self.sent.iter().find(|(count, _)| *count == stats.PresentCount) {
-                        let mut f = 0i64;
-                        // SAFETY: a plain query.
-                        let _ = unsafe { windows::Win32::System::Performance::QueryPerformanceFrequency(&mut f) };
-                        self.to_screen.push((stats.SyncQPCTime - called) as f64 * 1000.0 / f.max(1) as f64);
+                    if let Some(sent) = self.sent.iter().find(|s| s.count == stats.PresentCount) {
+                        self.to_screen.push(ms_between(sent.drawn, stats.SyncQPCTime));
+                        self.present_to_screen.push(ms_between(sent.presented, stats.SyncQPCTime));
+                        if let Some(a) = sent.arrived {
+                            self.arrival_to_screen.push(ms_between(a, stats.SyncQPCTime));
+                        }
                     }
                 }
             }
@@ -420,7 +484,7 @@ impl Cadence {
     /// Every few seconds: a line for the log, and start again. (The gaps are only worth
     /// anything for a picture shown by itself: for one drawn by the compositor they are the
     /// times of presenting, not of showing. `monitor::watch_vblanks` is what to go by.)
-    fn report(&mut self, swap: &IDXGISwapChain1, refresh_hz: u32, tearing: bool) -> Option<String> {
+    fn report(&mut self, swap: &IDXGISwapChain1, size: (u32, u32), refresh_hz: u32, tearing: bool) -> Option<String> {
         if self.since.is_none_or(|s| s.elapsed() < Duration::from_secs(5)) {
             return None;
         }
@@ -447,22 +511,43 @@ impl Cadence {
         let period = if refresh_hz > 0 { 1000.0 / refresh_hz as f64 } else { 0.0 };
         let whole = gaps.iter().filter(|g| period > 0.0 && ((**g / period).round() * period - **g).abs() < 0.5).count();
         let mean = if gaps.is_empty() { 0.0 } else { gaps.iter().sum::<f64>() / gaps.len() as f64 };
-        // From beginning to draw the picture to its being on the screen (meaningful for a picture
-        // shown by itself, as the gaps are).
-        let mut to_screen = std::mem::take(&mut self.to_screen);
-        to_screen.sort_by(f64::total_cmp);
-        let at = |q: f64| to_screen.get(((to_screen.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or(0.0);
-        // (Not with tearing: a picture flipped in the middle of a refresh is timed from the
-        // refresh before it, so the figure comes out below nothing.)
-        let to_screen = if tearing || to_screen.is_empty() {
+        // From beginning to draw the picture, from its arrival and from `Present` to its being on
+        // the screen (meaningful for a picture shown by itself, as the gaps are). Not with
+        // tearing: a picture flipped in the middle of a refresh is timed from the refresh before
+        // it, so the figure comes out below nothing.
+        let to_screen = if tearing || self.to_screen.is_empty() {
+            self.to_screen.clear();
+            self.arrival_to_screen.clear();
+            self.present_to_screen.clear();
             String::new()
         } else {
-            format!("; from drawing to the screen {:.2} ms median, {:.2} at the 95th percentile, {:.2} at most ({} pictures)", at(0.5), at(0.95), at(1.0), to_screen.len())
+            let n = self.to_screen.len();
+            format!(
+                "; to the screen (median / 95th percentile / most, ms, {n} pictures): from drawing {}, from arrival {}, from Present {}",
+                spread(&mut self.to_screen),
+                spread(&mut self.arrival_to_screen),
+                spread(&mut self.present_to_screen)
+            )
+        };
+        // Each picture's way through this program, whether or not its showing was reported.
+        let handoff = if self.handoff.is_empty() {
+            String::new()
+        } else {
+            let n = self.handoff.len();
+            format!(
+                "; from arrival to Present returning (median / 95th percentile / most, ms, {n} pictures) {}: decoding {}, waiting for the draw thread {}, drawing and presenting {}",
+                spread(&mut self.handoff),
+                spread(&mut self.decoding),
+                spread(&mut self.waiting),
+                spread(&mut self.presenting)
+            )
         };
         let line = format!(
-            "{} presented in {seconds:.1} s{}, {mode}; {} gaps between pictures shown, {mean:.2} ms on average, {} of them whole refreshes of {period:.2} ms{to_screen}",
+            "{} presented in {seconds:.1} s{} into {}x{}, {mode}; {} gaps between pictures shown, {mean:.2} ms on average, {} of them whole refreshes of {period:.2} ms{handoff}{to_screen}",
             self.presents,
             if tearing { " with tearing allowed" } else { " at the display's refresh" },
+            size.0,
+            size.1,
             gaps.len(),
             whole,
         );
@@ -1241,14 +1326,14 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
             let presented = unsafe { if tear { drawer.swap.Present(0, DXGI_PRESENT_ALLOW_TEARING) } else { drawer.swap.Present(1, DXGI_PRESENT(0)) } };
             timed(&mut phases[4], began);
             if new && scene.measure.load(Ordering::Relaxed) {
-                drawer.cadence.sent(&drawer.swap, drawing_at);
+                drawer.cadence.sent(&drawer.swap, picture.as_ref(), drawing_at);
             }
             room = false;
             presented.ok().context("present")?;
             // For tests: how the pictures reach the screen, in the log every few seconds.
             if new && scene.measure.load(Ordering::Relaxed) {
                 drawer.cadence.note(&drawer.swap);
-                if let Some(line) = drawer.cadence.report(&drawer.swap, scene.refresh_hz.load(Ordering::Relaxed), tear) {
+                if let Some(line) = drawer.cadence.report(&drawer.swap, drawer.size, scene.refresh_hz.load(Ordering::Relaxed), tear) {
                     let ms = |us: u64| us as f64 / 1000.0;
                     say!(
                         "presenting: {line}; this thread's time: {:.0} ms waiting for room, {:.0} painting the interface, {:.0} drawing, {:.0} copying to full screen's swap chain, {:.0} presenting",
