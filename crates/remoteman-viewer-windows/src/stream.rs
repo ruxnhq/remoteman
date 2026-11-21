@@ -68,6 +68,10 @@ pub struct Scene {
     pub shots: AtomicU32,
     /// Why drawing stopped, if it has: nothing can be shown then.
     pub failed: Mutex<Option<String>>,
+    /// The computer's cursor shape while the draw thread draws it over the picture, where the
+    /// session's `cursor_at` says (a captured pointer in the app: `draw.rs`); `None` otherwise.
+    /// Set by whoever owns the window.
+    pub pointer: Mutex<Option<Arc<remoteman_core::CursorShape>>>,
 }
 
 impl Scene {
@@ -389,6 +393,10 @@ impl Handler for Feed {
         let moved = !self.shared.cursor_moved.swap(true, Ordering::Relaxed);
         if self.shared.cursor_gone.swap(!visible, Ordering::Relaxed) == visible || moved {
             self.wake_window();
+        }
+        // The draw thread draws it over the picture: every move is drawn.
+        if self.shared.scene.pointer.lock().unwrap().is_some() {
+            self.shared.scene.poke();
         }
     }
 

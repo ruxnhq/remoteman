@@ -58,12 +58,15 @@ pub struct Args {
     /// For tests: what the made-up session's computer says it can do besides `video`
     /// (`--play-features mic,camera`), so those controls can be tried with no computer.
     pub play_features: Vec<String>,
+    /// For tests: the made-up session's computer sends a cursor (an arrow) and moves it in a
+    /// circle, so a captured pointer's drawing can be seen with no computer.
+    pub play_cursor: bool,
     /// For tests: browse for this DNS-SD service instead of remoteman's (`_name._udp.local`),
     /// so what a test advertises shows as nearby without a remoteman host on the network.
     pub browse: Option<String>,
 }
 
-const USAGE: &str = "usage: remoteman [HOST:PORT] [--pair] [--state DIR] [--size WxH] [--refresh HZ] [--decoders av1,hevc] [--seconds N] [--fullscreen] [--shot FILE.png] [--stats] [--input-demo] [--log FILE] [--sound] [--ui STEPS --shots DIR [--dark|--light]] [--profiles] [--vrr-probe SECONDS] [--watch-vblank] [--screen-hdr yes|no] [--play FILE [--play-colour bt709|bt2020-pq] [--play-mode hevc|hevc444] [--play-rate N] [--play-features mic,camera]] [--browse _name._udp.local]";
+const USAGE: &str = "usage: remoteman [HOST:PORT] [--pair] [--state DIR] [--size WxH] [--refresh HZ] [--decoders av1,hevc] [--seconds N] [--fullscreen] [--shot FILE.png] [--stats] [--input-demo] [--log FILE] [--sound] [--ui STEPS --shots DIR [--dark|--light]] [--profiles] [--vrr-probe SECONDS] [--watch-vblank] [--screen-hdr yes|no] [--play FILE [--play-colour bt709|bt2020-pq] [--play-mode hevc|hevc444] [--play-rate N] [--play-features mic,camera] [--play-cursor]] [--browse _name._udp.local]";
 
 fn mode(word: &str) -> Option<Mode> {
     // 4:4:4 is decoded on the processor (this FFmpeg's HEVC decoder has no D3D11VA path for
@@ -118,6 +121,7 @@ pub fn parse_from(words: Vec<String>) -> Result<Args> {
         watch_vblank: false,
         vrr_probe: None,
         play_features: Vec::new(),
+        play_cursor: false,
         browse: None,
     };
     while let Some(arg) = words.next() {
@@ -161,6 +165,7 @@ pub fn parse_from(words: Vec<String>) -> Result<Args> {
             "--watch-vblank" => args.watch_vblank = true,
             "--vrr-probe" => args.vrr_probe = Some(value()?.parse()?),
             "--browse" => args.browse = Some(value()?),
+            "--play-cursor" => args.play_cursor = true,
             "--play-features" => args.play_features = value()?.split(',').map(str::to_owned).filter(|f| !f.is_empty()).collect(),
             other => bail!("unknown option {other}\n{USAGE}"),
         }

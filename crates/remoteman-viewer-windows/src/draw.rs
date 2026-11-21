@@ -140,6 +140,25 @@ float4 ps(Corner c) : SV_Target {
     lin = max(mul(float3x3(1.6605, -0.5876, -0.0728, -0.1246, 1.1329, -0.0083, -0.0182, -0.1006, 1.1187), lin), 0);
     return float4(pow(saturate(fit(lin, max(peak / white, 1.0), 1.0, 0.9)), 1.0 / 2.2), 1);
 }
+
+// The computer's cursor over the picture (`Drawer::draw_pointer`): its shape, premultiplied
+// sRGB as the computer sends it, drawn through a viewport that is the cursor's place and
+// blended over the picture. `pointer_pq`: the swap chain is PQ BT.2020, so the shape's colours
+// go there at this screen's SDR white (`pointer_white`, nits), as SDR content is shown.
+Texture2D<float4> pointer : register(t3);
+cbuffer Pointer : register(b1) {
+    float pointer_pq, pointer_white, pointer_unused0, pointer_unused1;
+};
+
+float4 ps_pointer(Corner c) : SV_Target {
+    float4 p = pointer.Sample(smooth, c.uv);
+    if (pointer_pq < 0.5 || p.a <= 0.0) return p;
+    float3 s = saturate(p.rgb / p.a);
+    float3 lin = s <= 0.04045 ? s / 12.92 : pow((s + 0.055) / 1.055, 2.4);
+    // BT.709 to BT.2020 primaries.
+    lin = mul(float3x3(0.6274, 0.3293, 0.0433, 0.0691, 0.9195, 0.0114, 0.0164, 0.0880, 0.8956), lin);
+    return float4(nits_pq(lin * pointer_white) * p.a, p.a);
+}
 ";
 
 fn compile(entry: PCSTR, target: PCSTR) -> Result<Vec<u8>> {
@@ -163,6 +182,96 @@ struct Planes {
     luma: ID3D11ShaderResourceView,
     chroma: ID3D11ShaderResourceView,
     cr: Option<ID3D11ShaderResourceView>,
+}
+
+/// The computer's cursor as the draw thread draws it over the picture: its shape, and where its
+/// hot spot is, as fractions of the picture (the session's `cursor_at`).
+#[derive(Clone)]
+struct PointerAt {
+    shape: Arc<remoteman_core::CursorShape>,
+    at: (f32, f32),
+}
+
+impl PartialEq for PointerAt {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shape, &other.shape) && self.at == other.at
+    }
+}
+
+/// What the cursor's pass draws with: its shader, blending (premultiplied), a rasteriser that
+/// cuts to the picture, its constants, and the shape in a texture (made again for a new shape).
+struct PointerPass {
+    ps: ID3D11PixelShader,
+    blend: ID3D11BlendState,
+    cut: ID3D11RasterizerState,
+    constants: ID3D11Buffer,
+    shape: Option<(usize, ID3D11ShaderResourceView)>,
+}
+
+impl PointerPass {
+    fn new(device: &ID3D11Device) -> Result<Self> {
+        let code = compile(windows::core::s!("ps_pointer"), windows::core::s!("ps_5_0"))?;
+        // SAFETY: Direct3D calls with descriptions that live through each call.
+        unsafe {
+            let (mut ps, mut blend, mut cut, mut constants) = (None, None, None, None);
+            device.CreatePixelShader(&code, None, Some(&mut ps))?;
+            let mut b = D3D11_BLEND_DESC::default();
+            b.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
+                BlendEnable: true.into(),
+                SrcBlend: D3D11_BLEND_ONE,
+                DestBlend: D3D11_BLEND_INV_SRC_ALPHA,
+                BlendOp: D3D11_BLEND_OP_ADD,
+                SrcBlendAlpha: D3D11_BLEND_ONE,
+                DestBlendAlpha: D3D11_BLEND_INV_SRC_ALPHA,
+                BlendOpAlpha: D3D11_BLEND_OP_ADD,
+                RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
+            };
+            device.CreateBlendState(&b, Some(&mut blend))?;
+            let r = D3D11_RASTERIZER_DESC { FillMode: D3D11_FILL_SOLID, CullMode: D3D11_CULL_NONE, DepthClipEnable: true.into(), ScissorEnable: true.into(), ..Default::default() };
+            device.CreateRasterizerState(&r, Some(&mut cut))?;
+            let c = D3D11_BUFFER_DESC { ByteWidth: 16, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
+            device.CreateBuffer(&c, None, Some(&mut constants))?;
+            Ok(Self { ps: ps.context("no cursor shader")?, blend: blend.context("no blend state")?, cut: cut.context("no rasteriser state")?, constants: constants.context("no constant buffer")?, shape: None })
+        }
+    }
+
+    /// The shape's texture, made if the shape is new; `None` for a shape with nothing to draw.
+    fn shape(&mut self, device: &ID3D11Device, shape: &Arc<remoteman_core::CursorShape>) -> Option<ID3D11ShaderResourceView> {
+        let key = Arc::as_ptr(shape) as usize;
+        if let Some((of, view)) = &self.shape {
+            if *of == key {
+                return Some(view.clone());
+            }
+        }
+        let (w, h) = (shape.width, shape.height);
+        if w == 0 || h == 0 || shape.rgba.len() != (w * h * 4) as usize {
+            return None;
+        }
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: w,
+            Height: h,
+            MipLevels: 1,
+            ArraySize: 1,
+            // Premultiplied RGBA, as the computer sends it.
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_IMMUTABLE,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let data = D3D11_SUBRESOURCE_DATA { pSysMem: shape.rgba.as_ptr() as *const _, SysMemPitch: w * 4, SysMemSlicePitch: 0 };
+        let (mut texture, mut view) = (None, None);
+        // SAFETY: the pixels are `w * h * 4` bytes (checked) and live through the call.
+        unsafe {
+            device.CreateTexture2D(&desc, Some(&data), Some(&mut texture)).ok()?;
+            device.CreateShaderResourceView(texture.as_ref()?, None, Some(&mut view)).ok()?;
+        }
+        let view = view?;
+        say!("drawing: the computer's cursor ({w}x{h}, hot spot {},{}) over the picture, in its own pass", shape.hot_x, shape.hot_y);
+        self.shape = Some((key, view.clone()));
+        Some(view)
+    }
 }
 
 /// Where the picture goes: a window of our own, with the interface drawn in a layer over it,
@@ -288,6 +397,8 @@ struct Drawer {
     cadence: Cadence,
     /// Full screen's own presenting device and the stage the picture is drawn into.
     presenter: Option<Presenter>,
+    /// The computer's cursor's pass over the picture.
+    pointer: PointerPass,
 }
 
 /// Whether DXGI lets this device's swap chains present with tearing allowed, which variable
@@ -736,6 +847,7 @@ impl Drawer {
             gpu.device.CreateSamplerState(&s, Some(&mut sampler))?;
             let c = D3D11_BUFFER_DESC { ByteWidth: 64, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
             gpu.device.CreateBuffer(&c, None, Some(&mut constants))?;
+            let pointer = PointerPass::new(&gpu.device)?;
             let flags = DXGI_SWAP_CHAIN_FLAG(now.Flags as i32);
             let tears = flags.0 & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 != 0;
             say!(
@@ -768,6 +880,7 @@ impl Drawer {
                 tears,
                 cadence: Cadence::default(),
                 presenter: full,
+                pointer,
             })
         }
     }
@@ -984,11 +1097,12 @@ impl Drawer {
 
     /// Draw the picture's back buffer: black, and the picture (if there is one and somewhere
     /// for it to go) as large as fits `video` with its shape kept.
-    fn draw(&mut self, picture: Option<&Picture>, video: Option<(i32, i32, i32, i32)>, colour: Colour) -> Result<()> {
+    fn draw(&mut self, picture: Option<&Picture>, video: Option<(i32, i32, i32, i32)>, colour: Colour, pointer: Option<&PointerAt>) -> Result<()> {
         let planes = match (picture, video) {
             (Some(picture), Some(_)) => Some((self.planes(picture)?, picture)),
             _ => None,
         };
+        let pointer = pointer.and_then(|p| Some((p, self.pointer.shape(&self.gpu.device, &p.shape)?)));
         // SAFETY: Direct3D calls on interfaces held here; everything bound outlives the draw.
         unsafe {
             if self.target.is_none() {
@@ -1050,6 +1164,9 @@ impl Drawer {
                 ctx.Draw(3, 0);
                 // Let go of the slice, so the decoder may write to it again when its turn comes.
                 ctx.PSSetShaderResources(0, Some(&[None, None, None]));
+                if let Some((pointer, shape)) = &pointer {
+                    self.draw_pointer(pointer, shape, &viewport, (vw, vh), here_white);
+                }
             }
             // Direct2D draws with the same context: leave nothing of ours bound to it.
             ctx.OMSetRenderTargets(None, None);
@@ -1058,6 +1175,42 @@ impl Drawer {
             }
         }
         Ok(())
+    }
+
+    /// The computer's cursor over the picture just drawn through `picture` (its place in the
+    /// back buffer; `size`, its pixels): the shape's quad, scaled as the picture is, its hot spot
+    /// where the computer says, cut to the picture and blended over it; in PQ at this screen's
+    /// SDR white when the swap chain is HDR. Part of the same frame as the picture, so the two
+    /// reach the screen together, whatever the presenting.
+    fn draw_pointer(&self, p: &PointerAt, shape: &ID3D11ShaderResourceView, picture: &D3D11_VIEWPORT, size: (f32, f32), here_white: f32) {
+        let fit = picture.Width / size.0.max(1.0);
+        let x = (picture.TopLeftX + p.at.0 * picture.Width - p.shape.hot_x as f32 * fit).round();
+        let y = (picture.TopLeftY + p.at.1 * picture.Height - p.shape.hot_y as f32 * fit).round();
+        let quad = D3D11_VIEWPORT { TopLeftX: x, TopLeftY: y, Width: p.shape.width as f32 * fit, Height: p.shape.height as f32 * fit, MinDepth: 0.0, MaxDepth: 1.0 };
+        let cut = windows::Win32::Foundation::RECT {
+            left: picture.TopLeftX as i32,
+            top: picture.TopLeftY as i32,
+            right: (picture.TopLeftX + picture.Width).ceil() as i32,
+            bottom: (picture.TopLeftY + picture.Height).ceil() as i32,
+        };
+        let constants: [f32; 4] = [if self.pq { 1.0 } else { 0.0 }, here_white, 0.0, 0.0];
+        let ctx = &self.gpu.context;
+        // SAFETY: Direct3D calls on interfaces held here; what is bound is unbound again (the
+        // texture) or put back to the defaults the picture's pass sets anyway.
+        unsafe {
+            ctx.UpdateSubresource(&self.pointer.constants, 0, None, constants.as_ptr() as *const _, 0, 0);
+            ctx.RSSetState(&self.pointer.cut);
+            ctx.RSSetScissorRects(Some(&[cut]));
+            ctx.RSSetViewports(Some(&[quad]));
+            ctx.OMSetBlendState(&self.pointer.blend, None, u32::MAX);
+            ctx.PSSetShader(&self.pointer.ps, None);
+            ctx.PSSetConstantBuffers(1, Some(&[Some(self.pointer.constants.clone())]));
+            ctx.PSSetShaderResources(3, Some(&[Some(shape.clone())]));
+            ctx.Draw(3, 0);
+            ctx.PSSetShaderResources(3, Some(&[None]));
+            ctx.OMSetBlendState(None, None, u32::MAX);
+            ctx.RSSetState(None);
+        }
     }
 
     /// A swap chain's back buffer copied down: its size and its pixels as they lie in memory.
@@ -1195,6 +1348,7 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
     let mut drawn = None::<Arc<crate::ui::Frame>>;
     let mut of = 0usize;
     let (mut drawn_colour, mut fitted) = (Colour::default(), None::<Colour>);
+    let mut drawn_pointer = None::<PointerAt>;
     // For tests: where this thread's time goes, in microseconds: waiting for room, painting the
     // interface, drawing the picture, copying it to full screen's swap chain, presenting.
     let mut phases = [0u64; 5];
@@ -1250,6 +1404,14 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
         let colour = Colour::of(session.as_deref(), scene);
         changed |= session.is_some() && colour != drawn_colour;
         drawn_colour = colour;
+        // The computer's cursor over the picture (a captured pointer, in the app): a move, a new
+        // shape, or its coming and going redraws the picture with it.
+        let pointer = session.as_ref().and_then(|s| {
+            let shape = scene.pointer.lock().unwrap().clone()?;
+            (!s.cursor_gone.load(Ordering::Relaxed)).then(|| PointerAt { shape, at: *s.cursor_at.lock().unwrap() })
+        });
+        changed |= pointer != drawn_pointer;
+        drawn_pointer = pointer.clone();
         let new = fresh.is_some();
         if let Some(picture) = fresh {
             drawer.shown = Some(picture);
@@ -1281,7 +1443,7 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
             let _alone = DRAWING.lock().unwrap();
             let began = Instant::now();
             drawing_at = qpc();
-            drawer.draw(picture.as_ref(), video, colour)?;
+            drawer.draw(picture.as_ref(), video, colour, pointer.as_ref())?;
             timed(&mut phases[2], began);
         }
         let backdrop = frame.as_ref().map_or(crate::ui::Color(0.0, 0.0, 0.0, 1.0), |f| f.backdrop);

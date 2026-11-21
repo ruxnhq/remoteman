@@ -194,7 +194,9 @@ pub fn view(app: &App, ui: &mut Ui) {
     }
     // A captured pointer has no place of its own on this screen: the computer's is drawn
     // where the computer says it is, at once, not in the picture a pipeline's delay later.
-    if let (true, Some(image), Some(area)) = (app.captured, &app.remote_cursor, app.video_area()) {
+    // (In the app the draw thread draws it into the picture's own frame instead: `draw.rs`.)
+    let drawn_below = app.scene.pointer.lock().unwrap().is_some();
+    if let (true, false, Some(image), Some(area)) = (app.captured, drawn_below, &app.remote_cursor, app.video_area()) {
         let (vw, vh) = crate::stream::unpack(s.shared.stream_size.load(std::sync::atomic::Ordering::Relaxed));
         if vw > 0 && vh > 0 && !s.shared.cursor_gone.load(std::sync::atomic::Ordering::Relaxed) {
             let (fx, fy) = *s.shared.cursor_at.lock().unwrap();

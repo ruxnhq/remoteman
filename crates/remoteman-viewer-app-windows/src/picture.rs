@@ -127,8 +127,11 @@ impl Picture {
         }
     }
 
-    /// The panel inside its border; seen, and taking the keyboard, only during a session.
-    pub fn view(&self, panel: &ElementRef<SwapChainPanel>, session: bool) -> Border {
+    /// The panel inside its border; seen, and taking the keyboard, only during a session. While
+    /// the pointer is captured this PC's cursor isn't seen over it (the engine draws the computer's
+    /// into the picture): WinUI sets its own cursor over its content, whatever the window answers
+    /// to WM_SETCURSOR, so the border wears a blank one (the exe's cursor resource 1).
+    pub fn view(&self, panel: &ElementRef<SwapChainPanel>, session: bool, captured: bool) -> Border {
         let border = Border::new()
             .element_ref(&self.border)
             .is_tab_stop(session)
@@ -147,6 +150,7 @@ impl Picture {
             .on_got_focus(self.got_focus.clone())
             .on_lost_focus(self.lost_focus.clone())
             .content(SwapChainPanel::new().element_ref(panel));
+        let border = if captured { border.pointer_cursor(InputSystemCursorShape::Hidden) } else { border };
         // Black behind the picture (the bands that keep its shape are black too), and nothing
         // to hit when there is no session.
         if session { border.background(Color::rgb(0, 0, 0)) } else { border }

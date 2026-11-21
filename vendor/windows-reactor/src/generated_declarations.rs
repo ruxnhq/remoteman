@@ -193,6 +193,9 @@ pub enum InputSystemCursorShape {
     Pin,
     Person,
     AppStarting,
+    /// remoteman patch (VENDORED.md, patch 9): no cursor to be seen: the app's own cursor
+    /// resource 1, which the app makes blank (WinUI has no system shape for none).
+    Hidden,
 }
 impl InputSystemCursorShape {
     pub(crate) fn property_value(self) -> PropertyValue {
@@ -260,6 +263,10 @@ impl InputSystemCursorShape {
             Self::AppStarting => PropertyValue::Enum {
                 kind: "InputSystemCursorShape",
                 variant: "AppStarting",
+            },
+            Self::Hidden => PropertyValue::Enum {
+                kind: "InputSystemCursorShape",
+                variant: "Hidden",
             },
         }
     }
