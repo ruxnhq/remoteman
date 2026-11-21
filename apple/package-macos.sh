@@ -8,9 +8,9 @@
 #                                       System Settings > Privacy & Security > Open Anyway
 #   SIGN=devid apple/package-macos.sh   Developer ID (Xcode signed in to the team as its Account
 #                                       Holder or an Admin allowed to make one), hardened runtime
-#   SIGN=devid NOTARIZE=1 NOTARY_PROFILE=<name> apple/package-macos.sh
-#                                       also notarized by Apple and stapled; <name> is a notarytool
-#                                       keychain profile (xcrun notarytool store-credentials)
+#   SIGN=devid NOTARIZE=1 apple/package-macos.sh
+#                                       also notarized by Apple through the account Xcode is
+#                                       signed in to (no password or key needed) and stapled
 #
 # Apple Silicon only: the core is built for aarch64-apple-darwin (build-core.sh), and the viewer
 # uses Float16, which macOS has no Intel version of.
@@ -42,14 +42,30 @@ build() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>method</key><string>developer-id</string>
-<key>destination</key><string>export</string>
+<key>destination</key><string>$([ "$NOTARIZE" = 1 ] && echo upload || echo export)</string>
 <key>signingStyle</key><string>automatic</string>
 <key>teamID</key><string>$TEAM</string>
 </dict></plist>
 EOF
-        xcodebuild -exportArchive -archivePath "$WORK/$1.xcarchive" -exportOptionsPlist "$WORK/export.plist" \
-            -exportPath "$WORK/$1" -allowProvisioningUpdates >>"$log" 2>&1 \
-            || { grep -E 'error' "$log" | sort -u; exit 1; }
+        if [ "$NOTARIZE" = 1 ]; then
+            # Sent to Apple's notary service with the account Xcode is signed in to; the app
+            # comes back notarized with its ticket stapled.
+            xcodebuild -exportArchive -archivePath "$WORK/$1.xcarchive" -exportOptionsPlist "$WORK/export.plist" \
+                -exportPath "$WORK/$1-upload" -allowProvisioningUpdates >>"$log" 2>&1 \
+                || { grep -E 'error' "$log" | sort -u; exit 1; }
+            echo "$1: sent for notarization"
+            tries=0
+            until xcodebuild -exportNotarizedApp -archivePath "$WORK/$1.xcarchive" -exportPath "$WORK/$1" >>"$log" 2>&1; do
+                tries=$((tries + 1))
+                [ $tries -lt 90 ] || { echo "$1: not notarized after 45 minutes"; tail -5 "$log"; exit 1; }
+                sleep 30
+            done
+            xcrun stapler validate "$WORK/$1/$app"
+        else
+            xcodebuild -exportArchive -archivePath "$WORK/$1.xcarchive" -exportOptionsPlist "$WORK/export.plist" \
+                -exportPath "$WORK/$1" -allowProvisioningUpdates >>"$log" 2>&1 \
+                || { grep -E 'error' "$log" | sort -u; exit 1; }
+        fi
     else
         xcodebuild build -project Remoteman.xcodeproj -scheme "$scheme" -configuration Release \
             -destination 'generic/platform=macOS' -derivedDataPath "$WORK/dd" \
@@ -65,11 +81,6 @@ EOF
 # product app volume-name
 pack() {
     app="$WORK/$1/$2"
-    if [ "$SIGN" = devid ] && [ "$NOTARIZE" = 1 ]; then
-        ditto -c -k --keepParent "$app" "$WORK/$1.zip"
-        xcrun notarytool submit "$WORK/$1.zip" --keychain-profile "$NOTARY_PROFILE" --wait
-        xcrun stapler staple "$app"
-    fi
     stage="$WORK/$1-dmg"
     rm -rf "$stage"; mkdir -p "$stage"
     ditto "$app" "$stage/$2"
@@ -78,13 +89,10 @@ pack() {
     hdiutil create -quiet -volname "$3" -srcfolder "$stage" -fs APFS -format ULFO -ov "$OUT/$dmg"
     if [ "$SIGN" = devid ]; then
         # Xcode's Developer ID certificate may be cloud-managed, with no key in this keychain:
-        # the image is then left unsigned (the app inside is signed, notarized and stapled).
+        # the image is then left unsigned, which macOS opens without asking; the app inside is
+        # what Gatekeeper checks, and it carries its own stapled ticket.
         id=$(security find-identity -v -p codesigning | awk -F'"' "/Developer ID Application.*$TEAM/ {print \$2; exit}")
-        [ -n "$id" ] && codesign --sign "$id" --timestamp "$OUT/$dmg"
-        if [ "$NOTARIZE" = 1 ]; then
-            xcrun notarytool submit "$OUT/$dmg" --keychain-profile "$NOTARY_PROFILE" --wait
-            xcrun stapler staple "$OUT/$dmg"
-        fi
+        if [ -n "$id" ]; then codesign --sign "$id" --timestamp "$OUT/$dmg"; fi
     fi
     (cd "$OUT" && shasum -a 256 "$dmg" > "$dmg.sha256")
     echo "$OUT/$dmg"
