@@ -5,10 +5,14 @@
 # own build in target/release is not touched. Needs docker, and the Rust toolchain from rustup
 # (it is lent to the container, with the crates already downloaded).
 #
-#   packaging/appimage/build.sh        both, into target/appimage/
+#   packaging/appimage/build.sh        both, into target/appimage/: remoteman-viewer-VERSION-gnome-
+#                                      x86_64.AppImage and remoteman-host-VERSION-gnome-x86_64.AppImage,
+#                                      each with FILE.sha256 beside it
 #
 # What goes inside: the programs, FFmpeg (built in the container with only what remoteman
-# uses, LGPL), dav1d, OpenH264 and Opus. What stays the computer's own: GTK and libadwaita
+# uses, LGPL), dav1d, OpenH264 and Opus, and their licences (usr/share/licenses/remoteman,
+# with FFmpeg-SOURCE.txt saying which FFmpeg it is and where its source is). What stays the
+# computer's own: GTK and libadwaita
 # (4.20 and 1.6 at least), PipeWire, the graphics drivers and everything they load.
 set -eu
 root=$(dirname "$(dirname "$(dirname "$(readlink -f "$0")")")")
