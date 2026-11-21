@@ -24,6 +24,9 @@ pub enum Problem {
     NotPaired,
     /// Something else answered with another key.
     Changed,
+    /// Something answered with a key other than the one the command line gave
+    /// (`remoteman connect --expect`).
+    Unexpected,
     /// The computer answered and said no; with its reason.
     Refused(String),
     /// The computer is logging its user in (or unlocking) for this PC and will take it in a
@@ -44,6 +47,8 @@ pub const LOGGING_IN_TRIES: u32 = 10;
 pub fn classify(error: &str) -> Problem {
     if error.contains("isn't the host that was paired") {
         Problem::Changed
+    } else if error.contains("isn't the host that was expected") {
+        Problem::Unexpected
     } else if error.contains("isn't paired") || error.contains("the host refused: not_paired") {
         Problem::NotPaired
     } else if let Some((_, said)) = error.split_once("the host refused: logging_in: ") {
@@ -81,5 +86,19 @@ pub fn ended(reason: &str, shown: bool) -> Problem {
         Some(words) => Problem::Ended(format!("The computer closed the connection: {words}")),
         None if reason.contains("timed out") => Problem::Ended("The computer stopped answering.".into()),
         None => Problem::Ended(reason.to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_other_than_the_one_given_isnt_a_changed_computer() {
+        // As the core says them (remoteman-core's `Client::start` and the transport's check).
+        let expected = format!("172.29.1.2:7791 isn't the host that was expected: its certificate's fingerprint isn't {}", "ab".repeat(32));
+        assert_eq!(classify(&expected), Problem::Unexpected);
+        let paired = "connect: aborted by peer: the cryptographic handshake failed: error 42: this isn't the host that was paired";
+        assert_eq!(classify(paired), Problem::Changed);
     }
 }

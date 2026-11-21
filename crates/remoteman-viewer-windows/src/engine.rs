@@ -1111,6 +1111,7 @@ impl Engine {
         let full = self.full.borrow().is_some();
         let effects = {
             let Ok(mut app) = self.app.try_borrow_mut() else { return false };
+            app.end_connect_run();
             if full {
                 // In full screen the engine's own window shows the kit's bar, menus and news.
                 app.finish()
@@ -1465,6 +1466,7 @@ fn problem(p: &Problem) -> Value {
         Problem::Asleep => ("asleep", ""),
         Problem::NotPaired => ("not-paired", ""),
         Problem::Changed => ("changed", ""),
+        Problem::Unexpected => ("unexpected", ""),
         Problem::Refused(s) => ("refused", s.as_str()),
         Problem::LoggingIn(s) => ("logging-in", s.as_str()),
         Problem::Locked(s) => ("locked", s.as_str()),
@@ -1482,7 +1484,11 @@ fn options(app: &App, choice: &Choice) -> Value {
 fn state_of(app: &App) -> Value {
     let screen = match &app.screen {
         Screen::Computers => json!({"kind": "computers"}),
-        Screen::Connecting => json!({"kind": "connecting", "name": app.attempt.as_ref().map(|a| a.target.name.clone()), "address": app.attempt.as_ref().map(|a| a.target.address.clone())}),
+        Screen::Connecting => {
+            // (Before the first attempt, `remoteman connect`'s computer.)
+            let target = app.attempt.as_ref().map(|a| a.target.clone()).or_else(|| app.args.given.as_ref().map(|g| app.target_of(&g.address)));
+            json!({"kind": "connecting", "name": target.as_ref().map(|t| t.name.clone()), "address": target.map(|t| t.address)})
+        }
         Screen::Problem(t, p) => json!({"kind": "problem", "name": t.name, "address": t.address, "problem": problem(p), "retrying": app.retry_at.is_some()}),
         Screen::Session => json!({"kind": "session"}),
         Screen::Settings => json!({"kind": "settings"}),

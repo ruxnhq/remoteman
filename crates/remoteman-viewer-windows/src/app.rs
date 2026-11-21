@@ -389,6 +389,8 @@ pub struct App {
     logging_in: u32,
     /// When to try the computer on the problem page again by itself.
     pub retry_at: Option<Instant>,
+    /// The window is up and the computer the command line names has been tried (`start`).
+    started_on_host: bool,
     /// The stream's size and rate as the bar last said them.
     shown_format: Option<(u32, u32, u32)>,
     /// The password being tried on a locked computer, until it is known whether it worked.
@@ -419,6 +421,8 @@ impl App {
     pub fn new(args: Args, gpu: Gpu, scene: Arc<Scene>, decoders: Vec<Mode>, dark: bool) -> anyhow::Result<Self> {
         let store = Store::load(&args.state);
         let now = Instant::now();
+        // `remoteman connect` never shows the list, not even before its window is up.
+        let screen = if args.given.is_some() { Screen::Connecting } else { Screen::Computers };
         Ok(Self {
             fonts: Fonts::new()?,
             store,
@@ -428,7 +432,7 @@ impl App {
             scale: 1.0,
             maximised: false,
             fullscreen: false,
-            screen: Screen::Computers,
+            screen,
             dialog: None,
             menu: None,
             fields: HashMap::new(),
@@ -465,6 +469,7 @@ impl App {
             unlock: None,
             logging_in: 0,
             retry_at: None,
+            started_on_host: false,
             unlocking: None,
             remember: false,
             captured: false,
@@ -537,14 +542,27 @@ impl App {
         self.reach.get(address).copied().filter(|r| FEATURES.presence || *r == Reach::Unreachable)
     }
 
+    /// A placement was picked for this computer: it wins from now on over one the command line
+    /// gave.
+    fn drop_given_placement(&mut self, address: &str) {
+        if let Some(given) = self.args.given.as_mut().filter(|g| g.address == address) {
+            given.placement = None;
+        }
+    }
+
+    /// The computer's key fingerprint: the one `remoteman connect` gave for it, or the one kept
+    /// from pairing. What a kept password is filed under.
+    fn key_of(&self, address: &str) -> Option<String> {
+        self.args.given_for(address).map(|g| g.expect.clone()).or_else(|| self.store.key(address))
+    }
+
     /// How this display is to sit among a computer's own, which stream to ask it for, and the
     /// most that may use.
     pub fn choices(&self, address: &str) -> (Placement, Quality, u32) {
+        let placement = placement(&self.args, &self.store, address);
         match self.store.find(address) {
-            Some(c) => (c.placement, c.quality.unwrap_or(self.store.settings.quality), c.bitrate),
-            // Not in the list: a computer named on the command line gets the placement last
-            // used; one being paired starts as an extra display.
-            None => (if self.args.host.is_some() { self.store.settings.placement } else { Placement::Extend }, self.store.settings.quality, 0),
+            Some(c) => (placement, c.quality.unwrap_or(self.store.settings.quality), c.bitrate),
+            None => (placement, self.store.settings.quality, 0),
         }
     }
 
@@ -699,6 +717,20 @@ impl App {
         if let Some(host) = self.args.host.clone() {
             let target = self.target_of(&with_port(&host));
             self.connect(target, self.args.pair);
+            self.started_on_host = true;
+        }
+    }
+
+    /// `remoteman connect` shows its one computer and never the list: where another run comes
+    /// back to the list (Disconnect, Back from a problem page, Cancel while connecting), it ends.
+    /// A computer that went away or can't be reached keeps its page, with Try again, until the
+    /// window is closed or Back is pressed. Looked at each time the state is published.
+    pub fn end_connect_run(&mut self) {
+        if connect_run_over(self.args.given.is_some(), self.started_on_host, &self.screen) && self.code.is_none() {
+            say!("connect: back at the list of computers, which this run doesn't show: leaving");
+            self.dialog = None;
+            self.menu = None;
+            self.quit(0);
         }
     }
 
@@ -792,10 +824,20 @@ impl App {
             attach_only: self.store.find(&target.address).is_some_and(|c| c.attach_only),
         };
         *shared.folder.lock().unwrap() = self.store.receive_folder();
-        say!("connecting to {} for {}x{} at {} Hz{}", target.address, display.width, display.height, display.refresh, if display.hdr { format!(", HDR (headroom {:.1})", display.headroom) } else { String::new() });
+        // `remoteman connect`: its keys for the computer it names, every time it is tried.
+        let given = self.args.given_for(&target.address).map(crate::args::Given::core).unwrap_or_default();
+        say!(
+            "connecting to {} for {}x{} at {} Hz{}{}",
+            target.address,
+            display.width,
+            display.height,
+            display.refresh,
+            if display.hdr { format!(", HDR (headroom {:.1})", display.headroom) } else { String::new() },
+            if given.expect.is_some() { ", with the keys given" } else { "" }
+        );
         let (id, tx, scene) = (self.attempt_id, self.results.0.clone(), self.scene.clone());
         let _ = std::thread::Builder::new().name("connect".into()).spawn(move || {
-            let result = Client::connect(options, feed).map_err(|e| format!("{e:#}"));
+            let result = Client::connect_given(options, given, feed).map_err(|e| format!("{e:#}"));
             let _ = tx.send((id, result));
             scene.wake_window();
         });
@@ -1192,7 +1234,7 @@ impl App {
                 say!("the computer is locked: {said}");
                 self.fields.insert(id("locked.password"), Field::default());
                 self.focus(id("locked.password"), false);
-                let computer = self.store.key(&target.address).unwrap_or_default();
+                let computer = self.key_of(&target.address).unwrap_or_default();
                 // What became of the password that was just tried, if one was: one kept here
                 // that the computer says is wrong is out of date.
                 let tried = self.unlocking.take();
@@ -1263,7 +1305,10 @@ impl App {
                 client.send_message(Message::Configure { display: None, bitrate: Some(s.bitrate * 1_000_000), decoders: None });
             }
         }
-        self.store.settings.placement = display.placement;
+        // A placement given on the command line is that connection's, not the one last used.
+        if self.args.given_for(&address).is_none_or(|g| g.placement.is_none()) {
+            self.store.settings.placement = display.placement;
+        }
         self.store.save_settings();
         self.reach.remove(&address);
         let name = self.name_of(&address);
@@ -1442,7 +1487,7 @@ impl App {
             Msg::Unlock => {
                 let typed = self.fields.insert(id("locked.password"), Field::default()).map(|f| f.string()).unwrap_or_default();
                 if let (false, Screen::Problem(target, _)) = (typed.is_empty(), self.screen.clone()) {
-                    let computer = self.store.key(&target.address).unwrap_or_default();
+                    let computer = self.key_of(&target.address).unwrap_or_default();
                     self.unlocking = Some(Unlocking { remember: self.remember && !computer.is_empty(), computer, password: typed.clone(), kept: false });
                     self.unlock = Some(typed);
                     self.connect(target, false);
@@ -1552,6 +1597,7 @@ impl App {
                 if s.display.placement != placement {
                     let address = s.target.address.clone();
                     self.store.update(&address, |c| c.placement = placement);
+                    self.drop_given_placement(&address);
                     say!("placement: {} asked for, by connecting again", crate::store::placement_key(placement));
                     self.reconnect();
                 }
@@ -1675,7 +1721,10 @@ impl App {
                 self.store.settings.quality = QUALITIES[n.min(3)];
                 self.store.save_settings();
             }
-            Choice::Placement(address) => self.store.update(&address, |c| c.placement = PLACEMENT_NAMES[n.min(3)].0),
+            Choice::Placement(address) => {
+                self.store.update(&address, |c| c.placement = PLACEMENT_NAMES[n.min(3)].0);
+                self.drop_given_placement(&address);
+            }
             Choice::Size(address) => self.store.update(&address, |c| c.max_height = SIZES[n.min(3)].0),
             Choice::Scroll => {
                 self.store.settings.scroll_reversed = n == 1;
@@ -2346,4 +2395,67 @@ impl App {
 /// Let a connection go without making the window wait: saying goodbye can take a second.
 fn retire(client: Arc<Client>) {
     let _ = std::thread::Builder::new().name("goodbye".into()).spawn(move || drop(client));
+}
+
+/// How the display for the computer at `address` is to sit among its own: as `remoteman
+/// connect --placement` says for the computer it names, else as was chosen for that computer;
+/// one not in the list gets the placement last used if the command line names it, and one being
+/// paired starts as an extra display.
+fn placement(args: &Args, store: &Store, address: &str) -> Placement {
+    if let Some(given) = args.given_for(address).and_then(|g| g.placement) {
+        return given;
+    }
+    match store.find(address) {
+        Some(c) => c.placement,
+        None if args.host.is_some() => store.settings.placement,
+        None => Placement::Extend,
+    }
+}
+
+/// Whether a `remoteman connect` run (`given`) is over: started, and on the list of computers.
+fn connect_run_over(given: bool, started: bool, screen: &Screen) -> bool {
+    given && started && *screen == Screen::Computers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_connect_run_ends_where_others_show_the_list() {
+        let problem = Screen::Problem(Target { address: "172.29.1.2:7791".into(), name: "guest".into() }, Problem::Ended("gone".into()));
+        // Before the window is up the screen is the list's; then connecting, the session, a
+        // problem page (with Try again) all stay; the list ends it.
+        assert!(!connect_run_over(true, false, &Screen::Computers));
+        for screen in [Screen::Connecting, Screen::Session, problem.clone(), Screen::Settings] {
+            assert!(!connect_run_over(true, true, &screen), "{screen:?}");
+        }
+        assert!(connect_run_over(true, true, &Screen::Computers));
+        // Any other run goes back to the list as before.
+        assert!(!connect_run_over(false, true, &Screen::Computers));
+    }
+
+    #[test]
+    fn the_placement_given_wins_over_the_computers_own() {
+        let dir = std::env::temp_dir().join(format!("remoteman-placement-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("viewer-computers"), "[computer]\nname=guest\naddress=172.29.1.2:7791\nplacement=extend\n[computer]\nname=other\naddress=10.0.0.9:7791\nplacement=only\n").unwrap();
+        std::fs::write(dir.join("viewer-settings"), "placement=mirror\n").unwrap();
+        let store = Store::load(&dir);
+        let words = |w: &str| w.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let mut args = crate::args::parse_from(words(&format!("172.29.1.2:7791 --state {}", dir.display()))).unwrap();
+        // As it was: the computer's own, and the last used for one the command line names.
+        assert_eq!(placement(&args, &store, "172.29.1.2:7791"), Placement::Extend);
+        assert_eq!(placement(&args, &store, "10.0.0.9:7791"), Placement::Only);
+        assert_eq!(placement(&args, &store, "10.0.0.10:7791"), Placement::Mirror);
+        // Given for the computer named: that, for it alone.
+        args.given = Some(crate::args::Given { address: "172.29.1.2:7791".into(), expect: "ab".repeat(32), cert: Vec::new(), key: Vec::new(), placement: Some(Placement::Main) });
+        assert_eq!(placement(&args, &store, "172.29.1.2:7791"), Placement::Main);
+        assert_eq!(placement(&args, &store, "10.0.0.9:7791"), Placement::Only);
+        // Picked in the session: the computer's own again.
+        args.given.as_mut().unwrap().placement = None;
+        assert_eq!(placement(&args, &store, "172.29.1.2:7791"), Placement::Extend);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

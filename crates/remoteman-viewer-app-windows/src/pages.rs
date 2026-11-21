@@ -242,6 +242,14 @@ pub fn status(v: &Viewer, context: &ViewContext<Viewer>) -> View {
                 add("Forget…", act(context, "forget", json!({"address": address})), false);
                 add("Back", act(context, "back", Value::Null), true);
             }
+            // `remoteman connect --expect`: nothing paired to forget, only the key it was given.
+            "unexpected" => {
+                top = sign(glyph::WARNING, Some(ThemeBrush::SystemCritical));
+                title = format!("This isn't the {name} that was expected");
+                words = format!("Something answered at {host} with a key other than the one remoteman was started with (--expect), so it wasn't let in.");
+                add("Try again", connect(), false);
+                add("Back", act(context, "back", Value::Null), true);
+            }
             "refused" => {
                 top = sign(glyph::CLOSE, Some(ThemeBrush::SystemCritical));
                 title = format!("{name} closed the connection");

@@ -41,6 +41,17 @@ impl Identity {
         Self { fingerprint: fingerprint(&cert), cert: CertificateDer::from(cert), key }
     }
 
+    /// An identity given rather than kept: a certificate and its key (PKCS #8), both DER, as
+    /// `cert.der` and `key.der` hold them. Checked here, so a key that isn't one, or isn't the
+    /// certificate's, is found before anything connects.
+    pub fn from_der(cert: Vec<u8>, key: Vec<u8>) -> Result<Self> {
+        let id = Self::from_parts(cert, key);
+        let provider = rustls::crypto::ring::default_provider();
+        let signing = provider.key_provider.load_private_key(id.key()).map_err(|e| anyhow::anyhow!("the key isn't a key: {e}"))?;
+        rustls::sign::CertifiedKey::new(vec![id.cert.clone()], signing).keys_match().map_err(|e| anyhow::anyhow!("the key isn't the certificate's: {e}"))?;
+        Ok(id)
+    }
+
     /// The identity kept in `dir`, made on first use. The key file is readable by its owner only.
     pub fn load_or_create(dir: &Path) -> Result<Self> {
         let (cert_path, key_path) = (dir.join("cert.der"), dir.join("key.der"));
@@ -60,6 +71,24 @@ impl Identity {
 
     pub(crate) fn key(&self) -> PrivateKeyDer<'static> {
         PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_given_identity_is_checked() {
+        let one = Identity::generate().unwrap();
+        let other = Identity::generate().unwrap();
+        let given = Identity::from_der(one.cert.to_vec(), one.key.clone()).unwrap();
+        assert_eq!(given.fingerprint, one.fingerprint);
+        let crossed = Identity::from_der(one.cert.to_vec(), other.key.clone()).err().unwrap().to_string();
+        assert!(crossed.contains("isn't the certificate's"), "{crossed}");
+        let junk = Identity::from_der(one.cert.to_vec(), vec![1, 2, 3]).err().unwrap().to_string();
+        assert!(junk.contains("isn't a key"), "{junk}");
+        assert!(Identity::from_der(vec![1, 2, 3], one.key.clone()).is_err(), "a certificate that isn't one");
     }
 }
 

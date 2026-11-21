@@ -113,7 +113,7 @@ pub fn placement_key(p: Placement) -> &'static str {
     PLACEMENTS.iter().find(|x| x.0 == p).map_or("extend", |x| x.1)
 }
 
-fn placement_from_key(key: &str) -> Option<Placement> {
+pub fn placement_from_key(key: &str) -> Option<Placement> {
     PLACEMENTS.iter().find(|x| x.1 == key).map(|x| x.0)
 }
 
