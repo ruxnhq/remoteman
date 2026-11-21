@@ -219,6 +219,7 @@ impl VirtualDisplay {
             // display this is asked of.
             Event::Display(_) => {}
             Event::Pen { .. } => {}
+            Event::Gamepad { .. } => {}
             Event::Button { button, down } => {
                 // Linux BTN_LEFT, BTN_RIGHT, BTN_MIDDLE.
                 let code: i32 = match button {
