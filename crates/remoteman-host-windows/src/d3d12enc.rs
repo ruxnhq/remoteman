@@ -590,6 +590,22 @@ fn choose(video: &ID3D12VideoDevice3, vendor: u32, w: u32, h: u32, fps: u32, bit
     Ok(Chosen { caps, config, level: D3D12_VIDEO_ENCODER_LEVEL_TIER_CONSTRAINTS_HEVC { Level: D3D12_VIDEO_ENCODER_LEVELS_HEVC(level), Tier: D3D12_VIDEO_ENCODER_TIER_HEVC_MAIN } })
 }
 
+/// The sequence's settings the first frame says changed: each only when the driver can change it.
+/// A driver that can't, such as Intel's for its Arc cards, refuses the frame as a whole ("the
+/// parameter is incorrect") when asked to, even for the first frame, while AMD's, which can change
+/// all of them, takes them as the first settings either way.
+fn first_frame_flags(support: i32) -> D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAGS {
+    let pairs = [
+        (D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RESOLUTION_RECONFIGURATION_AVAILABLE.0, D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_RESOLUTION_CHANGE.0),
+        (D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_RECONFIGURATION_AVAILABLE.0, D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_RATE_CONTROL_CHANGE.0),
+        (D3D12_VIDEO_ENCODER_SUPPORT_FLAG_SEQUENCE_GOP_RECONFIGURATION_AVAILABLE.0, D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_GOP_SEQUENCE_CHANGE.0),
+        (D3D12_VIDEO_ENCODER_SUPPORT_FLAG_SUBREGION_LAYOUT_RECONFIGURATION_AVAILABLE.0, D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_SUBREGION_LAYOUT_CHANGE.0),
+    ];
+    D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAGS(
+        pairs.iter().filter(|(can, _)| support & can != 0).fold(0, |flags, (_, change)| flags | change),
+    )
+}
+
 fn cbr_params(bitrate: u32, fps: u32, vbv: bool) -> D3D12_VIDEO_ENCODER_RATE_CONTROL_CBR {
     let frame = (bitrate as u64 / fps.max(1) as u64).max(1000);
     D3D12_VIDEO_ENCODER_RATE_CONTROL_CBR { InitialQP: 0, MinQP: 0, MaxQP: 0, MaxFrameBitSize: 0, TargetBitRate: bitrate as u64, VBVCapacity: if vbv { frame } else { 0 }, InitialVBVFullness: if vbv { frame } else { 0 } }
@@ -955,9 +971,7 @@ impl Encoder {
         let cbr = cbr_params(self.bitrate, self.fps, self.vbv);
         let mut flags = D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_NONE;
         if self.first {
-            flags = D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAGS(
-                D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_RESOLUTION_CHANGE.0 | D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_RATE_CONTROL_CHANGE.0 | D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_GOP_SEQUENCE_CHANGE.0 | D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_SUBREGION_LAYOUT_CHANGE.0,
-            );
+            flags = first_frame_flags(self.caps.support_flags);
         } else if self.rate_change {
             flags = D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_RATE_CONTROL_CHANGE;
         }
@@ -1166,4 +1180,26 @@ impl FrameEncoder for Encoder {
 #[allow(dead_code)]
 fn unused() -> Result<()> {
     bail!("")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_frame_asks_only_for_changes_the_driver_can_make() {
+        // Intel's Arc B580 (in a guest with its card shared): it can change the resolution, and not
+        // the rate control, the GOP or the frame's layout.
+        let arc = first_frame_flags(0x174d).0;
+        assert_eq!(arc, D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_RESOLUTION_CHANGE.0);
+        // AMD's Radeon: it can change all four, and is asked to as before.
+        let radeon = first_frame_flags(0x1daf).0;
+        assert_eq!(
+            radeon,
+            D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_RESOLUTION_CHANGE.0
+                | D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_RATE_CONTROL_CHANGE.0
+                | D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_GOP_SEQUENCE_CHANGE.0
+                | D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_SUBREGION_LAYOUT_CHANGE.0
+        );
+    }
 }
