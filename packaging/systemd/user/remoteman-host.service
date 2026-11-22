@@ -1,6 +1,6 @@
 [Unit]
 Description=remoteman host: this computer's screen for paired devices
-Documentation=https://github.com/xnixy/remoteman
+Documentation=https://github.com/ruxnhq/remoteman
 # The host by itself, in this user's graphical session: it listens and serves one device at a
 # time. Its owner starts and stops it from Remoteman Host (remoteman-tray), which also shows
 # who is connected. What paired devices may do beyond the screen (clipboard, files) is kept in
