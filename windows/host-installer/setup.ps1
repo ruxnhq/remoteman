@@ -48,7 +48,22 @@ $subject = 'CN=remoteman display driver, this machine only'
 $ours = '*remoteman display driver, this machine only*'
 $settingsFolder = Join-Path $env:ProgramData 'remoteman\display'  # where the driver reads its settings
 
-function Say([string]$line) { Add-Content -Path $log -Value "$(Get-Date -Format s) $line" }
+# The installer writes to the same file between this script's lines, a line at a time, so each line
+# is written sharing the file and tried again if it's busy. Add-Content shares it only for reading
+# and doesn't try again, and stopped installs with a sharing violation. A line that still can't be
+# written is lost, and the install goes on: the log is never a reason to fail.
+function Say([string]$line) {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes("$(Get-Date -Format s) $line`r`n")
+    for ($try = 0; $try -lt 20; $try++) {
+        try {
+            $file = [System.IO.File]::Open($log, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+            try { $file.Write($bytes, 0, $bytes.Length) } finally { $file.Dispose() }
+            return
+        } catch {
+            Start-Sleep -Milliseconds 25
+        }
+    }
+}
 
 $source = @'
 using System; using System.Runtime.InteropServices;
