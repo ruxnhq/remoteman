@@ -37,6 +37,10 @@ use crate::encode::Settings;
 /// Reconstructed pictures kept to refer to: 5 is what a level 4.1 and up allows at 1080p and
 /// 4K (6 in the decoder's picture buffer, counting the one being decoded).
 const DPB: usize = 5;
+/// What the resolved metadata and the bitstream's start are filled with before each frame.
+const UNWRITTEN: u8 = 0xa5;
+/// The resolved metadata's size: the frame's, and none of its subregions'.
+const METADATA_SIZE: usize = std::mem::size_of::<D3D12_VIDEO_ENCODER_OUTPUT_METADATA>();
 /// The newest this many are always kept.
 const RECENT: usize = 3;
 /// POC's low bits: 16.
@@ -331,10 +335,9 @@ fn heap(kind: D3D12_HEAP_TYPE) -> D3D12_HEAP_PROPERTIES {
     D3D12_HEAP_PROPERTIES { Type: kind, ..Default::default() }
 }
 
-/// Memory the video encoder may write and the CPU read: a custom heap of the system's memory,
-/// cached for the CPU. A readback heap isn't: only a copy may write to one, and while AMD's driver
-/// lets the encoder write its bitstream and metadata there all the same, Intel's writes nothing,
-/// so every frame read back as 0 bytes.
+/// Memory the video encoder writes and the CPU reads: a custom heap of the system's memory, cached
+/// for the CPU, which on a card of its own is what a readback heap is (FFmpeg's encoder writes its
+/// bitstream and resolved metadata into a readback heap, on Intel's Arc too).
 fn readable_heap() -> D3D12_HEAP_PROPERTIES {
     D3D12_HEAP_PROPERTIES {
         Type: D3D12_HEAP_TYPE_CUSTOM,
@@ -603,11 +606,15 @@ fn choose(video: &ID3D12VideoDevice3, vendor: u32, w: u32, h: u32, fps: u32, bit
     Ok(Chosen { caps, config, level: D3D12_VIDEO_ENCODER_LEVEL_TIER_CONSTRAINTS_HEVC { Level: D3D12_VIDEO_ENCODER_LEVELS_HEVC(level), Tier: D3D12_VIDEO_ENCODER_TIER_HEVC_MAIN } })
 }
 
-/// The sequence's settings the first frame says changed: each only when the driver can change it.
-/// A driver that can't, such as Intel's for its Arc cards, refuses the frame as a whole ("the
-/// parameter is incorrect") when asked to, even for the first frame, while AMD's, which can change
-/// all of them, takes them as the first settings either way.
+/// The sequence's settings the first frame says changed. AMD's driver, which can change all of
+/// them, takes them as the first settings, and is told as it was before. A driver that can't change
+/// its rate control, such as Intel's for its Arc cards, is told of no change at all, as FFmpeg's
+/// encoder tells every driver: asked for one it can't make, Intel's refused the frame as a whole
+/// ("the parameter is incorrect"), and asked for the resolution alone, it encoded nothing.
 fn first_frame_flags(support: i32) -> D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAGS {
+    if support & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_RECONFIGURATION_AVAILABLE.0 == 0 {
+        return D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_NONE;
+    }
     let pairs = [
         (D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RESOLUTION_RECONFIGURATION_AVAILABLE.0, D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_RESOLUTION_CHANGE.0),
         (D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_RECONFIGURATION_AVAILABLE.0, D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_RATE_CONTROL_CHANGE.0),
@@ -687,7 +694,9 @@ pub struct Encoder {
     encoder: ID3D12VideoEncoder,
     heap: ID3D12VideoEncoderHeap,
     input: ID3D12Resource,
-    recon: ID3D12Resource,
+    /// The reconstructed pictures: one texture array of them, or a texture each.
+    recon: Vec<ID3D12Resource>,
+    recon_array: bool,
     recon_state: Vec<D3D12_RESOURCE_STATES>,
     bitstream: ID3D12Resource,
     bitstream_size: u64,
@@ -803,11 +812,19 @@ impl Encoder {
             let gpu_context: ID3D11DeviceContext4 = gpu.context.cast().context("ID3D11DeviceContext4")?;
 
             let recon_slices = DPB + 1;
-            let mut recon: Option<ID3D12Resource> = None;
-            device
-                .CreateCommittedResource(&heap(D3D12_HEAP_TYPE_DEFAULT), D3D12_HEAP_FLAG_NONE, &texture_desc(cw, ch, recon_slices as u16, if env_flag("REMOTEMAN_D3D12_REFONLY", true) { D3D12_RESOURCE_FLAGS(D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY.0 | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE.0) } else { D3D12_RESOURCE_FLAG_NONE }), D3D12_RESOURCE_STATE_COMMON, None, &mut recon)
-                .context("the reconstructed pictures")?;
-            let _ = array;
+            let recon_flags = if env_flag("REMOTEMAN_D3D12_REFONLY", true) { D3D12_RESOURCE_FLAGS(D3D12_RESOURCE_FLAG_VIDEO_ENCODE_REFERENCE_ONLY.0 | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE.0) } else { D3D12_RESOURCE_FLAG_NONE };
+            // One texture array where the driver needs the pictures in one (AMD's); else a
+            // texture of its own for each, as FFmpeg's encoder has them on a driver that doesn't
+            // (Intel's). REMOTEMAN_D3D12_ARRAY=1 makes an array anyway.
+            let recon_array = array || env_flag("REMOTEMAN_D3D12_ARRAY", false);
+            let mut recon = Vec::new();
+            for _ in 0..if recon_array { 1 } else { recon_slices } {
+                let mut texture: Option<ID3D12Resource> = None;
+                device
+                    .CreateCommittedResource(&heap(D3D12_HEAP_TYPE_DEFAULT), D3D12_HEAP_FLAG_NONE, &texture_desc(cw, ch, if recon_array { recon_slices as u16 } else { 1 }, recon_flags), D3D12_RESOURCE_STATE_COMMON, None, &mut texture)
+                    .context("the reconstructed pictures")?;
+                recon.push(texture.context("no reconstruction texture")?);
+            }
 
             // Output: the bitstream and the resolved metadata where the CPU can read them
             // (a readback heap), the encoder's own metadata in the GPU's.
@@ -876,7 +893,8 @@ impl Encoder {
                 encoder,
                 heap: vheap,
                 input: shared,
-                recon: recon.context("no reconstruction texture")?,
+                recon,
+                recon_array,
                 recon_state: vec![D3D12_RESOURCE_STATE_COMMON; recon_slices],
                 bitstream: bitstream.context("no bitstream buffer")?,
                 bitstream_size,
@@ -910,6 +928,39 @@ impl Encoder {
     /// The parameter sets this encoder puts before a keyframe.
     pub fn parameter_sets(&self) -> Vec<u8> {
         self.params.sets()
+    }
+
+    /// Where picture `slice` is: its texture, and the subresource of its luma plane there.
+    fn recon_at(&self, slice: usize) -> (&ID3D12Resource, u32) {
+        if self.recon_array { (&self.recon[0], slice as u32) } else { (&self.recon[slice], 0) }
+    }
+
+    /// Why a frame came back with nothing: whether the driver wrote the resolved metadata and the
+    /// bitstream at all (both are filled with [`UNWRITTEN`] before each frame), what the metadata
+    /// says, and whether the device was lost.
+    fn explain_nothing(&self, resolved: &[u8]) -> String {
+        let metadata = if resolved.iter().all(|&b| b == UNWRITTEN) { "the driver never wrote the resolved metadata" } else { "the driver wrote the resolved metadata" };
+        let mut head = [UNWRITTEN; 16];
+        // SAFETY: the bitstream buffer is at least 1 MB, and idle (the frame's work is done).
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if self.bitstream.Map(0, Some(&D3D12_RANGE { Begin: 0, End: head.len() }), Some(&mut mapped)).is_ok() {
+                std::ptr::copy_nonoverlapping(mapped as *const u8, head.as_mut_ptr(), head.len());
+                self.bitstream.Unmap(0, None);
+            }
+        }
+        let bitstream = if head.iter().all(|&b| b == UNWRITTEN) { "never written" } else { "written" };
+        // SAFETY: a live device.
+        let device = unsafe { self.device.GetDeviceRemovedReason() };
+        format!(
+            "{metadata} ({:02x?}), the bitstream's start {bitstream} ({:02x?}), the device {}",
+            resolved,
+            head,
+            match device {
+                Ok(()) => "is fine".to_owned(),
+                Err(e) => format!("was lost: {e}"),
+            }
+        )
     }
 
     fn encode_frame(&mut self, n: u64, idr: bool) -> Result<bool> {
@@ -947,8 +998,12 @@ impl Encoder {
         // so (AMD's driver writes it as given, and a decoder finds the wrong pictures otherwise).
         let refs: Vec<usize> = if key { Vec::new() } else { (0..self.pics.len()).rev().collect() };
         let ref_i = self.pics.len().wrapping_sub(1); // the newest
-        let mut textures: Vec<Option<ID3D12Resource>> = refs.iter().map(|_| Some(self.recon.clone())).collect();
-        let mut subs: Vec<u32> = refs.iter().map(|&i| self.pics[i].slice as u32).collect();
+        let mut textures: Vec<Option<ID3D12Resource>> = refs.iter().map(|&i| Some(self.recon_at(self.pics[i].slice).0.clone())).collect();
+        let mut subs: Vec<u32> = refs.iter().map(|&i| self.recon_at(self.pics[i].slice).1).collect();
+        let (work_texture, work_sub) = {
+            let (texture, sub) = self.recon_at(work);
+            (texture.clone(), sub)
+        };
         let mut descs: Vec<D3D12_VIDEO_ENCODER_REFERENCE_PICTURE_DESCRIPTOR_HEVC> = refs
             .iter()
             .enumerate()
@@ -980,7 +1035,10 @@ impl Encoder {
             QPMapValuesCount: 0,
             pRateControlQPMap: std::ptr::null_mut(),
         };
-        let mut gop = D3D12_VIDEO_ENCODER_SEQUENCE_GOP_STRUCTURE_HEVC { GOPLength: 0, PPicturePeriod: 0, log2_max_pic_order_cnt_lsb_minus4: POC_BITS - 4 };
+        // An endless group of pictures (keyframes are asked for when they're wanted), with a
+        // P-picture every picture: no B-frames, as FFmpeg's encoder says it (a period of 0 means
+        // none).
+        let mut gop = D3D12_VIDEO_ENCODER_SEQUENCE_GOP_STRUCTURE_HEVC { GOPLength: 0, PPicturePeriod: 1, log2_max_pic_order_cnt_lsb_minus4: POC_BITS - 4 };
         let cbr = cbr_params(self.bitrate, self.fps, self.vbv);
         let mut flags = D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_NONE;
         if self.first {
@@ -999,11 +1057,13 @@ impl Encoder {
             let mut before = Vec::new();
             before.push(transition(&self.input, 0, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ));
             before.push(transition(&self.input, 1, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ));
-            let mut set = |slice: usize, to: D3D12_RESOURCE_STATES, b: &mut Vec<D3D12_RESOURCE_BARRIER>, states: &mut Vec<D3D12_RESOURCE_STATES>| {
+            let (recon, recon_array) = (&self.recon, self.recon_array);
+            let set = |slice: usize, to: D3D12_RESOURCE_STATES, b: &mut Vec<D3D12_RESOURCE_BARRIER>, states: &mut Vec<D3D12_RESOURCE_STATES>| {
                 if states[slice] != to {
-                    let n = DPB as u32 + 1;
-                    b.push(transition(&self.recon, slice as u32, states[slice], to));
-                    b.push(transition(&self.recon, slice as u32 + n, states[slice], to));
+                    // Both of P010's planes: the chroma plane's subresources follow all the luma's.
+                    let (texture, sub, planes_apart) = if recon_array { (&recon[0], slice as u32, DPB as u32 + 1) } else { (&recon[slice], 0, 1) };
+                    b.push(transition(texture, sub, states[slice], to));
+                    b.push(transition(texture, sub + planes_apart, states[slice], to));
                     states[slice] = to;
                 }
             };
@@ -1033,7 +1093,8 @@ impl Encoder {
                     ReferenceFrames: D3D12_VIDEO_ENCODE_REFERENCE_FRAMES {
                         NumTexture2Ds: textures.len() as u32,
                         ppTexture2Ds: if key { std::ptr::null_mut() } else { textures.as_mut_ptr() },
-                        pSubresources: if key { std::ptr::null_mut() } else { subs.as_mut_ptr() },
+                        // Separate textures need no subresources (each picture is its own 0).
+                        pSubresources: if key || !self.recon_array { std::ptr::null_mut() } else { subs.as_mut_ptr() },
                     },
                 },
                 pInputFrame: ManuallyDrop::new(Some(self.input.clone())),
@@ -1042,7 +1103,7 @@ impl Encoder {
             };
             let output_args = D3D12_VIDEO_ENCODER_ENCODEFRAME_OUTPUT_ARGUMENTS {
                 Bitstream: D3D12_VIDEO_ENCODER_COMPRESSED_BITSTREAM { pBuffer: ManuallyDrop::new(Some(self.bitstream.clone())), FrameStartOffset: 0 },
-                ReconstructedPicture: D3D12_VIDEO_ENCODER_RECONSTRUCTED_PICTURE { pReconstructedPicture: ManuallyDrop::new(Some(self.recon.clone())), ReconstructedPictureSubresource: work as u32 },
+                ReconstructedPicture: D3D12_VIDEO_ENCODER_RECONSTRUCTED_PICTURE { pReconstructedPicture: ManuallyDrop::new(Some(work_texture)), ReconstructedPictureSubresource: work_sub },
                 EncoderOutputMetadata: D3D12_VIDEO_ENCODER_ENCODE_OPERATION_METADATA_BUFFER { pBuffer: ManuallyDrop::new(Some(self.meta.clone())), Offset: 0 },
             };
             self.list.EncodeFrame(&self.encoder, &self.heap, &input_args, &output_args);
@@ -1083,6 +1144,15 @@ impl Encoder {
                 return Err(anyhow::Error::from(e).context("closing the encode command list (the driver refused the EncodeFrame arguments)"));
             }
 
+            // The resolved metadata and the bitstream's start marked as unwritten, so that a frame
+            // the driver gives nothing for says whether it wrote anything at all.
+            for (buffer, len) in [(&self.resolved, METADATA_SIZE), (&self.bitstream, 16)] {
+                let mut mapped = std::ptr::null_mut();
+                buffer.Map(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }), Some(&mut mapped))?;
+                std::ptr::write_bytes(mapped as *mut u8, UNWRITTEN, len);
+                buffer.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: len }));
+            }
+
             // Wait for the converter's copy, run, and wait for the end.
             let shared_fence = self.shared_fence.clone();
             self.queue.Wait(&shared_fence, self.shared_value)?;
@@ -1108,13 +1178,15 @@ impl Encoder {
             let mut mapped = std::ptr::null_mut();
             self.resolved.Map(0, None, Some(&mut mapped))?;
             let md = *(mapped as *const D3D12_VIDEO_ENCODER_OUTPUT_METADATA);
-            self.resolved.Unmap(0, None);
-            ensure!(md.EncodeErrorFlags == 0, "the encoder reports error flags {:#x}", md.EncodeErrorFlags);
+            let raw = std::slice::from_raw_parts(mapped as *const u8, METADATA_SIZE).to_vec();
+            self.resolved.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
+            ensure!(md.EncodeErrorFlags == 0, "the encoder reports error flags {:#x}: {}", md.EncodeErrorFlags, self.explain_nothing(&raw));
+            ensure!(md.EncodedBitstreamWrittenBytesCount > 0, "the encoder wrote 0 bytes: {}", self.explain_nothing(&raw));
             (md.EncodedBitstreamWrittenBytesCount, md.EncodeStats.AverageQP as u32)
         };
         self.bitstream_state = D3D12_RESOURCE_STATE_COMMON;
         self.resolved_state = D3D12_RESOURCE_STATE_COMMON;
-        ensure!(written > 0 && written <= self.bitstream_size, "the encoder wrote {written} bytes");
+        ensure!(written <= self.bitstream_size, "the encoder wrote {written} bytes, more than its buffer's {}", self.bitstream_size);
         self.last_qp = qp;
 
         self.out.clear();
@@ -1206,11 +1278,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_first_frame_asks_only_for_changes_the_driver_can_make() {
+    fn the_first_frame_asks_for_changes_only_of_a_driver_that_can_change_its_rate() {
         // Intel's Arc B580 (in a guest with its card shared): it can change the resolution, and not
-        // the rate control, the GOP or the frame's layout.
+        // the rate control, the GOP or the frame's layout, so it's told of no change.
         let arc = first_frame_flags(0x174d).0;
-        assert_eq!(arc, D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_RESOLUTION_CHANGE.0);
+        assert_eq!(arc, D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_NONE.0);
         // AMD's Radeon: it can change all four, and is asked to as before.
         let radeon = first_frame_flags(0x1daf).0;
         assert_eq!(

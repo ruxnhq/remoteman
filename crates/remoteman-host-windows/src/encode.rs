@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use remoteman_core::{Chroma, Codec, Mode};
-use remoteman_encode::{Config, Encoder, FrameEncoder};
+use remoteman_encode::{Config, Encoder, FrameEncoder, How};
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::System::LibraryLoader::{LOAD_WITH_ALTERED_SEARCH_PATH, LoadLibraryExW, LoadLibraryW};
@@ -76,9 +76,21 @@ pub fn hdr_light(meta: &crate::vdd::Metadata, sdr_white: f32) -> remoteman_encod
 pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<Box<dyn FrameEncoder>> {
     anyhow::ensure!(MODES.contains(&settings.mode), "this host doesn't encode {:?}", settings.mode);
     if WHICH.load(std::sync::atomic::Ordering::Relaxed) == D3D12 {
-        let e = crate::d3d12enc::Encoder::open(gpu, input, settings).with_context(|| format!("Direct3D 12 Video Encode on {}", gpu.adapter))?;
-        tracing::info!(note = e.note(), "encoder");
-        return Ok(Box::new(e));
+        let tried = d3d12_tried(gpu, input, settings).with_context(|| format!("Direct3D 12 Video Encode on {}", gpu.adapter));
+        return match tried {
+            Ok(e) => {
+                tracing::info!(note = e.note(), "encoder");
+                Ok(e)
+            }
+            // Asked for, and no picture from it: Media Foundation's encoder, for what it makes.
+            Err(first) if settings.mode.codec == Codec::Hevc && settings.mode.chroma == Chroma::C420 && !settings.hdr => {
+                tracing::warn!("{first:#}; Media Foundation's encoder instead");
+                crate::mf::Encoder::open(gpu, input, settings)
+                    .map(|e| Box::new(e) as Box<dyn FrameEncoder>)
+                    .with_context(|| format!("{first:#}; and Media Foundation's encoder on {}", gpu.adapter))
+            }
+            Err(e) => Err(e),
+        };
     }
     if settings.mode.chroma == Chroma::C444 || settings.hdr {
         // Only NVENC: Media Foundation's encoders are given 4:2:0 SDR alone.
@@ -92,7 +104,7 @@ pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<B
     }
     let any = || crate::mf::Encoder::open(gpu, input, settings).map(|e| Box::new(e) as Box<dyn FrameEncoder>).with_context(|| format!("Media Foundation's encoder on {}", gpu.adapter));
     let nvenc = || nvidia::open(gpu, input, settings).with_context(|| format!("NVENC on {}", gpu.adapter));
-    let d3d12 = || crate::d3d12enc::Encoder::open(gpu, input, settings).map(|e| Box::new(e) as Box<dyn FrameEncoder>).with_context(|| format!("Direct3D 12 Video Encode on {}", gpu.adapter));
+    let d3d12 = || d3d12_tried(gpu, input, settings).with_context(|| format!("Direct3D 12 Video Encode on {}", gpu.adapter));
     match WHICH.load(std::sync::atomic::Ordering::Relaxed) {
         NVENC => nvenc(),
         ANY_MAKERS => any(),
@@ -106,6 +118,17 @@ pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<B
         _ if gpu.vendor == AMD => d3d12().or_else(|first| any().map_err(|second| anyhow::anyhow!("{first:#}; and {second:#}"))),
         _ => any(),
     }
+}
+
+/// Direct3D 12 Video Encode, given the stream only once it has made a picture: a driver can take
+/// every argument and still give nothing back (Intel's, for an Arc card in a guest, wrote 0 bytes
+/// a frame), and the caller then has another encoder. The trial encoder is put away and a fresh
+/// one opened, so that the stream starts at its first frame.
+fn d3d12_tried(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<Box<dyn FrameEncoder>> {
+    let mut trial = crate::d3d12enc::Encoder::open(gpu, input, settings)?;
+    trial.encode_how(0, 0, How { idr: true, mark: None, refer: 0 }).context("its trial picture")?;
+    drop(trial);
+    Ok(Box::new(crate::d3d12enc::Encoder::open(gpu, input, settings)?))
 }
 
 /// NVIDIA's PCI id.

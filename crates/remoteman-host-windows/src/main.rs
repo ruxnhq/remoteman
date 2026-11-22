@@ -483,7 +483,7 @@ mod windows_main {
             tracing::info!("the display driver has no second monitor to give (its settings say one monitor, or `--mode keep`): a device gets the one monitor at its own size");
         }
         let features = crate::control::features(&allowed);
-        tracing::info!(?features, "what this host does");
+        tracing::info!(version = env!("CARGO_PKG_VERSION"), ?features, "what this host does");
         let options = HostOptions { listen, state: state.clone(), name, os: "windows".into(), features, pair, test_drop_one_in: drop_one_in };
         let host = std::sync::Arc::new(Host::start(options, session::Host::new(screen, bitrate * 1_000_000, fit, allowed.clone()))?);
         // What the core says of devices (paired, connected, refused) is kept for the app's notifications.
