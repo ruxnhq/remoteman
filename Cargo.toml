@@ -7,7 +7,7 @@ exclude = ["vendor/windows-reactor", "vendor/windows-rs"]
 [workspace.package]
 version = "0.1.2"
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-or-later"
 publish = false
 
 [profile.release]

@@ -18,7 +18,7 @@
 # the files' names, in each installer's archive (what its pages and Settings > Apps show) and in
 # the viewer folder's version.txt.
 #
-# The viewer's folder carries remoteman's LICENSE (MIT) and FFmpeg's: FFmpeg is LGPL, as shared
+# The viewer's folder carries remoteman's LICENSE (GPL-3.0-or-later) and FFmpeg's: FFmpeg is LGPL, as shared
 # DLLs taken from -Ffmpeg (avcodec, avutil, swresample), so its licence text (-Ffmpeg's
 # LICENSE.txt) goes beside them in licences\, with where its source is and which build it is (from
 # that folder's ffmpeg.exe -version). Nothing is signed. Needs what the two scripts it runs need:
