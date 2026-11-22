@@ -76,6 +76,15 @@ pub fn hdr_light(meta: &crate::vdd::Metadata, sdr_white: f32) -> remoteman_encod
 pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<Box<dyn FrameEncoder>> {
     anyhow::ensure!(MODES.contains(&settings.mode), "this host doesn't encode {:?}", settings.mode);
     if WHICH.load(std::sync::atomic::Ordering::Relaxed) == D3D12 {
+        // AV1 isn't this encoder's (it makes HEVC 4:2:0 alone), but the card may well have one:
+        // Intel's Arc cards encode AV1, and their driver offers it to Media Foundation. Without
+        // this the pipeline went down to HEVC, with a client that asked for AV1 first.
+        if settings.mode.codec == Codec::Av1 && !settings.hdr {
+            tracing::info!("Direct3D 12 encoding here is HEVC only; AV1 from Media Foundation's encoder");
+            return crate::mf::Encoder::open(gpu, input, settings)
+                .map(|e| Box::new(e) as Box<dyn FrameEncoder>)
+                .with_context(|| format!("Media Foundation's AV1 encoder on {}", gpu.adapter));
+        }
         let tried = d3d12_tried(gpu, input, settings).with_context(|| format!("Direct3D 12 Video Encode on {}", gpu.adapter));
         return match tried {
             Ok(e) => {
