@@ -58,6 +58,15 @@ impl Recovery {
         Self { short: short_term as u64, slots, kept: [None; 2], kept_last: 0, every, n: 0, answer: None, tally: Tally::default() }
     }
 
+    /// Another encoder takes over the same stream (opened again, as at another rate where the
+    /// encoder can't change it live): its own recent and long-term frames, none kept yet, and the
+    /// stream's frame numbers, last answer and tally carried on, since the client's are. Its
+    /// first frame has to be a keyframe.
+    pub fn renewed(&mut self, short_term: u32, long_term: u32, fps: u32) {
+        let (n, answer, tally) = (self.n, self.answer, std::mem::take(&mut self.tally));
+        *self = Self { n, answer, tally, ..Self::new(short_term, long_term, fps) };
+    }
+
     /// The number of the next frame: its timestamp for the encoder.
     pub fn number(&self) -> u64 {
         self.n
@@ -231,5 +240,23 @@ mod tests {
         let plan = r.plan(false, Some((48, 49)), &mut |_| anyhow::bail!("no"));
         assert!(plan.how.idr);
         assert_eq!(r.tally.refused, 1);
+    }
+
+    #[test]
+    fn another_encoder_carries_the_stream_on() {
+        let mut r = Recovery::new(4, 2, 120);
+        run(&mut r, 100);
+        assert!(r.kept.iter().all(Option::is_some));
+        r.renewed(1 << 20, 0, 120);
+        // The frame numbers go on, nothing is kept from the old encoder, the tally stays.
+        assert_eq!(r.number(), 100);
+        assert_eq!((r.slots, r.kept, r.short), (0, [None; 2], 1 << 20));
+        let plan = r.plan(true, None, &mut |_| Ok(()));
+        assert_eq!(r.made(&plan, true, None, 0), Sent::Key);
+        assert_eq!(r.number(), 101);
+        // A loss reported from before the new encoder's keyframe could have arrived is early.
+        let plan = r.plan(false, Some((95, 99)), &mut |_| Ok(()));
+        assert!(!plan.how.idr && !plan.recovery);
+        assert_eq!((r.tally.reports, r.tally.early), (1, 1));
     }
 }

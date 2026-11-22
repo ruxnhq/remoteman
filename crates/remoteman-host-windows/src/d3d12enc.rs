@@ -440,8 +440,8 @@ fn size_multiples(video: &ID3D12VideoDevice3, vendor: u32) -> (u32, u32) {
     // blocks (64x64): a stream that says 1080 rows decodes wrongly in its last 56, and one that
     // says 368 (a multiple of 16, not of 64) fails to parse in a picture of a few hundred
     // (found by bisecting; 384 is clean over thousands). The picture is coded at the aligned size
-    // and cropped by the stream's parameter sets. NVIDIA's takes any multiple of the smallest
-    // coding unit.
+    // and cropped by the stream's parameter sets. NVIDIA's needs whole blocks too (32x32 there),
+    // as `Encoder::open` gives every maker's picture on top of this floor.
     let floor: u32 = std::env::var("REMOTEMAN_D3D12_ALIGN").ok().and_then(|v| v.parse().ok()).unwrap_or(if vendor == 0x1002 { 64 } else { 8 });
     let mut r = D3D12_FEATURE_DATA_VIDEO_ENCODER_OUTPUT_RESOLUTION { Codec: D3D12_VIDEO_ENCODER_CODEC_HEVC, ..Default::default() };
     let said = check(video, D3D12_FEATURE_VIDEO_ENCODER_OUTPUT_RESOLUTION, &mut r);
@@ -719,6 +719,8 @@ pub struct Encoder {
     last_anchor: u64,
     out: Vec<u8>,
     last_qp: u32,
+    /// The driver said a quantiser off HEVC's scale: what it says isn't taken from then on.
+    qp_garbled: bool,
     /// The time the GPU took for the last frame, in microseconds, for the tests.
     pub last_gpu_us: u64,
 }
@@ -732,20 +734,35 @@ impl Encoder {
     pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, s: &Settings) -> Result<Self> {
         ensure!(s.mode.codec == remoteman_core::Codec::Hevc && s.mode.chroma == remoteman_core::Chroma::C420, "Direct3D 12 encoding here is HEVC 4:2:0 only");
         let (w, h, fps) = (s.width, s.height, s.fps.max(1));
-        // The coded size is the picture's: the input is copied whole (a planar texture is copied
-        // as a whole or not at all), so a size the smallest coding unit (8) doesn't divide is
-        // left to the other encoders.
-        ensure!(w % 8 == 0 && h % 8 == 0, "Direct3D 12 encoding here needs a picture size that 8 divides, not {w}x{h}");
+        // The coded size is the picture's rounded up to whole coding tree blocks (below), and
+        // the stream's parameter sets crop it back. They crop in steps of 2 (4:2:0), so the
+        // picture's sides have to be even; 1554x790 is coded as 1568x800 with 32x32 blocks, or
+        // 1600x832 with 64x64. (Intel's Arc B580 had every window-sized picture a client asked
+        // for, none of them multiples of 8, go to Media Foundation's encoder.)
+        ensure!(w % 2 == 0 && h % 2 == 0, "Direct3D 12 encoding here needs a picture size with even sides, not {w}x{h}");
         // SAFETY: Direct3D 12 calls as documented, with live arguments and out-parameters.
         unsafe {
             let device = d3d12_device(gpu)?;
             let video: ID3D12VideoDevice3 = device.cast().context("ID3D12VideoDevice3 (no Direct3D 12 video on this GPU or driver)")?;
             let (mw, mh) = size_multiples(&video, gpu.vendor);
-            let (cw, ch) = (w.next_multiple_of(mw), h.next_multiple_of(mh));
-            let chosen = choose(&video, gpu.vendor, cw, ch, fps, s.bitrate)?;
+            let (mut cw, mut ch) = (w.next_multiple_of(mw), h.next_multiple_of(mh));
+            let mut chosen = choose(&video, gpu.vendor, cw, ch, fps, s.bitrate)?;
+            // Whole coding tree blocks (the largest coding unit chosen, which doesn't depend on
+            // the size), as AMD's needs above, for every maker. NVIDIA's RTX 5090, at 32, made a
+            // stream FFmpeg can't decode (cu_qp_delta out of range everywhere) of every width 32
+            // doesn't divide, 1552 and 1560 among them; with the columns whole and the rows not,
+            // it decodes but wrongly (PSNR 21 dB at 1554x790, and 29.8 at 1920x1080 where every
+            // other case is 31 and up). Both whole, it is clean.
+            let ctb = 8u32 << chosen.config.MaxLumaCodingUnitSize.0;
+            if cw % ctb != 0 || ch % ctb != 0 {
+                (cw, ch) = (cw.next_multiple_of(ctb), ch.next_multiple_of(ctb));
+                chosen = choose(&video, gpu.vendor, cw, ch, fps, s.bitrate)?;
+            }
             let caps = chosen.caps.clone();
             let vbv = caps.support_flags & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_VBV_SIZE_CONFIG_AVAILABLE.0 != 0 && env_flag("REMOTEMAN_D3D12_VBV", true);
-            let reconfigurable = caps.support_flags & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_RECONFIGURATION_AVAILABLE.0 != 0;
+            // REMOTEMAN_D3D12_RECONFIG=0 has a driver that can change the rate live act as Intel's
+            // can't (the pipeline then opens the encoder again at each new rate).
+            let reconfigurable = caps.support_flags & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_RECONFIGURATION_AVAILABLE.0 != 0 && env_flag("REMOTEMAN_D3D12_RECONFIG", true);
             let array = caps.support_flags & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RECONSTRUCTED_FRAMES_REQUIRE_TEXTURE_ARRAYS.0 != 0;
 
             let mut profile = D3D12_VIDEO_ENCODER_PROFILE_HEVC_MAIN10;
@@ -871,7 +888,7 @@ impl Encoder {
                 temporal_mvp: env_flag("REMOTEMAN_D3D12_TMVP", false),
                 transform_skip: env_flag("REMOTEMAN_D3D12_TSKIP", false),
             };
-            let note = format!("Direct3D 12 HEVC Main10 level idx {} on {}: {} refs/P, DPB {}, flags {:#x}, vbv {vbv}, reconfig {reconfigurable}", caps.level, gpu.adapter, caps.max_l0_refs, caps.max_dpb, caps.support_flags);
+            let note = format!("Direct3D 12 HEVC Main10 level idx {} on {}: {} refs/P, DPB {}, flags {:#x}, vbv {vbv}, reconfig {reconfigurable}, coded {cw}x{ch} in {ctb}x{ctb} blocks", caps.level, gpu.adapter, caps.max_l0_refs, caps.max_dpb, caps.support_flags);
             if std::env::var_os("REMOTEMAN_D3D12_DEBUG").is_some() {
                 eprintln!("{note}
 {caps:?}
@@ -916,6 +933,7 @@ impl Encoder {
                 last_anchor: 0,
                 out: Vec::new(),
                 last_qp: 0,
+                qp_garbled: false,
                 last_gpu_us: 0,
             })
         }
@@ -1187,7 +1205,11 @@ impl Encoder {
         self.bitstream_state = D3D12_RESOURCE_STATE_COMMON;
         self.resolved_state = D3D12_RESOURCE_STATE_COMMON;
         ensure!(written <= self.bitstream_size, "the encoder wrote {written} bytes, more than its buffer's {}", self.bitstream_size);
-        self.last_qp = qp;
+        // HEVC's quantiser runs to 51. Intel's driver (Arc B580) says numbers from 14 to 225
+        // here, in and out of range in one picture, so once it says one off the scale none of
+        // what it says is taken (0: not said) for the rest of this encoder's life.
+        self.qp_garbled |= qp > 51;
+        self.last_qp = if self.qp_garbled { 0 } else { qp };
 
         self.out.clear();
         if key {

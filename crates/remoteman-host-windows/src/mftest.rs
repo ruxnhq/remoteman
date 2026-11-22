@@ -19,7 +19,7 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R10G10B10A2_UNORM, DXGI
 
 use crate::capture::Gpu;
 use crate::convert::{Converter, Input, Output};
-use crate::d3d12test::{FPS, H, ONE_AT_A_TIME, W, decode, dump, ffmpeg, gpu, nal_types, out_dir, paint, source};
+use crate::d3d12test::{FPS, ONE_AT_A_TIME, decode, dump, ffmpeg, gpu, nal_types, out_dir, paint, size, source};
 use crate::encode::Settings;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -92,7 +92,7 @@ fn run(gpu: &Gpu, which: Which, (w, h): (u32, u32), count: u32, bitrate: u32, ke
         gpu.device.CreateShaderResourceView(&t, None, Some(&mut v))?;
         (t, v.unwrap())
     };
-    let shared = (w, h) == (W, H);
+    let shared = (w, h) == size();
     let big = shared.then(|| source(gpu));
     let conv = Converter::new(gpu, w, h, Input::Encoded, Output::Sdr, false)?;
     let settings = Settings { mode: Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 }, width: w, height: h, fps: FPS, bitrate, hdr: false, light: None };
@@ -224,7 +224,7 @@ fn stream(which: Which) {
     let srcp = dir.join("src.p010");
     let mut w = std::io::BufWriter::new(std::fs::File::create(&srcp).unwrap());
     let bitrate: u32 = std::env::var("REMOTEMAN_TEST_BITRATE").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000_000);
-    let done = match run(&gpu, which, (W, H), 120, bitrate, |_| false, |_| None, Some(&mut w)) {
+    let done = match run(&gpu, which, size(), 120, bitrate, |_| false, |_| None, Some(&mut w)) {
         Ok(d) => d,
         Err(e) => return missing(&e),
     };
@@ -253,7 +253,7 @@ fn stream(which: Which) {
 fn events(which: Which) {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let Some((gpu, dir, keep)) = setup() else { return eprintln!("no GPU: skipped") };
-    let done = match run(&gpu, which, (W, H), 140, 20_000_000, |f| f == 100, |f| (f == 60).then_some(5_000_000), None) {
+    let done = match run(&gpu, which, size(), 140, 20_000_000, |f| f == 100, |f| (f == 60).then_some(5_000_000), None) {
         Ok(d) => d,
         Err(e) => return missing(&e),
     };
@@ -337,7 +337,8 @@ fn long(which: Which) {
 /// PSNR of the decoded pictures (raw P010) against the pictures that went in (raw P010): compared
 /// as they are, not through a conversion FFmpeg would apply by the stream's colour tags.
 fn psnr_raw(src: &Path, dec: &Path) -> String {
-    let size = format!("{W}x{H}");
+    let (w, h) = size();
+    let size = format!("{w}x{h}");
     let o = Command::new(ffmpeg()).args(["-hide_banner", "-f", "rawvideo", "-pix_fmt", "p010le", "-video_size", &size, "-i"]).arg(src).args(["-f", "rawvideo", "-pix_fmt", "p010le", "-video_size", &size, "-i"]).arg(dec).args(["-lavfi", "[0:v][1:v]psnr", "-f", "null", "-"]).output().expect("ffmpeg");
     String::from_utf8_lossy(&o.stderr).lines().filter(|l| l.contains("PSNR")).collect::<Vec<_>>().join(" | ")
 }

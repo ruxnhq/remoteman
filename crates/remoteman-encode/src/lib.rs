@@ -131,7 +131,9 @@ pub struct Made<'a> {
     /// The long-term frames it was built from (bit i: frame i).
     pub referred: u32,
     /// The frame's average quantiser as the encoder reports it (lower is finer; HEVC's scale
-    /// runs to 51, AV1's to 255). For logs: it shows whether the encoder is spending its rate.
+    /// runs to 51, AV1's to 255), or 0 where the encoder doesn't say (Media Foundation's,
+    /// VA-API's) or says something off its codec's scale. For logs: it shows whether the encoder
+    /// is spending its rate.
     pub qp: u32,
 }
 

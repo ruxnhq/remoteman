@@ -382,7 +382,29 @@ impl Picture {
         self.again = true;
         Ok(true)
     }
+
+    /// Open the encoder again at `bitrate`, on the same converter, for the same picture and
+    /// mode: for an encoder that can't change its rate live (Direct3D 12 on Intel's Arc B580).
+    /// The client's decoder carries on; the next frame has to be a keyframe.
+    fn reopen_encoder(&mut self, s: &Settings, bitrate: u32) -> Result<()> {
+        let meta = self.source.meta();
+        let hdr = self.hdr.is_some();
+        let av1_light = std::env::var("REMOTEMAN_AV1_HDR_METADATA").as_deref() == Ok("1");
+        let light = (hdr && (self.mode.codec != Codec::Av1 || av1_light)).then(|| encode::hdr_light(&meta, s.sdr_white));
+        let settings = encode::Settings { mode: self.mode, width: self.width, height: self.height, fps: s.fps, bitrate, hdr, light };
+        let encoder = encode::open(&self.gpu, &self.converter.output, &settings)?;
+        tracing::info!(bitrate, "encoder opened again at the new rate ({})", encoder.note());
+        self.encoder = encoder;
+        self.recovery.renewed(self.encoder.short_term(), self.encoder.long_term(), s.fps);
+        Ok(())
+    }
 }
+
+/// An encoder that can't change its rate live is opened again at the new one, from a keyframe:
+/// at once when the rate goes down (the network is short), and on the way back up only once the
+/// rate asked for has held this long or grown by half, so that the core's small steps up don't
+/// each cost a keyframe and a new encoder.
+const REOPEN_UP_AFTER: Duration = Duration::from_secs(3);
 
 /// How long ago Windows meant a frame to be shown, in microseconds; 0 if that is still to come
 /// or makes no sense.
@@ -416,10 +438,12 @@ fn refine_qp(width: u32, height: u32) -> u32 {
 
 fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<()> {
     let mut rate = s.bitrate;
+    // The rate last asked for, and since when; how often the encoder was opened again for one.
+    let (mut asked, mut reopens) = ((rate, Instant::now()), 0u64);
     let (mut frames, mut keys, mut repeats) = (0u64, 0u64, 0u64);
     // What the encoder made of its rate: bytes in all, the largest frame, and its quantiser
-    // summed (for the average) and at the last frame.
-    let (mut bytes, mut largest, mut qp_sum, mut qp_last) = (0u64, 0usize, 0u64, 0u32);
+    // summed over the frames it said one for (for the average) and at the last frame.
+    let (mut bytes, mut largest, mut qp_sum, mut qp_said, mut qp_last) = (0u64, 0usize, 0u64, 0u64, 0u32);
     let began = Instant::now();
     // How long each new picture took from being taken up (converted) to being encoded, in
     // milliseconds; said every ten seconds and at the end.
@@ -477,8 +501,12 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         if control.held.load(Ordering::Relaxed) {
             continue;
         }
-        // A new bitrate takes effect here, with no keyframe.
+        // A new bitrate takes effect here, with no keyframe; or, where the encoder can't change
+        // it live, by opening the encoder again at it (`REOPEN_UP_AFTER`).
         let want = control.bitrate.load(Ordering::Relaxed);
+        if want != asked.0 {
+            asked = (want, Instant::now());
+        }
         if want != rate {
             match p.encoder.set_bitrate(want) {
                 Ok(()) => {
@@ -488,10 +516,24 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
                         link.send_message(Message::Status { bitrate: Some(rate) });
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("couldn't change the bitrate: {e:#}");
-                    control.bitrate.store(rate, Ordering::Relaxed);
-                }
+                Err(live) if want < rate || asked.1.elapsed() >= REOPEN_UP_AFTER || want as u64 * 2 >= rate as u64 * 3 => match p.reopen_encoder(s, want) {
+                    Ok(()) => {
+                        tracing::info!(from = rate, to = want, "bitrate (the encoder can't change it live: {live:#}; opened again, from a keyframe)");
+                        rate = want;
+                        reopens += 1;
+                        control.keyframe.store(true, Ordering::Relaxed);
+                        if s.status {
+                            link.send_message(Message::Status { bitrate: Some(rate) });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("couldn't change the bitrate: {live:#}; nor open the encoder again at it: {e:#}");
+                        control.bitrate.store(rate, Ordering::Relaxed);
+                        asked = (rate, Instant::now());
+                    }
+                },
+                // On the way up: wait until the rate asked for holds still.
+                Err(_) => {}
             }
         }
 
@@ -625,7 +667,10 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         keys += made.key as u64;
         bytes += made.data.len() as u64;
         largest = largest.max(made.data.len());
-        qp_sum += made.qp as u64;
+        if made.qp > 0 {
+            qp_sum += made.qp as u64;
+            qp_said += 1;
+        }
         qp_last = made.qp;
         let delivered = match sent {
             Sent::Key => link.send_frame(made.data, true, capture_us),
@@ -652,13 +697,15 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         frames,
         keyframes = keys,
         encoded_again = repeats,
+        opened_again_for_rate = reopens,
         refined = refines,
         seconds = began.elapsed().as_secs(),
         kilobytes = bytes / 1000,
         mbit_per_s = format!("{:.1}", bytes as f64 * 8.0 / 1e6 / began.elapsed().as_secs_f64().max(0.001)),
         target_mbit = format!("{:.1}", rate as f64 / 1e6),
         largest_frame_bytes = largest,
-        qp_average = format!("{:.1}", qp_sum as f64 / frames.max(1) as f64),
+        qp_average = if qp_said > 0 { format!("{:.1}", qp_sum as f64 / qp_said as f64) } else { "not said".to_owned() },
+        qp_frames = qp_said,
         qp_last,
         driver_frames = driver.map(|d| d.0),
         driver_replaced_unread = driver.map(|d| d.1),

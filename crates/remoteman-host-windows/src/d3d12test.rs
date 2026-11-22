@@ -26,6 +26,13 @@ pub(crate) const W: u32 = 1920;
 pub(crate) const H: u32 = 1080;
 pub(crate) const FPS: u32 = 60;
 
+/// The pictures' size: `W`x`H`, or what `REMOTEMAN_TEST_SIZE` says (`1554x790`, a client's window
+/// that 8 divides neither side of, which the encoder codes larger and crops).
+pub(crate) fn size() -> (u32, u32) {
+    let asked = std::env::var("REMOTEMAN_TEST_SIZE").ok();
+    asked.as_deref().and_then(|v| v.split_once('x')).and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))).unwrap_or((W, H))
+}
+
 /// The GPU the tests run on: the one `REMOTEMAN_TEST_ADAPTER` (or, as it was first called,
 /// `REMOTEMAN_D3D12_VENDOR`) names, by PCI vendor id in hex (`1002` AMD, `10de` NVIDIA, `8086`
 /// Intel) or by a part of its name; else the first hardware one DXGI lists.
@@ -77,15 +84,16 @@ pub(crate) struct Source {
 }
 
 pub(crate) fn source(gpu: &Gpu) -> Source {
+    let (w, h) = size();
     // SAFETY: Direct3D calls as documented.
     unsafe {
-        let desc = D3D11_TEXTURE2D_DESC { Width: W, Height: H, MipLevels: 1, ArraySize: 1, Format: DXGI_FORMAT_R10G10B10A2_UNORM, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 }, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32, ..Default::default() };
+        let desc = D3D11_TEXTURE2D_DESC { Width: w, Height: h, MipLevels: 1, ArraySize: 1, Format: DXGI_FORMAT_R10G10B10A2_UNORM, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 }, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32, ..Default::default() };
         let mut t = None;
         gpu.device.CreateTexture2D(&desc, None, Some(&mut t)).unwrap();
         let t = t.unwrap();
         let mut v = None;
         gpu.device.CreateShaderResourceView(&t, None, Some(&mut v)).unwrap();
-        let sd = D3D11_TEXTURE2D_DESC { Width: W, Height: H, MipLevels: 1, ArraySize: 1, Format: DXGI_FORMAT_P010, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 }, Usage: D3D11_USAGE_STAGING, CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32, ..Default::default() };
+        let sd = D3D11_TEXTURE2D_DESC { Width: w, Height: h, MipLevels: 1, ArraySize: 1, Format: DXGI_FORMAT_P010, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 }, Usage: D3D11_USAGE_STAGING, CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32, ..Default::default() };
         let mut s = None;
         gpu.device.CreateTexture2D(&sd, None, Some(&mut s)).unwrap();
         Source { tex: t, view: v.unwrap(), staging: s.unwrap() }
@@ -94,12 +102,13 @@ pub(crate) fn source(gpu: &Gpu) -> Source {
 
 /// A moving picture: a gradient, drifting stripes, a box that travels, some texture.
 pub(crate) fn paint(gpu: &Gpu, s: &Source, f: u32) {
-    let mut px = vec![0u32; (W * H) as usize];
-    let (bx, by) = ((f * 9) % (W - 400), 200 + (f * 4) % 500);
-    for y in 0..H {
-        for x in 0..W {
-            let mut r = (x * 700 / W + 100) as i32;
-            let mut g = (y * 700 / H + 100) as i32;
+    let (w, h) = size();
+    let mut px = vec![0u32; (w * h) as usize];
+    let (bx, by) = ((f * 9) % (w - 400), 200 + (f * 4) % 500);
+    for y in 0..h {
+        for x in 0..w {
+            let mut r = (x * 700 / w + 100) as i32;
+            let mut g = (y * 700 / h + 100) as i32;
             let mut b = 400 + (((x + f * 6) / 24 + y / 24) % 2) as i32 * 200;
             let tex = ((x * 31 + y * 17 + f * 5) % 23) as i32 - 11;
             r += tex;
@@ -110,22 +119,23 @@ pub(crate) fn paint(gpu: &Gpu, s: &Source, f: u32) {
                 g = 200 + ((x - bx) * 2) as i32;
                 b = 100 + ((y - by) * 2) as i32;
             }
-            px[(y * W + x) as usize] = (r.clamp(0, 1023) as u32) | (g.clamp(0, 1023) as u32) << 10 | (b.clamp(0, 1023) as u32) << 20 | 3 << 30;
+            px[(y * w + x) as usize] = (r.clamp(0, 1023) as u32) | (g.clamp(0, 1023) as u32) << 10 | (b.clamp(0, 1023) as u32) << 20 | 3 << 30;
         }
     }
     // SAFETY: the pixels live through the call.
-    unsafe { gpu.context.UpdateSubresource(&s.tex, 0, None, px.as_ptr() as *const _, W * 4, 0) };
+    unsafe { gpu.context.UpdateSubresource(&s.tex, 0, None, px.as_ptr() as *const _, w * 4, 0) };
 }
 
 pub(crate) fn dump(gpu: &Gpu, s: &Source, converted: &ID3D11Texture2D, out: &mut dyn Write) {
+    let (w, h) = size();
     // SAFETY: a staging texture mapped for reading, rows copied out within its pitch.
     unsafe {
         gpu.context.CopyResource(&s.staging, converted);
         let mut m = D3D11_MAPPED_SUBRESOURCE::default();
         gpu.context.Map(&s.staging, 0, D3D11_MAP_READ, 0, Some(&mut m)).unwrap();
         let base = m.pData as *const u8;
-        for y in 0..H + H / 2 {
-            out.write_all(std::slice::from_raw_parts(base.add(y as usize * m.RowPitch as usize), W as usize * 2)).unwrap();
+        for y in 0..h + h / 2 {
+            out.write_all(std::slice::from_raw_parts(base.add(y as usize * m.RowPitch as usize), w as usize * 2)).unwrap();
         }
         gpu.context.Unmap(&s.staging, 0);
     }
@@ -155,12 +165,15 @@ struct Frame {
 
 /// Encode `count` frames the pipeline's way: `lost_at(frame)` gives a loss report to answer before
 /// that frame, `rate_at(frame)` a new bitrate. With `src`, the converted pictures are written to it
-/// as raw P010.
-fn run(gpu: &Gpu, count: u32, bitrate: u32, mut lost_at: impl FnMut(u32) -> Option<(u32, u32)>, mut rate_at: impl FnMut(u32) -> Option<u32>, mut src: Option<&mut dyn Write>) -> Result<(Vec<Frame>, String)> {
+/// as raw P010. A new bitrate the encoder can't take live (or any, with `reopen`) is given the
+/// pipeline's way: the encoder opened again at it, and a keyframe.
+#[allow(clippy::too_many_arguments)]
+fn run(gpu: &Gpu, count: u32, bitrate: u32, mut lost_at: impl FnMut(u32) -> Option<(u32, u32)>, mut rate_at: impl FnMut(u32) -> Option<u32>, reopen: bool, mut src: Option<&mut dyn Write>) -> Result<(Vec<Frame>, String)> {
+    let (w, h) = size();
     let s = source(gpu);
-    let conv = Converter::new(gpu, W, H, Input::Encoded, Output::Sdr, false)?;
-    let settings = Settings { mode: Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 }, width: W, height: H, fps: FPS, bitrate, hdr: false, light: None };
-    let mut e = Encoder::open(gpu, &conv.output, &settings)?;
+    let conv = Converter::new(gpu, w, h, Input::Encoded, Output::Sdr, false)?;
+    let settings = |bitrate| Settings { mode: Mode { codec: Codec::Hevc, chroma: Chroma::C420, depth: 10 }, width: w, height: h, fps: FPS, bitrate, hdr: false, light: None };
+    let mut e = Encoder::open(gpu, &conv.output, &settings(bitrate))?;
     let note = e.note().to_owned();
     let mut r = Recovery::new(e.short_term(), e.long_term(), FPS);
     let mut frames = Vec::new();
@@ -170,12 +183,17 @@ fn run(gpu: &Gpu, count: u32, bitrate: u32, mut lost_at: impl FnMut(u32) -> Opti
         if let Some(w) = src.as_deref_mut() {
             dump(gpu, &s, &conv.output, w);
         }
+        let mut opened_again = false;
         if let Some(b) = rate_at(f) {
-            e.set_bitrate(b)?;
+            if reopen || e.set_bitrate(b).is_err() {
+                e = Encoder::open(gpu, &conv.output, &settings(b))?;
+                r.renewed(e.short_term(), e.long_term(), FPS);
+                opened_again = true;
+            }
         }
         let n = r.number();
         let reported = lost_at(f);
-        let plan = r.plan(n == 0, reported, &mut |t| e.invalidate(t));
+        let plan = r.plan(n == 0 || opened_again, reported, &mut |t| e.invalidate(t));
         let t = std::time::Instant::now();
         let made = e.encode_how(0, n, plan.how)?;
         let ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -187,14 +205,18 @@ fn run(gpu: &Gpu, count: u32, bitrate: u32, mut lost_at: impl FnMut(u32) -> Opti
 }
 
 pub(crate) fn decode(path: &std::path::Path, raw: &std::path::Path) -> (String, u64) {
+    let (w, h) = size();
     let o = Command::new(ffmpeg()).args(["-v", "error", "-y", "-i"]).arg(path).args(["-f", "rawvideo", "-pix_fmt", "p010le"]).arg(raw).output().expect("ffmpeg");
-    let size = std::fs::metadata(raw).map(|m| m.len()).unwrap_or(0);
-    (String::from_utf8_lossy(&o.stderr).into_owned(), size / (W as u64 * H as u64 * 3))
+    // The decoder crops to the size the parameter sets say, so this counts frames of the
+    // picture's size only when the crop is right.
+    let bytes = std::fs::metadata(raw).map(|m| m.len()).unwrap_or(0);
+    (String::from_utf8_lossy(&o.stderr).into_owned(), bytes / (w as u64 * h as u64 * 3))
 }
 
 pub(crate) fn psnr(src: &std::path::Path, stream: &std::path::Path) -> String {
+    let (w, h) = size();
     let o = Command::new(ffmpeg())
-        .args(["-hide_banner", "-f", "rawvideo", "-pix_fmt", "p010le", "-video_size", &format!("{W}x{H}"), "-i"])
+        .args(["-hide_banner", "-f", "rawvideo", "-pix_fmt", "p010le", "-video_size", &format!("{w}x{h}"), "-i"])
         .arg(src)
         .arg("-i")
         .arg(stream)
@@ -242,7 +264,7 @@ fn plain_stream() {
     let srcp = dir.join("src.p010");
     let mut w = std::io::BufWriter::new(std::fs::File::create(&srcp).unwrap());
     let bitrate = std::env::var("REMOTEMAN_TEST_BITRATE").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000_000);
-    let (frames, note) = match run(&gpu, frames_wanted(), bitrate, |_| None, |_| None, Some(&mut w)) {
+    let (frames, note) = match run(&gpu, frames_wanted(), bitrate, |_| None, |_| None, false, Some(&mut w)) {
         Ok(x) => x,
         Err(e) => return no_encoder(&e),
     };
@@ -264,7 +286,7 @@ fn plain_stream() {
 fn live_rate_change() {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let Some((gpu, dir, keep)) = setup() else { return eprintln!("no GPU: skipped") };
-    let (frames, _) = match run(&gpu, 120, 20_000_000, |_| None, |f| (f == 60).then_some(5_000_000), None) {
+    let (frames, _) = match run(&gpu, 120, 20_000_000, |_| None, |f| (f == 60).then_some(5_000_000), false, None) {
         Ok(x) => x,
         Err(e) => return no_encoder(&e),
     };
@@ -283,12 +305,46 @@ fn live_rate_change() {
     assert!(err.trim().is_empty() && n == 120);
 }
 
+/// The rate changed as for an encoder that can't change it live (Intel's Arc B580): the encoder
+/// opened again at each new rate, down at 40 and back up at 80, the stream going on with a
+/// keyframe each time and its frame numbers unbroken.
+#[test]
+fn rate_change_by_opening_again() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((gpu, dir, keep)) = setup() else { return eprintln!("no GPU: skipped") };
+    let rate_at = |f| match f {
+        40 => Some(5_000_000),
+        80 => Some(20_000_000),
+        _ => None,
+    };
+    let (frames, _) = match run(&gpu, 120, 20_000_000, |_| None, rate_at, true, None) {
+        Ok(x) => x,
+        Err(e) => return no_encoder(&e),
+    };
+    let avg = |a: usize, b: usize| frames[a..b].iter().map(|f| f.data.len()).sum::<usize>() / (b - a);
+    let (high, low, again) = (avg(20, 40), avg(50, 80), avg(90, 120));
+    eprintln!("bytes/frame: 20..40 {high} (20 Mbit/s = {}), 50..80 {low} (5 Mbit/s = {}), 90..120 {again}", 20_000_000 / 8 / FPS, 5_000_000 / 8 / FPS);
+    let idrs: Vec<usize> = frames.iter().enumerate().filter(|(_, f)| nal_types(&f.data).iter().any(|&k| (16..=21).contains(&k))).map(|(i, _)| i).collect();
+    eprintln!("IDR frames: {idrs:?}");
+    let stream = dir.join("reopen.h265");
+    std::fs::write(&stream, join(&frames, 1000..=1000)).unwrap();
+    let (err, n) = decode(&stream, &dir.join("reopen.yuv"));
+    eprintln!("decoded {n} frames; errors: {err:?}");
+    if !keep {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    assert_eq!(idrs, [0, 40, 80]);
+    assert!(frames[40].key && frames[80].key);
+    assert!(low * 2 < high && again * 2 > high, "the rate didn't follow: {high} then {low} then {again} bytes/frame");
+    assert!(err.trim().is_empty() && n == 120);
+}
+
 #[test]
 fn recovery_without_a_keyframe() {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let Some((gpu, dir, keep)) = setup() else { return eprintln!("no GPU: skipped") };
     // Frames 60 to 62 are lost; the report reaches the host before frame 63.
-    let (frames, _) = match run(&gpu, 120, 20_000_000, |f| (f == 63).then_some((60, 62)), |_| None, None) {
+    let (frames, _) = match run(&gpu, 120, 20_000_000, |f| (f == 63).then_some((60, 62)), |_| None, false, None) {
         Ok(x) => x,
         Err(e) => return no_encoder(&e),
     };
@@ -299,7 +355,7 @@ fn recovery_without_a_keyframe() {
     let (err, n) = decode(&stream, &dir.join("recovery.yuv"));
     eprintln!("decoded {n} frames of the edited stream (117 expected); errors: {err:?}");
     // A late report: 50..62 lost, answered at 70, so only an anchor older than 50 will do.
-    let (frames2, _) = run(&gpu, 120, 20_000_000, |f| (f == 70).then_some((50, 62)), |_| None, None).unwrap();
+    let (frames2, _) = run(&gpu, 120, 20_000_000, |f| (f == 70).then_some((50, 62)), |_| None, false, None).unwrap();
     eprintln!("late report (50.. lost, answered at 70): key {} recovery {}", frames2[70].key, frames2[70].recovery);
     std::fs::write(&stream, join(&frames2, 50..=69)).unwrap();
     let (err2, n2) = decode(&stream, &dir.join("recovery2.yuv"));
