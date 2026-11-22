@@ -331,6 +331,19 @@ fn heap(kind: D3D12_HEAP_TYPE) -> D3D12_HEAP_PROPERTIES {
     D3D12_HEAP_PROPERTIES { Type: kind, ..Default::default() }
 }
 
+/// Memory the video encoder may write and the CPU read: a custom heap of the system's memory,
+/// cached for the CPU. A readback heap isn't: only a copy may write to one, and while AMD's driver
+/// lets the encoder write its bitstream and metadata there all the same, Intel's writes nothing,
+/// so every frame read back as 0 bytes.
+fn readable_heap() -> D3D12_HEAP_PROPERTIES {
+    D3D12_HEAP_PROPERTIES {
+        Type: D3D12_HEAP_TYPE_CUSTOM,
+        CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_WRITE_BACK,
+        MemoryPoolPreference: D3D12_MEMORY_POOL_L0,
+        ..Default::default()
+    }
+}
+
 fn buffer_desc(size: u64) -> D3D12_RESOURCE_DESC {
     D3D12_RESOURCE_DESC {
         Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
@@ -800,18 +813,18 @@ impl Encoder {
             // (a readback heap), the encoder's own metadata in the GPU's.
             let bitstream_size = ((cw as u64 * ch as u64 * 3 / 2) * 2).max(1 << 20).next_multiple_of(1 << 16);
             let mut bitstream: Option<ID3D12Resource> = None;
-            let mut bitstream_state = D3D12_RESOURCE_STATE_COPY_DEST;
+            let mut bitstream_state = D3D12_RESOURCE_STATE_COMMON;
             device
-                .CreateCommittedResource(&heap(D3D12_HEAP_TYPE_READBACK), D3D12_HEAP_FLAG_NONE, &buffer_desc(bitstream_size), bitstream_state, None, &mut bitstream)
+                .CreateCommittedResource(&readable_heap(), D3D12_HEAP_FLAG_NONE, &buffer_desc(bitstream_size), bitstream_state, None, &mut bitstream)
                 .context("the bitstream buffer")?;
             let mut meta: Option<ID3D12Resource> = None;
             device
                 .CreateCommittedResource(&heap(D3D12_HEAP_TYPE_DEFAULT), D3D12_HEAP_FLAG_NONE, &buffer_desc(caps.meta_size.max(256) as u64), D3D12_RESOURCE_STATE_COMMON, None, &mut meta)
                 .context("the metadata buffer")?;
             let mut resolved: Option<ID3D12Resource> = None;
-            let resolved_state = D3D12_RESOURCE_STATE_COPY_DEST;
+            let resolved_state = D3D12_RESOURCE_STATE_COMMON;
             device
-                .CreateCommittedResource(&heap(D3D12_HEAP_TYPE_READBACK), D3D12_HEAP_FLAG_NONE, &buffer_desc(4096), resolved_state, None, &mut resolved)
+                .CreateCommittedResource(&readable_heap(), D3D12_HEAP_FLAG_NONE, &buffer_desc(4096), resolved_state, None, &mut resolved)
                 .context("the resolved metadata buffer")?;
             bitstream_state = bitstream_state;
 
@@ -999,6 +1012,8 @@ impl Encoder {
             }
             set(work, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, &mut before, &mut self.recon_state);
             before.push(transition(&self.meta, 0, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE));
+            before.push(transition(&self.bitstream, 0, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE));
+            before.push(transition(&self.resolved, 0, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE));
             self.list.ResourceBarrier(&before);
 
             let input_args = D3D12_VIDEO_ENCODER_ENCODEFRAME_INPUT_ARGUMENTS {
@@ -1047,7 +1062,11 @@ impl Encoder {
                 ResolvedLayoutMetadata: D3D12_VIDEO_ENCODER_ENCODE_OPERATION_METADATA_BUFFER { pBuffer: ManuallyDrop::new(Some(self.resolved.clone())), Offset: 0 },
             };
             self.list.ResolveEncoderOutputMetadata(&resolve_in, &resolve_out);
-            let last = [transition(&self.meta, 0, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, D3D12_RESOURCE_STATE_COMMON)];
+            let last = [
+                transition(&self.meta, 0, D3D12_RESOURCE_STATE_VIDEO_ENCODE_READ, D3D12_RESOURCE_STATE_COMMON),
+                transition(&self.bitstream, 0, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_COMMON),
+                transition(&self.resolved, 0, D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE, D3D12_RESOURCE_STATE_COMMON),
+            ];
             self.list.ResourceBarrier(&last);
             if let Err(e) = self.list.Close() {
                 if let Ok(q) = self.device.cast::<ID3D12InfoQueue>() {
@@ -1093,8 +1112,8 @@ impl Encoder {
             ensure!(md.EncodeErrorFlags == 0, "the encoder reports error flags {:#x}", md.EncodeErrorFlags);
             (md.EncodedBitstreamWrittenBytesCount, md.EncodeStats.AverageQP as u32)
         };
-        self.bitstream_state = D3D12_RESOURCE_STATE_COPY_DEST;
-        self.resolved_state = D3D12_RESOURCE_STATE_COPY_DEST;
+        self.bitstream_state = D3D12_RESOURCE_STATE_COMMON;
+        self.resolved_state = D3D12_RESOURCE_STATE_COMMON;
         ensure!(written > 0 && written <= self.bitstream_size, "the encoder wrote {written} bytes");
         self.last_qp = qp;
 
