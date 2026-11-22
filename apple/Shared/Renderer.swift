@@ -46,7 +46,12 @@ fragment float4 rm_fragment_hdr(VOut in [[stage_in]], texture2d<float> luma [[te
     float3 e = saturate(float3(y + 1.4746 * c.y, y - 0.16455 * c.x - 0.57135 * c.y, y + 1.8814 * c.x));
     float3 p = pow(e, float3(1.0 / 78.84375));
     float3 nits = 10000.0 * pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), float3(1.0 / 0.1593017578125));
-    float3 v = nits / l.sdrWhite;
+    // BT.2020 to Display P3 primaries (linear light): an extended-range P3 layer is what iOS draws
+    // with headroom (it doesn't take an extended BT.2020 one), and macOS takes it too.
+    const float3x3 toP3 = float3x3(float3(1.3435783, -0.0652975, 0.0028218),
+                                   float3(-0.2821797, 1.0757879, -0.0195985),
+                                   float3(-0.0613986, -0.0104905, 1.0167767));
+    float3 v = toP3 * (nits / l.sdrWhite);
     float m = max(v.r, max(v.g, v.b));
     float room = max(l.headroom - 1.0, 0.001);
     if (m > 1.0) { v *= (1.0 + room * (1.0 - exp(-(m - 1.0) / room))) / m; }
@@ -68,6 +73,7 @@ final class VideoRenderer {
     private let queue: MTLCommandQueue
     private let library: MTLLibrary
     private var pipelines: [String: MTLRenderPipelineState] = [:]
+    private var reportedNoDrawable = false, reportedNoPipeline = false
     /// The stream is HDR (BT.2020, PQ): drawn into a float layer in which 1.0 is SDR white.
     private(set) var hdr = false
     /// Where SDR white sits in the HDR signal, in nits (the host says; 203 if it doesn't).
@@ -82,7 +88,7 @@ final class VideoRenderer {
         hdr = on
         if #available(iOS 16.0, macOS 10.11, *) { layer.wantsExtendedDynamicRangeContent = on }
         layer.pixelFormat = on ? .rgba16Float : sdrFormat
-        layer.colorspace = CGColorSpace(name: on ? CGColorSpace.extendedLinearITUR_2020 : CGColorSpace.sRGB)
+        layer.colorspace = CGColorSpace(name: on ? CGColorSpace.extendedLinearDisplayP3 : CGColorSpace.sRGB)
         setNeedsRedraw()
     }
 
@@ -121,6 +127,45 @@ final class VideoRenderer {
     private var lastAgeAtPresentUs: Int64 = -1
     /// Every frame shown: when (uptime ns) and how old it was (µs, -1 unknown). For run summaries.
     private var shownLog: [(UInt64, Int64)] = []
+    /// For each frame, ms from its arrival here to the moment the screen showed it.
+    private var onScreenLog: [Double] = []
+
+    /// Each frame is drawn and presented the moment it is handed over, instead of at the next tick of
+    /// the display link: it reaches the screen at the screen's next refresh, up to a whole tick
+    /// sooner, and frames that come unevenly are shown unevenly as they came. Set before frames come.
+    /// Off by default: on the iPad Pro (120 Hz) a frame presented as it came reached the screen no
+    /// sooner (median 15.0 against 14.3 ms) and the slowest 5% a frame later (30 against 20 ms):
+    /// presented at a random moment it often misses the compositor's deadline for the coming
+    /// refresh, where the display link's tick comes just after one. `--present arrival` to compare.
+    static var onArrival = false
+    private let presentQueue = DispatchQueue(label: "remoteman.present", qos: .userInteractive)
+    /// The size the layer is drawn at, set on the main thread only (CAMetalLayer's own is read off it).
+    private var layerSize = CGSize.zero
+
+    func takeOnScreenLog() -> [Double] {
+        lock.lock()
+        defer { lock.unlock() }
+        let l = onScreenLog
+        onScreenLog = []
+        return l
+    }
+
+    /// Main thread: keep the layer's size and, when frames are drawn as they come, draw what needs
+    /// drawing again (a zoom, a new size, the end of a picture). Call at each display refresh.
+    func tick() {
+        guard Self.onArrival else { return draw() }
+        lock.lock()
+        let frame = pending ?? current
+        let redraw = needsRedraw
+        lock.unlock()
+        let size = frame == nil ? CGSize(width: 16, height: 16) : drawableSize
+        if size.width >= 1, size.height >= 1, layer.drawableSize != size {
+            layer.drawableSize = size
+            setNeedsRedraw()
+        }
+        layerSize = layer.drawableSize
+        if redraw { presentQueue.async { [weak self] in self?.draw(sized: false) } }
+    }
 
     func takeShownLog() -> [(UInt64, Int64)] {
         lock.lock()
@@ -170,7 +215,25 @@ final class VideoRenderer {
         if pending != nil { superseded += 1 }
         pending = f
         lock.unlock()
+        // One draw waiting at a time: frames that come while it waits only replace what it will
+        // draw, so that a burst never queues up drawables (newest wins, as at the tick).
+        if Self.onArrival {
+            lock.lock()
+            let start = !drawQueued
+            drawQueued = true
+            lock.unlock()
+            if start {
+                presentQueue.async { [weak self] in
+                    guard let self else { return }
+                    self.lock.lock()
+                    self.drawQueued = false
+                    self.lock.unlock()
+                    self.draw(sized: false)
+                }
+            }
+        }
     }
+    private var drawQueued = false
 
     func clear() {
         lock.lock()
@@ -253,6 +316,10 @@ final class VideoRenderer {
         pass.colorAttachments[0].storeAction = .store
         guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return [] }
         var keep: [Any] = []
+        if pb != nil, pipeline(format, hdr: hdr) == nil, !reportedNoPipeline {
+            reportedNoPipeline = true
+            print("remoteman: no pipeline for format \(format.rawValue), HDR \(hdr)")
+        }
         if let pb, let (ty, tc, ky, kc) = textures(pb), let p = pipeline(format, hdr: hdr) {
             let tw = Double(target.width), th = Double(target.height)
             let vw = Double(CVPixelBufferGetWidth(pb)), vh = Double(CVPixelBufferGetHeight(pb))
@@ -277,7 +344,7 @@ final class VideoRenderer {
     }
 
     /// Draw the newest frame if there is one that hasn't been shown. Call at each display refresh.
-    func draw() {
+    func draw(sized: Bool = true) {
         lock.lock()
         let fresh = pending
         pending = nil
@@ -289,9 +356,25 @@ final class VideoRenderer {
         guard fresh != nil || redraw else { return }
         // With no picture the layer is black whatever its size: a few pixels then, so that the
         // full-size buffers behind the view go back until there is a picture again.
-        let size = frame == nil ? CGSize(width: 16, height: 16) : drawableSize
-        if size.width >= 1, size.height >= 1, layer.drawableSize != size { layer.drawableSize = size }
-        guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else { return }
+        if sized {
+            let size = frame == nil ? CGSize(width: 16, height: 16) : drawableSize
+            if size.width >= 1, size.height >= 1, layer.drawableSize != size { layer.drawableSize = size }
+        }
+        guard let drawable = layer.nextDrawable(), let cb = queue.makeCommandBuffer() else {
+            if !reportedNoDrawable { reportedNoDrawable = true; print("remoteman: the layer gave no drawable (format \(layer.pixelFormat.rawValue))") }
+            return
+        }
+        if let fresh {
+            // When the screen really showed it, against when it came.
+            let came = fresh.receivedNs
+            drawable.addPresentedHandler { [weak self] d in
+                guard d.presentedTime > 0, let self else { return }
+                let ms = (d.presentedTime * 1e9 - Double(came)) / 1e6
+                self.lock.lock()
+                if self.onScreenLog.count < 200_000 { self.onScreenLog.append(ms) }
+                self.lock.unlock()
+            }
+        }
         let keep = encode(frame?.pixelBuffer, into: drawable.texture, format: layer.pixelFormat, commandBuffer: cb)
         cb.present(drawable)
         // With no picture left to show, the decoded pictures the texture cache still holds go

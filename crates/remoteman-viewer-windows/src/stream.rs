@@ -68,6 +68,10 @@ pub struct Scene {
     pub shots: AtomicU32,
     /// Why drawing stopped, if it has: nothing can be shown then.
     pub failed: Mutex<Option<String>>,
+    /// The computer's cursor shape while the draw thread draws it over the picture, where the
+    /// session's `cursor_at` says (a captured pointer in the app: `draw.rs`); `None` otherwise.
+    /// Set by whoever owns the window.
+    pub pointer: Mutex<Option<Arc<remoteman_core::CursorShape>>>,
 }
 
 impl Scene {
@@ -250,7 +254,8 @@ pub fn unpack(size: u64) -> (u32, u32) {
 
 enum Msg {
     Stream(StreamInfo),
-    Frame(Vec<u8>, Option<i64>),
+    /// A frame, its age if the clocks have been compared, and when it came to this program.
+    Frame(Vec<u8>, Option<i64>, std::time::Instant),
 }
 
 pub struct Feed {
@@ -287,7 +292,7 @@ impl Handler for Feed {
         // Every frame leans on the one before, so none may be skipped here: if the decoder
         // falls behind, this waits, and the loss shows up upstream as a keyframe request.
         self.shared.bytes.fetch_add(frame.data.len() as u64, Ordering::Relaxed);
-        let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us));
+        let _ = self.tx.send(Msg::Frame(frame.data.clone(), age_us, std::time::Instant::now()));
     }
 
     fn stream2(&mut self, info: &StreamInfo) {
@@ -300,7 +305,7 @@ impl Handler for Feed {
     }
 
     fn frame2(&mut self, frame: &Frame, age_us: Option<i64>) {
-        let _ = self.tx2.send(Msg::Frame(frame.data.clone(), age_us));
+        let _ = self.tx2.send(Msg::Frame(frame.data.clone(), age_us, std::time::Instant::now()));
     }
 
     fn stage(&mut self, stage: Stage) {
@@ -389,6 +394,10 @@ impl Handler for Feed {
         if self.shared.cursor_gone.swap(!visible, Ordering::Relaxed) == visible || moved {
             self.wake_window();
         }
+        // The draw thread draws it over the picture: every move is drawn.
+        if self.shared.scene.pointer.lock().unwrap().is_some() {
+            self.shared.scene.poke();
+        }
     }
 
     fn closed(&mut self, reason: &str) {
@@ -448,7 +457,7 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
                 first = true;
                 info = Some(i);
             }
-            Msg::Frame(data, age) => {
+            Msg::Frame(data, age, arrived) => {
                 let (Some(d), Some(i)) = (decoder.as_mut(), info.as_ref()) else { continue };
                 let t = std::time::Instant::now();
                 let mut decoded = d.decode(&data, age);
@@ -517,6 +526,7 @@ fn decode_loop(s: &Shared, gpu: &Gpu, rx: mpsc::Receiver<Msg>) -> Result<()> {
                 s.decoded.fetch_add(1, Ordering::Relaxed);
                 s.decoded_total.fetch_add(1, Ordering::Relaxed);
                 picture.age_us = age.map(|a| a.max(0) + took as i64);
+                picture.arrived = Some(arrived);
                 if let Some(a) = picture.age_us {
                     s.age_decoded_us.store(a as u64, Ordering::Relaxed);
                 }

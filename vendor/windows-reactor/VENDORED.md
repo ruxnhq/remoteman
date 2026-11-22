@@ -64,6 +64,14 @@ comment ("Spike patch" for blurman's, "remoteman patch" for ours).
 8. **In-app acrylic** (remoteman, for the viewer's bar over the picture): `ThemeBrush::
    AcrylicInApp` (`AcrylicInAppFillColorDefaultBrush`) in `src/declaration.rs`, beside patch 2's
    brushes.
+9. **A hidden pointer** (remoteman, for the viewer's captured pointer): `InputSystemCursorShape::
+   Hidden` (in `src/generated_declarations.rs`, its variant in `src/generated.rs`'s contract, and
+   `Border`'s setter in `src/native/generated.rs`) wears the app's own cursor resource 1 through
+   WinUI's `InputDesktopResourceCursor.CreateFromModule` (`src/native/resource_cursor.rs`, bound
+   by hand: the generated bindings lack it; its IID from the runtime's `Microsoft.UI.winmd`). The
+   app makes that resource blank. WinUI has no system shape for "none", and over its content it
+   sets the cursor itself whatever the window answers to `WM_SETCURSOR` or `ShowCursor` says.
+   If the cursor can't be made, the default one is worn (Reactor would otherwise unwrap the error).
 
 Cargo.toml: the `[lints]` and docs.rs sections are gone (with `[lints.rust]` set here instead)
 and the dependencies name the git commit instead of the windows-rs workspace. `public-api.txt` is

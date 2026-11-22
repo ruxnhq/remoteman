@@ -169,7 +169,7 @@ final class RefreshMeter {
 
         @objc private func tick() {
             flushPointer()
-            renderer?.draw()
+            renderer?.tick()
             // The cursor's size follows the picture's, which is known once a frame is in.
             let v = renderer?.videoSize
             if v != cursorVideoSize {
@@ -596,7 +596,7 @@ final class RefreshMeter {
 
         @objc private func tick() {
             flushPointer()
-            session.renderer?.draw()
+            session.renderer?.tick()
             // The cursor's size follows the picture's, which is known once a frame is in.
             let v = session.renderer?.videoSize
             if v != cursorVideoSize {
@@ -752,6 +752,26 @@ final class RefreshMeter {
             session.aim(session.touchDisplay)
             let rect = r.videoRect(in: bounds.size)
             guard rect.width > 0, rect.height > 0 else { return }
+            // Apple Pencil to a computer that takes a pen: its pressure and tilt go with it, in
+            // either touch mode. The pen is out of range again once it lifts.
+            var touches = touches
+            if session.has("pen") {
+                for t in touches where t.type == .pencil {
+                    let p = t.location(in: self)
+                    let x = Float(min(max((p.x - rect.minX) / rect.width, 0), 1))
+                    let y = Float(min(max((p.y - rect.minY) / rect.height, 0), 1))
+                    let pressure = phase == 2 ? 0 : Float(t.maximumPossibleForce > 0 ? t.force / t.maximumPossibleForce : 0.5)
+                    // Altitude (0 flat, 90° upright) and azimuth to tilt in x and y, in degrees.
+                    let alt = max(Double(t.altitudeAngle), 0.01), az = Double(t.azimuthAngle(in: self))
+                    let tiltX = Float(atan(cos(az) / tan(alt)) * 180 / .pi), tiltY = Float(atan(sin(az) / tan(alt)) * 180 / .pi)
+                    var twist: Float = 0
+                    if #available(iOS 17.5, *) { twist = Float((Double(t.rollAngle) * 180 / .pi).truncatingRemainder(dividingBy: 360) + (t.rollAngle < 0 ? 360 : 0)) }
+                    session.client?.pen(phase: phase, buttons: 0, x: x, y: y, pressure: pressure, tiltX: tiltX, tiltY: tiltY, twist: twist)
+                    if phase == 2 { session.client?.pen(phase: 4, buttons: 0, x: x, y: y, pressure: 0, tiltX: 0, tiltY: 0, twist: 0) }
+                }
+                touches = touches.filter { $0.type != .pencil }
+                if touches.isEmpty { return }
+            }
             if InputSettings.trackpadTouch || !pad.isEmpty {
                 let fingers = touches.filter { $0.type != .indirectPointer }
                 for t in touches where t.type == .indirectPointer { pointer(t, event, phase: phase) }

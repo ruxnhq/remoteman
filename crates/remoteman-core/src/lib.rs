@@ -33,7 +33,7 @@ pub use blob::{BlobEvent, BlobSender};
 pub use remoteman_proto::control::Message;
 pub use remoteman_proto::media::{self, Packet};
 pub use remoteman_proto::video::Frame;
-use remoteman_transport::{Connection, Endpoint, Expect, Identity, connect, read_message, write_message};
+use remoteman_transport::{Connection, Endpoint, Expect, Identity, read_message, write_message};
 
 pub struct Options {
     /// `host:port`.
@@ -307,7 +307,10 @@ impl Client {
 
     async fn start(o: Options, given: Given, mut handler: Box<dyn Handler>) -> Result<Self> {
         handler.stage(Stage::Lookup);
-        let addr = o.host.to_socket_addrs().with_context(|| format!("look up {}", o.host))?.next().context("no such host")?;
+        // Every address the name has, not only the first: a `.local` name lists IPv6 link-local
+        // and VPN addresses before the LAN one, and the hosts listen on IPv4.
+        let addrs = remoteman_transport::connect_order(o.host.to_socket_addrs().with_context(|| format!("look up {}", o.host))?);
+        anyhow::ensure!(!addrs.is_empty(), "no such host");
         let identity = match given.identity {
             Some((cert, key)) => Identity::from_der(cert, key).context("the identity given")?,
             None => Identity::load_or_create(&o.state.join("client"))?,
@@ -324,7 +327,7 @@ impl Client {
         let o_drop = o.test_drop_one_in.filter(|n| *n > 1);
         let o_delay = o.test_delay_lost_ms.filter(|ms| *ms > 0);
         handler.stage(Stage::Handshake);
-        let (endpoint, conn, fingerprint) = connect(addr, &identity, expect).await.map_err(|e| match &expected {
+        let (endpoint, conn, fingerprint) = remoteman_transport::connect_any(&addrs, &identity, expect).await.map_err(|e| match &expected {
             Some(fp) if format!("{e:#}").contains("isn't the host that was paired") => anyhow::anyhow!("{} isn't the host that was expected: its certificate's fingerprint isn't {fp}", o.host),
             _ => e,
         })?;

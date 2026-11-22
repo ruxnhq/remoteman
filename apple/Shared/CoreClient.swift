@@ -253,7 +253,39 @@ final class CoreClient: SharingLink {
     func scroll(dx: Float, dy: Float) { with { rm_client_scroll($0, dx, dy) } }
     func key(usage: UInt16, down: Bool) { with { rm_client_key($0, usage, down ? 1 : 0) } }
     func touch(phase: UInt8, slot: UInt8, x: Float, y: Float) { with { rm_client_touch($0, phase, slot, x, y) } }
+    /// Apple Pencil: phase 0 down, 1 move, 2 up, 3 hover, 4 out of range. Nothing goes to a host without `pen`.
+    func pen(phase: UInt8, buttons: UInt8, x: Float, y: Float, pressure: Float, tiltX: Float, tiltY: Float, twist: Float) {
+        with { _ = rm_client_pen($0, phase, buttons, x, y, pressure, tiltX, tiltY, twist) }
+    }
     func text(_ s: String) { with { rm_client_text($0, s) } }
+
+    /// A game controller's state (docs/PROTOCOL.md, "Gamepad"): `flags` bit 0 connected (clear: the
+    /// pad was unplugged). Sticks are up and right positive. False when the host doesn't list `gamepad`.
+    @discardableResult
+    func gamepad(pad: UInt8, flags: UInt8, buttons: UInt16, lt: Float, rt: Float, lx: Float, ly: Float, rx: Float, ry: Float) -> Bool {
+        var ok = false
+        with { ok = rm_client_gamepad($0, pad, flags, buttons, lt, rt, lx, ly, rx, ry) != 0 }
+        return ok
+    }
+
+    /// Called when the computer wants a code from an authenticator app: -1 the first time, after a
+    /// wrong one the tries left. Set it right after connecting; it may be called at once.
+    func onSecondFactor(_ handler: @escaping (Int) -> Void) {
+        secondFactorHandler = handler
+        let ctx = Unmanaged.passUnretained(self).toOpaque()
+        with {
+            rm_client_set_second_factor_callback($0, { ctx, left in
+                let me = Unmanaged<CoreClient>.fromOpaque(ctx!).takeUnretainedValue()
+                me.secondFactorHandler?(Int(left))
+            }, ctx)
+        }
+    }
+    private var secondFactorHandler: ((Int) -> Void)?
+
+    /// Answer the computer's ask for a code; `remember` keeps this device from being asked for 30 days.
+    func secondFactor(code: String, remember: Bool) {
+        with { _ = rm_client_second_factor($0, code, remember ? 1 : 0) }
+    }
 
     /// Leave. Safe to call more than once.
     func close() {

@@ -1,0 +1,59 @@
+import CoreMedia
+import CoreVideo
+import Foundation
+import VideoToolbox
+
+func hostLog(_ s: String) { print(s) }
+let w = 3840, h = 2160, fps = 60, rate = 40_000_000
+let factor = Int(CommandLine.arguments.dropFirst().first ?? "8") ?? 8
+func buffer(_ fill: (UnsafeMutablePointer<UInt16>, Int, Int) -> Void) -> CVPixelBuffer {
+    var pb: CVPixelBuffer?
+    CVPixelBufferCreate(nil, w, h, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &pb)
+    let b = pb!
+    CVPixelBufferLockBaseAddress(b, [])
+    let y = CVPixelBufferGetBaseAddressOfPlane(b, 0)!.assumingMemoryBound(to: UInt16.self)
+    let yr = CVPixelBufferGetBytesPerRowOfPlane(b, 0) / 2
+    fill(y, yr, 0)
+    let c = CVPixelBufferGetBaseAddressOfPlane(b, 1)!.assumingMemoryBound(to: UInt16.self)
+    let cr = CVPixelBufferGetBytesPerRowOfPlane(b, 1) / 2
+    for r in 0..<(h / 2) { for x in 0..<w { c[r * cr + x] = 512 << 6 } }
+    CVPixelBufferUnlockBaseAddress(b, [])
+    return b
+}
+// "Text": rows of small glyph-like 1-2 px strokes on a light background, deterministic.
+var seed: UInt64 = 42
+func rnd() -> UInt64 { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return seed >> 33 }
+var glyph = [[Bool]](repeating: [Bool](repeating: false, count: w), count: h)
+for line in stride(from: 20, to: h - 30, by: 28) {
+    var x = 20
+    while x < w - 20 {
+        if rnd() % 7 == 0 { x += 9; continue }
+        for gy in 0..<16 { for gx in 0..<8 where rnd() % 3 == 0 { glyph[line + gy][x + gx] = true } }
+        x += 10
+    }
+}
+let blank = buffer { y, r, _ in for row in 0..<h { for x in 0..<w { y[row * r + x] = 900 << 6 } } }
+let text = buffer { y, r, _ in for row in 0..<h { for x in 0..<w { y[row * r + x] = (glyph[row][x] ? 100 : 900) << 6 } } }
+// Source luma for comparing, 10-bit values.
+var src = Data(capacity: w * h * 2)
+for row in 0..<h { for x in 0..<w { var v = UInt16(glyph[row][x] ? 100 : 900); src.append(Data(bytes: &v, count: 2)) } }
+try! src.write(to: URL(fileURLWithPath: "source.y16"))
+
+let enc = try HostEncoder(width: w, height: h, fps: fps, bitrate: rate, tenBit: true)
+enc.maxInFlight = 1
+let out = FileHandle(forWritingAtPath: { FileManager.default.createFile(atPath: "out.hevc", contents: nil); return "out.hevc" }())!
+var sizes: [Int] = []
+let done = DispatchSemaphore(value: 0)
+enc.onFrame = { o in out.write(o.annexB); sizes.append(o.annexB.count); done.signal() }
+var t = 0
+func pts() -> CMTime { t += 1; return CMTime(value: CMTimeValue(t), timescale: CMTimeScale(fps)) }
+func push(_ pb: CVPixelBuffer) { while !enc.encode(pb, pts: pts()) { usleep(1000) }; done.wait() }
+for _ in 0..<5 { push(blank) }     // 0-4: blank
+push(text)                          // 5: the change: text appears
+push(text)                          // 6: one more ordinary frame of it (as capture might send)
+if factor > 0 {
+    enc.refine(text, pts: pts(), bitrate: rate); done.wait()   // 7: refined
+} else { push(text) }               // 7: or an ordinary frame
+push(text)                          // 8: ordinary again
+out.closeFile()
+print("frame bytes:", sizes)

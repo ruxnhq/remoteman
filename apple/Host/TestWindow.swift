@@ -18,6 +18,12 @@ private final class TestView: NSView {
         note("left down", e)
     }
     override func mouseUp(with e: NSEvent) { note("left up", e) }
+    override func mouseDragged(with e: NSEvent) {
+        guard e.subtype == .tabletPoint else { return }
+        let p = convert(e.locationInWindow, from: nil)
+        hostLog(String(format: "test window: pen at %.3f, %.3f pressure %.2f tilt %.2f, %.2f rotation %.0f", p.x / bounds.width, 1 - p.y / bounds.height, e.pressure, e.tilt.x, e.tilt.y, e.rotation))
+    }
+    override func tabletProximity(with e: NSEvent) { hostLog("test window: pen \(e.isEnteringProximity ? "near" : "gone"), \(e.pointingDeviceType == .eraser ? "eraser" : "pen")") }
     override func rightMouseDown(with e: NSEvent) { note("right down", e) }
     override func scrollWheel(with e: NSEvent) { hostLog(String(format: "test window: scroll %.1f, %.1f", e.scrollingDeltaX, e.scrollingDeltaY)) }
     override func keyDown(with e: NSEvent) { hostLog("test window: key down code \(e.keyCode) characters \"\(e.characters ?? "")\" flags \(e.modifierFlags.intersection(.deviceIndependentFlagsMask).rawValue)") }
@@ -35,16 +41,57 @@ final class TestWindow {
     private let bright = CALayer()
     /// `--test-bright yes`: a patch above SDR white in the middle.
     static var bright = false
+    /// The middle patch's level (`--test-bright-level`), 4 by default; at 1 nothing on screen asks for headroom.
+    static var level: CGFloat = 4
     private var n = 0
     private var size = CGSize.zero
 
+    /// The display it covers. A display changed in place (or made anew) can reach NSScreen a moment
+    /// after the host asks for it, at its old size or not at all: the window follows every change
+    /// of the screens and tries again until the display is there.
+    private var displayID: CGDirectDisplayID = 0
+    private var watching: NSObjectProtocol?
+
+    private func screen(_ id: CGDirectDisplayID) -> NSScreen? {
+        NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
+        }
+    }
+
+    private func refit() {
+        guard displayID != 0 else { return }
+        guard let s = screen(displayID) else { return }
+        guard let w = window else { return show(on: displayID) }
+        let f = s.frame
+        guard w.frame != f else { return }
+        w.setFrame(f, display: true)
+        w.contentView?.frame = NSRect(origin: .zero, size: f.size)
+        size = f.size
+        text.frame = CGRect(x: 40, y: f.height - 160, width: f.width - 80, height: 120)
+        hostLog("test window: now \(Int(f.width))×\(Int(f.height)) points")
+    }
+
     func show(on id: CGDirectDisplayID) {
-        guard window == nil,
-            let screen = NSScreen.screens.first(where: {
-                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
-            })
-        else { return }
+        displayID = id
+        if watching == nil {
+            watching = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+            ) { [weak self] _ in self?.refit() }
+        }
+        // Not there yet: again shortly (and on the next change of the screens).
+        if window == nil, screen(id) == nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self, self.displayID == id, self.window == nil else { return }
+                self.show(on: id)
+            }
+            return
+        }
+        for delay in [0.3, 1.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.refit() }
+        }
+        guard window == nil, let screen = screen(id) else { return }
         let f = screen.frame
+        hostLog("test window: shown at \(Int(f.width))×\(Int(f.height)) points on display \(id)")
         let w = KeyableWindow(contentRect: f, styleMask: [.borderless], backing: .buffered, defer: false, screen: screen)
         w.setFrame(f, display: true)
         w.isReleasedWhenClosed = false
@@ -63,11 +110,20 @@ final class TestWindow {
         if Self.bright {
             // A patch four times as bright as SDR white, for checking HDR: it needs a layer that
             // may go over 1.0 and a colour in an extended space.
-            view.layer?.wantsExtendedDynamicRangeContent = true
-            bright.wantsExtendedDynamicRangeContent = true
+            view.layer?.wantsExtendedDynamicRangeContent = Self.level > 1
+            bright.wantsExtendedDynamicRangeContent = Self.level > 1
             bright.frame = CGRect(x: f.width / 2 - 200, y: f.height / 2 - 100, width: 400, height: 200)
             if let space = CGColorSpace(name: CGColorSpace.extendedLinearSRGB) {
-                bright.backgroundColor = CGColor(colorSpace: space, components: [4, 4, 4, 1])
+                bright.backgroundColor = CGColor(colorSpace: space, components: [Self.level, Self.level, Self.level, 1])
+                // Beside it: plain white (1.0) on the left and twice white on the right, for
+                // finding where SDR white sits in the signal.
+                for (i, v) in (Self.level > 1 ? [(0, 1.0), (1, 2.0)] : []) {
+                    let l = CALayer()
+                    l.wantsExtendedDynamicRangeContent = true
+                    l.frame = CGRect(x: i == 0 ? f.width * 0.1 : f.width * 0.9 - 300, y: f.height / 2 - 100, width: 300, height: 200)
+                    l.backgroundColor = CGColor(colorSpace: space, components: [CGFloat(v), CGFloat(v), CGFloat(v), 1])
+                    view.layer?.addSublayer(l)
+                }
             }
             view.layer?.addSublayer(bright)
         }
@@ -134,6 +190,7 @@ final class TestWindow {
     }
 
     func close() {
+        displayID = 0
         link?.invalidate()
         link = nil
         window?.close()
