@@ -44,8 +44,17 @@ put() {
 if [ -n "${APPIMAGE:-}" ] && [ -z "${REMOTEMAN_NO_INTEGRATION:-}" ]; then
     tmp=$(mktemp -d)
     (cd "$here/usr/share/icons" && find . -name 'dev.remoteman.Host*' -type f) | while read -r icon; do put "$here/usr/share/icons/$icon" "$data/icons/$icon" || true; done
-    sed "s|^Exec=remoteman-tray|Exec=\"$APPIMAGE\"|" "$here/dev.remoteman.Host.desktop" > "$tmp/entry"
-    put "$tmp/entry" "$data/applications/dev.remoteman.Host.desktop" || true
+    # An AppImage manager (Gear Lever, AppImageLauncher, appimaged) that added this AppImage
+    # to the applications writes its own launcher entry and starts the AppImage with
+    # DESKTOPINTEGRATION set, the AppImage convention for "already integrated". A second entry
+    # of ours would then show the app twice, so ours goes, if it was ours for this file.
+    entry="$data/applications/dev.remoteman.Host.desktop"
+    if [ -n "${DESKTOPINTEGRATION:-}" ]; then
+        grep -qF "Exec=\"$APPIMAGE\"" "$entry" 2>/dev/null && rm -f "$entry"
+    else
+        sed "s|^Exec=remoteman-tray|Exec=\"$APPIMAGE\"|" "$here/dev.remoteman.Host.desktop" > "$tmp/entry"
+        put "$tmp/entry" "$entry" || true
+    fi
     if [ ! -e /etc/systemd/user/remoteman-agent.service ]; then
         sed "s|=/usr/lib/remoteman/remoteman-agent|=\"$APPIMAGE\" agent|" "$here/usr/share/remoteman/systemd/user/remoteman-host.service" > "$tmp/unit"
         put "$tmp/unit" "$config/systemd/user/remoteman-host.service" && systemctl --user daemon-reload 2>/dev/null
