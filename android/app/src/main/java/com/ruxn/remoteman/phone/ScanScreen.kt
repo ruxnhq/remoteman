@@ -5,7 +5,7 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ImageAnalysis
-import androidx.camera.mlkit.vision.MlKitAnalyzer
+import androidx.camera.core.ImageProxy
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
@@ -44,10 +44,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.google.mlkit.vision.barcode.BarcodeScanner
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
+import com.google.zxing.LuminanceSource
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.NotFoundException
+import com.google.zxing.PlanarYUVLuminanceSource
+import com.google.zxing.ReaderException
+import com.google.zxing.common.HybridBinarizer
 import com.ruxn.remoteman.AppModel
 import com.ruxn.remoteman.PairLink
 
@@ -98,31 +103,70 @@ fun ScanScreen(model: AppModel) {
     }
 }
 
-/** The camera's picture, with ML Kit reading QR codes in it; [onCode] gets each new one's text. */
+/** The camera's picture, with ZXing reading QR codes in it; [onCode] gets each new one's text. */
 @Composable
 private fun Camera(onCode: (String) -> Unit) {
     val ctx = LocalContext.current
     val owner = LocalLifecycleOwner.current
-    val scanner: BarcodeScanner = remember { BarcodeScanning.getClient(BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()) }
     val controller = remember { LifecycleCameraController(ctx) }
     var last by remember { mutableStateOf<String?>(null) }
     DisposableEffect(owner) {
-        val executor = ContextCompat.getMainExecutor(ctx)
-        controller.setImageAnalysisAnalyzer(
-            executor,
-            MlKitAnalyzer(listOf(scanner), ImageAnalysis.COORDINATE_SYSTEM_VIEW_REFERENCED, executor) { result ->
-                val text = result.getValue(scanner)?.firstOrNull()?.rawValue ?: return@MlKitAnalyzer
-                if (text != last) { last = text; onCode(text) }
-            },
-        )
+        val main = ContextCompat.getMainExecutor(ctx)
+        val work = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val reader = QrReader()
+        // Only the newest picture is looked at; the camera drops the ones that come meanwhile.
+        controller.imageAnalysisBackpressureStrategy = ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST
+        controller.setImageAnalysisAnalyzer(work) { image ->
+            val text = image.use { reader.read(it) }
+            if (text != null) main.execute { if (text != last) { last = text; onCode(text) } }
+        }
         controller.bindToLifecycle(owner)
         onDispose {
+            controller.clearImageAnalysisAnalyzer()
             controller.unbind()
-            scanner.close()
+            work.shutdown()
         }
     }
     AndroidView(
         modifier = Modifier.fillMaxSize().background(Color.Black),
         factory = { c -> PreviewView(c).apply { this.controller = controller } },
     )
+}
+
+/**
+ * QR codes from the camera's pictures with ZXing: the picture's brightness plane is all a QR
+ * reader needs, and a QR code reads the same at any rotation. A code shown light on dark (a
+ * dark theme) is tried inverted too.
+ */
+internal class QrReader {
+    private val reader = MultiFormatReader().apply {
+        setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE), DecodeHintType.TRY_HARDER to true))
+    }
+    private var buffer = ByteArray(0)
+
+    fun read(image: ImageProxy): String? {
+        val plane = image.planes[0]
+        val rowStride = plane.rowStride
+        val height = image.height
+        val size = rowStride * height
+        if (buffer.size != size) buffer = ByteArray(size)
+        val bytes = plane.buffer.duplicate()
+        bytes.rewind()
+        // The last row can be shorter than the stride: what's missing stays as it was.
+        bytes.get(buffer, 0, minOf(size, bytes.remaining()))
+        return read(PlanarYUVLuminanceSource(buffer, rowStride, height, 0, 0, image.width, height, false))
+    }
+
+    fun read(source: LuminanceSource): String? {
+        for (s in listOf(source, source.invert())) {
+            try {
+                return reader.decodeWithState(BinaryBitmap(HybridBinarizer(s))).text
+            } catch (_: NotFoundException) {
+            } catch (_: ReaderException) {
+            } finally {
+                reader.reset()
+            }
+        }
+        return null
+    }
 }

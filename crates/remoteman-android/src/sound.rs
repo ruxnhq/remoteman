@@ -170,7 +170,8 @@ fn stop(s: &AudioStream) {
 fn monotonic_ns() -> i64 {
     let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
-    t.tv_sec * 1_000_000_000 + t.tv_nsec
+    // 32-bit Android (armeabi-v7a) has 32-bit fields here: widen before multiplying.
+    t.tv_sec as i64 * 1_000_000_000 + t.tv_nsec as i64
 }
 
 fn open_stream(shared: &Arc<Shared>, holder: Weak<Mutex<Option<Stream>>>) -> Result<Stream> {

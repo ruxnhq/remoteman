@@ -159,7 +159,10 @@ for you.
 
 - **The privacy policy inside the app**: Play wants a link in the app as well as on the
   listing. Settings needs a "Privacy policy" row that opens `https://remoteman.ruxn.com/privacy/`.
-- **ML Kit and the Data safety answers**: the camera's code reader is ML Kit's barcode
+- **Decided 2026-11-23: ML Kit was replaced by ZXing** (build 3), so Data safety is answered as in B,
+  the privacy policy stays as it is, and Settings has the "Privacy policy" row (phone and TV).
+  What follows is why.
+- **ML Kit and the Data safety answers**: the camera's code reader was ML Kit's barcode
   scanner, with the model bundled in the app. The pictures stay on the device. Google's ML Kit
   terms say the SDK "also send[s] metrics about the performance and utilization of the APIs"
   to Google, and the release build does include its sender
@@ -189,7 +192,7 @@ What the app handles:
   diagnostics and usage analytics, encrypted in transit (HTTPS), and Google doesn't pass them
   to third parties.
 
-**A. With ML Kit** (the build as it is):
+**A. With ML Kit** (builds 1 and 2):
 - Does your app collect or share any of the required user data types? **Yes.**
 - Is all of the user data collected by your app encrypted in transit? **Yes.**
 - Do you provide a way for users to request that their data is deleted? **No.** RUXN holds
@@ -202,7 +205,7 @@ What the app handles:
 - Everything else (location, personal info, messages, photos and videos, audio, files,
   contacts, app activity, web browsing): **not collected**.
 
-**B. Without ML Kit** (a code reader that sends nothing):
+**B. Without ML Kit** (build 3 on, with ZXing; the answer to give):
 - Does your app collect or share any of the required user data types? **No.** The form ends
   there, and the listing shows "No data collected" and "No data shared with third parties".
 
@@ -230,9 +233,10 @@ signature permission that only the app itself holds.
 - **App Bundle**: required, and the release is an `.aab`.
 - **64-bit and 16 KB pages**: TV apps have needed both since 1 August 2026. The bundle has
   arm64-v8a and x86_64, all 16 KB aligned.
-- **32-bit devices**: there is no `armeabi-v7a` build. Many Android TV sets and boxes run a
-  32-bit system and won't be offered the app. Adding one means building the Rust side for
-  `armv7-linux-androideabi` and adding it to `abiFilters`.
+- **32-bit devices**: since build 3 the bundle has `armeabi-v7a` too, for the many Android TV
+  sets and boxes and older phones with a 32-bit system. Its library is aligned to 4 KB, which is
+  right: Play's 16 KB rule is for 64-bit code, and 32-bit Android uses 4 KB pages. Not yet run
+  on a 32-bit device.
 
 TV app quality (<https://developer.android.com/docs/quality-guidelines/tv-app-quality>,
 "TV Ready"):

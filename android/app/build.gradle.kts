@@ -27,7 +27,8 @@ android {
         // versionCode than the last, even on a testing track.
         versionCode = providers.gradleProperty("remoteman.versionCode").get().toInt()
         versionName = providers.gradleProperty("remoteman.versionName").get()
-        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        // armeabi-v7a: many Android TV boxes and sets, and older phones, run a 32-bit system.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
     }
 
     signingConfigs {
@@ -77,13 +78,13 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core:1.7.8")
     implementation("androidx.tv:tv-material:1.1.0")
-    // Scanning a computer's pairing code (phones): the camera and ML Kit's barcode reader,
-    // whose model is in the app (no Play services needed).
+    // Scanning a computer's pairing code (phones): the camera, and ZXing's QR reader (Apache
+    // 2.0), which runs on the device and sends nothing anywhere. ML Kit's reader was replaced
+    // because it reports usage figures to Google, which remoteman's privacy policy rules out.
     implementation("androidx.camera:camera-camera2:1.7.0")
     implementation("androidx.camera:camera-lifecycle:1.7.0")
     implementation("androidx.camera:camera-view:1.7.0")
-    implementation("androidx.camera:camera-mlkit-vision:1.7.0")
-    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("com.google.zxing:core:3.5.4")
 
     // Unit tests on this computer (./gradlew testDebugUnitTest): what needs no Android.
     testImplementation("junit:junit:4.13.2")

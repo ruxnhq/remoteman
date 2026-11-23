@@ -13,11 +13,3 @@
 -keepclassmembers class * implements com.ruxn.remoteman.Core$Listener {
     public void on*(...);
 }
-
-# ML Kit (the phone's code reader) makes its component registrars by reflection, from names in
-# its manifest, through their no-argument constructors. Its own rules keep the classes but, in
-# R8's full mode, not those constructors: without this, opening the scanner crashes in
-# BarcodeScanning.getClient (seen on the 0.1.0 release build, 2026-11-23).
--keep class * implements com.google.firebase.components.ComponentRegistrar {
-    <init>();
-}

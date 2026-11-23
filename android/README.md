@@ -20,7 +20,7 @@ activity, one model (`AppModel`: a stack of screens, the computers, the settings
   Phone: tap connects, the ⋮ menu has the computer's settings and Forget. TV: a row of cards, OK
   connects, holding OK opens the computer's settings.
 - **Adding**: by address (and an optional name), or on a phone by scanning the computer's
-  pairing code (CameraX + ML Kit's bundled barcode model; no Play services). A
+  pairing code (CameraX and ZXing's QR reader, which sends nothing anywhere; no Play services). A
   `remoteman://pair?…` link opens the app and does the same, on phones and TVs. A code's key is
   checked on the first connection: another computer answering there is turned away.
 - **Connecting** is one screen with the picture (it owns the SurfaceView, whose surface the

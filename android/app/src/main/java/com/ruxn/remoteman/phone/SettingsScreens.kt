@@ -131,6 +131,23 @@ fun SettingsScreen(model: AppModel) {
         Header("This ${model.session.deviceKind}")
         ListItem(headlineContent = { Text("Decoders") }, supportingContent = { Text(Decoders.describe()) })
         ListItem(headlineContent = { Text("Version") }, supportingContent = { Text(appVersion()) })
+        val uri = androidx.compose.ui.platform.LocalUriHandler.current
+        ListItem(
+            headlineContent = { Text("Privacy policy") },
+            supportingContent = { Text(PRIVACY_URL.removePrefix("https://")) },
+            modifier = Modifier.clickable { openPolicy(uri) },
+        )
+    }
+}
+
+/** remoteman's privacy policy, which Google Play also wants reachable from inside the app. */
+const val PRIVACY_URL = "https://remoteman.ruxn.com/privacy/"
+
+/** Open the policy in a browser; a device without one (many TVs) still shows its address. */
+fun openPolicy(uri: androidx.compose.ui.platform.UriHandler) {
+    try {
+        uri.openUri(PRIVACY_URL)
+    } catch (_: Exception) {
     }
 }
 

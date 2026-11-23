@@ -267,6 +267,11 @@ fun TvSettings(model: AppModel) {
             }
             item { ListItem(selected = false, onClick = {}, headlineContent = { Text("Decoders") }, supportingContent = { Text(Decoders.describe()) }) }
             item { ListItem(selected = false, onClick = {}, headlineContent = { Text("Version") }, supportingContent = { Text(appVersion()) }) }
+            item {
+                val uri = androidx.compose.ui.platform.LocalUriHandler.current
+                ListItem(selected = false, onClick = { com.ruxn.remoteman.phone.openPolicy(uri) }, headlineContent = { Text("Privacy policy") },
+                    supportingContent = { Text(com.ruxn.remoteman.phone.PRIVACY_URL.removePrefix("https://")) })
+            }
         }
     }
 }
