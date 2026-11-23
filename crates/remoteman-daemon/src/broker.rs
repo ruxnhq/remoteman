@@ -219,15 +219,15 @@ impl Shared {
     fn login_screen_agent(&self, login: &Login, plasma: &crate::plasma::Plasma) -> Result<u32, String> {
         let start = std::time::Instant::now();
         while start.elapsed() < Duration::from_secs(10) {
-            let candidates: Vec<(u32, i32)> = {
+            let found = {
                 let st = self.state.lock().unwrap();
-                st.agents.iter().rev().filter(|(_, a)| a.uid == plasma.greeter_uid).map(|(id, a)| (*id, a.pid)).collect()
+                st.agents.iter().rev().find(|(_, a)| a.uid == plasma.greeter_uid).map(|(id, _)| *id)
             };
-            for (id, pid) in candidates {
-                if login.runtime.block_on(plasma.in_login_screen(pid)) {
-                    tracing::info!(agent = id, "the client is shown the login screen");
-                    return Ok(id);
-                }
+            if let Some(id) = found
+                && login.runtime.block_on(plasma.login_screen_up())
+            {
+                tracing::info!(agent = id, "the client is shown the login screen");
+                return Ok(id);
             }
             std::thread::sleep(Duration::from_millis(300));
         }
@@ -368,8 +368,8 @@ impl Broker {
     }
 }
 
-impl HostHandler for Broker {
-    fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
+impl Broker {
+    fn connect(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
         // A device that has just been paired is given its user before anything is decided.
         if let Some(host) = self.0.host() {
             self.0.settle(&host, &mut self.0.pairing.lock().unwrap());
@@ -460,6 +460,18 @@ impl HostHandler for Broker {
         if answer.is_err() {
             let mut st = self.0.state.lock().unwrap();
             (st.link, st.client, st.client_user, st.waiting) = (None, None, None, None);
+        }
+        answer
+    }
+
+}
+
+impl HostHandler for Broker {
+    fn connected(&mut self, client: &ClientInfo, link: Link) -> Result<Accept, String> {
+        let answer = self.connect(client, link);
+        // Said here, as the device is told: a refusal is otherwise in no log.
+        if let Err(why) = &answer {
+            tracing::info!(name = %client.name, "turned away: {why}");
         }
         answer
     }
