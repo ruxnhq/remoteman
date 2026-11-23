@@ -59,9 +59,13 @@ impl Bus {
         }
     }
 
-    async fn disable(&self) -> zbus::Result<()> {
+    /// `ours`: the device's offer is still what the clipboard holds. The portal has no
+    /// turning off, so that offer is taken down here, or pastes of it would get no answer;
+    /// an empty offer clears the clipboard whoever holds it, hence only then.
+    async fn disable(&self, ours: bool) -> zbus::Result<()> {
         match self {
             Self::Mutter(p) => p.call("DisableClipboard", &()).await,
+            Self::Portal { clip, session } if ours => clip.call("SetSelection", &(session, HashMap::from([("mime_types", Value::from(Vec::<&str>::new()))]))).await,
             Self::Portal { .. } => Ok(()),
         }
     }
@@ -284,9 +288,9 @@ impl Clipboard {
         if !self.shared.on.swap(false, Ordering::SeqCst) {
             return Ok(());
         }
-        self.shared.offer.lock().unwrap().take();
-        self.shared.theirs.lock().unwrap().clear();
-        self.session.disable().await.context("turn clipboard sharing off")
+        let had = self.shared.offer.lock().unwrap().take().is_some();
+        let ours = had && std::mem::take(&mut *self.shared.theirs.lock().unwrap()).is_empty();
+        self.session.disable(ours).await.context("turn clipboard sharing off")
     }
 
     /// Read what an app on the desktop copied, as one of the types last reported. Fails with
@@ -347,8 +351,9 @@ impl Drop for Clipboard {
         // With nobody listening, a paste of what we offered would hang until Mutter gives up.
         if self.shared.on.swap(false, Ordering::SeqCst) {
             let session = self.session.clone();
+            let ours = self.shared.offer.lock().unwrap().is_some() && self.shared.theirs.lock().unwrap().is_empty();
             self.runtime.spawn(async move {
-                let _ = session.disable().await;
+                let _ = session.disable(ours).await;
             });
         }
     }

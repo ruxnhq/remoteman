@@ -47,9 +47,15 @@ impl spa::buffer::meta::Metadata for CursorMeta {
 
 /// The largest cursor image asked for, as Mutter offers it.
 const CURSOR_MAX: usize = 384;
+/// The cursor image KWin offers, and takes nothing else (6.8.3).
+const CURSOR_KWIN: usize = 256;
+
+fn cursor_meta_size_for(side: usize) -> usize {
+    std::mem::size_of::<spa::sys::spa_meta_cursor>() + std::mem::size_of::<spa::sys::spa_meta_bitmap>() + side * side * 4
+}
 
 fn cursor_meta_size() -> usize {
-    std::mem::size_of::<spa::sys::spa_meta_cursor>() + std::mem::size_of::<spa::sys::spa_meta_bitmap>() + CURSOR_MAX * CURSOR_MAX * 4
+    cursor_meta_size_for(CURSOR_MAX)
 }
 
 /// Read the cursor metadata of a buffer, if it carries any.
@@ -60,9 +66,10 @@ fn read_cursor(meta: &CursorMeta) -> Cursor {
     }
     let mut shape = None;
     if m.bitmap_offset as usize >= std::mem::size_of::<spa::sys::spa_meta_cursor>() {
-        // SAFETY: the metadata area is `cursor_meta_size()` bytes, as negotiated; the bitmap
+        // SAFETY: the metadata area is as large as was agreed: `cursor_meta_size()` bytes with
+        // Mutter, less with KWin, which writes no bitmap past its own smaller area. The bitmap
         // header sits at `bitmap_offset` and its pixels at its own `offset`, both inside it
-        // (checked against the size below before reading).
+        // (checked against the larger size below before reading).
         unsafe {
             let base = meta as *const CursorMeta as *const u8;
             let bitmap = &*(base.add(m.bitmap_offset as usize) as *const spa::sys::spa_meta_bitmap);
@@ -90,7 +97,15 @@ fn cursor_meta_param() -> Result<Vec<u8>> {
         id: spa::sys::SPA_PARAM_Meta,
         properties: vec![
             Property { key: spa::sys::SPA_PARAM_META_type, flags: PropertyFlags::empty(), value: Value::Id(spa::utils::Id(spa::sys::SPA_META_Cursor)) },
-            Property { key: spa::sys::SPA_PARAM_META_size, flags: PropertyFlags::empty(), value: Value::Int(cursor_meta_size() as i32) },
+            // Mutter's size or KWin's, whichever the compositor offers.
+            Property {
+                key: spa::sys::SPA_PARAM_META_size,
+                flags: PropertyFlags::empty(),
+                value: Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+                    spa::utils::ChoiceFlags::empty(),
+                    spa::utils::ChoiceEnum::Enum { default: cursor_meta_size() as i32, alternatives: vec![cursor_meta_size() as i32, cursor_meta_size_for(CURSOR_KWIN) as i32] },
+                ))),
+            },
         ],
     })
 }

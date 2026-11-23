@@ -75,6 +75,8 @@ pub struct VirtualDisplay {
     eis: Option<crate::eis::Eis>,
     /// KScreen's name for the monitor.
     output: String,
+    /// The computer's own screens as they were before the monitor was made.
+    before: Arc<Vec<Output>>,
     geometry: Arc<Mutex<Geometry>>,
     /// The scale the client asked for, set once the monitor is there.
     want_scale: Arc<Mutex<f64>>,
@@ -124,15 +126,16 @@ impl VirtualDisplay {
     /// Mirroring isn't built for KDE yet, so a client that asks for it gets a display of its
     /// own beside the others, as the wire spec has it for a host that doesn't offer `mirror`.
     pub async fn create(cursor_apart: bool, _mirror: bool) -> Result<Self> {
-        Self::make(cursor_apart).await
+        Self::make(cursor_apart, false).await
     }
 
     /// A second virtual monitor for the same client.
     pub async fn create_beside(cursor_apart: bool) -> Result<Self> {
-        Self::make(cursor_apart).await
+        Self::make(cursor_apart, true).await
     }
 
-    async fn make(cursor_apart: bool) -> Result<Self> {
+    /// `beside`: a second display for a client, whose first is among the screens to sit beside.
+    async fn make(cursor_apart: bool, beside: bool) -> Result<Self> {
         let conn = Connection::session().await.context("session bus")?;
         // Say who we are before anything else on this connection: otherwise the portal names
         // us after our systemd unit, which for a service is nobody.
@@ -141,6 +144,10 @@ impl VirtualDisplay {
         if let Err(e) = conn.call_method(Some(PORTAL), PORTAL_PATH, Some("org.freedesktop.host.portal.Registry"), "Register", &(APP_ID, HashMap::<&str, Value>::new())).await {
             tracing::warn!("couldn't register as {APP_ID} with the portal (is the host app installed?): {e}");
         }
+        // The computer's own screens, before ours: KWin keeps a layout for each set of
+        // screens, and ours always has the same name, so a session that turned them off would
+        // otherwise leave them off for the next one. Every placement puts them back as they are now.
+        let before: Vec<Output> = outputs().await.unwrap_or_default().into_iter().filter(|o| o.enabled && (beside || !o.name.starts_with("Virtual-virtual-xdp-kde-"))).collect();
         let session_token = token();
         let created = request(&conn, REMOTE, "CreateSession", |mut o| {
             o.insert("session_handle_token", Value::from(session_token));
@@ -184,7 +191,7 @@ impl VirtualDisplay {
             }
         };
         let portal = Proxy::new(&conn, PORTAL, PORTAL_PATH, REMOTE).await?;
-        Ok(Self { conn, session, portal, eis, output, geometry: Arc::default(), want_scale: Arc::new(Mutex::new(1.0)), node, mirrored: None, clipboard })
+        Ok(Self { conn, session, portal, eis, output, before: Arc::new(before), geometry: Arc::default(), want_scale: Arc::new(Mutex::new(1.0)), node, mirrored: None, clipboard })
     }
 
     /// Put this display where the client wants it among the computer's own: beside them, as
@@ -223,14 +230,14 @@ impl VirtualDisplay {
 
     fn place_at(&self, placement: Placement, side: Side) -> impl Future<Output = Result<()>> + Send + 'static {
         let placement = if placement == Placement::Mirror { Placement::Extend } else { placement };
-        let (output, geometry, scale) = (self.output.clone(), self.geometry.clone(), *self.want_scale.lock().unwrap());
+        let (output, geometry, scale, before) = (self.output.clone(), self.geometry.clone(), *self.want_scale.lock().unwrap(), self.before.clone());
         async move {
-            let result = place_once(&output, placement, side, scale).await;
+            let result = place_once(&output, &before, placement, side, scale).await;
             let result = match result {
                 Ok(()) => Ok(()),
                 Err(_) => {
                     tokio::time::sleep(Duration::from_millis(300)).await;
-                    place_once(&output, placement, side, scale).await
+                    place_once(&output, &before, placement, side, scale).await
                 }
             };
             // Wherever it ended up, input goes there.
@@ -337,12 +344,27 @@ struct Output {
     priority: u32,
     /// Its mode's size in pixels, not turned.
     pixels: (i32, i32),
+    /// Its mode's refresh rate. (KScreen's ids for modes change from one layout to the
+    /// next, so a mode is kept as its size and rate.)
+    refresh: f64,
+    /// Every mode it has: KScreen's id, size in pixels, refresh rate.
+    modes: Vec<(String, (i32, i32), f64)>,
+}
+
+impl Output {
+    /// The id its mode of this size and rate has now.
+    fn mode_id(&self, pixels: (i32, i32), refresh: f64) -> Option<&str> {
+        self.modes.iter().filter(|m| m.1 == pixels).min_by(|a, b| (a.2 - refresh).abs().total_cmp(&(b.2 - refresh).abs())).map(|m| m.0.as_str())
+    }
 }
 
 async fn kscreen(args: &[String]) -> Result<Vec<u8>> {
     let out = tokio::process::Command::new("kscreen-doctor").args(args).output().await.context("run kscreen-doctor (is KScreen installed?)")?;
-    if !out.status.success() {
-        bail!("kscreen-doctor {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    // It says what it couldn't do but still exits with success (6.8.3), and says nothing
+    // when a change works.
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stderr), if args.first().is_some_and(|a| a.starts_with('-')) { String::new() } else { String::from_utf8_lossy(&out.stdout).into_owned() });
+    if !out.status.success() || said.lines().any(|l| { let l = l.to_lowercase(); l.contains("not found") || l.contains("failed") || l.contains("error") || l.contains("invalid") || l.contains("unknown") }) {
+        bail!("kscreen-doctor {}: {}", args.join(" "), said.trim());
     }
     Ok(out.stdout)
 }
@@ -361,7 +383,8 @@ async fn outputs() -> Result<Vec<Output>> {
         list.push(Output {
             id: o["id"].as_u64().unwrap_or(0),
             name: o["name"].as_str().unwrap_or_default().to_owned(),
-            enabled: o["enabled"].as_bool().unwrap_or(false) && o["connected"].as_bool().unwrap_or(false),
+            // (KScreen leaves `enabled` out for virtual screens that are on, 6.8.3.)
+            enabled: o["enabled"].as_bool().unwrap_or(true),
             x: o["pos"]["x"].as_i64().unwrap_or(0) as i32,
             y: o["pos"]["y"].as_i64().unwrap_or(0) as i32,
             width: (w as f64 / scale).round() as i32,
@@ -369,6 +392,13 @@ async fn outputs() -> Result<Vec<Output>> {
             scale,
             priority: o["priority"].as_u64().unwrap_or(0) as u32,
             pixels,
+            refresh: mode.and_then(|m| m["refreshRate"].as_f64()).unwrap_or(0.0),
+            modes: o["modes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| Some((m["id"].as_str()?.to_owned(), (m["size"]["width"].as_i64()? as i32, m["size"]["height"].as_i64()? as i32), m["refreshRate"].as_f64()?)))
+                .collect(),
         });
     }
     Ok(list)
@@ -401,42 +431,61 @@ async fn find_mode(name: &str, width: u32, height: u32, refresh: u32) -> Result<
     Ok(best.map(|(id, _)| id))
 }
 
-/// One go at [`VirtualDisplay::place`].
-async fn place_once(name: &str, placement: Placement, side: Side, scale: f64) -> Result<()> {
+/// One go at [`VirtualDisplay::place`]. `before` is the computer's own screens as they were
+/// before ours: they are put back as they were (on, mode, scale, place, order), with ours added,
+/// or turned off for [`Placement::Only`].
+async fn place_once(name: &str, before: &[Output], placement: Placement, side: Side, scale: f64) -> Result<()> {
     let ours = wait_for(name).await?;
     let list = outputs().await?;
-    let rest: Vec<&Output> = list.iter().filter(|o| o.enabled && o.id != ours.id).collect();
-    let (w, h) = ((ours.width as f64 * ours.scale / scale).round() as i32, (ours.height as f64 * ours.scale / scale).round() as i32);
-    let mut args = vec![format!("output.{}.scale.{scale}", ours.id)];
+    // Unplugged since? Then they aren't ours to place. (Ids can change; names don't.)
+    let rest: Vec<(&Output, &Output)> = before.iter().filter_map(|b| Some((list.iter().find(|o| o.name == b.name)?, b))).collect();
+    let (w, h) = ((ours.pixels.0 as f64 / scale).round() as i32, (ours.pixels.1 as f64 / scale).round() as i32);
+    let mut args = vec![format!("output.{}.scale.{scale}", ours.id), format!("output.{}.enable", ours.id)];
     if placement == Placement::Only {
-        args.extend(rest.iter().map(|o| format!("output.{}.disable", o.id)));
+        // Every other screen off, whatever turned it on since.
+        args.extend(list.iter().filter(|o| o.id != ours.id && o.enabled).map(|o| format!("output.{}.disable", o.id)));
         args.push(format!("output.{}.position.0,0", ours.id));
-    } else if let Some(first) = rest.first() {
-        // Beside the rest, level with the outermost one on that side.
-        let right = rest.iter().max_by_key(|o| o.x + o.width).unwrap_or(first);
-        let left = rest.iter().min_by_key(|o| o.x).unwrap_or(first);
-        let top = rest.iter().min_by_key(|o| o.y).unwrap_or(first);
-        let bottom = rest.iter().max_by_key(|o| o.y + o.height).unwrap_or(first);
-        let (x, y) = match side {
-            Side::Right => (right.x + right.width, right.y),
-            Side::Left => (left.x - w, left.y),
-            Side::Above => (top.x, top.y - h),
-            Side::Below => (bottom.x, bottom.y + bottom.height),
-        };
-        args.push(format!("output.{}.position.{x},{y}", ours.id));
-        // The others keep their places: KWin moves everything so the layout starts at 0,0.
-        for o in &rest {
-            args.push(format!("output.{}.position.{},{}", o.id, o.x, o.y));
-        }
-    }
-    if placement != Placement::Extend {
-        // Priority 1 is the main display; the others keep their order behind it.
         args.push(format!("output.{}.priority.1", ours.id));
-        let mut others = rest.clone();
-        others.sort_by_key(|o| o.priority);
-        for (i, o) in others.iter().enumerate() {
-            args.push(format!("output.{}.priority.{}", o.id, i + 2));
-        }
+        return kscreen(&args).await.map(|_| ());
     }
+    let (x, y) = match rest.first() {
+        None => (0, 0),
+        Some((_, first)) => {
+            // Beside the rest, level with the outermost one on that side.
+            let others = || rest.iter().map(|(_, o)| *o);
+            let right = others().max_by_key(|o| o.x + o.width).unwrap_or(first);
+            let left = others().min_by_key(|o| o.x).unwrap_or(first);
+            let top = others().min_by_key(|o| o.y).unwrap_or(first);
+            let bottom = others().max_by_key(|o| o.y + o.height).unwrap_or(first);
+            match side {
+                Side::Right => (right.x + right.width, right.y),
+                Side::Left => (left.x - w, left.y),
+                Side::Above => (top.x, top.y - h),
+                Side::Below => (bottom.x, bottom.y + bottom.height),
+            }
+        }
+    };
+    // KWin refuses a screen at a negative place: with ours to the left or above, everything
+    // moves over by its size.
+    let (dx, dy) = (rest.iter().map(|(_, o)| o.x).chain([x]).min().unwrap_or(0).min(0), rest.iter().map(|(_, o)| o.y).chain([y]).min().unwrap_or(0).min(0));
+    args.push(format!("output.{}.position.{},{}", ours.id, x - dx, y - dy));
+    for (now, o) in &rest {
+        let id = now.id;
+        args.push(format!("output.{id}.enable"));
+        if let Some(mode) = now.mode_id(o.pixels, o.refresh) {
+            args.push(format!("output.{id}.mode.{mode}"));
+        }
+        args.push(format!("output.{id}.scale.{}", o.scale));
+        args.push(format!("output.{id}.position.{},{}", o.x - dx, o.y - dy));
+    }
+    // Priority 1 is the main display; the others keep their order behind it, or ahead of
+    // ours when ours only sits beside them.
+    let mut others = rest.clone();
+    others.sort_by_key(|(_, o)| o.priority);
+    let ours_first = placement == Placement::Main;
+    for (i, (now, _)) in others.iter().enumerate() {
+        args.push(format!("output.{}.priority.{}", now.id, i + 1 + ours_first as usize));
+    }
+    args.push(format!("output.{}.priority.{}", ours.id, if ours_first { 1 } else { others.len() + 1 }));
     kscreen(&args).await.map(|_| ())
 }
