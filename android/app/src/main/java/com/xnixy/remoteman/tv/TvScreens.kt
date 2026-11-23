@@ -137,15 +137,15 @@ fun TvAdd(model: AppModel) {
             )
         }
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            OutlinedTextField(
-                value = address, onValueChange = { address = it }, label = { androidx.compose.material3.Text("Address") }, singleLine = true,
+            TvTextField(
+                value = address, onValueChange = { address = it }, label = "Address",
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false, imeAction = ImeAction.Go),
-                keyboardActions = KeyboardActions(onGo = { add() }),
+                onDone = { add() },
                 modifier = Modifier.fillMaxWidth().then(if (address.isBlank()) Modifier.focusRequester(focus) else Modifier),
             )
-            OutlinedTextField(
-                value = name, onValueChange = { name = it }, label = { androidx.compose.material3.Text("Name (optional)") }, singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go), keyboardActions = KeyboardActions(onGo = { add() }),
+            TvTextField(
+                value = name, onValueChange = { name = it }, label = "Name (optional)",
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), onDone = {},
                 modifier = Modifier.fillMaxWidth(),
             )
             Button(onClick = add, enabled = address.isNotBlank(), modifier = if (address.isNotBlank()) Modifier.focusRequester(focus) else Modifier) {

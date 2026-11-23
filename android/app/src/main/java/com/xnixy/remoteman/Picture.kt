@@ -18,6 +18,12 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -29,6 +35,7 @@ import androidx.compose.ui.viewinterop.AndroidView
  * stream's proportions that fits. Touches go to the computer as touches, a mouse as a mouse.
  * The connection starts once its surface is there and ends when it goes.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun Picture(model: AppModel) {
     val (w, h) = model.session.streamSize
@@ -37,8 +44,15 @@ fun Picture(model: AppModel) {
             val s = minOf(maxWidth.value / w, maxHeight.value / h)
             Modifier.size((w * s).dp, (h * s).dp)
         } else Modifier.fillMaxSize()
+        var view by remember { mutableStateOf<View?>(null) }
         AndroidView(
-            modifier = box,
+            // Touches and the mouse's buttons come through Compose, which hands the picture's
+            // view only what it routes there itself; same MotionEvents, view-relative.
+            modifier = box.pointerInteropFilter { e ->
+                val v = view ?: return@pointerInteropFilter false
+                if (e.isFromSource(InputDevice.SOURCE_MOUSE)) mouse(model, v, e) else touch(model, v, e)
+                true
+            },
             factory = { ctx ->
                 SurfaceView(ctx).apply {
                     holder.addCallback(object : SurfaceHolder.Callback {
@@ -46,15 +60,13 @@ fun Picture(model: AppModel) {
                         override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
                         override fun surfaceDestroyed(holder: SurfaceHolder) = model.surfaceGone()
                     })
-                    setOnTouchListener { v, e ->
-                        if (e.isFromSource(InputDevice.SOURCE_MOUSE)) mouse(model, v, e) else touch(model, v, e)
-                        true
-                    }
+                    view = this
                     setOnGenericMotionListener { v, e -> e.isFromSource(InputDevice.SOURCE_MOUSE) && mouse(model, v, e) }
                 }
             },
         )
-        KeyCatcher(model)
+        // In a corner, off the picture, so it takes no touches meant for the computer.
+        Box(Modifier.align(Alignment.TopStart)) { KeyCatcher(model) }
     }
 }
 
@@ -106,12 +118,16 @@ private fun KeyCatcher(model: AppModel) {
             update = { v ->
                 val imm = v.context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
                 if (on) {
+                    v.isFocusable = true
                     v.isFocusableInTouchMode = true
                     v.requestFocus()
                     v.post { imm.showSoftInput(v, 0) }
                 } else {
                     imm.hideSoftInputFromWindow(v.windowToken, 0)
                     v.clearFocus()
+                    // Out of the D-pad's way while it isn't wanted.
+                    v.isFocusable = false
+                    v.isFocusableInTouchMode = false
                 }
             },
         )
@@ -119,7 +135,7 @@ private fun KeyCatcher(model: AppModel) {
 }
 
 private class KeyCatcherView(context: Context, val model: AppModel) : View(context) {
-    init { isFocusable = true }
+    init { isFocusable = false }
 
     override fun onCheckIsTextEditor() = true
 

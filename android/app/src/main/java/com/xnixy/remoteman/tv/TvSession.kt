@@ -115,9 +115,9 @@ private fun SecondFactor(model: AppModel, left: Int) {
         if (left >= 0) "That code wasn't right. $left ${if (left == 1) "try" else "tries"} left." else "${model.session.computer?.name ?: "The computer"} asks for the code its owner's authenticator app shows for it.",
         color = if (left >= 0) MaterialTheme.colorScheme.error else Color.White.copy(alpha = 0.75f),
     )
-    OutlinedTextField(
-        value = code, onValueChange = { code = it.filter(Char::isDigit).take(8) }, label = { androidx.compose.material3.Text("Code") }, singleLine = true,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Go), keyboardActions = KeyboardActions(onGo = { send() }),
+    TvTextField(
+        value = code, onValueChange = { code = it.filter(Char::isDigit).take(8) }, label = "Code",
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Go), onDone = { send() },
         modifier = Modifier.fillMaxWidth().focusRequester(focus),
     )
     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {

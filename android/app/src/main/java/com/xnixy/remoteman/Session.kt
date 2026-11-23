@@ -194,7 +194,11 @@ class Session(private val store: ComputerStore, private val stateDir: String, pr
                     c?.let { store.update(it.copy(paired = false)); computer = it.copy(paired = false) }
                     Phase.Ended("$name no longer trusts this $deviceKind", "Turn pairing on at the computer, then pair again.", mustPairAgain = true, byHost = true)
                 }
-                code >= 0 -> Phase.Ended("$name ended the session", plainWords(reason), byHost = true)
+                code >= 0 -> Phase.Ended("$name ended the session", when (code) {
+                    CLOSE_DROPPED -> "Someone at the computer ended it."
+                    0 -> "The computer stopped sharing its screen, or another device took over."
+                    else -> "Something went wrong on the computer. " + plainWords(reason)
+                }, byHost = true)
                 "isn't the host that was paired" in reason -> Phase.Ended(
                     if (c == null || c.name == c.address) "This isn't the computer this $deviceKind paired with" else "This isn't the $name this $deviceKind paired with",
                     "A different computer, or the same one with a new key, answers at ${c?.address}. If you trust it, forget the old key and pair again.",
@@ -212,6 +216,8 @@ class Session(private val store: ComputerStore, private val stateDir: String, pr
         const val TAG = "remoteman"
         /** `Client::close_code`: the host revoked this device. */
         const val CLOSE_REVOKED = 3
+        /** `Client::close_code`: someone at the host dropped this device. */
+        const val CLOSE_DROPPED = 2
 
         /** The core's reasons are for logs; this says the common ones for people. */
         fun plainWords(reason: String): String {

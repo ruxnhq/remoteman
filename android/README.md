@@ -77,12 +77,12 @@ PY
 ```
 
 `revoke FINGERPRINT` there shows the app's "no longer trusts this device", `drop` "ended the
-session".
+session" (both tried).
 
 On this PC (KDE) the GNOME `scripts/headless-host.sh` can't run (no mutter); use `main`'s
-`scripts/kde-nested.sh` with an agent on 127.0.0.1:7799 and `scripts/animate.py`, and tick
-"Mirror" in the app: an extra display there stays empty, and an unchanging display sends one
-frame.
+`scripts/kde-nested.sh` with an agent on 127.0.0.1:7799 and `scripts/animate.py`, and keep
+the app's placement on "Mirror its screen" (the default): an extra display there stays empty,
+and an unchanging display sends one frame.
 
 Learned in the first run (2026-11-23):
 - Android 17 refuses an app's sockets to local addresses (sendmsg EPERM) without
@@ -113,9 +113,16 @@ control socket:
   known. Also: a key the device kept from an earlier host ("forget the key and pair again"),
   a revoked device ("no longer trusts this phone" → Pair again → code → back in), Home and
   back ("Disconnected" → Connect again), a pairing link with the wrong key (turned away), the
-  camera screen (the emulator's virtual room; no QR code was read).
+  camera screen (the emulator's virtual room; no QR code was read), the local-network
+  permission asked afresh (refused: a note on the list; allowed: it connects), the host's
+  `drop` ("Someone at the computer ended it"), a tap on the picture reaching it (the controls
+  close), the bench build still running to "done".
 - TV (`Google_TV_1080p`), by D-pad only: the same from an empty list to the code, the picture,
   Back for the bar, Disconnect, the list; holding OK for a computer's settings and Forget
-  (its key file goes too); Settings and a choice list; Home and back.
+  (its key file goes too); Settings and a choice list; Home and back; typing an address:
+  the D-pad passes over the fields without opening the keyboard, OK opens it, its Go key
+  connects (`TvTextField`); Cancel while the code shows and the host accepting after (the late
+  connection is closed).
 - Not checked: reading a real QR code, the second factor (the agent has no switch for it), text
-  arriving on the computer from the on-screen keyboard, a hardware keyboard or mouse, rotation.
+  arriving on the computer from the on-screen keyboard, a hardware keyboard, mouse or a real
+  remote's scan codes, a pairing link on a TV, rotation.
