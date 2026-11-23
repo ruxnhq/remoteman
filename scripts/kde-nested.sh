@@ -15,26 +15,31 @@ sed "s|^Exec=.*|Exec=/usr/bin/true|" "$root/packaging/linux/dev.remoteman.Host.d
 echo "logs: $RM_LOGS" >&2
 exec dbus-run-session -- sh -c '
   export XDG_CONFIG_HOME="$RM_LOGS/config" XDG_DATA_HOME="$RM_LOGS/data" XDG_CACHE_HOME="$RM_LOGS/cache"
-  export XDG_CURRENT_DESKTOP=KDE XDG_SESSION_TYPE=wayland KDE_FULL_SESSION=true QT_QPA_PLATFORM=wayland
+  export XDG_CURRENT_DESKTOP=${RM_DESKTOP-KDE} XDG_SESSION_TYPE=wayland KDE_FULL_SESSION=true QT_QPA_PLATFORM=wayland
+  [ -z "$XDG_CURRENT_DESKTOP" ] && unset XDG_CURRENT_DESKTOP KDE_FULL_SESSION
   unset DISPLAY
   export WAYLAND_DISPLAY=rm-kde-$$
   kwin_wayland --virtual --no-lockscreen --no-global-shortcuts --socket "$WAYLAND_DISPLAY" --width 1920 --height 1080 >"$RM_LOGS/kwin.log" 2>&1 &
   kpid=$!
   for _ in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ] && break; sleep 0.1; done
   dbus-update-activation-environment XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_CURRENT_DESKTOP XDG_SESSION_TYPE WAYLAND_DISPLAY QT_QPA_PLATFORM KDE_FULL_SESSION 2>/dev/null
-  QT_LOGGING_RULES="xdp-kde-*=true" /usr/lib/xdg-desktop-portal-kde >"$RM_LOGS/portal-kde.log" 2>&1 &
-  ppid1=$!
-  sleep 1
-  /usr/lib/xdg-desktop-portal -r >"$RM_LOGS/portal.log" 2>&1 &
-  ppid2=$!
-  sleep 1
+  # RM_ON_DEMAND=1: the portals are not started here but by the bus when first asked for, as
+  # on the login screen of Plasma Login (which also has no XDG_CURRENT_DESKTOP: RM_DESKTOP=).
+  if [ -z "$RM_ON_DEMAND" ]; then
+    QT_LOGGING_RULES="xdp-kde-*=true" /usr/lib/xdg-desktop-portal-kde >"$RM_LOGS/portal-kde.log" 2>&1 &
+    ppid1=$!
+    sleep 1
+    /usr/lib/xdg-desktop-portal -r >"$RM_LOGS/portal.log" 2>&1 &
+    ppid2=$!
+    sleep 1
+  fi
   if [ -n "$RM_KDE_AUTHORIZE" ]; then
     gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore --object-path /org/freedesktop/impl/portal/PermissionStore \
       --method org.freedesktop.impl.portal.PermissionStore.SetPermission kde-authorized true remote-desktop dev.remoteman.Host "[\"yes\"]" >/dev/null
   fi
   "$@"
   status=$?
-  kill $ppid2 $ppid1 2>/dev/null; sleep 0.3; kill $kpid 2>/dev/null
+  [ -n "$ppid2" ] && kill $ppid2 $ppid1 2>/dev/null; sleep 0.3; kill $kpid 2>/dev/null
   wait 2>/dev/null
   exit $status
 ' sh "$@"

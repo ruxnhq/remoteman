@@ -50,6 +50,35 @@ pub fn likely() -> bool {
     std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("KDE")))
 }
 
+/// Make the portals serve this session as KDE's, where it doesn't say it is (Plasma Login's
+/// login screen sets no `XDG_CURRENT_DESKTOP`): KDE's portal offers remote desktop, screen
+/// casts and the clipboard only when that says KDE, and the portal frontend picks KDE's portal
+/// by it too. Both are started on demand, so the setting goes into what this session's bus and
+/// its systemd user manager start things with; portals already running without it are
+/// restarted. Everything goes through this session's own bus, so it reaches only this user's
+/// services.
+async fn portals_for_kde(conn: &Connection) {
+    let env = HashMap::from([("XDG_CURRENT_DESKTOP", "KDE")]);
+    let _ = conn.call_method(Some("org.freedesktop.DBus"), "/org/freedesktop/DBus", Some("org.freedesktop.DBus"), "UpdateActivationEnvironment", &(env,)).await;
+    let manager = |m: &'static str| (Some("org.freedesktop.systemd1"), "/org/freedesktop/systemd1", Some("org.freedesktop.systemd1.Manager"), m);
+    let (d, p, i, m) = manager("SetEnvironment");
+    let _ = conn.call_method(d, p, i, m, &(vec!["XDG_CURRENT_DESKTOP=KDE"],)).await;
+    // Already running without it? Then it has no remote desktop.
+    let has_remote = Proxy::new(conn, PORTAL, PORTAL_PATH, REMOTE).await.ok();
+    let has_remote = match has_remote {
+        Some(p) => p.get_property::<u32>("version").await.is_ok(),
+        None => false,
+    };
+    if has_remote {
+        return;
+    }
+    for unit in ["plasma-xdg-desktop-portal-kde.service", "xdg-desktop-portal.service"] {
+        let (d, p, i, m) = manager("TryRestartUnit");
+        let _ = conn.call_method(d, p, i, m, &(unit, "replace")).await;
+    }
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+}
+
 /// Whether this session's desktop is KDE's: KWin is on the bus.
 pub async fn present() -> bool {
     let Ok(conn) = Connection::session().await else { return false };
@@ -143,6 +172,9 @@ impl VirtualDisplay {
         // would name us on that.)
         if let Err(e) = conn.call_method(Some(PORTAL), PORTAL_PATH, Some("org.freedesktop.host.portal.Registry"), "Register", &(APP_ID, HashMap::<&str, Value>::new())).await {
             tracing::warn!("couldn't register as {APP_ID} with the portal (is the host app installed?): {e}");
+        }
+        if !likely() {
+            portals_for_kde(&conn).await;
         }
         // The computer's own screens, before ours: KWin keeps a layout for each set of
         // screens, and ours always has the same name, so a session that turned them off would
