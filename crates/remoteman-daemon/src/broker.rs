@@ -223,11 +223,15 @@ impl Shared {
                 let st = self.state.lock().unwrap();
                 st.agents.iter().rev().find(|(_, a)| a.uid == plasma.greeter_uid).map(|(id, _)| *id)
             };
-            if let Some(id) = found
-                && login.runtime.block_on(plasma.login_screen_up())
-            {
+            let up = login.runtime.block_on(plasma.login_screen_up());
+            if let (Some(id), true) = (found, up) {
                 tracing::info!(agent = id, "the client is shown the login screen");
                 return Ok(id);
+            }
+            // No login screen at all (a text console, say): nothing is coming; turned away at
+            // once rather than after the wait, which is for an agent still starting with one.
+            if !up {
+                return Err("nobody is logged in at this computer, and its login screen isn't showing".into());
             }
             std::thread::sleep(Duration::from_millis(300));
         }
