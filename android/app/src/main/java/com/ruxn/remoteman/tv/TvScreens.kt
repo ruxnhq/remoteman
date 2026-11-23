@@ -32,6 +32,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.input.ImeAction
@@ -80,7 +82,8 @@ fun TvComputers(model: AppModel) {
         onDispose { model.lookNearby(false) }
     }
     val nearby = model.nearbyNew
-    Column(Modifier.fillMaxSize()) {
+    // Scrolls when the Nearby row is pushed below the screen; focus brings it into view.
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             Box(Modifier.weight(1f)) {
                 Title("remoteman", if (computers.isEmpty()) "Start remoteman on your computer with pairing on, then add it here." else "Choose a computer. Hold OK for its settings.")
@@ -273,6 +276,11 @@ fun TvSettings(model: AppModel) {
 fun TvComputer(model: AppModel, id: String) {
     val c = model.store.get(id) ?: run { model.pop(); return }
     var confirm by remember { mutableStateOf(false) }
+    // Still looking here, so Wake is offered only for a computer not in sight.
+    DisposableEffect(Unit) {
+        model.lookNearby(true)
+        onDispose { model.lookNearby(false) }
+    }
     val focus = rememberInitialFocus()
     Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(48.dp)) {
         Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(16.dp)) {

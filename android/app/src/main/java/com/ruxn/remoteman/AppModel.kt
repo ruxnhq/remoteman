@@ -66,7 +66,8 @@ class AppModel(
     var nearbyNeedsPermission by mutableStateOf(false)
         private set
 
-    private var nearbyWanted = false
+    /** How many screens in sight want Nearby (overlapping while one replaces another). */
+    private var nearbyWanted = 0
     private var started = true
     private var wakeThenConnect: Runnable? = null
 
@@ -187,9 +188,9 @@ class AppModel(
 
     // Nearby: computers advertising on this network.
 
-    /** The computers screen is in sight (or not): look nearby while it is. */
+    /** A computers screen comes into sight (or goes): look nearby while one is. */
     fun lookNearby(on: Boolean) {
-        nearbyWanted = on
+        nearbyWanted = maxOf(0, nearbyWanted + if (on) 1 else -1)
         updateNearby()
     }
 
@@ -201,7 +202,7 @@ class AppModel(
     }
 
     private fun updateNearby() {
-        val run = nearbyWanted && started
+        val run = nearbyWanted > 0 && started
         nearbyNeedsPermission = run && !localNetworkAllowed()
         if (run && !nearbyNeedsPermission) nearby.start() else nearby.stop()
     }
