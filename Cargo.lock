@@ -1870,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-android"
-version = "0.1.0"
+version = "0.1.6"
 dependencies = [
  "android_logger",
  "anyhow",
