@@ -17,6 +17,10 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <!-- CHANGE_WIFI_MULTICAST_STATE (for finding computers nearby) makes Android imply Wi-Fi is
+         required, which would keep the app off TV boxes on Ethernet. Without Wi-Fi, Nearby finds
+         nothing and connecting by address still works. -->
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
     <application
         android:label="@string/app_name"
