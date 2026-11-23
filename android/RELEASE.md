@@ -71,8 +71,14 @@ android/bundletool.sh install-apks --apks=/tmp/remoteman.apks --device-id=emulat
 ## The upload key
 
 Play App Signing keeps the key that signs what users install. The upload key only proves to
-Play that an upload comes from RUXN. Make it once. The place below is a proposal, outside every
-repository; the owner chooses where it lives.
+Play that an upload comes from RUXN. It was made on 2026-11-23 on the owner's PC at
+`~/.config/ruxn/remoteman-upload.jks` (RSA 4096, alias `upload`, valid until 2054, owner
+`CN=RUXN LLC, O=RUXN LLC`), with its random password in `~/.gradle/gradle.properties`. The
+certificate's SHA-256 fingerprint, to compare with the upload key Play Console shows:
+`15:DE:98:F8:D9:2A:37:5E:1E:0A:3C:A8:65:BE:A6:D0:D3:0A:81:D8:AE:17:82:1A:97:44:15:77:C6:E1:AF:46`.
+
+On another machine, copy both, or make a new key the same way (after Google has reset the
+upload key, if the old one is lost):
 
 ```sh
 mkdir -p ~/.config/ruxn
