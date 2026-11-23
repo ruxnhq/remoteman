@@ -80,7 +80,7 @@ fun AddScreen(model: AppModel) {
                 )
                 OutlinedTextField(
                     value = address, onValueChange = { address = it },
-                    label = { Text("Address") }, placeholder = { Text("blackbox or 10.0.0.76") },
+                    label = { Text("Address") }, placeholder = { Text("my-pc or 192.168.1.20") },
                     supportingText = { Text("The computer's name or number on your network. Add :port if it isn't 7791.") },
                     singleLine = true, modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false, capitalization = KeyboardCapitalization.None, imeAction = ImeAction.Next),

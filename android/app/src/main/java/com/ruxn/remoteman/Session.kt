@@ -307,7 +307,7 @@ class Session(private val store: ComputerStore, private val stateDir: String, pr
                 "operation not permitted" in r || "eperm" in r ->
                     "remoteman isn't allowed to reach computers on this network. Allow it in Settings, Apps, remoteman, Permissions."
                 "look up" in r || "no such host" in r ->
-                    "That name wasn't found on this network. Check the address, or use the computer's number (like 10.0.0.76)."
+                    "That name wasn't found on this network. Check the address, or use the computer's number (like 192.168.1.20)."
                 "timed out" in r || "timeout" in r ->
                     "It didn't answer. Check that it's on, that remoteman is running there, and that this device is on the same network."
                 "refused" in r && "the host refused" !in r ->

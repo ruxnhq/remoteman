@@ -191,7 +191,7 @@ fun TvAdd(model: AppModel) {
             Text(
                 "Start remoteman on the computer with pairing on. The first connection from this TV pairs the two: " +
                     "the computer shows a code, the TV shows the same, and the computer's owner confirms there.\n\n" +
-                    "The address is the computer's name or number on your network, for example blackbox or 10.0.0.76. Add :port if it isn't 7791.",
+                    "The address is the computer's name or number on your network, for example my-pc or 192.168.1.20. Add :port if it isn't 7791.",
                 style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }

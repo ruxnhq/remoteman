@@ -60,7 +60,7 @@ class AppModel(
     var keyboard by mutableStateOf(false)
     /** A note for the computers list, like a scanned code that wasn't a remoteman one. */
     var note by mutableStateOf<String?>(null)
-    /** A passing word for the computers list, like "Waking blackbox: connecting in ten seconds". */
+    /** A passing word for the computers list, like "Waking my-pc: connecting in ten seconds". */
     var info by mutableStateOf<String?>(null)
     /** Looking nearby is wanted but Android 17 hasn't been allowed the local network yet. */
     var nearbyNeedsPermission by mutableStateOf(false)
