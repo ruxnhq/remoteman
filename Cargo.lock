@@ -1878,6 +1878,7 @@ dependencies = [
  "log",
  "ndk",
  "remoteman-core",
+ "serde_json",
  "tracing",
 ]
 

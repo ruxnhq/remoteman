@@ -47,6 +47,14 @@ object Core {
     external fun key(handle: Long, usage: Int, down: Boolean)
     /** A hardware key by its Linux code (KeyEvent.getScanCode()); false if it has no USB usage. */
     external fun keyLinux(handle: Long, code: Int, down: Boolean): Boolean
+    /** The benchmark: play a recording (RMREC1) through the decoder into [surface]; results as JSON. */
+    external fun benchSurface(path: String, surface: Surface): String
+    /** Let the benchmark's last decoder (and its picture on the surface) go. */
+    external fun benchRelease()
+
+    /** Decode [mime] with the decoder called [name] (see [Decoders.choose]). */
+    external fun useDecoder(mime: String, name: String)
+
     /** Display pixels; positive dy moves towards the end of a document. */
     external fun scroll(handle: Long, dx: Float, dy: Float)
 }

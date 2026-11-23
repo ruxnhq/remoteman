@@ -125,6 +125,7 @@ class MainActivity : Activity(), Core.Listener {
         }
         val scale = if (Decoders.isEmulator) 1f else resources.displayMetrics.density
         val decoders = Decoders.list()
+        Decoders.choose()
         val placement = if (mirror.isChecked) 3 else 0
         val surface = picture.holder.surface
         val state = filesDir.absolutePath

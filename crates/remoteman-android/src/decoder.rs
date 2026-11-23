@@ -25,6 +25,12 @@ pub struct Stats {
     /// The newest shown picture's age: from the host's capture to its release to the screen, in
     /// microseconds; -1 until the clocks have been compared.
     pub age_us: AtomicI32,
+    /// For the benchmark: each picture's time from being handed to the decoder to being
+    /// released to the screen, in microseconds, once `timing` is set.
+    pub timing: AtomicBool,
+    pub decode_us: Mutex<Vec<u32>>,
+    /// The decoder's name, once it is made.
+    pub name: Mutex<String>,
 }
 
 /// AMediaCodec may be fed on one thread and drained on another.
@@ -55,6 +61,14 @@ pub struct Decoder {
 }
 
 const BUFFER_FLAG_KEY_FRAME: u32 = 1;
+
+/// Which decoder to use for each type (mime, name), as the app chose it: the first one for a
+/// type is often not the one that does 10-bit (the emulator's goldfish HEVC decoder doesn't).
+pub static CHOSEN: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// How long a frame may wait for room in the decoder before it is dropped: a moment in a
+/// session (a keyframe is then asked for), long in the benchmark (its recordings have one).
+pub static INPUT_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(4);
 
 impl Decoder {
     pub fn new(window: NativeWindow) -> Self {
@@ -136,7 +150,11 @@ impl Decoder {
             Codec::Hevc => "video/hevc",
             Codec::Av1 => "video/av01",
         };
-        let codec = MediaCodec::from_decoder_type(mime).ok_or_else(|| anyhow::anyhow!("this device has no {mime} decoder"))?;
+        let chosen = CHOSEN.lock().unwrap().iter().find(|(m, _)| m == mime).map(|(_, n)| n.clone());
+        let codec = match &chosen {
+            Some(name) => MediaCodec::from_codec_name(name).ok_or_else(|| anyhow::anyhow!("no decoder called {name}"))?,
+            None => MediaCodec::from_decoder_type(mime).ok_or_else(|| anyhow::anyhow!("this device has no {mime} decoder"))?,
+        };
         let mut format = MediaFormat::new();
         format.set_str("mime", mime);
         format.set_i32("width", info.width as i32);
@@ -154,7 +172,9 @@ impl Decoder {
         }
         codec.configure(&format, Some(&self.window), MediaCodecDirection::Decoder).map_err(|e| anyhow::anyhow!("configure {mime}: {e:?}"))?;
         codec.start().map_err(|e| anyhow::anyhow!("start {mime}: {e:?}"))?;
-        log::info!("decoding {mime} {}x{} with {}", info.width, info.height, codec.name().unwrap_or_default());
+        let name = codec.name().unwrap_or_default();
+        log::info!("decoding {mime} {}x{} with {name}", info.width, info.height);
+        *self.stats.name.lock().unwrap() = name;
         let codec = Arc::new(Shared(codec));
         let stop = Arc::new(AtomicBool::new(false));
         let in_flight: Arc<InFlight> = Arc::default();
@@ -184,7 +204,8 @@ impl Drop for Decoder {
 
 /// Copy a frame into the decoder. Ok(false): it had no room.
 fn queue(codec: &MediaCodec, frame: &Frame) -> anyhow::Result<bool> {
-    let mut buffer = match codec.dequeue_input_buffer(Duration::from_millis(4)).map_err(|e| anyhow::anyhow!("dequeue input: {e:?}"))? {
+    let wait = Duration::from_millis(INPUT_WAIT_MS.load(Ordering::Relaxed));
+    let mut buffer = match codec.dequeue_input_buffer(wait).map_err(|e| anyhow::anyhow!("dequeue input: {e:?}"))? {
         DequeuedInputBufferResult::Buffer(b) => b,
         DequeuedInputBufferResult::TryAgainLater => return Ok(false),
     };
@@ -214,6 +235,9 @@ fn drain(codec: &MediaCodec, stop: &AtomicBool, in_flight: &InFlight, stats: &St
                     }
                     f.pop_front();
                     if capture == pts {
+                        if stats.timing.load(Ordering::Relaxed) {
+                            stats.decode_us.lock().unwrap().push(at.elapsed().as_micros() as u32);
+                        }
                         if let Some(age) = age {
                             let shown = age + at.elapsed().as_micros() as i64;
                             stats.age_us.store(shown.clamp(0, i32::MAX as i64) as i32, Ordering::Relaxed);

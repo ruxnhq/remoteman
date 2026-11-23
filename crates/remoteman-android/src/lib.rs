@@ -6,6 +6,7 @@
 //! connection (stages, pairing, the stream's format, the end) and sends input in.
 #![cfg(target_os = "android")]
 
+mod bench;
 mod decoder;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -310,5 +311,37 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_scroll(_env: JNIEnv, _class
         if let Some(handle) = handle(h) {
             handle.client.send(Event::Scroll { dx, dy });
         }
+    })
+}
+
+/// `Core.benchSurface(path, surface)`: play a recording (RMREC1) through the decoder into the
+/// surface at its own rate; returns the results as JSON ({"error": ...} if it couldn't). The
+/// last picture stays on the surface until `Core.benchRelease()`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_xnixy_remoteman_Core_benchSurface<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, path: JString<'l>, surface: JObject<'l>) -> jstring {
+    guard(std::ptr::null_mut(), move || {
+        let path = text(&mut env, &path);
+        let result = match unsafe { ndk::native_window::NativeWindow::from_surface(env.get_raw(), surface.as_raw()) } {
+            Some(window) => bench::run(&path, window).unwrap_or_else(|e| serde_json::json!({ "error": format!("{e:#}") }).to_string()),
+            None => r#"{"error":"no surface"}"#.to_owned(),
+        };
+        env.new_string(result).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+    })
+}
+
+/// `Core.benchRelease()`: let the last benchmark run's decoder go.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_xnixy_remoteman_Core_benchRelease(_env: JNIEnv, _class: JClass) {
+    guard((), bench::release)
+}
+
+/// `Core.useDecoder(mime, name)`: decode `mime` with the decoder called `name`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_xnixy_remoteman_Core_useDecoder<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, mime: JString<'l>, name: JString<'l>) {
+    guard((), move || {
+        let (mime, name) = (text(&mut env, &mime), text(&mut env, &name));
+        let mut chosen = decoder::CHOSEN.lock().unwrap();
+        chosen.retain(|(m, _)| *m != mime);
+        chosen.push((mime, name));
     })
 }

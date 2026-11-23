@@ -9,7 +9,7 @@ object Decoders {
     val isEmulator: Boolean
         get() = Build.HARDWARE == "ranchu" || Build.FINGERPRINT.contains("generic")
 
-    private fun has(mime: String, profile: Int, hardwareOnly: Boolean): String? {
+    fun has(mime: String, profile: Int, hardwareOnly: Boolean): String? {
         for (info in MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos) {
             if (info.isEncoder || mime !in info.supportedTypes) continue
             if (hardwareOnly && !info.isHardwareAccelerated) continue
@@ -17,6 +17,13 @@ object Decoders {
             if (caps.profileLevels.any { it.profile == profile }) return info.name
         }
         return null
+    }
+
+    /** The 10-bit decoder for each codec, told to the core, which otherwise takes the first of a type. */
+    fun choose() {
+        val hw = !isEmulator
+        has("video/av01", CodecProfileLevel.AV1ProfileMain10, hw)?.let { Core.useDecoder("video/av01", it) }
+        has("video/hevc", CodecProfileLevel.HEVCProfileMain10, hw)?.let { Core.useDecoder("video/hevc", it) }
     }
 
     /** In order of preference. The emulator has only software decoders, which do for testing. */

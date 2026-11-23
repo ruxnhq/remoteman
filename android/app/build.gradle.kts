@@ -23,5 +23,15 @@ android {
         release {
             isMinifyEnabled = false
         }
+        // The benchmark: the app plus recorded streams (android/bench) and a benchmark screen,
+        // which Firebase Test Lab runs as a game loop. Kept apart for its size.
+        create("bench") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".bench"
+            matchingFallbacks += listOf("debug")
+        }
+    }
+    sourceSets {
+        getByName("bench").assets.directories.add("../bench/assets")
     }
 }
