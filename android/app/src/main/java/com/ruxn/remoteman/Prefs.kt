@@ -35,8 +35,11 @@ class Prefs(context: Context) {
         private set
     var showStats by mutableStateOf(p.getBoolean("stats", false))
         private set
-    /** The computer's sound plays here. */
-    var sound by mutableStateOf(p.getBoolean("sound", true))
+    /**
+     * The computer's sound plays here. Off until chosen, as on the other viewers: turning it on
+     * moves the computer's sound away from its own speakers.
+     */
+    var sound by mutableStateOf(p.getBoolean("sound", false))
         private set
 
     fun placement(v: Placement) { placement = v; p.edit().putString("placement", v.key).apply() }

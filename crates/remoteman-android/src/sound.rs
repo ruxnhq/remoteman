@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, Weak};
 use anyhow::{Context, Result};
 use ndk::audio::{
     AudioCallbackResult, AudioContentType, AudioDirection, AudioError, AudioFormat, AudioPerformanceMode, AudioSharingMode, AudioStream, AudioStreamBuilder,
-    AudioUsage, Clockid,
+    AudioStreamState, AudioUsage, Clockid,
 };
 use remoteman_audio::{Channels, JITTER_FRAMES, JitterBuffer, Packet, SAMPLE_RATE};
 
@@ -143,11 +143,27 @@ impl Drop for Player {
     fn drop(&mut self) {
         self.shared.closing.store(true, Ordering::Relaxed);
         if let Some(Stream(s)) = self.stream.lock().unwrap().take() {
-            let _ = s.request_stop();
+            stop(&s);
             // Dropping it closes it.
         }
         let s = self.shared.jitter.lock().unwrap().stats();
         log::info!("sound: {} packets played, {} concealed, {} late, {} skipped", s.played, s.concealed, s.late, s.skipped);
+    }
+}
+
+/// Stop a stream and wait (a little) until it has: stopping is asynchronous, and the stream and
+/// its callbacks are freed when it is dropped right after.
+fn stop(s: &AudioStream) {
+    let _ = s.request_stop();
+    let mut state = s.state();
+    for _ in 0..4 {
+        if !matches!(state, AudioStreamState::Started | AudioStreamState::Starting | AudioStreamState::Stopping) {
+            break;
+        }
+        match s.wait_for_state_change(state, 50_000_000) {
+            Ok(next) => state = next,
+            Err(_) => break,
+        }
     }
 }
 
@@ -229,7 +245,7 @@ fn reopen(shared: Arc<Shared>, holder: Weak<Mutex<Option<Stream>>>) {
         return;
     }
     if let Some(Stream(old)) = slot.take() {
-        let _ = old.request_stop();
+        stop(&old);
     }
     match open_stream(&shared, Arc::downgrade(&holder)) {
         Ok(s) => {

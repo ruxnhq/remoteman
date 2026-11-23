@@ -34,8 +34,9 @@ activity, one model (`AppModel`: a stack of screens, the computers, the settings
   sound, statistics, disconnect); Back does too. TV: the remote's Back opens a bar (back to the
   picture, sound, statistics, disconnect) instead of leaving. Back, Home, volume and the like
   never go to the computer; the volume keys set the volume the computer's sound plays at.
-- **Sound** (when the computer offers it, on unless turned off in Settings or the session's
-  controls): see "Sound" below.
+- **Sound** (when the computer offers it; off until turned on in Settings or the session's
+  controls, as on the other viewers, since it moves the computer's sound away from its own
+  speakers): see "Sound" below.
 - **Settings**: where this device's display goes on the computer (mirror, extra, main, only;
   also per computer), the resolution and refresh rate asked for (default: the screen's own;
   1280×720 at 60 on the emulator), statistics, the computer's sound.
@@ -84,9 +85,13 @@ they're first used.
 
 - Buttons: A, B, X, Y, L1/R1 as shoulders, THUMBL/THUMBR, Start, Select as Back/View, Mode as
   Guide; the D-pad from the hat (`AXIS_HAT_X/Y`) or from D-pad keys of the controller.
-- Sticks: X/Y left; Z/RZ right (RX/RY on controllers that have no Z); the device's own dead zone
-  (`MotionRange.flat`, at least 0.05). Triggers: `LTRIGGER/RTRIGGER` or `BRAKE/GAS`, whichever
-  the device has; L2/R2 keys as full triggers on controllers without analog ones.
+- Sticks: X/Y left; Z/RZ right, as Android's convention and its layouts for known controllers
+  put it (RX/RY on controllers without Z). A controller Android has no layout for keeps Linux's
+  axis names, and Linux's convention is the other way round: one with Z, RZ, RX and RY and no
+  trigger axes has its right stick on RX/RY and its triggers on Z/RZ. The device's own dead
+  zone (`MotionRange.flat`, at least 0.05). Triggers: `LTRIGGER/RTRIGGER`, `BRAKE/GAS`, or Z/RZ
+  as just said; L2/R2 keys as full triggers only on controllers without analog ones (a
+  DualShock sends both).
 - Each change goes at once with the whole state; it's repeated every 100 ms while anything is
   off neutral. A controller unplugged is unplugged on the computer.
 - Back stays this device's, a controller's own Back key too: on a TV the remote's Back opens the
@@ -178,7 +183,9 @@ Controllers on an emulator: `adb shell input gamepad keyevent BUTTON_A` (buttons
 virtual Xbox 360 pad with sticks, triggers and hat through the system's `uinput` tool, which
 the shell user may run (no root): `adb push android/testing/xbox360-pad.evemu /data/local/tmp/
 && adb shell uinput /data/local/tmp/xbox360-pad.evemu` (it moves the sticks, the triggers, the
-hat and A, lets go, presses Start+Select, and unplugs). The file is JSON lines: one `register` (vid 0x045e, pid 0x028e,
+hat and A, lets go, presses Start+Select, and unplugs). `dualshock4-pad.evemu` presses L2 halfway
+(key and axis, as a DualShock does); `unlisted-pad.evemu` is a pad Android has no layout for,
+with its axes as Linux names them. The file is JSON lines: one `register` (vid 0x045e, pid 0x028e,
 `UI_SET_EVBIT` [1, 3], the BTN_ keys, ABS 0-5, 16, 17 with their `abs_info`), then `inject`
 (`[type, code, value, ..., 0, 0, 0]`) and `delay` lines; the pad is unplugged when it ends.
 
@@ -189,31 +196,41 @@ on they'd play on this PC's speakers.
 
 ## Sound and controllers on the emulators (2026-11-23)
 
-Phone (an AVD like `Medium_Phone_API_37.0`) and `Google_TV_1080p`, `-gpu host -no-audio`:
-- **Sound** from `padhost` and from the real agent (in `kde-nested.sh`, a 440 Hz tone played
-  into its speaker): the agent was asked and made its speaker; the app played every packet, the
-  loudest sample out of the callback matching the tone (0.51 for 0.5, 0.49 for 16000/32768).
-  With `--drop 50 --pause 1:5`, what was concealed matched what was left out (about 9 frames
-  in 5 s: 8 dropped, 1 or 2 at each pause's end), and the tone came back after every pause.
-  The switch in the TV bar and the phone's controls turned it off and on (the agent's speaker
-  went and came back).
-- **The delay it adds**: the playout buffer held 10 to 35 ms (sampled every 5 s; depth 3 frames).
-  On the phone emulator it grew to 5 frames once (35 to 53 ms): the emulator pulls in 20 ms
-  bursts, and two packets just missed their turn. AAudio there: shared, not low-latency
-  (the emulator has neither), burst 960 frames (20 ms), buffer 1920 (40 ms), and 108 to 127 ms
-  from AAudio to the (null) output. A device with a low-latency path has bursts of 2 to 5 ms, so
-  its own part is 4 to 10 ms plus the hardware's; not measured here.
-- **Controllers**, phone and TV, against `padhost`: every button with its XInput bit, from
-  `input gamepad keyevent` and a `uinput` Xbox 360 pad; sticks (right and up positive, the right
-  stick from Z/RZ), triggers from LTRIGGER/RTRIGGER as 1.0 and 0.5, the hat as D-pad bits, the
-  100 ms repeat while held, neutral when released, "unplugged" when the pad went. Start+Select
-  opened the bar (and the pad went neutral there). On the TV the remote's Back opened the bar
-  while A and the stick were held, and the computer got neutral at once; B on the computer, not
-  leaving. Against the agent (no `gamepad`), B opened the bar.
-- Not checked: real speakers, Bluetooth headsets and switching outputs mid-stream (the
-  disconnect path), exclusive/low-latency AAudio, sound focus taken by a call, real controllers
-  (Xbox, DualSense, 8BitDo, the Shield's; which axes each puts its right stick and triggers on),
-  more than two controllers at once.
+A phone AVD made from `Medium_Phone_API_37.0`'s image (`Sound_Phone_API_37`, so as not to
+disturb a running one) and `Google_TV_1080p` (`-read-only`), `-gpu host -no-audio`:
+- **Sound from `padhost`** (phone and TV): every packet played, the loudest sample out of the
+  callback matching the tone (0.51 for 0.5). With `--drop 50 --pause 1:5` (phone), what was
+  concealed matched what was left out (about 9 frames in 5 s: 8 dropped, 1 or 2 at each
+  pause's end), and the tone came back after every pause. Off by default: the host wasn't
+  asked until the phone's controls (Sound on, Sound off: the host stopped) or Settings (then at
+  the next connection) turned it on.
+- **Sound from the real agent** (TV only), in `kde-nested.sh` with `--keep-output`, a 440 Hz
+  tone played into its speaker: the agent was asked and made its speaker; the TV played it
+  (loudest sample 0.49 for 16000/32768, nothing concealed). The TV bar's Sound off and on: the
+  agent's speaker went and came back.
+- **The delay it adds**, sampled every 5 s: the playout buffer held 10 to 45 ms at its depth of
+  3 frames; on the phone it grew to 4 or 5 frames in some runs (then 35 to 53 ms), as the
+  emulator pulls in 20 ms bursts and a packet or two just missed their turn. AAudio there:
+  shared and not low-latency (the emulator has neither), burst 960 frames (20 ms), buffer 1920
+  (40 ms), and 108 to 127 ms from AAudio to the (null) output. So about 125 to 170 ms in all,
+  most of it the emulator's output path. A device with a low-latency path has bursts of 2 to
+  5 ms, so AAudio's part is 4 to 10 ms plus the hardware's; not measured here.
+- **Controllers against `padhost`** (phone and TV): every button with its XInput bit, from
+  `input gamepad keyevent` and from `uinput` pads; sticks (right and up positive), triggers,
+  the hat as D-pad bits, the 100 ms repeat while held, neutral when let go, "unplugged" when
+  the pad went. Three layouts on the phone: an Xbox 360 pad (Android's layout: right stick on
+  Z/RZ, triggers 1.0 and 0.5), a DualShock 4 (L2 half pressed, key and axis: 0.50, not 1.0),
+  and a pad Android has no layout for, axes as Linux names them (right stick from RX 0.50,
+  left trigger from Z 1.0, neutral at rest). Start+Select opened the controls (the two buttons
+  reach the computer first, then neutral). On the TV the remote's Back opened the bar while A
+  and the stick were held, and the computer got neutral at once; B went to the computer
+  instead of leaving. Against the agent (no `gamepad`), B opened the bar. Once, in the first
+  run, a D-pad up from `input gamepad keyevent` didn't arrive, just after the full-screen
+  notice was dismissed; it didn't happen again in a few dozen.
+- Not checked: real speakers, Bluetooth headsets, switching outputs mid-stream (the
+  "disconnected" path), exclusive/low-latency AAudio, sound focus taken by a call, real
+  controllers (Xbox, DualSense, 8BitDo, the Shield's) and which axes each really uses, more
+  than two controllers at once.
 
 ## The interface on the emulators (2026-11-23)
 

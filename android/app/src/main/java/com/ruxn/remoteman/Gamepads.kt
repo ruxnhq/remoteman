@@ -23,7 +23,7 @@ class Gamepads {
         var hat = 0
         var lt = 0f
         var rt = 0f
-        /** L2 and R2 as buttons, for controllers without analog triggers. */
+        /** L2 and R2 as keys, for controllers without analog triggers. */
         var ltKey = false
         var rtKey = false
         var lx = 0f
@@ -68,9 +68,12 @@ class Gamepads {
         if (e.repeatCount > 0) return true
         val pad = pad(e.deviceId, e.device) ?: return true
         val down = e.action == KeyEvent.ACTION_DOWN
+        // A controller with analog triggers may send L2 and R2 as keys as well (a DualShock
+        // does, past a point): the axis says how far, the key would say "all the way".
+        fun analog(vararg axes: Int) = triggersOnZ(e.device) || axes.any { e.device?.getMotionRange(it) != null }
         when {
-            e.keyCode == KeyEvent.KEYCODE_BUTTON_L2 -> pad.ltKey = down
-            e.keyCode == KeyEvent.KEYCODE_BUTTON_R2 -> pad.rtKey = down
+            e.keyCode == KeyEvent.KEYCODE_BUTTON_L2 -> if (!analog(MotionEvent.AXIS_LTRIGGER, MotionEvent.AXIS_BRAKE)) pad.ltKey = down
+            e.keyCode == KeyEvent.KEYCODE_BUTTON_R2 -> if (!analog(MotionEvent.AXIS_RTRIGGER, MotionEvent.AXIS_GAS)) pad.rtKey = down
             else -> pad.keys = if (down) pad.keys or bit!! else pad.keys and bit!!.inv()
         }
         send(h, pad)
@@ -92,17 +95,20 @@ class Gamepads {
         pad.lx = axis(MotionEvent.AXIS_X)
         // Android has down positive, the protocol up (0f - v, so that rest is 0, not -0).
         pad.ly = 0f - axis(MotionEvent.AXIS_Y)
-        // Most controllers put the right stick on Z and RZ; some on RX and RY.
-        if (device == null || has(MotionEvent.AXIS_Z) || !has(MotionEvent.AXIS_RX)) {
+        val zIsTriggers = triggersOnZ(device)
+        if (!zIsTriggers && (device == null || has(MotionEvent.AXIS_Z) || !has(MotionEvent.AXIS_RX))) {
             pad.rx = axis(MotionEvent.AXIS_Z)
             pad.ry = 0f - axis(MotionEvent.AXIS_RZ)
         } else {
             pad.rx = axis(MotionEvent.AXIS_RX)
             pad.ry = 0f - axis(MotionEvent.AXIS_RY)
         }
-        // Triggers are LTRIGGER and RTRIGGER on some, BRAKE and GAS on others, both on a few.
-        pad.lt = maxOf(axis(MotionEvent.AXIS_LTRIGGER), axis(MotionEvent.AXIS_BRAKE)).coerceIn(0f, 1f)
-        pad.rt = maxOf(axis(MotionEvent.AXIS_RTRIGGER), axis(MotionEvent.AXIS_GAS)).coerceIn(0f, 1f)
+        // Triggers are LTRIGGER and RTRIGGER on some, BRAKE and GAS on others, both on a few;
+        // Z and RZ on the controllers [triggersOnZ] finds. Those go from -1 (let go) to 1, but
+        // Android reports an axis as exactly 0 until it first moves: that is let go too.
+        fun pull(a: Int) = e.getAxisValue(a).let { v -> if (v == 0f) 0f else ((v + 1f) / 2f).let { if (it < 0.05f) 0f else it.coerceAtMost(1f) } }
+        pad.lt = maxOf(axis(MotionEvent.AXIS_LTRIGGER), axis(MotionEvent.AXIS_BRAKE), if (zIsTriggers) pull(MotionEvent.AXIS_Z) else 0f).coerceIn(0f, 1f)
+        pad.rt = maxOf(axis(MotionEvent.AXIS_RTRIGGER), axis(MotionEvent.AXIS_GAS), if (zIsTriggers) pull(MotionEvent.AXIS_RZ) else 0f).coerceIn(0f, 1f)
         val hx = e.getAxisValue(MotionEvent.AXIS_HAT_X)
         val hy = e.getAxisValue(MotionEvent.AXIS_HAT_Y)
         pad.hat = (if (hy < -0.5f) DPAD_UP else 0) or (if (hy > 0.5f) DPAD_DOWN else 0) or
@@ -138,12 +144,26 @@ class Gamepads {
         for (pad in pads.values) { pad.clear(); pad.sent = null }
     }
 
+    /**
+     * Whether [device]'s Z and RZ are its triggers and RX and RY its right stick. Android's
+     * convention, and the layouts it has for known controllers, put the right stick on Z and RZ
+     * and the triggers on LTRIGGER and RTRIGGER (or BRAKE and GAS). A controller Android has no
+     * layout for keeps Linux's names (Generic.kl), and Linux's gamepad convention is the other
+     * way round: so a controller with Z, RZ, RX and RY and no trigger axes is taken to be one.
+     */
+    private fun triggersOnZ(device: InputDevice?): Boolean {
+        if (device == null) return false
+        fun has(a: Int) = device.getMotionRange(a) != null
+        val triggers = has(MotionEvent.AXIS_LTRIGGER) || has(MotionEvent.AXIS_RTRIGGER) || has(MotionEvent.AXIS_BRAKE) || has(MotionEvent.AXIS_GAS)
+        return !triggers && has(MotionEvent.AXIS_Z) && has(MotionEvent.AXIS_RZ) && has(MotionEvent.AXIS_RX) && has(MotionEvent.AXIS_RY)
+    }
+
     private fun pad(id: Int, device: InputDevice?): Pad? {
         pads[id]?.let { return it }
         val used = pads.values.map { it.slot }.toSet()
         val slot = (0 until 4).firstOrNull { it !in used } ?: return null
         val name = device?.name ?: "injected"
-        Log.i(TAG, "controller $slot: $name")
+        Log.i(TAG, "controller $slot: $name, right stick on ${if (triggersOnZ(device)) "RX/RY, triggers on Z/RZ" else "Z/RZ"}")
         return Pad(slot, name).also { pads[id] = it }
     }
 
