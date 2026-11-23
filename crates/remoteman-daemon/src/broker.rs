@@ -29,7 +29,7 @@ const HELLO: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 10_00
 /// How long a client whose session's agent went away is kept, for another agent of its user
 /// to attach (the agent restarting; a login screen giving way to a session), before it is
 /// dropped rather than left looking at a picture that will never move.
-const ORPHAN: Duration = Duration::from_millis(if cfg!(test) { 2_000 } else { 20_000 });
+const ORPHAN: Duration = Duration::from_millis(if cfg!(test) { 2_000 } else { 40_000 });
 
 type Writer = Arc<Mutex<UnixStream>>;
 
@@ -94,12 +94,28 @@ struct Pairing {
     known: Vec<String>,
 }
 
-/// Getting a device into a session it isn't in yet, through GDM.
+/// Getting a device into a session it isn't in yet, through the login manager.
 pub struct Login {
     pub runtime: tokio::runtime::Runtime,
-    pub gdm: Gdm,
+    pub way: Way,
     /// Straight into the owner's session by the device's key alone, with no login screen.
     pub by_key: bool,
+}
+
+/// The login manager a device logs in through.
+pub enum Way {
+    /// GDM: a headless login screen of the device's own.
+    Gdm(Gdm),
+    /// Plasma Login: the computer's own login screen (see plasma.rs).
+    Plasma(crate::plasma::Plasma),
+}
+
+/// What a client that came in through the login manager is followed by.
+enum Follow {
+    /// GDM's display of this id, for this user.
+    Gdm(String, u32),
+    /// The computer's graphical sessions, for this user.
+    Plasma(u32),
 }
 
 pub struct Shared {
@@ -167,16 +183,16 @@ impl Shared {
 
     /// Ask GDM for a display for this client and wait for the agent of the session behind it:
     /// the login screen's, or with `by_key` the session of `user`, whose device it is.
-    fn open_login(&self, login: &Login, remote_id: &str, client: &ClientInfo, user: u32) -> Result<u32, String> {
+    fn open_login(&self, login: &Login, gdm: &Gdm, remote_id: &str, client: &ClientInfo, user: u32) -> Result<u32, String> {
         let name = match login.by_key {
             true => Some(users::name_of(user).ok_or_else(|| format!("this device belongs to user {user}, who is not a user of this computer any more"))?),
             false => None,
         };
-        login.runtime.block_on(login.gdm.create_display(remote_id, &client.name, name.as_deref()));
+        login.runtime.block_on(gdm.create_display(remote_id, &client.name, name.as_deref()));
         let start = std::time::Instant::now();
         let mut seen = None;
         while start.elapsed() < Duration::from_secs(30) {
-            if let Ok(sessions) = login.runtime.block_on(login.gdm.sessions(remote_id)) {
+            if let Ok(sessions) = login.runtime.block_on(gdm.sessions(remote_id)) {
                 // Its user's session if there is one already, else the login screen's; never
                 // a session of somebody else's.
                 if let Some(s) = users::session_for(&sessions, user) {
@@ -196,11 +212,35 @@ impl Shared {
     }
 }
 
-/// Follow a client that came in through GDM: when its user's session turns up behind its
-/// display (they logged in on the login screen), move the client to that session's agent.
-/// Somebody else logging in there doesn't take the device with them: it is dropped.
-async fn follow(shared: Arc<Shared>, remote_id: String, generation: u64, owner: u32) {
-    let Some(login) = shared.login.as_ref() else { return };
+impl Shared {
+    /// The agent of Plasma Login's login screen, for a device whose owner isn't logged in. It
+    /// is the login manager's user's newest agent whose process logind puts in a `greeter`
+    /// session; it starts with the login screen, so it is waited for a little.
+    fn login_screen_agent(&self, login: &Login, plasma: &crate::plasma::Plasma) -> Result<u32, String> {
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(10) {
+            let candidates: Vec<(u32, i32)> = {
+                let st = self.state.lock().unwrap();
+                st.agents.iter().rev().filter(|(_, a)| a.uid == plasma.greeter_uid).map(|(id, a)| (*id, a.pid)).collect()
+            };
+            for (id, pid) in candidates {
+                if login.runtime.block_on(plasma.in_login_screen(pid)) {
+                    tracing::info!(agent = id, "the client is shown the login screen");
+                    return Ok(id);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        Err("nobody is logged in at this computer, and no remoteman agent is running on its login screen: is remoteman installed for the whole computer?".into())
+    }
+}
+
+/// Follow a client that is on Plasma Login's login screen: when its owner's graphical session
+/// turns up (they logged in there), mark the client as having logged in here and hand it to
+/// that session's agent (or let the agent take it up when it attaches, after the login
+/// screen's agent has gone). Somebody else logging in doesn't take the device with them.
+async fn follow_plasma(shared: Arc<Shared>, generation: u64, owner: u32) {
+    let Some(Login { way: Way::Plasma(plasma), .. }) = shared.login.as_ref() else { return };
     loop {
         tokio::time::sleep(Duration::from_millis(300)).await;
         {
@@ -209,7 +249,55 @@ async fn follow(shared: Arc<Shared>, remote_id: String, generation: u64, owner: 
                 return;
             }
         }
-        let Ok(sessions) = login.gdm.sessions(&remote_id).await else { continue };
+        let Ok(sessions) = plasma.graphical().await else { continue };
+        let user = match users::logged_in(&sessions, owner) {
+            LoggedIn::Nobody => continue,
+            LoggedIn::Owner(session) => session.clone(),
+            LoggedIn::Stranger(uid) => {
+                tracing::warn!(uid, owner, "somebody else logged in on the login screen this device was on: the device is dropped, not taken into their session");
+                if let Some(host) = shared.host() {
+                    host.drop_client();
+                }
+                return;
+            }
+        };
+        {
+            let mut st = shared.state.lock().unwrap();
+            if st.generation != generation {
+                return;
+            }
+            if let Some(c) = st.client.as_mut() {
+                c.logged_in_here = true;
+            }
+        }
+        let Some(target) = shared.agent_of(user.uid) else { continue };
+        if shared.state.lock().unwrap().current == Some(target) {
+            return;
+        }
+        match begin_switch(&shared, target) {
+            Ok(()) => {
+                tracing::info!(session = %user.id, agent = target, "the device's owner logged in on the login screen: moving the client to their session");
+                return;
+            }
+            Err(_) => continue,
+        }
+    }
+}
+
+/// Follow a client that came in through GDM: when its user's session turns up behind its
+/// display (they logged in on the login screen), move the client to that session's agent.
+/// Somebody else logging in there doesn't take the device with them: it is dropped.
+async fn follow(shared: Arc<Shared>, remote_id: String, generation: u64, owner: u32) {
+    let Some(Login { way: Way::Gdm(gdm), .. }) = shared.login.as_ref() else { return };
+    loop {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        {
+            let st = shared.state.lock().unwrap();
+            if st.generation != generation || st.client.is_none() {
+                return;
+            }
+        }
+        let Ok(sessions) = gdm.sessions(&remote_id).await else { continue };
         let user = match users::logged_in(&sessions, owner) {
             LoggedIn::Nobody => continue,
             LoggedIn::Owner(session) => session,
@@ -311,16 +399,24 @@ impl HostHandler for Broker {
         if found.is_none() && client.attach_only {
             return Err("nobody is logged in at this computer, and this device is set not to use its login screen".into());
         }
-        // Not logged in: ask GDM, and remember to follow the client to wherever it logs in.
+        // Not logged in: to the login screen, and remember to follow the client to wherever
+        // it logs in.
         let mut following = None;
         let id = match (found, &self.0.login, user) {
             (Some(id), _, _) => id,
-            (None, Some(login), Some(uid)) => {
-                let remote_id = gdm::new_remote_id();
-                let id = self.0.open_login(login, &remote_id, client, uid)?;
-                following = Some((remote_id, uid));
-                id
-            }
+            (None, Some(login), Some(uid)) => match &login.way {
+                Way::Gdm(gdm) => {
+                    let remote_id = gdm::new_remote_id();
+                    let id = self.0.open_login(login, gdm, &remote_id, client, uid)?;
+                    following = Some(Follow::Gdm(remote_id, uid));
+                    id
+                }
+                Way::Plasma(plasma) => {
+                    let id = self.0.login_screen_agent(login, plasma)?;
+                    following = Some(Follow::Plasma(uid));
+                    id
+                }
+            },
             (None, _, Some(uid)) => {
                 let name = users::name_of(uid).unwrap_or_else(|| format!("user {uid}"));
                 return Err(format!("{name} isn't logged in on this computer, and it isn't set up to log in from a device"));
@@ -331,8 +427,10 @@ impl HostHandler for Broker {
             let mut st = self.0.state.lock().unwrap();
             let Some(agent) = st.agents.get(&id) else { return Err("the desktop session ended".into()) };
             let writer = agent.writer.clone();
-            if let (Some((remote_id, uid)), Some(login)) = (following, &self.0.login) {
-                login.runtime.spawn(follow(self.0.clone(), remote_id, generation, uid));
+            match (following, &self.0.login) {
+                (Some(Follow::Gdm(remote_id, uid)), Some(login)) => drop(login.runtime.spawn(follow(self.0.clone(), remote_id, generation, uid))),
+                (Some(Follow::Plasma(uid)), Some(login)) => drop(login.runtime.spawn(follow_plasma(self.0.clone(), generation, uid))),
+                _ => {}
             }
             st.link = Some(link.clone());
             st.client = Some(client.clone());

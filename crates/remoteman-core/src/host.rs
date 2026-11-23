@@ -62,6 +62,12 @@ pub struct ClientInfo {
     /// It asked to be let in only into a session that is already running.
     #[serde(default)]
     pub attach_only: bool,
+    /// Set by the daemon, never by the device: it logged in on this computer's own login
+    /// screen (Plasma Login's), so the session it is handed opened on the computer's
+    /// monitors, unlocked. It is treated as unlocked for the device: the monitors go off
+    /// while it is here and the session is locked when it leaves.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub logged_in_here: bool,
 }
 
 /// What [`Host::second_factor`] says when it is on.
@@ -1122,7 +1128,7 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
     let link = Link { frames: frame_tx, cursor: cursor_tx, clock, second: false };
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     let client_name = name.trim().to_owned();
-    let info = ClientInfo { name, fingerprint, display, decoders, cursor, unlock, attach_only: way_in.as_deref() == Some("attach") };
+    let info = ClientInfo { name, fingerprint, display, decoders, cursor, unlock, attach_only: way_in.as_deref() == Some("attach"), logged_in_here: false };
     // Reachable through `Host::link` before the handler hears of the client, so nothing it
     // sends from the start is lost.
     *current_link.lock().unwrap() = Some(link.clone());

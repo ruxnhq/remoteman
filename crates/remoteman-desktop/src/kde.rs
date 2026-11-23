@@ -79,6 +79,17 @@ async fn portals_for_kde(conn: &Connection) {
     tokio::time::sleep(Duration::from_millis(1500)).await;
 }
 
+/// Let this host control this session's desktop without KDE asking: the permission store's
+/// `kde-authorized` table, `remote-desktop` row, `["yes"]` for [`APP_ID`]. For the login
+/// screen only (see the agent); on the owner's desktop it is the owner's to grant, through
+/// Remoteman Host.
+pub async fn allow_without_asking() -> Result<()> {
+    let conn = Connection::session().await.context("session bus")?;
+    let store = Proxy::new(&conn, "org.freedesktop.impl.portal.PermissionStore", "/org/freedesktop/impl/portal/PermissionStore", "org.freedesktop.impl.portal.PermissionStore").await?;
+    store.call::<_, _, ()>("SetPermission", &("kde-authorized", true, "remote-desktop", APP_ID, vec!["yes"])).await.context("the permission store")?;
+    Ok(())
+}
+
 /// Whether this session's desktop is KDE's: KWin is on the bus.
 pub async fn present() -> bool {
     let Ok(conn) = Connection::session().await else { return false };

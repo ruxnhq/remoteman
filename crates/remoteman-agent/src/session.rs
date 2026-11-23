@@ -225,6 +225,15 @@ impl Agent {
         if login_screen.is_some() {
             tracing::info!("this is a login screen's session: no files, no clipboard, and it ends when its client goes");
         }
+        // Plasma Login's login screen: KDE's portal must let the host in without asking, and
+        // the login screen's user has its own permission store, which exists only while the
+        // login screen runs. Its agent writes the grant there itself, and only there.
+        if login_screen == Some(false) && runtime.block_on(remoteman_desktop::kde::present()) {
+            match runtime.block_on(remoteman_desktop::kde::allow_without_asking()) {
+                Ok(()) => tracing::info!("the login screen lets this host in without asking"),
+                Err(e) => tracing::warn!("couldn't let this host into the login screen without asking: {e:#}"),
+            }
+        }
         Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None, unlocked_for_client: false, wrong: (0, None), ending: None, told_logging_in: 0 })
     }
 
@@ -895,7 +904,21 @@ impl HostHandler for Agent {
             tracing::info!(device = client.name, "turned away: {}", why.strip_prefix("locked: ").unwrap_or(&why));
             return Err(why);
         }
-        let screen = client.display;
+        // Logged in on the computer's own login screen (the daemon says so, never the device):
+        // the session opened on the monitors, unlocked, in a room that may be empty. As if it
+        // had been unlocked for the device: the monitors are off while it is here, and the
+        // session is locked when it leaves.
+        if client.logged_in_here && self.login_screen.is_none() && !self.unlocked_for_client {
+            tracing::info!(device = client.name, "this session was logged into from the device on this computer's login screen: it locks when the device leaves");
+            self.unlocked_for_client = true;
+            let _ = std::fs::write(unlocked_note(), "");
+        }
+        let mut screen = client.display;
+        // The computer's own login screen (not one made for the device): it is shown as it is,
+        // so that nothing about the monitors is changed by the login screen's user.
+        if self.login_screen == Some(false) {
+            screen.placement = remoteman_core::Placement::Mirror;
+        }
         tracing::info!(name = %client.name, ?screen, decoders = ?client.decoders, cursor_apart = client.cursor, "client");
         self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link)
     }
