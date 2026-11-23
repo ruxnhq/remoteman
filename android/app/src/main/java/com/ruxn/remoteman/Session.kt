@@ -35,6 +35,8 @@ sealed interface Phase {
         val keyChanged: Boolean = false,
         /** Connecting again can work (not after a scanned code named another computer). */
         val retry: Boolean = true,
+        /** It never answered: it may be asleep, so waking it is offered. */
+        val noAnswer: Boolean = false,
     ) : Phase
 }
 
@@ -278,7 +280,7 @@ class Session(private val store: ComputerStore, private val stateDir: String, pr
                     "A different computer, or the same one with a new key, answers at ${c?.address}. If you trust it, forget the old key and pair again.",
                     keyChanged = true,
                 )
-                else -> Phase.Ended(if (h != 0L) "The connection to $name was lost" else "Can't connect to $name", plainWords(reason))
+                else -> Phase.Ended(if (h != 0L) "The connection to $name was lost" else "Can't connect to $name", plainWords(reason), noAnswer = h == 0L && silent(reason))
             }
         }
     }
@@ -292,6 +294,11 @@ class Session(private val store: ComputerStore, private val stateDir: String, pr
         const val CLOSE_REVOKED = 3
         /** `Client::close_code`: someone at the host dropped this device. */
         const val CLOSE_DROPPED = 2
+
+        /** Nothing answered at all (it may be asleep), as opposed to an answer that said no. */
+        fun silent(reason: String): Boolean = reason.lowercase().let { r ->
+            "timed out" in r || "timeout" in r || "unreachable" in r || "no route" in r
+        }
 
         /** The core's reasons are for logs; this says the common ones for people. */
         fun plainWords(reason: String): String {

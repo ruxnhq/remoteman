@@ -304,12 +304,16 @@ port, so Pair from it ends in "Can't connect".
 - TV (`Google_TV_1080p`, Android 16, run `-read-only`), by D-pad: the Nearby row under the
   computers, the dot on a card, holding OK → "Wake and connect" (only when not in sight) → the
   waking line with Cancel → "Can't connect" with "Wake it and connect"; OK on a Nearby card
-  paired at its address. The waking line pushed Nearby off the screen: that screen now scrolls.
+  paired at its address. The waking line pushed Nearby off the screen: that screen now scrolls,
+  and D-pad down reached the Nearby row with the line showing. A host that answered "not
+  paired" gets no Wake; only silence (a timeout, unreachable) does.
 - The emulators' Wi-Fi did receive real hosts' advertisements from this PC's network (a host
   showed under Nearby with its LAN address); that host was not touched.
 - A withdrawn advertisement of the device's own lingered in the system's list (even after
-  looking anew, until Wi-Fi went off and on); a real host's going did take it off the list.
-- Not checked: the magic packet waking a real computer (unit tests check its bytes and that it
+  looking anew, until Wi-Fi went off and on). A host leaving while the list is watched was not
+  seen, so its entry going is unchecked.
+- Not checked: browsing stopping on Home or in a session (by the code: `onStop` and the screen
+  leaving stop it), the permission button on an Android 17 TV, the magic packet waking a real computer (unit tests check its bytes and that it
   is sent; on the emulator only the log shows where it went), Android 13 and older (resolving
   one at a time with `resolveService`), a TV on Ethernet (the multicast lock is a Wi-Fi thing),
   names with spaces from a real host (`\032` unescaping is unit-tested), IPv6-only networks.

@@ -105,7 +105,8 @@ class Nearby(context: Context) {
             val cb = object : NsdManager.ServiceInfoCallback {
                 override fun onServiceInfoCallbackRegistrationFailed(error: Int) = post(gen) { watching.remove(name) }
                 override fun onServiceUpdated(info: NsdServiceInfo) = post(gen) { resolved(info, info.hostAddresses) }
-                override fun onServiceLost() = post(gen) { lost(name) }
+                // Gone for now: the callback stays, so it comes back if it does.
+                override fun onServiceLost() = post(gen) { if (found.removeAll { it.name == name }) changed() }
                 override fun onServiceInfoCallbackUnregistered() {}
             }
             watching[name] = cb
