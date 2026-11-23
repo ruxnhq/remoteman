@@ -47,14 +47,13 @@ if [ -n "${APPIMAGE:-}" ] && [ -z "${REMOTEMAN_NO_INTEGRATION:-}" ]; then
     # An AppImage manager (Gear Lever, AppImageLauncher, appimaged) that added this AppImage
     # to the applications writes its own launcher entry and starts the AppImage with
     # DESKTOPINTEGRATION set, the AppImage convention for "already integrated". A second entry
-    # of ours would then show the app twice, so ours goes, if it was ours for this file.
+    # of ours shown too would list the app twice, so ours is then hidden (NoDisplay). It still
+    # has to exist: on KDE the desktop portal lets the host call itself dev.remoteman.Host, and
+    # so lets it in without asking, only if an app of that id is installed.
     entry="$data/applications/dev.remoteman.Host.desktop"
-    if [ -n "${DESKTOPINTEGRATION:-}" ]; then
-        grep -qF "Exec=\"$APPIMAGE\"" "$entry" 2>/dev/null && rm -f "$entry"
-    else
-        sed "s|^Exec=remoteman-tray|Exec=\"$APPIMAGE\"|" "$here/dev.remoteman.Host.desktop" > "$tmp/entry"
-        put "$tmp/entry" "$entry" || true
-    fi
+    sed "s|^Exec=remoteman-tray|Exec=\"$APPIMAGE\"|" "$here/dev.remoteman.Host.desktop" > "$tmp/entry"
+    [ -n "${DESKTOPINTEGRATION:-}" ] && printf 'NoDisplay=true\n' >> "$tmp/entry"
+    put "$tmp/entry" "$entry" || true
     if [ ! -e /etc/systemd/user/remoteman-agent.service ]; then
         sed "s|=/usr/lib/remoteman/remoteman-agent|=\"$APPIMAGE\" agent|" "$here/usr/share/remoteman/systemd/user/remoteman-host.service" > "$tmp/unit"
         put "$tmp/unit" "$config/systemd/user/remoteman-host.service" && systemctl --user daemon-reload 2>/dev/null

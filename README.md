@@ -63,7 +63,7 @@ Free, on everything you use. Downloads are on **[remoteman.ruxn.com](https://rem
 |---|:---:|:---:|
 | **Windows 11**, x64 | ✓ | ✓ |
 | **Mac**, Apple silicon | ✓ | ✓ |
-| **Linux**, GNOME on x86_64 | ✓ | ✓ |
+| **Linux**, GNOME or KDE Plasma on x86_64 | ✓ | ✓ |
 | **iPhone and iPad** | | ✓ [TestFlight beta](https://testflight.apple.com/join/5wRbTvXB) |
 
 ## Private by design

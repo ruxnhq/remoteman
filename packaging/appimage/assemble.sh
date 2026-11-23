@@ -88,7 +88,7 @@ install -m755 "$src/packaging/appimage/AppRun-viewer" "$v/AppRun"
 desktop-file-validate "$v/dev.remoteman.Viewer.desktop"
 # The names say they are GNOME's: both are GTK and libadwaita programs, and the host shares a
 # GNOME session (through Mutter).
-pack "$v" "remoteman-viewer-$version-gnome-x86_64.AppImage"
+pack "$v" "remoteman-viewer-$version-x86_64.AppImage"
 
 # The host: Remoteman Host, and under usr/lib/remoteman what the whole-computer install
 # copies as it is (the daemon, the agent, their libraries).
@@ -111,4 +111,4 @@ cp "$linux/dev.remoteman.Host.svg" "$h/"
 ln -s dev.remoteman.Host.svg "$h/.DirIcon"
 install -m755 "$src/packaging/appimage/AppRun-host" "$h/AppRun"
 desktop-file-validate "$h/dev.remoteman.Host.desktop"
-pack "$h" "remoteman-host-$version-gnome-x86_64.AppImage"
+pack "$h" "remoteman-host-$version-x86_64.AppImage"

@@ -5,8 +5,8 @@
 # own build in target/release is not touched. Needs docker, and the Rust toolchain from rustup
 # (it is lent to the container, with the crates already downloaded).
 #
-#   packaging/appimage/build.sh        both, into target/appimage/: remoteman-viewer-VERSION-gnome-
-#                                      x86_64.AppImage and remoteman-host-VERSION-gnome-x86_64.AppImage,
+#   packaging/appimage/build.sh        both, into target/appimage/: remoteman-viewer-VERSION-
+#                                      x86_64.AppImage and remoteman-host-VERSION-x86_64.AppImage,
 #                                      each with FILE.sha256 beside it
 #
 # What goes inside: the programs, FFmpeg (built in the container with only what remoteman
