@@ -57,6 +57,9 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 Or open `android/` in Android Studio after running `build-core.sh` once.
 
+For Google Play (the release bundle, the upload key, the icon and TV banner, and what is done
+in Play Console): [RELEASE.md](RELEASE.md).
+
 ## Trying it against a throwaway host
 
 `scripts/headless-host.sh` listens on 127.0.0.1:7799, which the emulator reaches as
