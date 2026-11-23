@@ -1,4 +1,4 @@
-package com.xnixy.remoteman
+package com.ruxn.remoteman
 
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -15,8 +15,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import com.xnixy.remoteman.phone.PhoneApp
-import com.xnixy.remoteman.tv.TvApp
+import com.ruxn.remoteman.phone.PhoneApp
+import com.ruxn.remoteman.tv.TvApp
 
 /**
  * The viewer. One activity for phones, tablets and TVs: the TV interface (Compose for TV, D-pad

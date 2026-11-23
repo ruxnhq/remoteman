@@ -1,4 +1,4 @@
-package com.xnixy.remoteman
+package com.ruxn.remoteman
 
 import android.media.MediaCodecInfo.CodecProfileLevel
 import android.media.MediaCodecList

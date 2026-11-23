@@ -1,4 +1,4 @@
-package com.xnixy.remoteman.tv
+package com.ruxn.remoteman.tv
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -15,8 +15,8 @@ import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.darkColorScheme
-import com.xnixy.remoteman.AppModel
-import com.xnixy.remoteman.Screen
+import com.ruxn.remoteman.AppModel
+import com.ruxn.remoteman.Screen
 
 /**
  * TVs: Compose for TV, worked with the remote's D-pad. Every screen puts focus somewhere when

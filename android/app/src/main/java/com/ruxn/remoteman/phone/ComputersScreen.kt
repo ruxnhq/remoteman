@@ -1,4 +1,4 @@
-package com.xnixy.remoteman.phone
+package com.ruxn.remoteman.phone
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -48,9 +48,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.xnixy.remoteman.AppModel
-import com.xnixy.remoteman.Computer
-import com.xnixy.remoteman.Screen
+import com.ruxn.remoteman.AppModel
+import com.ruxn.remoteman.Computer
+import com.ruxn.remoteman.Screen
 
 /** The computers this device knows: tap one to connect; add or pair another. */
 @OptIn(ExperimentalMaterial3Api::class)

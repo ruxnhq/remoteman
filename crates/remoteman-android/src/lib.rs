@@ -1,5 +1,5 @@
 //! remoteman for Android: the shared core and the video decoder, for the Kotlin app in
-//! `android/` (class `com.xnixy.remoteman.Core`). On other systems this crate is empty.
+//! `android/` (class `com.ruxn.remoteman.Core`). On other systems this crate is empty.
 //!
 //! The picture never goes through Java: frames come from the core's thread straight into a
 //! MediaCodec decoder that draws into the app's Surface. Kotlin is told only about the
@@ -139,7 +139,7 @@ pub extern "system" fn JNI_OnLoad(_vm: JavaVM, _: *mut std::ffi::c_void) -> jint
 /// surface, listener)`: placement 0 an extra display, 1 the main one, 2 the only one, 3 a mirror: blocks until the host answers, so call it off the main thread. Returns a handle,
 /// or 0 after `listener.onClosed(reason)`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_connect<'l>(
+pub extern "system" fn Java_com_ruxn_remoteman_Core_connect<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
     host: JString<'l>,
@@ -217,7 +217,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_connect<'l>(
 
 /// `Core.close(handle)`: leave and free the session.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_close(_env: JNIEnv, _class: JClass, h: jlong) {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_close(_env: JNIEnv, _class: JClass, h: jlong) {
     guard((), || {
         if h != 0 {
             let handle = unsafe { Box::from_raw(h as *mut Handle) };
@@ -229,7 +229,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_close(_env: JNIEnv, _class:
 /// `Core.stats(handle)`: [frames lost, keyframes asked for, round trip µs, frames decoded,
 /// frames dropped before the decoder, newest frame's age when shown in µs (-1 not known)].
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_stats<'l>(env: JNIEnv<'l>, _class: JClass<'l>, h: jlong) -> jintArray {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_stats<'l>(env: JNIEnv<'l>, _class: JClass<'l>, h: jlong) -> jintArray {
     guard(std::ptr::null_mut(), || {
         let Some(handle) = handle(h) else { return std::ptr::null_mut() };
         handle.keyframe_if_wanted();
@@ -244,7 +244,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_stats<'l>(env: JNIEnv<'l>, 
 
 /// `Core.host(handle)`: "name\tos\tfingerprint".
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_host<'l>(env: JNIEnv<'l>, _class: JClass<'l>, h: jlong) -> jstring {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_host<'l>(env: JNIEnv<'l>, _class: JClass<'l>, h: jlong) -> jstring {
     guard(std::ptr::null_mut(), || {
         let Some(handle) = handle(h) else { return std::ptr::null_mut() };
         let c = &handle.client;
@@ -255,7 +255,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_host<'l>(env: JNIEnv<'l>, _
 /// `Core.touch(handle, phase, slot, x, y)`: phase 0 down, 1 move, 2 up; x and y are fractions
 /// of the display.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_touch(_env: JNIEnv, _class: JClass, h: jlong, phase: jint, slot: jint, x: jfloat, y: jfloat) {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_touch(_env: JNIEnv, _class: JClass, h: jlong, phase: jint, slot: jint, x: jfloat, y: jfloat) {
     guard((), || {
         let Some(handle) = handle(h) else { return };
         handle.keyframe_if_wanted();
@@ -270,7 +270,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_touch(_env: JNIEnv, _class:
 
 /// `Core.pointerTo(handle, x, y)`: the mouse pointer, as fractions of the display.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_pointerTo(_env: JNIEnv, _class: JClass, h: jlong, x: jfloat, y: jfloat) {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_pointerTo(_env: JNIEnv, _class: JClass, h: jlong, x: jfloat, y: jfloat) {
     guard((), || {
         if let Some(handle) = handle(h) {
             handle.client.send(Event::PointerTo { x, y });
@@ -280,7 +280,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_pointerTo(_env: JNIEnv, _cl
 
 /// `Core.button(handle, button, down)`: 0 left, 1 right, 2 middle.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_button(_env: JNIEnv, _class: JClass, h: jlong, button: jint, down: jboolean) {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_button(_env: JNIEnv, _class: JClass, h: jlong, button: jint, down: jboolean) {
     guard((), || {
         let Some(handle) = handle(h) else { return };
         let button = match button {
@@ -294,7 +294,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_button(_env: JNIEnv, _class
 
 /// `Core.key(handle, usage, down)`: a USB HID usage on page 7.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_key(_env: JNIEnv, _class: JClass, h: jlong, usage: jint, down: jboolean) {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_key(_env: JNIEnv, _class: JClass, h: jlong, usage: jint, down: jboolean) {
     guard((), || {
         if let Some(handle) = handle(h) {
             handle.client.send(Event::Key { usage: usage as u16, down: down != 0 });
@@ -305,7 +305,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_key(_env: JNIEnv, _class: J
 /// `Core.keyLinux(handle, code, down)`: a key by its Linux code, which is what Android gives as
 /// a hardware key's scan code. False when the key has no USB usage (the app may try otherwise).
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_keyLinux(_env: JNIEnv, _class: JClass, h: jlong, code: jint, down: jboolean) -> jboolean {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_keyLinux(_env: JNIEnv, _class: JClass, h: jlong, code: jint, down: jboolean) -> jboolean {
     guard(0, || {
         let Some(handle) = handle(h) else { return 0 };
         match remoteman_core::keys::linux_to_hid(code as u16) {
@@ -320,7 +320,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_keyLinux(_env: JNIEnv, _cla
 
 /// `Core.scroll(handle, dx, dy)`: in display pixels; positive dy moves towards the end.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_scroll(_env: JNIEnv, _class: JClass, h: jlong, dx: jfloat, dy: jfloat) {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_scroll(_env: JNIEnv, _class: JClass, h: jlong, dx: jfloat, dy: jfloat) {
     guard((), || {
         if let Some(handle) = handle(h) {
             handle.client.send(Event::Scroll { dx, dy });
@@ -330,7 +330,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_scroll(_env: JNIEnv, _class
 
 /// `Core.text(handle, text)`: typed text, from the on-screen keyboard.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_text<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, h: jlong, text: JString<'l>) {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_text<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, h: jlong, text: JString<'l>) {
     guard((), || {
         let t = self::text(&mut env, &text);
         if let Some(handle) = handle(h) {
@@ -343,7 +343,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_text<'l>(mut env: JNIEnv<'l
 
 /// `Core.secondFactor(handle, code, remember)`: the answer to `onSecondFactor`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_secondFactor<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, h: jlong, code: JString<'l>, remember: jboolean) {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_secondFactor<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, h: jlong, code: JString<'l>, remember: jboolean) {
     guard((), || {
         let code = text(&mut env, &code);
         if let Some(handle) = handle(h) {
@@ -355,14 +355,14 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_secondFactor<'l>(mut env: J
 /// `Core.closeCode(handle)`: why the host ended the session (3: it no longer trusts this
 /// device, pair again), or -1 when it wasn't the host that ended it.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_closeCode(_env: JNIEnv, _class: JClass, h: jlong) -> jint {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_closeCode(_env: JNIEnv, _class: JClass, h: jlong) -> jint {
     guard(-1, || handle(h).and_then(|h| h.client.close_code()).map_or(-1, |c| c as i32))
 }
 
 /// `Core.forgetHost(stateDir, host)`: throw this device's key for the host away (1 it was
 /// known, 0 it wasn't, -1 it couldn't be removed). Pairing is needed again after.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_forgetHost<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, state: JString<'l>, host: JString<'l>) -> jint {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_forgetHost<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, state: JString<'l>, host: JString<'l>) -> jint {
     guard(-1, || {
         let (state, host) = (text(&mut env, &state), text(&mut env, &host));
         match remoteman_core::forget_host(std::path::Path::new(&state), &with_port(&host)) {
@@ -374,7 +374,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_forgetHost<'l>(mut env: JNI
 
 /// `Core.knowsHost(stateDir, host)`: whether this device has paired with the host.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_knowsHost<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, state: JString<'l>, host: JString<'l>) -> jboolean {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_knowsHost<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, state: JString<'l>, host: JString<'l>) -> jboolean {
     guard(0, || {
         let (state, host) = (text(&mut env, &state), text(&mut env, &host));
         remoteman_core::knows_host(std::path::Path::new(&state), &with_port(&host)) as jboolean
@@ -385,7 +385,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_knowsHost<'l>(mut env: JNIE
 /// surface at its own rate; returns the results as JSON ({"error": ...} if it couldn't). The
 /// last picture stays on the surface until `Core.benchRelease()`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_benchSurface<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, path: JString<'l>, surface: JObject<'l>) -> jstring {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_benchSurface<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, path: JString<'l>, surface: JObject<'l>) -> jstring {
     guard(std::ptr::null_mut(), move || {
         let path = text(&mut env, &path);
         let result = match unsafe { ndk::native_window::NativeWindow::from_surface(env.get_raw(), surface.as_raw()) } {
@@ -398,13 +398,13 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_benchSurface<'l>(mut env: J
 
 /// `Core.benchRelease()`: let the last benchmark run's decoder go.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_benchRelease(_env: JNIEnv, _class: JClass) {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_benchRelease(_env: JNIEnv, _class: JClass) {
     guard((), bench::release)
 }
 
 /// `Core.useDecoder(mime, name)`: decode `mime` with the decoder called `name`.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_xnixy_remoteman_Core_useDecoder<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, mime: JString<'l>, name: JString<'l>) {
+pub extern "system" fn Java_com_ruxn_remoteman_Core_useDecoder<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, mime: JString<'l>, name: JString<'l>) {
     guard((), move || {
         let (mime, name) = (text(&mut env, &mime), text(&mut env, &name));
         let mut chosen = decoder::CHOSEN.lock().unwrap();

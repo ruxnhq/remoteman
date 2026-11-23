@@ -1,4 +1,4 @@
-package com.xnixy.remoteman
+package com.ruxn.remoteman
 
 import android.view.Surface
 

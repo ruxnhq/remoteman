@@ -1,4 +1,4 @@
-package com.xnixy.remoteman.phone
+package com.ruxn.remoteman.phone
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -41,13 +41,13 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
-import com.xnixy.remoteman.AppModel
-import com.xnixy.remoteman.appVersion
-import com.xnixy.remoteman.Decoders
-import com.xnixy.remoteman.Placement
-import com.xnixy.remoteman.Resolution
-import com.xnixy.remoteman.refreshChoices
-import com.xnixy.remoteman.refreshTitle
+import com.ruxn.remoteman.AppModel
+import com.ruxn.remoteman.appVersion
+import com.ruxn.remoteman.Decoders
+import com.ruxn.remoteman.Placement
+import com.ruxn.remoteman.Resolution
+import com.ruxn.remoteman.refreshChoices
+import com.ruxn.remoteman.refreshTitle
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

@@ -1,4 +1,4 @@
-package com.xnixy.remoteman.phone
+package com.ruxn.remoteman.phone
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -48,8 +48,8 @@ import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
-import com.xnixy.remoteman.AppModel
-import com.xnixy.remoteman.PairLink
+import com.ruxn.remoteman.AppModel
+import com.ruxn.remoteman.PairLink
 
 /** The camera, reading the computer's pairing code (its QR code in "Pair a Device"). */
 @OptIn(ExperimentalMaterial3Api::class)

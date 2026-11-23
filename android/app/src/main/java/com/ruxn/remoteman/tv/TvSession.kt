@@ -1,4 +1,4 @@
-package com.xnixy.remoteman.tv
+package com.ruxn.remoteman.tv
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -40,9 +40,9 @@ import androidx.tv.material3.OutlinedButton
 import androidx.tv.material3.Surface
 import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.Text
-import com.xnixy.remoteman.AppModel
-import com.xnixy.remoteman.Phase
-import com.xnixy.remoteman.Picture
+import com.ruxn.remoteman.AppModel
+import com.ruxn.remoteman.Phase
+import com.ruxn.remoteman.Picture
 
 /**
  * The session on a TV: the picture full screen; the remote's Back opens a bar with Disconnect

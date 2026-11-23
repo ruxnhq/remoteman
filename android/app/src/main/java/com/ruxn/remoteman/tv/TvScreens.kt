@@ -1,4 +1,4 @@
-package com.xnixy.remoteman.tv
+package com.ruxn.remoteman.tv
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -45,16 +45,16 @@ import androidx.tv.material3.OutlinedButton
 import androidx.tv.material3.RadioButton
 import androidx.tv.material3.Switch
 import androidx.tv.material3.Text
-import com.xnixy.remoteman.AppModel
-import com.xnixy.remoteman.Computer
-import com.xnixy.remoteman.Decoders
-import com.xnixy.remoteman.Placement
-import com.xnixy.remoteman.Resolution
-import com.xnixy.remoteman.Screen
-import com.xnixy.remoteman.appVersion
-import com.xnixy.remoteman.phone.defaultAddress
-import com.xnixy.remoteman.refreshChoices
-import com.xnixy.remoteman.refreshTitle
+import com.ruxn.remoteman.AppModel
+import com.ruxn.remoteman.Computer
+import com.ruxn.remoteman.Decoders
+import com.ruxn.remoteman.Placement
+import com.ruxn.remoteman.Resolution
+import com.ruxn.remoteman.Screen
+import com.ruxn.remoteman.appVersion
+import com.ruxn.remoteman.phone.defaultAddress
+import com.ruxn.remoteman.refreshChoices
+import com.ruxn.remoteman.refreshTitle
 
 @Composable
 private fun Title(text: String, sub: String? = null) {

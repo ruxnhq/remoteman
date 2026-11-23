@@ -1,4 +1,4 @@
-package com.xnixy.remoteman.phone
+package com.ruxn.remoteman.phone
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -59,9 +59,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.xnixy.remoteman.AppModel
-import com.xnixy.remoteman.Phase
-import com.xnixy.remoteman.Placement
+import com.ruxn.remoteman.AppModel
+import com.ruxn.remoteman.Phase
+import com.ruxn.remoteman.Placement
 
 /** Connecting, pairing, the second factor, the picture with its controls, and the end. */
 @OptIn(ExperimentalLayoutApi::class)
@@ -75,7 +75,7 @@ fun PhoneSession(model: AppModel) {
         if (ime) imeSeen = true else if (imeSeen) { imeSeen = false; model.keyboard = false }
     }
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        com.xnixy.remoteman.Picture(model)
+        com.ruxn.remoteman.Picture(model)
         when (val p = session.phase) {
             is Phase.Connecting -> Backdrop { Connecting(model, p) }
             is Phase.SecondFactor -> Backdrop { SecondFactor(model, p.left) }

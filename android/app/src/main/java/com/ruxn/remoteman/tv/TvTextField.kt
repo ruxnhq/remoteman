@@ -1,4 +1,4 @@
-package com.xnixy.remoteman.tv
+package com.ruxn.remoteman.tv
 
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions

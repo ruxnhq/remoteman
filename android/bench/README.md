@@ -1,7 +1,7 @@
 # The decoder benchmark
 
 For devices nobody here has. The bench build of the app (`assembleBench`, app id
-`com.xnixy.remoteman.bench`, shown as "remoteman bench") carries four recorded streams and
+`com.ruxn.remoteman.bench`, shown as "remoteman bench") carries four recorded streams and
 plays each three ways:
 
 1. **timing**: through the app's own decoder (Rust, MediaCodec into a Surface) at 60 a second,
@@ -38,7 +38,7 @@ cd android && JAVA_HOME=/opt/android-studio/jbr ./gradlew assembleBench
 - **A tester's phone or TV:** install `app-bench.apk` (allow installs from unknown sources, or
   `adb install`), open "remoteman bench", wait for "done" (a minute or two), press Share results
   and send the text. On a TV with no share target, `adb logcat -s remoteman-bench` or
-  `adb shell run-as com.xnixy.remoteman.bench cat files/bench.json`.
+  `adb shell run-as com.ruxn.remoteman.bench cat files/bench.json`.
 - **Firebase Test Lab** (real devices in Google's data centres; needs a Firebase project, a
   few runs a day on the free plan):
 
@@ -50,7 +50,7 @@ cd android && JAVA_HOME=/opt/android-studio/jbr ./gradlew assembleBench
 
   The app writes its JSON to the file Test Lab gives it; it ends up in the run's results
   bucket with the logcat and a video of the screen.
-- **The emulators:** `adb shell am start -n com.xnixy.remoteman.bench/com.xnixy.remoteman.BenchActivity`.
+- **The emulators:** `adb shell am start -n com.ruxn.remoteman.bench/com.ruxn.remoteman.BenchActivity`.
 
 ## On the emulator (2026-11-23, phone, API 37, `-gpu host`)
 

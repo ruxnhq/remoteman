@@ -6,13 +6,13 @@ plugins {
 }
 
 android {
-    namespace = "com.xnixy.remoteman"
+    namespace = "com.ruxn.remoteman"
     compileSdk = 37
     // For stripping the Rust library's debug info from the APK.
     ndkVersion = "30.0.16248370"
 
     defaultConfig {
-        applicationId = "com.xnixy.remoteman"
+        applicationId = "com.ruxn.remoteman"
         minSdk = 29
         targetSdk = 37
         versionCode = 1

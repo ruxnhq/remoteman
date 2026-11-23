@@ -1,4 +1,4 @@
-package com.xnixy.remoteman.phone
+package com.ruxn.remoteman.phone
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -35,9 +35,9 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.xnixy.remoteman.AppModel
-import com.xnixy.remoteman.Decoders
-import com.xnixy.remoteman.Screen
+import com.ruxn.remoteman.AppModel
+import com.ruxn.remoteman.Decoders
+import com.ruxn.remoteman.Screen
 
 /**
  * "Add a computer": scan its pairing code, or type its address. The first connection pairs,
