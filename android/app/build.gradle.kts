@@ -5,6 +5,14 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// The upload key for Google Play (Play App Signing holds the app's own key; this one only proves
+// an upload is ours). Its place and passwords come from ~/.gradle/gradle.properties or the
+// environment, never from this repository; see ../RELEASE.md. Without them a release build is
+// unsigned (bundletool and the emulator sign with the debug key instead).
+fun secret(name: String): String? =
+    providers.gradleProperty(name).orNull ?: providers.environmentVariable(name).orNull
+val uploadStore = secret("REMOTEMAN_UPLOAD_STORE_FILE")
+
 android {
     namespace = "com.ruxn.remoteman"
     compileSdk = 37
@@ -15,14 +23,35 @@ android {
         applicationId = "com.ruxn.remoteman"
         minSdk = 29
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        // The version, in one place: ../gradle.properties. Every upload to Play needs a higher
+        // versionCode than the last, even on a testing track.
+        versionCode = providers.gradleProperty("remoteman.versionCode").get().toInt()
+        versionName = providers.gradleProperty("remoteman.versionName").get()
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
+    signingConfigs {
+        if (uploadStore != null) {
+            create("upload") {
+                storeFile = file(uploadStore)
+                storePassword = secret("REMOTEMAN_UPLOAD_STORE_PASSWORD")
+                keyAlias = secret("REMOTEMAN_UPLOAD_KEY_ALIAS") ?: "upload"
+                keyPassword = secret("REMOTEMAN_UPLOAD_KEY_PASSWORD") ?: storePassword
+            }
+        }
+    }
+
     buildTypes {
+        // What goes to Play: `./gradlew bundleRelease` makes app/build/outputs/bundle/release/
+        // app-release.aab. R8 shrinks the Kotlin (proguard-rules.pro keeps what Rust calls by
+        // name); the Rust library goes in stripped, with its symbol table beside it in the
+        // bundle for Play's crash reports.
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            ndk { debugSymbolLevel = "SYMBOL_TABLE" }
+            if (uploadStore != null) signingConfig = signingConfigs.getByName("upload")
         }
         // The benchmark: the app plus recorded streams (android/bench) and a benchmark screen,
         // which Firebase Test Lab runs as a game loop. Kept apart for its size.
