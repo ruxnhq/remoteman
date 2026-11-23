@@ -1,0 +1,22 @@
+[package]
+name = "remoteman-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# remoteman for Android and Android TV: the shared core and the video decoder (MediaCodec into
+# the app's Surface) as libremoteman_android.so, for the Kotlin app in android/. Built with
+# android/build-core.sh; on other systems it is an empty library.
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+remoteman-core = { path = "../remoteman-core" }
+anyhow = "1"
+jni = "0.21"
+ndk = { version = "0.9", features = ["media", "api-level-29"] }
+android_logger = "0.15"
+log = "0.4"
+# The QUIC library logs through tracing: with this, into logcat as well.
+tracing = { version = "0.1", features = ["log"] }
