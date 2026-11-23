@@ -1711,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-agent"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "libc",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-audio"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "opusic-c",
@@ -1740,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-camera"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "ffmpeg-next",
@@ -1750,7 +1750,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-capture"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "pipewire",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "remoteman-proto",
@@ -1771,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-daemon"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "libc",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-desktop"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -1802,7 +1802,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-encode"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "cc",
@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-gpu"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "ash",
@@ -1819,7 +1819,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-host-app-windows"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde_json",
  "windows",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-host-installer-windows"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "lzma-rust2",
  "serde",
@@ -1844,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-host-windows"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "opusic-c",
@@ -1860,7 +1860,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-proto"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64",
  "serde",
@@ -1870,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-testclient"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "remoteman-audio",
@@ -1880,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-transport"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "hex",
@@ -1896,7 +1896,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-tray"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "gtk4",
  "ksni",
@@ -1906,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-vcam-windows"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "windows",
  "windows-core 0.62.2",
@@ -1914,7 +1914,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-viewer"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "cc",
@@ -1932,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-viewer-app-windows"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "remoteman-viewer-windows",
  "serde_json",
@@ -1945,7 +1945,7 @@ dependencies = [
 
 [[package]]
 name = "remoteman-viewer-windows"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "ffmpeg-sys-next",
