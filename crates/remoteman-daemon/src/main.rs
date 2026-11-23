@@ -139,7 +139,11 @@ fn main() -> Result<()> {
             let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name("login").enable_all().build()?;
             let way = if plasma::in_use() {
                 anyhow::ensure!(how == "screen", "--login key: Plasma Login can't let a device in without the password; use --login screen");
-                let greeter = uid_of(plasma::GREETER_USER).context("Plasma Login is the login manager, but its user plasmalogin is missing")?;
+                // (For tests: REMOTEMAN_TEST_GREETER_UID takes another user for the login screen's.)
+                let greeter = match std::env::var("REMOTEMAN_TEST_GREETER_UID").ok().and_then(|u| u.parse().ok()) {
+                    Some(uid) => uid,
+                    None => uid_of(plasma::GREETER_USER).context("Plasma Login is the login manager, but its user plasmalogin is missing")?,
+                };
                 broker::Way::Plasma(runtime.block_on(plasma::Plasma::connect(greeter))?)
             } else {
                 broker::Way::Gdm(runtime.block_on(gdm::Gdm::connect())?)

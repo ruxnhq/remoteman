@@ -225,15 +225,7 @@ impl Agent {
         if login_screen.is_some() {
             tracing::info!("this is a login screen's session: no files, no clipboard, and it ends when its client goes");
         }
-        // Plasma Login's login screen: KDE's portal must let the host in without asking, and
-        // the login screen's user has its own permission store, which exists only while the
-        // login screen runs. Its agent writes the grant there itself, and only there.
-        if login_screen == Some(false) && runtime.block_on(remoteman_desktop::kde::present()) {
-            match runtime.block_on(remoteman_desktop::kde::allow_without_asking()) {
-                Ok(()) => tracing::info!("the login screen lets this host in without asking"),
-                Err(e) => tracing::warn!("couldn't let this host into the login screen without asking: {e:#}"),
-            }
-        }
+
         Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None, unlocked_for_client: false, wrong: (0, None), ending: None, told_logging_in: 0 })
     }
 
@@ -912,6 +904,16 @@ impl HostHandler for Agent {
             tracing::info!(device = client.name, "this session was logged into from the device on this computer's login screen: it locks when the device leaves");
             self.unlocked_for_client = true;
             let _ = std::fs::write(unlocked_note(), "");
+        }
+        // Plasma Login's login screen: KDE's portal must let the host in without asking, and
+        // the login screen's user has its own permission store, which exists only while the
+        // login screen runs. Its agent writes the grant there itself, and only there; when a
+        // device comes, since KWin may not have been up yet when the agent started.
+        if self.login_screen == Some(false) && self.runtime.block_on(remoteman_desktop::kde::present()) {
+            match self.runtime.block_on(remoteman_desktop::kde::allow_without_asking()) {
+                Ok(()) => tracing::info!("the login screen lets this host in without asking"),
+                Err(e) => tracing::warn!("couldn't let this host into the login screen without asking: {e:#}"),
+            }
         }
         let mut screen = client.display;
         // The computer's own login screen (not one made for the device): it is shown as it is,
