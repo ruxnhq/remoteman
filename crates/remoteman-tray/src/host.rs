@@ -56,8 +56,28 @@ fn daemon() -> bool {
     DAEMON.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// On KDE Plasma, let the host control the desktop without KDE asking each time, or take
+/// that back. KDE's portal asks on the computer's own screen before a program may take input
+/// or make a screen, and nobody may be there to answer; the owner turning sharing on is the
+/// answer. The grant is the permission store's `kde-authorized` table, `remote-desktop` row,
+/// for the app id the host registers with the portal (crates/remoteman-desktop/src/kde.rs).
+fn kde_grant(on: bool) {
+    let kde = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|d| d.eq_ignore_ascii_case("KDE")));
+    if !kde {
+        return;
+    }
+    let base = ["--user", "call", "org.freedesktop.impl.portal.PermissionStore", "/org/freedesktop/impl/portal/PermissionStore", "org.freedesktop.impl.portal.PermissionStore"];
+    let args: Vec<&str> = if on {
+        base.into_iter().chain(["SetPermission", "sbssas", "kde-authorized", "true", "remote-desktop", "dev.remoteman.Host", "1", "yes"]).collect()
+    } else {
+        base.into_iter().chain(["DeletePermission", "sss", "kde-authorized", "remote-desktop", "dev.remoteman.Host"]).collect()
+    };
+    let _ = Command::new("busctl").args(args).output();
+}
+
 /// Turn sharing on, now and at every sign-in from here on.
 pub fn start() {
+    kde_grant(true);
     if daemon() {
         let _ = ask("sharing on");
     } else if daemon_installed() {
@@ -70,6 +90,7 @@ pub fn start() {
 
 /// Turn sharing off, now and at sign-in, until it is turned on again.
 pub fn stop() {
+    kde_grant(false);
     if daemon() {
         let _ = ask("sharing off");
     } else if !daemon_installed() {

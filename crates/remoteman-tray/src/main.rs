@@ -40,6 +40,34 @@ fn appimage() -> Option<std::path::PathBuf> {
     std::env::var_os("APPIMAGE").map(std::path::PathBuf::from)
 }
 
+/// Where the whole-computer install keeps its programs (scripts/install-daemon.sh).
+const INSTALLED: &str = "/usr/local/lib/remoteman";
+
+/// Whether the whole-computer host is installed.
+fn installed() -> bool {
+    std::path::Path::new("/etc/systemd/user/remoteman-agent.service").exists()
+}
+
+/// Whether the whole-computer host was installed from another build than this AppImage's:
+/// its programs differ from the ones inside this AppImage. (Replacing the AppImage doesn't
+/// change what was copied to the system; nothing but installing again does.)
+fn installed_differs() -> bool {
+    let Some(dir) = std::env::var_os("APPDIR").map(std::path::PathBuf::from) else { return false };
+    if !installed() {
+        return false;
+    }
+    ["remotemand", "remoteman-agent"].iter().any(|program| {
+        let (ours, theirs) = (dir.join("usr/lib/remoteman").join(program), std::path::Path::new(INSTALLED).join(program));
+        match (std::fs::metadata(&ours), std::fs::metadata(&theirs)) {
+            (Ok(a), Ok(b)) if a.len() != b.len() => true,
+            (Ok(_), Ok(_)) => std::fs::read(&ours).ok() != std::fs::read(&theirs).ok(),
+            // Ours can't be read: nothing to compare with. Theirs missing: it needs installing.
+            (Err(_), _) => false,
+            (Ok(_), Err(_)) => true,
+        }
+    })
+}
+
 fn set_autostart(on: bool) -> std::io::Result<()> {
     let path = autostart();
     if !on {
@@ -431,10 +459,16 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     later.add(&notify);
     // Run from an AppImage on a computer whose host is not the daemon yet: the way to make it
     // that. (The window is known only further down, so the button is wired there.)
-    let whole = adw::PreferencesGroup::builder().title("Before anyone has signed in").description("As it is, devices reach this computer only while you are signed in and it is unlocked or may be unlocked for them. Installed for the whole computer, sharing starts when the computer does: a device is shown the login screen when nobody is signed in.").build();
-    let install = adw::ButtonRow::builder().title("Install for the Whole Computer…").build();
+    // Or, where it is that already but from another build than this AppImage: the way to
+    // bring it up to this one.
+    let outdated = appimage().is_some() && installed_differs();
+    let whole = match outdated {
+        true => adw::PreferencesGroup::builder().title("The whole-computer host is out of date").description("It was installed from another version of this app, and keeps running that version until it is installed again from this one. Your paired devices and settings stay as they are.").build(),
+        false => adw::PreferencesGroup::builder().title("Before anyone has signed in").description("As it is, devices reach this computer only while you are signed in and it is unlocked or may be unlocked for them. Installed for the whole computer, sharing starts when the computer does: a device is shown the login screen when nobody is signed in.").build(),
+    };
+    let install = adw::ButtonRow::builder().title(if outdated { "Update the Whole-Computer Host…" } else { "Install for the Whole Computer…" }).build();
     whole.add(&install);
-    whole.set_visible(appimage().is_some() && !std::path::Path::new("/etc/systemd/user/remoteman-agent.service").exists());
+    whole.set_visible(appimage().is_some() && (!installed() || outdated));
     let sharing_page = adw::PreferencesPage::new();
     sharing_page.add(&sharing_group);
     sharing_page.add(&later);
@@ -492,8 +526,11 @@ fn build(app: &adw::Application) -> Rc<Ui> {
     install.connect_activated({
         let (window, whole) = (window.clone(), whole.clone());
         move |_| {
-            let alert = adw::AlertDialog::new(Some("Install for the whole computer?"), Some("The host is copied to /usr/local/lib/remoteman and starts with the computer from now on, as a system service. Your paired devices stay paired. You are asked for an administrator's password.\n\nTo undo it: run this AppImage in a terminal with sudo and the word remove."));
-            alert.add_responses(&[("cancel", "Cancel"), ("install", "Install")]);
+            let alert = match outdated {
+                true => adw::AlertDialog::new(Some("Update the whole-computer host?"), Some("The host in /usr/local/lib/remoteman is replaced with this version and restarted. A device connected now is disconnected for a moment. You are asked for an administrator's password.")),
+                false => adw::AlertDialog::new(Some("Install for the whole computer?"), Some("The host is copied to /usr/local/lib/remoteman and starts with the computer from now on, as a system service. Your paired devices stay paired. You are asked for an administrator's password.\n\nTo undo it: run this AppImage in a terminal with sudo and the word remove.")),
+            };
+            alert.add_responses(&[("cancel", "Cancel"), ("install", if outdated { "Update" } else { "Install" })]);
             alert.set_response_appearance("install", adw::ResponseAppearance::Suggested);
             let (window2, whole) = (window.clone(), whole.clone());
             alert.connect_response(Some("install"), move |_, _| {
@@ -516,8 +553,8 @@ fn build(app: &adw::Application) -> Rc<Ui> {
                     };
                     let last = |text: &str| text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_owned();
                     let (title, body) = match &said {
-                        Ok(out) => ("Installed for the whole computer", last(out)),
-                        Err(why) => ("It was not installed", last(why)),
+                        Ok(out) => (if outdated { "The whole-computer host is up to date" } else { "Installed for the whole computer" }, last(out)),
+                        Err(why) => (if outdated { "It was not updated" } else { "It was not installed" }, last(why)),
                     };
                     let done = adw::AlertDialog::new(Some(title), Some(&body));
                     done.add_responses(&[("ok", "OK")]);
@@ -647,6 +684,12 @@ fn main() -> glib::ExitCode {
             Err(e) => eprintln!("remoteman-tray: no icon in the top bar ({e}); use the window"),
         }
         built.refresh();
+        // Said once at start, since the icon may be all that is shown.
+        if appimage().is_some() && installed_differs() {
+            let note = gtk::gio::Notification::new("Update the whole-computer host");
+            note.set_body(Some("It is still the version installed before this one. Open Remoteman Host to update it."));
+            app.send_notification(Some("outdated"), &note);
+        }
         glib::timeout_add_local(std::time::Duration::from_millis(150), {
             let ui = built.clone();
             move || {

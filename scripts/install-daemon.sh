@@ -35,6 +35,13 @@ STATE=/var/lib/remoteman
 UNIT=$DEST/etc/systemd/system/remotemand.service
 AGENT=/etc/systemd/user/remoteman-agent.service
 WANTS=/etc/systemd/user/gnome-session.target.wants
+# Plasma Login (KDE): the agent starts on its login screen (plasma-login-wayland.target, as the
+# user plasmalogin) and in every Plasma session (graphical-session.target).
+PLASMA_WANTS="/etc/systemd/user/plasma-login-wayland.target.wants /etc/systemd/user/graphical-session.target.wants"
+# The portal lets a program in as dev.remoteman.Host only if that app is installed where the
+# login screen's user can see it, with an Exec that exists.
+DESKTOP_FILE=/usr/local/share/applications/dev.remoteman.Host.desktop
+dm=$(basename "$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null)" .service 2>/dev/null)
 # The programs, the libraries that travel with them if there are any, and the two unit files.
 place() {
     how=$1
@@ -47,6 +54,14 @@ place() {
     sed -e "s|^ExecStart=/usr/lib/remoteman/remotemand.*|ExecStart=$LIB/remotemand --user $U --login $how|" "$UNITS/system/remotemand.service" > "$UNIT"
     sed -e "s|=/usr/lib/remoteman/remoteman-agent|=$LIB/remoteman-agent|" "$UNITS/user/remoteman-agent.service" > "$DEST$AGENT"
     ln -sf "$AGENT" "$DEST$WANTS/remoteman-agent.service"
+    if [ "$dm" = plasmalogin ]; then
+        for w in $PLASMA_WANTS; do
+            install -d -m 755 "$DEST$w"
+            ln -sf "$AGENT" "$DEST$w/remoteman-agent.service"
+        done
+        install -d -m 755 "$DEST$(dirname "$DESKTOP_FILE")"
+        printf '[Desktop Entry]\nType=Application\nName=Remoteman Host\nExec=%s/remoteman-agent --daemon\nIcon=dev.remoteman.Host\nNoDisplay=true\n' "$LIB" > "$DEST$DESKTOP_FILE"
+    fi
 }
 if [ -n "$DEST" ]; then
     [ "${1:-}" = install ] || { echo "RM_DESTDIR is for install only"; exit 1; }
@@ -100,6 +115,18 @@ install)
     case "$how" in screen|key) ;; *) echo "install [screen|key]"; exit 1 ;; esac
     for b in remotemand remoteman-agent; do [ -x "$PAYLOAD/$b" ] || { echo "build first, as yourself: cargo build --release -p remoteman-daemon -p remoteman-agent"; exit 1; }; done
     [ -e /run/remoteman/password ] && { echo "the remote-login test is still installed: sudo scripts/remote-login-test.sh stop first"; exit 1; }
+    # A device logs in through GDM (a login screen of its own) or Plasma Login (the
+    # computer's own login screen). Elsewhere (SDDM, say) no agent would start on the login
+    # screen, and the user's own host would be off.
+    case "$dm" in
+    gdm) ;;
+    plasmalogin)
+        [ "$how" = key ] && { echo "Plasma Login can't let a device in without the password: install screen"; exit 1; } ;;
+    *)
+        echo "the whole-computer host needs GDM or Plasma Login as the login manager, and this computer's is ${dm:-unknown}."
+        echo "Share it as your own user instead: open Remoteman Host and turn sharing on. A locked session can still be unlocked from a device."
+        exit 1 ;;
+    esac
     place "$how"
     # The key and the paired devices of the host that ran as the user, the first time only.
     install -d -m 700 "$STATE"
@@ -119,6 +146,13 @@ install)
     systemctl restart remotemand.service
     as_user systemctl --user daemon-reload
     as_user systemctl --user restart remoteman-agent.service || true
+    # KDE asks on the computer's screen before a program may control the desktop, and nobody
+    # may be there: sharing the whole computer is the owner's answer, for their own desktop.
+    # (The login screen's agent answers for the login screen itself.)
+    if [ "$dm" = plasmalogin ]; then
+        as_user busctl --user call org.freedesktop.impl.portal.PermissionStore /org/freedesktop/impl/portal/PermissionStore org.freedesktop.impl.portal.PermissionStore \
+            SetPermission sbssas kde-authorized true remote-desktop dev.remoteman.Host 1 yes >/dev/null 2>&1 && echo "$U's desktop lets the host in without asking"
+    fi
     sleep 2
     show
     echo "installed ($how). Remoteman Host in the top bar goes on working; restart it if it shows nothing."
@@ -130,8 +164,12 @@ remove)
     as_user systemctl --user stop remoteman-agent.service 2>/dev/null || true
     systemctl disable --now remotemand.service 2>/dev/null || true
     firewall deny
-    rm -f "$WANTS/remoteman-agent.service" "$AGENT" "$UNIT"
+    rm -f "$WANTS/remoteman-agent.service" "$AGENT" "$UNIT" "$DESKTOP_FILE"
     rmdir "$WANTS" 2>/dev/null || true
+    for w in $PLASMA_WANTS; do
+        rm -f "$w/remoteman-agent.service"
+        rmdir "$w" 2>/dev/null || true
+    done
     rm -rf "$LIB"
     systemctl daemon-reload
     as_user systemctl --user daemon-reload

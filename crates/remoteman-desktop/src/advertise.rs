@@ -56,10 +56,13 @@ pub fn records(fingerprint: &str, os: &str) -> Vec<String> {
 }
 
 impl Advert {
-    /// Advertise `name` at `port` with these text records. Fails if there is no Avahi to ask.
+    /// Advertise `name` at `port` with these text records: through Avahi where it runs, else
+    /// by answering the network's queries ourselves (a fresh Arch or Plasma install has Avahi
+    /// but doesn't start it), handing over to Avahi if it starts later, so that the computer
+    /// can be found without anyone opening a terminal. Fails only if neither can be done.
     pub fn start(name: &str, port: u16, records: Vec<String>) -> Result<Advert> {
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<()>>();
-        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<&'static str>>();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel::<()>();
         let name = name.to_owned();
         let thread = std::thread::Builder::new()
             .name("advertise".into())
@@ -69,23 +72,103 @@ impl Advert {
                     Err(e) => return drop(ready_tx.send(Err(e.into()))),
                 };
                 runtime.block_on(async move {
-                    // The connection is what keeps the service published: it is held until told to stop.
-                    match publish(&name, port, &records).await {
-                        Ok(_connection) => {
-                            let _ = ready_tx.send(Ok(()));
-                            let _ = stopped.await;
+                    let mut told = Some(ready_tx);
+                    loop {
+                        // The connection is what keeps the service published: it is held
+                        // until told to stop.
+                        // (For tests: REMOTEMAN_TEST_NO_AVAHI acts as if Avahi weren't there.)
+                        let avahi = if std::env::var_os("REMOTEMAN_TEST_NO_AVAHI").is_some() { Err(anyhow::anyhow!("left out for a test")) } else { publish(&name, port, &records).await };
+                        if let Ok(_connection) = avahi {
+                            if let Some(t) = told.take() {
+                                let _ = t.send(Ok("Avahi"));
+                            } else {
+                                tracing::info!("Avahi has started: it advertises this host from now on");
+                            }
+                            let _ = (&mut stopped).await;
+                            return;
                         }
-                        Err(e) => drop(ready_tx.send(Err(e))),
+                        let own = match OwnResponder::start(&name, port, &records) {
+                            Ok(own) => own,
+                            Err(e) => {
+                                if let Some(t) = told.take() {
+                                    let _ = t.send(Err(e));
+                                }
+                                return;
+                            }
+                        };
+                        if let Some(t) = told.take() {
+                            let _ = t.send(Ok("this program itself (Avahi isn't running)"));
+                        }
+                        // Until stopped, or until Avahi turns up to take over.
+                        loop {
+                            tokio::select! {
+                                _ = &mut stopped => return drop(own),
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {}
+                            }
+                            if std::env::var_os("REMOTEMAN_TEST_NO_AVAHI").is_none() && avahi_running().await {
+                                drop(own);
+                                break;
+                            }
+                        }
                     }
                 });
             })
             .context("start the advertising thread")?;
         match ready_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            Ok(Ok(())) => Ok(Advert { stop: Some(stop), thread: Some(thread) }),
+            Ok(Ok(by)) => {
+                tracing::debug!("advertised by {by}");
+                Ok(Advert { stop: Some(stop), thread: Some(thread) })
+            }
             Ok(Err(e)) => Err(e),
-            Err(_) => anyhow::bail!("Avahi did not answer"),
+            Err(_) => anyhow::bail!("the advertisement didn't start"),
         }
     }
+}
+
+/// Whether Avahi is on the system bus now.
+async fn avahi_running() -> bool {
+    let Ok(conn) = zbus::Connection::system().await else { return false };
+    let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else { return false };
+    let Ok(name) = "org.freedesktop.Avahi".try_into() else { return false };
+    dbus.name_has_owner(name).await.unwrap_or(false)
+}
+
+/// The same service answered by this program itself over multicast DNS, for as long as this
+/// lives.
+struct OwnResponder {
+    daemon: mdns_sd::ServiceDaemon,
+    fullname: String,
+}
+
+impl OwnResponder {
+    fn start(name: &str, port: u16, records: &[String]) -> Result<Self> {
+        let daemon = mdns_sd::ServiceDaemon::new().context("multicast DNS")?;
+        // A name of its own for the address records, never the computer's: Avahi starting
+        // later would find its own name taken and rename the computer ("NAME-2").
+        let host = format!("{}-remoteman", hostname());
+        let properties: Vec<(&str, &str)> = records.iter().filter_map(|r| r.split_once('=')).collect();
+        let info = mdns_sd::ServiceInfo::new("_remoteman._udp.local.", name, &format!("{host}.local."), "", port, &properties[..])
+            .context("the service's description")?
+            .enable_addr_auto();
+        let fullname = info.get_fullname().to_owned();
+        daemon.register(info).context("answer for this host on the network")?;
+        Ok(Self { daemon, fullname })
+    }
+}
+
+impl Drop for OwnResponder {
+    fn drop(&mut self) {
+        // Said goodbye to, so viewers drop it at once rather than when it times out.
+        if let Ok(done) = self.daemon.unregister(&self.fullname) {
+            let _ = done.recv_timeout(std::time::Duration::from_secs(1));
+        }
+        let _ = self.daemon.shutdown();
+    }
+}
+
+/// This computer's name as the network knows it, without a domain.
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname").map(|h| h.trim().split('.').next().unwrap_or("").to_owned()).ok().filter(|h| !h.is_empty()).unwrap_or_else(|| "remoteman-host".into())
 }
 
 impl Drop for Advert {

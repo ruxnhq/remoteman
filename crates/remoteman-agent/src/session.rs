@@ -12,7 +12,7 @@ use remoteman_core::media::{BLOB_CLIPBOARD, BLOB_FILE, CLIPBOARD_LIMIT, Clipboar
 use remoteman_desktop::clipboard::{self, Clipboard};
 use remoteman_audio::{DefaultSink, MicSource, SpeakerSink};
 use remoteman_core::{BlobEvent, Display, Event, Message, Mode, Packet, Side};
-use remoteman_desktop::mutter::VirtualDisplay;
+use remoteman_desktop::VirtualDisplay;
 
 use crate::pipeline::{Pipeline, Settings};
 
@@ -225,6 +225,7 @@ impl Agent {
         if login_screen.is_some() {
             tracing::info!("this is a login screen's session: no files, no clipboard, and it ends when its client goes");
         }
+
         Ok(Self { runtime, bitrate, refs, allowed, login_screen, clipboard_wanted: false, sound: None, microphone: None, mic_count: (0, 0, None), camera: None, early: Vec::new(), last_copy: Arc::default(), take_output, copies: Arc::default(), live: None, unlocked_for_client: false, wrong: (0, None), ending: None, told_logging_in: 0 })
     }
 
@@ -272,7 +273,7 @@ impl Agent {
         };
         // Mirroring: the picture is the monitor's, at its size and scale, and no faster
         // than the client asked for.
-        if let Some(m) = desktop.mirrored {
+        if let Some(m) = desktop.mirrored() {
             if m.width % 2 != 0 || m.height % 2 != 0 {
                 self.runtime.block_on(desktop.close());
                 return Err(format!("this computer's monitor is {} by {}: an odd size can't be sent", m.width, m.height));
@@ -281,8 +282,12 @@ impl Agent {
             refresh = refresh.min(m.refresh.clamp(1, 240));
             tracing::info!(width = m.width, height = m.height, refresh, "mirroring this computer's main monitor");
         }
+        // (KDE: before the stream connects, or it is held to the monitor's first 60 Hz.)
+        if let Err(e) = self.runtime.block_on(desktop.prepare(screen.width, screen.height, screen.scale, refresh)) {
+            tracing::warn!("couldn't give the display its refresh rate and scale: {e:#}");
+        }
         let settings = Settings {
-            node: desktop.node,
+            node: desktop.node(),
             width: screen.width,
             height: screen.height,
             fps: refresh,
@@ -436,7 +441,10 @@ impl Agent {
         let second = l.link.second();
         // Said before its first frame can be sent.
         second.restart(Accept { mode: l.mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
-        let settings = Settings { node: desktop.node, width: screen.width, height: screen.height, fps: refresh, scale: screen.scale.clamp(1.0, 4.0), mode: l.mode, bitrate: self.bitrate.min(40_000_000), cursor: false, refs: self.refs };
+        if let Err(e) = self.runtime.block_on(desktop.prepare(screen.width, screen.height, screen.scale, refresh)) {
+            tracing::warn!("couldn't give the second display its refresh rate and scale: {e:#}");
+        }
+        let settings = Settings { node: desktop.node(), width: screen.width, height: screen.height, fps: refresh, scale: screen.scale.clamp(1.0, 4.0), mode: l.mode, bitrate: self.bitrate.min(40_000_000), cursor: false, refs: self.refs };
         let pipeline = match Pipeline::start(settings, second) {
             Ok(p) => p,
             Err(e) => {
@@ -761,7 +769,7 @@ impl Agent {
         // first frame.
         let mut screen = screen;
         if screen.placement == remoteman_core::Placement::Mirror {
-            if let Ok(m) = self.runtime.block_on(remoteman_desktop::mutter::mirror_target()) {
+            if let Ok(m) = self.runtime.block_on(remoteman_desktop::mirror_target()) {
                 (screen.width, screen.height, screen.scale, screen.refresh) = (m.width, m.height, m.scale, screen.refresh.min(m.refresh));
             }
         }
@@ -888,7 +896,31 @@ impl HostHandler for Agent {
             tracing::info!(device = client.name, "turned away: {}", why.strip_prefix("locked: ").unwrap_or(&why));
             return Err(why);
         }
-        let screen = client.display;
+        // Logged in on the computer's own login screen (the daemon says so, never the device):
+        // the session opened on the monitors, unlocked, in a room that may be empty. As if it
+        // had been unlocked for the device: the monitors are off while it is here, and the
+        // session is locked when it leaves.
+        if client.logged_in_here && self.login_screen.is_none() && !self.unlocked_for_client {
+            tracing::info!(device = client.name, "this session was logged into from the device on this computer's login screen: it locks when the device leaves");
+            self.unlocked_for_client = true;
+            let _ = std::fs::write(unlocked_note(), "");
+        }
+        // Plasma Login's login screen: KDE's portal must let the host in without asking, and
+        // the login screen's user has its own permission store, which exists only while the
+        // login screen runs. Its agent writes the grant there itself, and only there; when a
+        // device comes, since KWin may not have been up yet when the agent started.
+        if self.login_screen == Some(false) && self.runtime.block_on(remoteman_desktop::kde::present()) {
+            match self.runtime.block_on(remoteman_desktop::kde::allow_without_asking()) {
+                Ok(()) => tracing::info!("the login screen lets this host in without asking"),
+                Err(e) => tracing::warn!("couldn't let this host into the login screen without asking: {e:#}"),
+            }
+        }
+        let mut screen = client.display;
+        // The computer's own login screen (not one made for the device): it is shown as it is,
+        // so that nothing about the monitors is changed by the login screen's user.
+        if self.login_screen == Some(false) {
+            screen.placement = remoteman_core::Placement::Mirror;
+        }
         tracing::info!(name = %client.name, ?screen, decoders = ?client.decoders, cursor_apart = client.cursor, "client");
         self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link)
     }

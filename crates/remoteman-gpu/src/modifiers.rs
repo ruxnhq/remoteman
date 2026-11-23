@@ -12,11 +12,9 @@ use ash::vk;
 pub fn modifiers_on(node: &Path) -> Result<Vec<u64>> {
     let rdev = std::fs::metadata(node).with_context(|| format!("{}", node.display()))?.rdev();
     let (major, minor) = (libc::major(rdev) as i64, libc::minor(rdev) as i64);
-    // SAFETY: plain Vulkan queries; the instance is destroyed before returning.
+    // SAFETY: plain Vulkan queries on the program's instance.
     unsafe {
-        let entry = ash::Entry::load().context("load Vulkan")?;
-        let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_1);
-        let instance = entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app), None)?;
+        let (_, instance) = crate::vulkan()?;
         let found = (|| {
             for p in instance.enumerate_physical_devices()? {
                 let exts = instance.enumerate_device_extension_properties(p)?;
@@ -47,7 +45,6 @@ pub fn modifiers_on(node: &Path) -> Result<Vec<u64>> {
             }
             anyhow::Ok(None)
         })();
-        instance.destroy_instance(None);
         found?.with_context(|| format!("no Vulkan device for {}", node.display()))
     }
 }

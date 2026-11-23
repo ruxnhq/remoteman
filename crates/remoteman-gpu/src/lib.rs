@@ -21,6 +21,29 @@ pub enum Chroma {
 }
 
 /// One encoder input buffer, written by Vulkan and read by NVENC.
+/// The Vulkan library and one instance of it, made once for the life of the program and
+/// never destroyed. The Vulkan loader loads a GPU's driver for each instance and unloads it
+/// when the instance goes, and NVIDIA's driver leaks when unloaded (its thread-local storage
+/// isn't given back): with an instance per picture, after about 26 pictures the driver could
+/// no longer be loaded at all ("Unable to find a Vulkan driver") until the program restarted.
+/// Devices are still made and destroyed per picture.
+pub fn vulkan() -> Result<&'static (ash::Entry, ash::Instance)> {
+    static VULKAN: std::sync::OnceLock<(ash::Entry, ash::Instance)> = std::sync::OnceLock::new();
+    if let Some(v) = VULKAN.get() {
+        return Ok(v);
+    }
+    // SAFETY: loading the system's Vulkan loader and making one instance; both stay until the
+    // program ends.
+    let made = unsafe {
+        let entry = ash::Entry::load().context("load Vulkan")?;
+        let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
+        let instance = entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app), None)?;
+        (entry, instance)
+    };
+    // Made twice at once by two threads: one is kept, and the other's instance stays unused.
+    Ok(VULKAN.get_or_init(|| made))
+}
+
 pub struct Slot {
     buffer: vk::Buffer,
     #[allow(dead_code)]
@@ -76,9 +99,7 @@ impl Converter {
         anyhow::ensure!(width % 2 == 0 && height % 2 == 0, "odd sizes aren't handled");
         // SAFETY: plain Vulkan setup; every handle created here is owned by the returned value.
         unsafe {
-            let entry = ash::Entry::load().context("load Vulkan")?;
-            let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
-            let instance = entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app), None)?;
+            let (entry, instance) = crate::vulkan()?.clone();
             let pdev = instance
                 .enumerate_physical_devices()?
                 .into_iter()
@@ -373,7 +394,7 @@ impl Drop for Converter {
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.pool, None);
             self.device.destroy_device(None);
-            self.instance.destroy_instance(None);
+            // The instance is the program's (see `vulkan`).
         }
     }
 }
