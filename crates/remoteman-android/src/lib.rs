@@ -119,6 +119,12 @@ fn handle<'a>(h: jlong) -> Option<&'a Handle> {
     (h != 0).then(|| unsafe { &*(h as *const Handle) })
 }
 
+/// "name" or "name:port", as the app keeps it, to what the core is given (and names its key by).
+fn with_port(host: &str) -> String {
+    let host = host.trim();
+    if host.contains(':') { host.to_owned() } else { format!("{host}:{}", remoteman_core::PORT) }
+}
+
 fn text(env: &mut JNIEnv, s: &JString) -> String {
     env.get_string(s).map(Into::into).unwrap_or_default()
 }
@@ -167,7 +173,7 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_connect<'l>(
                 _ => None,
             })
             .collect();
-        let host = if host.contains(':') { host } else { format!("{host}:{}", remoteman_core::PORT) };
+        let host = with_port(&host);
         let decoder = Decoder::new(window);
         let stats = decoder.stats();
         let want_keyframe = Arc::new(AtomicBool::new(false));
@@ -191,7 +197,15 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_connect<'l>(
         };
         let session = Session { listener: listener.clone(), decoder, want_keyframe: want_keyframe.clone() };
         match Client::connect(options, session) {
-            Ok(client) => Box::into_raw(Box::new(Handle { client, decoder: stats, want_keyframe })) as jlong,
+            Ok(client) => {
+                // The host may want a code from an authenticator app before the picture starts.
+                let asked = listener.clone();
+                client.on_second_factor(move |left| {
+                    let left = left.map_or(-1, |n| n as i32);
+                    asked.call("onSecondFactor", "(I)V", |_| Ok(vec![JValueOwned::Int(left)]));
+                });
+                Box::into_raw(Box::new(Handle { client, decoder: stats, want_keyframe })) as jlong
+            }
             Err(e) => {
                 log::warn!("connect: {e:#}");
                 listener.string("onClosed", &format!("{e:#}"));
@@ -311,6 +325,59 @@ pub extern "system" fn Java_com_xnixy_remoteman_Core_scroll(_env: JNIEnv, _class
         if let Some(handle) = handle(h) {
             handle.client.send(Event::Scroll { dx, dy });
         }
+    })
+}
+
+/// `Core.text(handle, text)`: typed text, from the on-screen keyboard.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_xnixy_remoteman_Core_text<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, h: jlong, text: JString<'l>) {
+    guard((), || {
+        let t = self::text(&mut env, &text);
+        if let Some(handle) = handle(h) {
+            if !t.is_empty() {
+                handle.client.send(Event::Text(t));
+            }
+        }
+    })
+}
+
+/// `Core.secondFactor(handle, code, remember)`: the answer to `onSecondFactor`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_xnixy_remoteman_Core_secondFactor<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, h: jlong, code: JString<'l>, remember: jboolean) {
+    guard((), || {
+        let code = text(&mut env, &code);
+        if let Some(handle) = handle(h) {
+            handle.client.second_factor(&code, remember != 0);
+        }
+    })
+}
+
+/// `Core.closeCode(handle)`: why the host ended the session (3: it no longer trusts this
+/// device, pair again), or -1 when it wasn't the host that ended it.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_xnixy_remoteman_Core_closeCode(_env: JNIEnv, _class: JClass, h: jlong) -> jint {
+    guard(-1, || handle(h).and_then(|h| h.client.close_code()).map_or(-1, |c| c as i32))
+}
+
+/// `Core.forgetHost(stateDir, host)`: throw this device's key for the host away (1 it was
+/// known, 0 it wasn't, -1 it couldn't be removed). Pairing is needed again after.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_xnixy_remoteman_Core_forgetHost<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, state: JString<'l>, host: JString<'l>) -> jint {
+    guard(-1, || {
+        let (state, host) = (text(&mut env, &state), text(&mut env, &host));
+        match remoteman_core::forget_host(std::path::Path::new(&state), &with_port(&host)) {
+            Ok(known) => known as jint,
+            Err(_) => -1,
+        }
+    })
+}
+
+/// `Core.knowsHost(stateDir, host)`: whether this device has paired with the host.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_xnixy_remoteman_Core_knowsHost<'l>(mut env: JNIEnv<'l>, _class: JClass<'l>, state: JString<'l>, host: JString<'l>) -> jboolean {
+    guard(0, || {
+        let (state, host) = (text(&mut env, &state), text(&mut env, &host));
+        remoteman_core::knows_host(std::path::Path::new(&state), &with_port(&host)) as jboolean
     })
 }
 

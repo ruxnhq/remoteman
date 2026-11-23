@@ -7,9 +7,14 @@
          (sendmsg fails with EPERM). Asked for before the first connection. -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
+    <!-- Phones: reading a computer's pairing code. Asked for when scanning. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
     <!-- One app for phones, tablets and TVs: none of these is required. -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
         android:label="@string/app_name"
@@ -17,6 +22,7 @@
         android:supportsRtl="true">
         <activity
             android:name=".MainActivity"
+            android:launchMode="singleTask"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|smallestScreenSize"
             android:windowSoftInputMode="adjustResize">
@@ -24,6 +30,13 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+            <!-- A computer's pairing code as a link: remoteman://pair?v=0&name=…&addr=…&fp=… -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="remoteman" android:host="pair" />
             </intent-filter>
         </activity>
     </application>

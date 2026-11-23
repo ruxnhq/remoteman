@@ -18,6 +18,12 @@ object Core {
         fun onStream(description: String, width: Int, height: Int)
         /** The connection is over, or never started. */
         fun onClosed(reason: String)
+        /**
+         * The host wants a code from its owner's authenticator app before the picture starts:
+         * answer with [secondFactor]. [left] is -1 when first asked, else the tries left after a
+         * wrong code.
+         */
+        fun onSecondFactor(left: Int) {}
     }
 
     /** Blocks until the host answers: call it off the main thread. 0 when it failed (after onClosed). */
@@ -54,6 +60,21 @@ object Core {
 
     /** Decode [mime] with the decoder called [name] (see [Decoders.choose]). */
     external fun useDecoder(mime: String, name: String)
+
+    /** Typed text (the on-screen keyboard). */
+    external fun text(handle: Long, text: String)
+
+    /** The answer to [Listener.onSecondFactor]; with [remember] the host stops asking this device for a while. */
+    external fun secondFactor(handle: Long, code: String, remember: Boolean)
+
+    /** Why the host ended the session: 3 it no longer trusts this device (pair again); -1 it wasn't the host. */
+    external fun closeCode(handle: Long): Int
+
+    /** Throw this device's key for [host] away: 1 it was known, 0 it wasn't, -1 it failed. */
+    external fun forgetHost(stateDir: String, host: String): Int
+
+    /** Whether this device has paired with [host]. */
+    external fun knowsHost(stateDir: String, host: String): Boolean
 
     /** Display pixels; positive dy moves towards the end of a document. */
     external fun scroll(handle: Long, dx: Float, dy: Float)
