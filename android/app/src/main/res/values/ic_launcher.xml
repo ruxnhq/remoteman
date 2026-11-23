@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The master icon's blue (assets/icon/viewer.svg). -->
+    <color name="ic_launcher_background">#2458F5</color>
+</resources>
