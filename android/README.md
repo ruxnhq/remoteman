@@ -42,9 +42,23 @@ activity, one model (`AppModel`: a stack of screens, the computers, the settings
   1280×720 at 60 on the emulator), statistics, the computer's sound.
 - **Leaving the app** ends the session (the host sees a clean close); coming back shows
   "Disconnected" with Connect again.
+- **Nearby** (`Nearby.kt`, `Advert.kt`): while the computers screen is in sight (and the app
+  is), `NsdManager` browses for `_remoteman._udp` (docs/PROTOCOL.md, "Finding a host") with a
+  Wi-Fi multicast lock held; Android 14+ resolves with `registerServiceInfoCallback`, older
+  versions one `resolveService` at a time. Computers found that this device doesn't have (by
+  key start or address) are listed under Nearby; Pair adds one at the address it was found at
+  (IPv4 first) and connects, which is the usual pairing (the code on both screens). A saved
+  computer whose key starts with an advertised `fp` gets a green dot ("on this network"), and
+  its network cards (`mac`) are remembered. Not seeing one says nothing (a VPN, another network).
+  On Android 17 looking needs `ACCESS_LOCAL_NETWORK` too: until it's allowed, Nearby shows a
+  "Find computers nearby" button that asks.
+- **Wake**: a saved computer with known cards that isn't in sight gets "Wake and connect"
+  (phone: its ⋮ menu; TV: its settings, by holding OK), as does "Can't connect" when it didn't
+  answer. The magic packet (six 0xFF, the card sixteen times) goes to the network's broadcast
+  address, 255.255.255.255 and the computer's last IPv4 address, on UDP ports 9 and 7; ten
+  seconds later the app connects (Cancel on the list stops that).
 - Not yet (each has a marked place in the session's controls): microphone, camera,
-  clipboard, files, finding computers on the network, online state in the list; rumble back
-  to a controller (not in the protocol yet).
+  clipboard, files; rumble back to a controller (not in the protocol yet).
 
 ## Sound
 
@@ -100,24 +114,6 @@ they're first used.
   neutral on the computer, and a controller moves the focus as usual (A is OK, B is Back).
 - A computer without `gamepad` gets nothing of controllers; their buttons do what Android
   does with them (B is Back, so it opens the bar).
-
-- **Nearby** (`Nearby.kt`, `Advert.kt`): while the computers screen is in sight (and the app
-  is), `NsdManager` browses for `_remoteman._udp` (docs/PROTOCOL.md, "Finding a host") with a
-  Wi-Fi multicast lock held; Android 14+ resolves with `registerServiceInfoCallback`, older
-  versions one `resolveService` at a time. Computers found that this device doesn't have (by
-  key start or address) are listed under Nearby; Pair adds one at the address it was found at
-  (IPv4 first) and connects, which is the usual pairing (the code on both screens). A saved
-  computer whose key starts with an advertised `fp` gets a green dot ("on this network"), and
-  its network cards (`mac`) are remembered. Not seeing one says nothing (a VPN, another network).
-  On Android 17 looking needs `ACCESS_LOCAL_NETWORK` too: until it's allowed, Nearby shows a
-  "Find computers nearby" button that asks.
-- **Wake**: a saved computer with known cards that isn't in sight gets "Wake and connect"
-  (phone: its ⋮ menu; TV: its settings, by holding OK), as does "Can't connect" when it didn't
-  answer. The magic packet (six 0xFF, the card sixteen times) goes to the network's broadcast
-  address, 255.255.255.255 and the computer's last IPv4 address, on UDP ports 9 and 7; ten
-  seconds later the app connects (Cancel on the list stops that).
-- Not yet (each has a marked place in the session's controls): sound, microphone, camera,
-  clipboard, files.
 
 Versions: Compose BOM 2026.09.00 (2026.11.01 wants compileSdk 37.1, not installed here),
 tv-material 1.1.0, the Compose compiler plugin 2.4.21, which raises AGP 9.5.1's built-in
