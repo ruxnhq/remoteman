@@ -77,7 +77,10 @@ Play that an upload comes from RUXN. It was made on 2026-11-23 on the owner's PC
 certificate's SHA-256 fingerprint, to compare with the upload key Play Console shows:
 `15:DE:98:F8:D9:2A:37:5E:1E:0A:3C:A8:65:BE:A6:D0:D3:0A:81:D8:AE:17:82:1A:97:44:15:77:C6:E1:AF:46`.
 
-On another machine, copy both, or make a new key the same way (after Google has reset the
+The backup is in 1Password, vault Personal, item "remoteman Android – Play upload key (RUXN
+LLC)": the `.jks` attached, its passwords, the alias and the path.
+
+On another machine, copy both from there, or make a new key the same way (after Google has reset the
 upload key, if the old one is lost):
 
 ```sh
