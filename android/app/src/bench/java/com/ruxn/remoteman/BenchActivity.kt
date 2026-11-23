@@ -198,7 +198,9 @@ class BenchActivity : Activity() {
             val psnr = screenPsnr(name)
             out.put("screen_psnr_db", psnr)
             val verdict = when {
-                psnr >= 30 -> "right"
+                // Measured: a right picture reads about 29 dB on a Galaxy S24 Ultra (its own scaling
+                // and colour conversion), a wrong one (the emulators' 10-bit misread) 1 to 4.
+                psnr >= 25 -> "right"
                 psnr >= 15 -> "close: look at files/screen-$name.png"
                 else -> "WRONG: the picture isn't shown as decoded"
             }

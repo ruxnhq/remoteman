@@ -7,7 +7,7 @@ plays each three ways:
 1. **timing**: through the app's own decoder (Rust, MediaCodec into a Surface) at 60 a second,
    each picture timed from being handed to the decoder to its release to the screen;
 2. **screen**: what the screen then shows, copied (PixelCopy) and compared with FFmpeg's
-   picture of the same frame. At least 30 dB is right, under 15 wrong, between: look at
+   picture of the same frame. At least 25 dB is right (a Galaxy S24 Ultra showing it right reads about 29), under 15 wrong, between: look at
    `files/screen-NAME.png`. The emulators fail this (about 2 dB): they show 10-bit pictures as 8-bit;
 3. **pixels**: decoded into memory, each frame's MD5 against FFmpeg's (bit-exact or not).
 
