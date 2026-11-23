@@ -39,8 +39,8 @@ cd android && JAVA_HOME=/opt/android-studio/jbr ./gradlew bundleRelease
 Checked on 2026-11-23 for 0.1.0 (1), a 21 MB bundle:
 - Both ABIs (arm64-v8a, x86_64) and every native library in the bundle, ML Kit's and CameraX's
   included, have no `.debug_*` sections, and their LOAD segments are aligned to 16 KB
-  (`readelf -lW`). Play has required 16 KB page sizes for TV apps since 1 August 2026, and from
-  1 February 2027 it requires them for every app that targets Android 15 or later.
+  (`readelf -lW`). Play requires 16 KB page support of apps that target Android 15 or later,
+  and of TV apps since 1 August 2026. From 1 February 2027 it refuses updates that lack it.
 - `bundletool build-apks`, then `install-apks` on a phone emulator (API 37) and a Google TV
   emulator (API 36). Play would deliver about 16 MB to them as splits: base, x86_64, density
   and language.
@@ -53,6 +53,10 @@ Checked on 2026-11-23 for 0.1.0 (1), a 21 MB bundle:
   calls into `Core.Listener` reached the screen by name ("Can't connect to 10.0.2.2:7799").
   R8's mapping shows all five `on…` methods kept. A full session (pairing code, picture) wasn't
   run on the R8 build, because no test host was up. Run one before the first upload.
+- The scanner opens on the R8 build and shows the emulator's camera. No code was read there.
+  At first it crashed: R8's full mode had dropped the constructors ML Kit calls by reflection,
+  and `proguard-rules.pro` now keeps them. Try every screen once on a release build after
+  adding a library.
 
 To try a bundle on a device or emulator the way Play cuts it:
 
@@ -67,9 +71,11 @@ android/bundletool.sh install-apks --apks=/tmp/remoteman.apks --device-id=emulat
 ## The upload key
 
 Play App Signing keeps the key that signs what users install. The upload key only proves to
-Play that an upload comes from RUXN. Make it once:
+Play that an upload comes from RUXN. Make it once. The place below is a proposal, outside every
+repository; the owner chooses where it lives.
 
 ```sh
+mkdir -p ~/.config/ruxn
 keytool -genkeypair -v -keystore ~/.config/ruxn/remoteman-upload.jks -alias upload \
     -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=RUXN LLC, O=RUXN LLC"
 ```
@@ -106,7 +112,7 @@ for you.
    "Android TV" mentioned in the description.
 4. **App content** (Policy → App content):
    - Privacy policy: `https://remoteman.ruxn.com/privacy/`. Play also wants it linked inside
-     the app, and the app doesn't link it yet (see "Before the first upload" below).
+     the app, and the app doesn't link it yet (see "What each step needs" below).
    - Ads: no ads.
    - App access: no sign-in. Say in the notes that the app connects to the user's own computer
      running the remoteman host, with a link to the downloads at <https://remoteman.ruxn.com>.
@@ -125,12 +131,22 @@ for you.
      `app-release.aab`, write a note, save, then review and roll out.
    - Send the tester the opt-in link from the Testers tab. They open it while signed in with
      that Google account, accept, then install "remoteman" from the Play Store on the phone.
+     Google shows the opt-in link only once the app's status is "Published". While the app is
+     still a draft, send the tester the app's Play Store address instead.
      For the TV, the same account installs it from the Play Store on the TV. Google's pages
      don't say whether internal-track builds reach a TV this way, so ask the tester to check.
    - Builds normally reach testers within minutes. The first upload of an app can take a few
      hours before the link works.
 
-## Before the first upload
+## What each step needs
+
+- **Internal testing** needs the developer account, the app, the upload key and a bundle.
+  Google exempts apps that are only on internal testing from the Data safety section, and an
+  internal test can start before the app's setup is complete. Run a full session on a release
+  build first (pairing, picture, input), on a phone emulator and the TV emulator, against a
+  test host.
+- **Closed testing, open testing or production** also need the two items below, the App
+  content declarations, the Data safety form and the TV review.
 
 - **The privacy policy inside the app**: Play wants a link in the app as well as on the
   listing. Settings needs a "Privacy policy" row that opens `https://remoteman.ruxn.com/privacy/`.
@@ -145,8 +161,6 @@ for you.
     make RUXN responsible for telling users about Google's processing of these metrics.
   - **Replace it with a reader that sends nothing** (ZXing's core library, Apache 2.0, used
     through CameraX's image analysis): answer as in B. The app also gets about 5 MB smaller.
-- A full session (pairing, picture, input) on the release build, on a phone emulator and the
-  TV emulator, against a test host.
 
 ## Data safety answers (draft)
 
@@ -185,9 +199,10 @@ What the app handles:
 
 ## Permissions
 
-None of these is on Play's list of permissions that need a declaration form (that list covers
-SMS, call log, all-files access and the like). If one ever needs a declaration, Play Console
-shows an alert on upload.
+Play asks for a declaration form for high-risk permissions, such as SMS and call log. The
+Google pages read on 2026-11-23 don't name `CAMERA` or `ACCESS_LOCAL_NETWORK` among them, but
+Play's full list wasn't checked. If a permission needs a declaration, Play Console shows an
+alert when the bundle is uploaded, test tracks included.
 
 | Permission | Why | Kind |
 |---|---|---|
