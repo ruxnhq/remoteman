@@ -82,7 +82,7 @@ pub struct VirtualDisplay {
     want_scale: Arc<Mutex<f64>>,
     /// The PipeWire node carrying the monitor's picture.
     pub node: u32,
-    /// Always `None` for now: mirroring isn't offered on KDE yet.
+    /// Not a monitor of the client's own but the computer's main one, as it is.
     pub mirrored: Option<Mirrored>,
     /// Whether the portal let the clipboard in for this session.
     pub(crate) clipboard: bool,
@@ -123,19 +123,19 @@ impl VirtualDisplay {
     /// Make a virtual monitor. Its size comes from the PipeWire stream format the caller then
     /// asks for on `node`. With `cursor_apart` the cursor is left out of the picture and comes
     /// as metadata on the stream; otherwise it is drawn into the picture.
-    /// Mirroring isn't built for KDE yet, so a client that asks for it gets a display of its
-    /// own beside the others, as the wire spec has it for a host that doesn't offer `mirror`.
-    pub async fn create(cursor_apart: bool, _mirror: bool) -> Result<Self> {
-        Self::make(cursor_apart, false).await
+    /// With `mirror` no monitor is made: the computer's main monitor is recorded as it is
+    /// (`mirrored` says what it is), and the client's input lands on it.
+    pub async fn create(cursor_apart: bool, mirror: bool) -> Result<Self> {
+        Self::make(cursor_apart, false, mirror).await
     }
 
     /// A second virtual monitor for the same client.
     pub async fn create_beside(cursor_apart: bool) -> Result<Self> {
-        Self::make(cursor_apart, true).await
+        Self::make(cursor_apart, true, false).await
     }
 
     /// `beside`: a second display for a client, whose first is among the screens to sit beside.
-    async fn make(cursor_apart: bool, beside: bool) -> Result<Self> {
+    async fn make(cursor_apart: bool, beside: bool, mirror: bool) -> Result<Self> {
         let conn = Connection::session().await.context("session bus")?;
         // Say who we are before anything else on this connection: otherwise the portal names
         // us after our systemd unit, which for a service is nobody.
@@ -148,6 +148,8 @@ impl VirtualDisplay {
         // screens, and ours always has the same name, so a session that turned them off would
         // otherwise leave them off for the next one. Every placement puts them back as they are now.
         let before: Vec<Output> = outputs().await.unwrap_or_default().into_iter().filter(|o| o.enabled && (beside || !o.name.starts_with("Virtual-virtual-xdp-kde-"))).collect();
+        // Mirroring: the main monitor, as it is.
+        let main = if mirror { Some(main_monitor(&before).context("this computer has no monitor to mirror")?.clone()) } else { None };
         let session_token = token();
         let created = request(&conn, REMOTE, "CreateSession", |mut o| {
             o.insert("session_handle_token", Value::from(session_token));
@@ -164,11 +166,13 @@ impl VirtualDisplay {
         })
         .await?;
         let s = session.clone();
-        // Virtual (4); the cursor drawn in (2) or as metadata (4).
+        // Virtual (4), or for mirroring the monitors (1): every one of them, since without a
+        // dialog KDE's portal gives either each monitor or the whole desktop as one picture,
+        // and the main one's is then picked out. The cursor drawn in (2) or as metadata (4).
         request(&conn, SCREENCAST, "SelectSources", move |mut o| {
-            o.insert("types", Value::from(4u32));
+            o.insert("types", Value::from(if mirror { 1u32 } else { 4u32 }));
             o.insert("cursor_mode", Value::from(if cursor_apart { 4u32 } else { 2u32 }));
-            o.insert("multiple", Value::from(false));
+            o.insert("multiple", Value::from(mirror));
             (s, o)
         })
         .await?;
@@ -181,8 +185,15 @@ impl VirtualDisplay {
         let clipboard = clipboard_asked && started.get("clipboard_enabled").and_then(|v| bool::try_from(v).ok()).unwrap_or(false);
         let streams: Vec<(u32, HashMap<String, OwnedValue>)> =
             started.get("streams").and_then(|v| v.try_clone().ok()).and_then(|v| Vec::try_from(v).ok()).context("the portal gave no stream (was the screen left out?)")?;
-        let (node, props) = streams.into_iter().next().context("the portal gave no stream")?;
-        let output = props.get("mapping_id").and_then(|v| String::try_from(v.try_clone().ok()?).ok()).context("the stream doesn't say which monitor it is")?;
+        let name_of = |props: &HashMap<String, OwnedValue>| props.get("mapping_id").and_then(|v| String::try_from(v.try_clone().ok()?).ok());
+        let (node, output) = match &main {
+            Some(m) => streams.iter().find(|(_, p)| name_of(p).as_deref() == Some(m.name.as_str())).map(|(n, _)| (*n, m.name.clone())).context("the portal gave no picture of the main monitor")?,
+            None => {
+                let (node, props) = streams.first().context("the portal gave no stream")?;
+                (*node, name_of(props).context("the stream doesn't say which monitor it is")?)
+            }
+        };
+        let mirrored = main.as_ref().map(Output::mirrored);
         let eis = match crate::eis::Eis::open(&conn).await {
             Ok(e) => Some(e),
             Err(e) => {
@@ -191,7 +202,7 @@ impl VirtualDisplay {
             }
         };
         let portal = Proxy::new(&conn, PORTAL, PORTAL_PATH, REMOTE).await?;
-        Ok(Self { conn, session, portal, eis, output, before: Arc::new(before), geometry: Arc::default(), want_scale: Arc::new(Mutex::new(1.0)), node, mirrored: None, clipboard })
+        Ok(Self { conn, session, portal, eis, output, before: Arc::new(before), geometry: Arc::default(), want_scale: Arc::new(Mutex::new(1.0)), node, mirrored, clipboard })
     }
 
     /// Put this display where the client wants it among the computer's own: beside them, as
@@ -214,6 +225,10 @@ impl VirtualDisplay {
     /// moment it is negotiated, and its virtual monitors start at 60 Hz. The mode is one of
     /// our own (KScreen's custom modes), added once for each size and rate.
     pub async fn prepare(&self, width: u32, height: u32, scale: f32, refresh: u32) -> Result<()> {
+        // A mirrored monitor is the computer's own, and stays as it is.
+        if self.mirrored.is_some() {
+            return Ok(());
+        }
         let scale = scale.clamp(1.0, 4.0) as f64;
         *self.want_scale.lock().unwrap() = scale;
         let ours = wait_for(&self.output).await?;
@@ -229,10 +244,9 @@ impl VirtualDisplay {
     }
 
     fn place_at(&self, placement: Placement, side: Side) -> impl Future<Output = Result<()>> + Send + 'static {
-        let placement = if placement == Placement::Mirror { Placement::Extend } else { placement };
-        let (output, geometry, scale, before) = (self.output.clone(), self.geometry.clone(), *self.want_scale.lock().unwrap(), self.before.clone());
+        let (output, geometry, scale, before, mirrored) = (self.output.clone(), self.geometry.clone(), *self.want_scale.lock().unwrap(), self.before.clone(), self.mirrored.is_some());
         async move {
-            let result = place_once(&output, &before, placement, side, scale).await;
+            let result = if mirrored { Ok(()) } else { place_once(&output, &before, placement, side, scale).await };
             let result = match result {
                 Ok(()) => Ok(()),
                 Err(_) => {
@@ -352,6 +366,15 @@ struct Output {
 }
 
 impl Output {
+    /// What a client mirroring this monitor is told: its size in pixels as turned, its rate
+    /// and scale.
+    fn mirrored(&self) -> Mirrored {
+        let (w, h) = self.pixels;
+        let turned = (self.width > self.height) != (w > h) && w != h;
+        let (w, h) = if turned { (h, w) } else { (w, h) };
+        Mirrored { width: w as u32, height: h as u32, refresh: self.refresh.round().max(1.0) as u32, scale: self.scale as f32 }
+    }
+
     /// The id its mode of this size and rate has now.
     fn mode_id(&self, pixels: (i32, i32), refresh: f64) -> Option<&str> {
         self.modes.iter().filter(|m| m.1 == pixels).min_by(|a, b| (a.2 - refresh).abs().total_cmp(&(b.2 - refresh).abs())).map(|m| m.0.as_str())
@@ -402,6 +425,18 @@ async fn outputs() -> Result<Vec<Output>> {
         });
     }
     Ok(list)
+}
+
+/// The computer's main monitor among `list`: the first in KScreen's order (priority 1 is the
+/// main one).
+fn main_monitor(list: &[Output]) -> Option<&Output> {
+    list.iter().filter(|o| o.enabled && !o.name.starts_with("Virtual-virtual-xdp-kde-")).min_by_key(|o| o.priority)
+}
+
+/// What a client that asks to mirror would be shown now: the computer's main monitor.
+pub async fn mirror_target() -> Result<Mirrored> {
+    let list = outputs().await?;
+    main_monitor(&list).map(Output::mirrored).context("this computer has no monitor to mirror")
 }
 
 /// The monitor called `name`, once KScreen lists it (a moment after the portal made it).

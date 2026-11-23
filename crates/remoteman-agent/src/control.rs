@@ -71,10 +71,6 @@ fn unlock_word(unlock: u8) -> &'static str {
 /// What the host offers, given what is allowed now.
 pub fn features(allowed: &Allowed) -> Vec<String> {
     let mut features: Vec<String> = ["video", "input", "cursor", "placement", "mirror", "displays", "configure", "sound", "mic", "camera"].map(String::from).to_vec();
-    // Not built for KDE yet: a client that asks then gets a display of its own.
-    if remoteman_desktop::kde::likely() {
-        features.retain(|f| f != "mirror");
-    }
     if allowed.files.load(Ordering::Relaxed) {
         features.push("files".into());
     }

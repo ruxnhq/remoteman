@@ -100,7 +100,7 @@ impl VirtualDisplay {
 /// What a client that asks to mirror would be shown now: the computer's main monitor.
 pub async fn mirror_target() -> Result<Mirrored> {
     if kde::present().await {
-        anyhow::bail!("mirroring isn't available on KDE yet");
+        return kde::mirror_target().await;
     }
     mutter::mirror_target().await
 }

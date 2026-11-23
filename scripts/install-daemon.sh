@@ -100,6 +100,14 @@ install)
     case "$how" in screen|key) ;; *) echo "install [screen|key]"; exit 1 ;; esac
     for b in remotemand remoteman-agent; do [ -x "$PAYLOAD/$b" ] || { echo "build first, as yourself: cargo build --release -p remoteman-daemon -p remoteman-agent"; exit 1; }; done
     [ -e /run/remoteman/password ] && { echo "the remote-login test is still installed: sudo scripts/remote-login-test.sh stop first"; exit 1; }
+    # The agents start with GNOME's sessions and the login screen is GDM's: elsewhere (KDE
+    # Plasma with SDDM, say) no agent would ever start, and the user's host would be off.
+    # RM_DESTDIR (a layout check) skips this.
+    if [ -z "$RM_DESTDIR" ] && [ "$(basename "$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null)")" != gdm.service ]; then
+        echo "the whole-computer host needs GNOME's login screen (GDM), and this computer's is $(basename "$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null)" .service 2>/dev/null || echo another)."
+        echo "Share it as your own user instead: open Remoteman Host and turn sharing on. A locked session can still be unlocked from a device."
+        exit 1
+    fi
     place "$how"
     # The key and the paired devices of the host that ran as the user, the first time only.
     install -d -m 700 "$STATE"
