@@ -277,3 +277,39 @@ control socket:
 - Not checked: reading a real QR code, the second factor (the agent has no switch for it), text
   arriving on the computer from the on-screen keyboard, a hardware keyboard, mouse or a real
   remote's scan codes, a pairing link on a TV, rotation.
+
+## Nearby on the emulators (2026-11-23)
+
+`FakeHostActivity` (debug builds only) advertises a pretend host from inside the emulator:
+
+```sh
+adb shell am start -W -n com.ruxn.remoteman/.FakeHostActivity --es name "'Test desk'" \
+    --es fp 0123456789abcdef --es os windows --es mac aa:bb:cc:dd:ee:ff --ei port 7800
+adb shell am start -W -n com.ruxn.remoteman/.FakeHostActivity --es stop "'Test desk'"
+```
+
+The device finds its own advertisement (at its Wi-Fi address, 10.0.2.15 or .16). An `fp` equal
+to the start of a saved computer's key makes that one "on this network". Nothing listens on the
+port, so Pair from it ends in "Can't connect".
+
+- Phone (`Medium_Phone_API_37.0`, Android 17), by touch: without `ACCESS_LOCAL_NETWORK`, Nearby
+  shows "Find computers nearby"; it asks (the system calls it "nearby devices"), refused gives
+  the note, allowed it looks. Unpaired hosts listed with Pair; a saved computer with a matching
+  `fp` got the dot and its cards were saved; Wi-Fi off and on emptied the list and the dot went.
+  Wake and connect from ⋮ sent to 255.255.255.255, 10.0.2.255 and 10.0.2.2 (logcat), the line
+  "Waking …: connecting in ten seconds" showed, and ten seconds later it connected; "Can't
+  connect" offered "Wake it and connect", which went back to the list with the line, and Cancel
+  stopped the connection. Pair added the computer at the found address with its cards and
+  connected; Forget put it back under Nearby.
+- TV (`Google_TV_1080p`, Android 16, run `-read-only`), by D-pad: the Nearby row under the
+  computers, the dot on a card, holding OK → "Wake and connect" (only when not in sight) → the
+  waking line with Cancel → "Can't connect" with "Wake it and connect"; OK on a Nearby card
+  paired at its address. The waking line pushed Nearby off the screen: that screen now scrolls.
+- The emulators' Wi-Fi did receive real hosts' advertisements from this PC's network (a host
+  showed under Nearby with its LAN address); that host was not touched.
+- A withdrawn advertisement of the device's own lingered in the system's list (even after
+  looking anew, until Wi-Fi went off and on); a real host's going did take it off the list.
+- Not checked: the magic packet waking a real computer (unit tests check its bytes and that it
+  is sent; on the emulator only the log shows where it went), Android 13 and older (resolving
+  one at a time with `resolveService`), a TV on Ethernet (the multicast lock is a Wi-Fi thing),
+  names with spaces from a real host (`\032` unescaping is unit-tested), IPv6-only networks.
