@@ -143,7 +143,9 @@ struct OwnResponder {
 impl OwnResponder {
     fn start(name: &str, port: u16, records: &[String]) -> Result<Self> {
         let daemon = mdns_sd::ServiceDaemon::new().context("multicast DNS")?;
-        let host = hostname();
+        // A name of its own for the address records, never the computer's: Avahi starting
+        // later would find its own name taken and rename the computer ("NAME-2").
+        let host = format!("{}-remoteman", hostname());
         let properties: Vec<(&str, &str)> = records.iter().filter_map(|r| r.split_once('=')).collect();
         let info = mdns_sd::ServiceInfo::new("_remoteman._udp.local.", name, &format!("{host}.local."), "", port, &properties[..])
             .context("the service's description")?
