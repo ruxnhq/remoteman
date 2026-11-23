@@ -64,6 +64,7 @@ fn popover(lines: &[&gtk::Widget], width: i32) -> gtk::Popover {
     }
     let popover = gtk::Popover::builder().child(&list).build();
     popover.add_css_class("menu");
+    popover.add_css_class("rm-over-picture");
     popover
 }
 

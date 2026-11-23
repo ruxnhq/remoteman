@@ -133,7 +133,13 @@ const STYLE: &str = "
 .rm-waiting { color: white; }
 /* The session's bar: a pill floating over the picture, with a background of its own that
    reads on any picture, a hairline edge and a soft shadow. */
-.rm-pill { padding: 5px 6px; border-radius: 999px; background-color: color-mix(in srgb, var(--headerbar-bg-color) 94%, transparent); color: var(--headerbar-fg-color); border: 1px solid color-mix(in srgb, currentColor 13%, transparent); box-shadow: 0 1px 2px alpha(black, 0.2), 0 6px 20px alpha(black, 0.3); }
+/* Its colours are its own, not the theme's: a theme may make bars and menus see-through
+   (for the compositor to blur what is behind them), and over a moving picture nothing blurs
+   it, so the bar and its menus would be unreadable. Adwaita's own, nearly opaque. */
+.rm-pill { padding: 5px 6px; border-radius: 999px; background-color: rgba(255, 255, 255, 0.96); color: rgba(0, 0, 0, 0.8); border: 1px solid rgba(0, 0, 0, 0.13); box-shadow: 0 1px 2px alpha(black, 0.2), 0 6px 20px alpha(black, 0.3); }
+popover.rm-over-picture > contents, popover.rm-over-picture > arrow { background-color: rgb(255, 255, 255); color: rgba(0, 0, 0, 0.8); }
+.rm-dark .rm-pill { background-color: rgba(48, 48, 48, 0.96); color: rgb(255, 255, 255); border-color: rgba(255, 255, 255, 0.13); }
+.rm-dark popover.rm-over-picture > contents, .rm-dark popover.rm-over-picture > arrow { background-color: rgb(56, 56, 61); color: rgb(255, 255, 255); }
 .rm-pill button { border-radius: 999px; }
 .rm-pill .rm-disconnect { padding-left: 14px; padding-right: 14px; font-weight: 700; }
 .rm-pill .rm-pill-sep { margin: 8px 4px; background-color: alpha(currentColor, 0.15); }
@@ -1029,7 +1035,10 @@ pub fn build(application: &adw::Application, args: Args) {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(STYLE);
     if let Some(display) = gdk::Display::default() {
-        gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        // Above the user's own CSS (a theme in ~/.config/gtk-4.0/gtk.css), which would
+        // otherwise win over this whatever its rules say: everything here is for this app's
+        // own widgets only.
+        gtk::style_context_add_provider_for_display(&display, &provider, gtk::STYLE_PROVIDER_PRIORITY_USER + 1);
     }
     if args.ui.is_some() {
         // For pictures of the window: nothing caught half way through a transition.
@@ -1042,6 +1051,19 @@ pub fn build(application: &adw::Application, args: Args) {
     // With a computer on the command line the window opens for its picture; otherwise for the list.
     let (width, height) = if args.host.is_some() { (1280, 800) } else { (900, 680) };
     let window = adw::ApplicationWindow::builder().application(application).title("remoteman").default_width(width).default_height(height).build();
+    // The bar's own colours follow light and dark by this class (see STYLE): the CSS media
+    // query for it doesn't follow libadwaita's own choice everywhere.
+    let style = adw::StyleManager::default();
+    let shade = |w: &adw::ApplicationWindow, dark: bool| if dark { w.add_css_class("rm-dark") } else { w.remove_css_class("rm-dark") };
+    shade(&window, style.is_dark());
+    style.connect_dark_notify({
+        let window = window.downgrade();
+        move |s| {
+            if let Some(w) = window.upgrade() {
+                shade(&w, s.is_dark());
+            }
+        }
+    });
 
     let video = Video::new(args.dump.clone());
     let list = computers::build();
