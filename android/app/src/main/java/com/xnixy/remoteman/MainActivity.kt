@@ -32,6 +32,7 @@ class MainActivity : Activity(), Core.Listener {
     private lateinit var form: LinearLayout
     private lateinit var address: EditText
     private lateinit var mirror: CheckBox
+    private lateinit var connectButton: Button
     private lateinit var status: TextView
     private var surfaceReady = false
     @Volatile private var handle = 0L
@@ -66,13 +67,14 @@ class MainActivity : Activity(), Core.Listener {
             hint = "computer:port"
             setSingleLine()
             setText(prefs.getString("address", if (Decoders.isEmulator) "10.0.2.2:7799" else ""))
+            // The keyboard's own key connects: on a TV it covers the Connect button.
+            imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_GO
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_URI
+            setOnEditorActionListener { _, _, _ -> start(); true }
         }
-        val connect = Button(this).apply {
+        connectButton = Button(this).apply {
             text = "Connect"
-            setOnClickListener {
-                prefs.edit().putString("address", address.text.toString().trim()).apply()
-                connect(address.text.toString().trim())
-            }
+            setOnClickListener { start() }
         }
         form.addView(TextView(this).apply { text = "remoteman\n\n" + Decoders.describe(); setTextColor(Color.WHITE) })
         form.addView(address)
@@ -83,7 +85,7 @@ class MainActivity : Activity(), Core.Listener {
             setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("mirror", on).apply() }
         }
         form.addView(mirror)
-        form.addView(connect)
+        form.addView(connectButton)
         root.addView(form, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER))
 
         status = TextView(this).apply {
@@ -93,6 +95,16 @@ class MainActivity : Activity(), Core.Listener {
         }
         root.addView(status, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START))
         setContentView(root)
+        // With an address already there, start on Connect, so a TV remote's OK connects at once
+        // instead of opening the on-screen keyboard.
+        if (address.text.isNotBlank()) connectButton.requestFocus()
+    }
+
+    private fun start() {
+        val host = address.text.toString().trim()
+        getSharedPreferences("viewer", MODE_PRIVATE).edit().putString("address", host).apply()
+        (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).hideSoftInputFromWindow(address.windowToken, 0)
+        connect(host)
     }
 
     private fun connect(host: String) {

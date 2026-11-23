@@ -36,9 +36,18 @@ frame.
 Learned in the first run (2026-11-23):
 - Android 17 refuses an app's sockets to local addresses (sendmsg EPERM) without
   `ACCESS_LOCAL_NETWORK`, a runtime permission: the app asks before its first connection.
-- The emulator shows 10-bit (P010) decoder output wrongly: the picture appears twice side by
-  side in false colours. Its software AV1 decoder also manages only about 37 of 60 frames a
-  second at 1080p. Judge the picture and its timing on a real device.
+- The emulator shows 10-bit (P010) decoder output wrongly: each half of the screen holds the
+  whole picture, sharp, in false colours, which is P010 read as 8-bit. It does so with both
+  `-gpu swiftshader_indirect` and `-gpu host`, so it's the emulator's display path, not the
+  decoder. Judge colours on a real device.
+- Rates at 1080p 60 AV1 10-bit, mirrored, software dav1d: phone emulator about 37 fps with
+  swiftshader, about 55 with `-gpu host`; Google TV emulator (API 36, `-gpu host`) about 60,
+  29 frames dropped in 20 s, 16 to 20 ms from capture to the screen.
+- On a TV the address field took focus and the on-screen keyboard covered Connect. Now Connect
+  takes focus when an address is there, and the keyboard's own key connects.
+
+TV emulator: `system-images;android-36;google-tv;x86_64`, AVD `Google_TV_1080p` (device
+`tv_1080p`). Drive it with `adb shell input keyevent DPAD_DOWN|DPAD_CENTER|BACK`.
 
 `adb logcat -s remoteman` shows the stream, the decoder chosen, and every 300th picture with
 its age (capture on the host to release to the screen).
