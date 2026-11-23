@@ -101,6 +101,24 @@ they're first used.
 - A computer without `gamepad` gets nothing of controllers; their buttons do what Android
   does with them (B is Back, so it opens the bar).
 
+- **Nearby** (`Nearby.kt`, `Advert.kt`): while the computers screen is in sight (and the app
+  is), `NsdManager` browses for `_remoteman._udp` (docs/PROTOCOL.md, "Finding a host") with a
+  Wi-Fi multicast lock held; Android 14+ resolves with `registerServiceInfoCallback`, older
+  versions one `resolveService` at a time. Computers found that this device doesn't have (by
+  key start or address) are listed under Nearby; Pair adds one at the address it was found at
+  (IPv4 first) and connects, which is the usual pairing (the code on both screens). A saved
+  computer whose key starts with an advertised `fp` gets a green dot ("on this network"), and
+  its network cards (`mac`) are remembered. Not seeing one says nothing (a VPN, another network).
+  On Android 17 looking needs `ACCESS_LOCAL_NETWORK` too: until it's allowed, Nearby shows a
+  "Find computers nearby" button that asks.
+- **Wake**: a saved computer with known cards that isn't in sight gets "Wake and connect"
+  (phone: its ⋮ menu; TV: its settings, by holding OK), as does "Can't connect" when it didn't
+  answer. The magic packet (six 0xFF, the card sixteen times) goes to the network's broadcast
+  address, 255.255.255.255 and the computer's last IPv4 address, on UDP ports 9 and 7; ten
+  seconds later the app connects (Cancel on the list stops that).
+- Not yet (each has a marked place in the session's controls): sound, microphone, camera,
+  clipboard, files.
+
 Versions: Compose BOM 2026.09.00 (2026.11.01 wants compileSdk 37.1, not installed here),
 tv-material 1.1.0, the Compose compiler plugin 2.4.21, which raises AGP 9.5.1's built-in
 Kotlin (2.2.10) to the same version.
@@ -120,6 +138,10 @@ Or open `android/` in Android Studio after running `build-core.sh` once.
 
 For Google Play (the release bundle, the upload key, the icon and TV banner, and what is done
 in Play Console): [RELEASE.md](RELEASE.md).
+
+`./gradlew testDebugUnitTest` runs the unit tests (what needs no Android: the advertisement's
+records, the key match, the address chosen, the waking packet's bytes and its sending, broadcast
+addresses).
 
 ## Trying it against a throwaway host
 

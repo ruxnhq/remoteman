@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: a pretend host advertising _remoteman._udp, for trying Nearby where no
+     real host's advertisement can reach (the emulator's network is NAT'd). See android/README.md. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name=".FakeHostActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+    </application>
+</manifest>
