@@ -64,19 +64,27 @@ async fn portals_for_kde(conn: &Connection) {
     let (d, p, i, m) = manager("SetEnvironment");
     let _ = conn.call_method(d, p, i, m, &(vec!["XDG_CURRENT_DESKTOP=KDE"],)).await;
     // Already running without it? Then it has no remote desktop.
-    let has_remote = Proxy::new(conn, PORTAL, PORTAL_PATH, REMOTE).await.ok();
-    let has_remote = match has_remote {
-        Some(p) => p.get_property::<u32>("version").await.is_ok(),
-        None => false,
-    };
-    if has_remote {
+    // (A connection of its own for each look: zbus keeps what a proxy read the first time.)
+    async fn has_remote() -> bool {
+        let Ok(c) = Connection::session().await else { return false };
+        let Ok(p) = Proxy::new(&c, PORTAL, PORTAL_PATH, REMOTE).await else { return false };
+        p.get_property::<u32>("version").await.is_ok()
+    }
+    if has_remote().await {
         return;
     }
     for unit in ["plasma-xdg-desktop-portal-kde.service", "xdg-desktop-portal.service"] {
         let (d, p, i, m) = manager("TryRestartUnit");
         let _ = conn.call_method(d, p, i, m, &(unit, "replace")).await;
     }
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Until the restarted portal offers remote desktop (5 s at most).
+    for _ in 0..25 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if has_remote().await {
+            return;
+        }
+    }
+    tracing::warn!("the portal still offers no remote desktop for this session");
 }
 
 /// Let this host control this session's desktop without KDE asking: the permission store's
@@ -176,6 +184,15 @@ impl VirtualDisplay {
 
     /// `beside`: a second display for a client, whose first is among the screens to sit beside.
     async fn make(cursor_apart: bool, beside: bool, mirror: bool) -> Result<Self> {
+        // Portals that would serve this session as something other than KDE's are put right
+        // first, on a connection of their own: putting them right may restart the portal, and
+        // a restarted portal no longer knows who we said we were (KDE then asks on the
+        // computer's screen for "an unidentifiable application", seen on Plasma Login's login
+        // screen). Nor may this connection have spoken to the portal before saying who we are.
+        if !likely() {
+            let first = Connection::session().await.context("session bus")?;
+            portals_for_kde(&first).await;
+        }
         let conn = Connection::session().await.context("session bus")?;
         // Say who we are before anything else on this connection: otherwise the portal names
         // us after our systemd unit, which for a service is nobody.
@@ -183,9 +200,6 @@ impl VirtualDisplay {
         // would name us on that.)
         if let Err(e) = conn.call_method(Some(PORTAL), PORTAL_PATH, Some("org.freedesktop.host.portal.Registry"), "Register", &(APP_ID, HashMap::<&str, Value>::new())).await {
             tracing::warn!("couldn't register as {APP_ID} with the portal (is the host app installed?): {e}");
-        }
-        if !likely() {
-            portals_for_kde(&conn).await;
         }
         // The computer's own screens, before ours: KWin keeps a layout for each set of
         // screens, and ours always has the same name, so a session that turned them off would
