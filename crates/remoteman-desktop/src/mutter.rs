@@ -266,7 +266,7 @@ impl VirtualDisplay {
 }
 
 /// The X keysym for a character: Latin-1 as itself, control keys by name, the rest as Unicode.
-fn keysym(c: char) -> u32 {
+pub(crate) fn keysym(c: char) -> u32 {
     match c {
         '\n' | '\r' => 0xff0d,
         '\t' => 0xff09,

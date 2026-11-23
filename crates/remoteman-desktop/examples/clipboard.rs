@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use remoteman_desktop::clipboard::{Changes, Clipboard, DEFAULT_CAP, TooLarge, text_type};
-use remoteman_desktop::mutter::VirtualDisplay;
+use remoteman_desktop::VirtualDisplay;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 

@@ -37,9 +37,97 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::pipe;
 use tokio::sync::watch;
 use zbus::Proxy;
-use zbus::zvariant::{self, OwnedValue, Value};
+use zbus::zvariant::{self, OwnedObjectPath, OwnedValue, Value};
 
-use crate::mutter::VirtualDisplay;
+use crate::VirtualDisplay;
+
+/// Where the clipboard calls go: Mutter's remote-desktop session, or the portal's Clipboard
+/// interface for a portal session (KDE). The portal's calls are Mutter's with the session
+/// handle first, its option names have `_` where Mutter's have `-`, and it has no turning on
+/// and off: the clipboard is asked for when the session is made.
+#[derive(Clone)]
+enum Bus {
+    Mutter(Proxy<'static>),
+    Portal { clip: Proxy<'static>, session: OwnedObjectPath },
+}
+
+impl Bus {
+    async fn enable(&self) -> zbus::Result<()> {
+        match self {
+            Self::Mutter(p) => p.call("EnableClipboard", &(HashMap::<&str, Value>::new(),)).await,
+            Self::Portal { .. } => Ok(()),
+        }
+    }
+
+    async fn disable(&self) -> zbus::Result<()> {
+        match self {
+            Self::Mutter(p) => p.call("DisableClipboard", &()).await,
+            Self::Portal { .. } => Ok(()),
+        }
+    }
+
+    async fn read(&self, mime: &str) -> zbus::Result<zvariant::OwnedFd> {
+        match self {
+            Self::Mutter(p) => p.call("SelectionRead", &(mime,)).await,
+            Self::Portal { clip, session } => clip.call("SelectionRead", &(session, mime)).await,
+        }
+    }
+
+    async fn set(&self, types: Vec<&str>) -> zbus::Result<()> {
+        let mut options = HashMap::new();
+        match self {
+            Self::Mutter(p) => {
+                options.insert("mime-types", Value::from(types));
+                p.call("SetSelection", &(options,)).await
+            }
+            Self::Portal { clip, session } => {
+                options.insert("mime_types", Value::from(types));
+                clip.call("SetSelection", &(session, options)).await
+            }
+        }
+    }
+
+    async fn write(&self, serial: u32) -> zbus::Result<zvariant::OwnedFd> {
+        match self {
+            Self::Mutter(p) => p.call("SelectionWrite", &(serial,)).await,
+            Self::Portal { clip, session } => clip.call("SelectionWrite", &(session, serial)).await,
+        }
+    }
+
+    async fn write_done(&self, serial: u32, ok: bool) -> zbus::Result<()> {
+        match self {
+            Self::Mutter(p) => p.call("SelectionWriteDone", &(serial, ok)).await,
+            Self::Portal { clip, session } => clip.call("SelectionWriteDone", &(session, serial, ok)).await,
+        }
+    }
+
+    /// The clipboard's signals and the session's end, as one stream.
+    async fn signals(&self) -> Result<std::pin::Pin<Box<dyn stream::Stream<Item = Signal> + Send>>> {
+        Ok(match self {
+            Self::Mutter(p) => {
+                let owner = p.receive_signal("SelectionOwnerChanged").await?.map(|m| m.body().deserialize::<HashMap<String, OwnedValue>>().map_or(Signal::Other, Signal::Owner));
+                let transfer = p.receive_signal("SelectionTransfer").await?.map(|m| m.body().deserialize::<(String, u32)>().map_or(Signal::Other, |(t, s)| Signal::Transfer(t, s)));
+                let closed = p.receive_signal("Closed").await?.map(|_| Signal::Closed);
+                Box::pin(stream::select(stream::select(owner, transfer), closed))
+            }
+            Self::Portal { clip, session } => {
+                let ours = session.clone();
+                let owner = clip.receive_signal("SelectionOwnerChanged").await?.map(move |m| match m.body().deserialize::<(OwnedObjectPath, HashMap<String, OwnedValue>)>() {
+                    Ok((s, options)) if s == ours => Signal::Owner(options),
+                    _ => Signal::Other,
+                });
+                let ours = session.clone();
+                let transfer = clip.receive_signal("SelectionTransfer").await?.map(move |m| match m.body().deserialize::<(OwnedObjectPath, String, u32)>() {
+                    Ok((s, t, serial)) if s == ours => Signal::Transfer(t, serial),
+                    _ => Signal::Other,
+                });
+                let s = Proxy::new(clip.connection(), "org.freedesktop.portal.Desktop", session.clone(), "org.freedesktop.portal.Session").await?;
+                let closed = s.receive_signal("Closed").await?.map(|_| Signal::Closed);
+                Box::pin(stream::select(stream::select(owner, transfer), closed))
+            }
+        })
+    }
+}
 
 /// The most a single [`Clipboard::read`] takes unless told otherwise: 8 MiB.
 pub const DEFAULT_CAP: usize = 8 << 20;
@@ -138,7 +226,7 @@ impl Changes {
 ///
 /// It works until the display is closed. Dropping it turns sharing off.
 pub struct Clipboard {
-    session: Proxy<'static>,
+    session: Bus,
     shared: Arc<Shared>,
     cap: usize,
     /// One at a time for turning on, turning off and offering.
@@ -154,12 +242,18 @@ impl Clipboard {
     ///
     /// Needs a tokio runtime with I/O enabled, as the rest of this crate does.
     pub async fn new(display: &VirtualDisplay, cap: usize) -> Result<(Self, Changes)> {
-        let session = display.session().clone();
+        let session = match display {
+            VirtualDisplay::Gnome(d) => Bus::Mutter(d.session().clone()),
+            VirtualDisplay::Kde(d) => {
+                if !d.clipboard {
+                    bail!("the desktop didn't let the clipboard in for this session");
+                }
+                let (conn, session) = d.session();
+                Bus::Portal { clip: Proxy::new(conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", crate::kde::CLIPBOARD).await?, session: session.clone() }
+            }
+        };
         // Listening before turning it on, so the first announcement isn't missed.
-        let owner = session.receive_signal("SelectionOwnerChanged").await?;
-        let transfer = session.receive_signal("SelectionTransfer").await?;
-        let closed = session.receive_signal("Closed").await?;
-        let events = stream::select(stream::select(owner.map(Signal::Owner), transfer.map(Signal::Transfer)), closed.map(|_| Signal::Closed));
+        let events = session.signals().await?;
         let shared = Arc::new(Shared::default());
         let (changed, changes) = watch::channel(Vec::new());
         let listener = tokio::spawn(listen(session.clone(), shared.clone(), changed, events));
@@ -175,8 +269,7 @@ impl Clipboard {
             return Ok(());
         }
         self.shared.theirs.lock().unwrap().clear();
-        let options = HashMap::<&str, Value>::new();
-        if let Err(e) = self.session.call::<_, _, ()>("EnableClipboard", &(options,)).await {
+        if let Err(e) = self.session.enable().await {
             self.shared.on.store(false, Ordering::SeqCst);
             return Err(e).context("turn clipboard sharing on");
         }
@@ -193,7 +286,7 @@ impl Clipboard {
         }
         self.shared.offer.lock().unwrap().take();
         self.shared.theirs.lock().unwrap().clear();
-        self.session.call::<_, _, ()>("DisableClipboard", &()).await.context("turn clipboard sharing off")
+        self.session.disable().await.context("turn clipboard sharing off")
     }
 
     /// Read what an app on the desktop copied, as one of the types last reported. Fails with
@@ -209,7 +302,7 @@ impl Clipboard {
         if !self.shared.theirs.lock().unwrap().iter().any(|t| t == mime) {
             bail!("the desktop's clipboard doesn't hold {mime}");
         }
-        let fd: zvariant::OwnedFd = self.session.call("SelectionRead", &(mime,)).await.context("ask for the clipboard's content")?;
+        let fd: zvariant::OwnedFd = self.session.read(mime).await.context("ask for the clipboard's content")?;
         let from = pipe::Receiver::from_owned_fd(OwnedFd::from(fd)).context("the clipboard's pipe")?;
         let mut data = Vec::new();
         // One byte past the cap tells too much from exactly enough. Dropping the pipe then
@@ -238,11 +331,9 @@ impl Clipboard {
             bail!("clipboard sharing is off");
         }
         let offer = Arc::new(Offer::new(items));
-        let mut options = HashMap::new();
-        options.insert("mime-types", Value::from(offer.types()));
         // In place before Mutter hears of it: its first paste follows at once.
         let before = self.shared.offer.lock().unwrap().replace(offer.clone());
-        if let Err(e) = self.session.call::<_, _, ()>("SetSelection", &(options,)).await {
+        if let Err(e) = self.session.set(offer.types()).await {
             *self.shared.offer.lock().unwrap() = before;
             return Err(e).context("offer to the desktop's clipboard");
         }
@@ -257,46 +348,47 @@ impl Drop for Clipboard {
         if self.shared.on.swap(false, Ordering::SeqCst) {
             let session = self.session.clone();
             self.runtime.spawn(async move {
-                let _ = session.call::<_, _, ()>("DisableClipboard", &()).await;
+                let _ = session.disable().await;
             });
         }
     }
 }
 
 enum Signal {
-    Owner(zbus::Message),
-    Transfer(zbus::Message),
+    Owner(HashMap<String, OwnedValue>),
+    Transfer(String, u32),
     Closed,
+    /// Another session's, or one that didn't read.
+    Other,
 }
 
 /// Follow the session's clipboard signals until the session closes.
-async fn listen(session: Proxy<'static>, shared: Arc<Shared>, changed: watch::Sender<Vec<String>>, mut events: impl stream::Stream<Item = Signal> + Unpin) {
+async fn listen(session: Bus, shared: Arc<Shared>, changed: watch::Sender<Vec<String>>, mut events: impl stream::Stream<Item = Signal> + Unpin) {
     while let Some(signal) = events.next().await {
         match signal {
-            Signal::Owner(msg) => {
-                let Ok(options) = msg.body().deserialize::<HashMap<String, OwnedValue>>() else { continue };
+            Signal::Owner(options) => {
                 // Held to the end, so that once `disable` has returned nothing more is reported.
                 let mut theirs = shared.theirs.lock().unwrap();
                 if !shared.on.load(Ordering::SeqCst) {
                     continue;
                 }
                 // Our own offer coming back. Not news, and not ours to read.
-                if options.get("session-is-owner").and_then(|v| bool::try_from(v).ok()).unwrap_or(false) {
+                if options.get("session-is-owner").or_else(|| options.get("session_is_owner")).and_then(|v| bool::try_from(v).ok()).unwrap_or(false) {
                     theirs.clear();
                     continue;
                 }
                 // No types at all: the clipboard is empty.
-                let types = options.get("mime-types").map(|v| strings(v)).unwrap_or_default();
+                let types = options.get("mime-types").or_else(|| options.get("mime_types")).map(|v| strings(v)).unwrap_or_default();
                 *theirs = types.clone();
                 let _ = changed.send(types);
             }
-            Signal::Transfer(msg) => {
-                let Ok((mime, serial)) = msg.body().deserialize::<(String, u32)>() else { continue };
+            Signal::Transfer(mime, serial) => {
                 let offer = shared.offer.lock().unwrap().clone();
                 // Each paste on its own, so an app slow to take one doesn't hold up the rest.
                 tokio::spawn(answer(session.clone(), offer, mime, serial));
             }
             Signal::Closed => break,
+            Signal::Other => {}
         }
     }
     // The session took its clipboard with it. Dropping `changed` ends `Changes`.
@@ -308,16 +400,16 @@ async fn listen(session: Proxy<'static>, shared: Arc<Shared>, changed: watch::Se
 /// Answer one paste: write the bytes of the type asked for into the pipe Mutter gives for it.
 /// Every paste gets an answer, a "no" included, or the app pasting would wait out Mutter's
 /// 15 seconds.
-async fn answer(session: Proxy<'static>, offer: Option<Arc<Offer>>, mime: String, serial: u32) {
+async fn answer(session: Bus, offer: Option<Arc<Offer>>, mime: String, serial: u32) {
     let sent = async {
         let data = offer.as_deref().and_then(|o| o.get(&mime))?;
-        let fd: zvariant::OwnedFd = session.call("SelectionWrite", &(serial,)).await.ok()?;
+        let fd: zvariant::OwnedFd = session.write(serial).await.ok()?;
         let mut to = pipe::Sender::from_owned_fd(OwnedFd::from(fd)).ok()?;
         tokio::time::timeout(PATIENCE, to.write_all(data)).await.ok()?.ok()
         // The pipe closes here, which is how the app knows it has everything.
     };
     let sent = sent.await.is_some();
-    let _ = session.call::<_, _, ()>("SelectionWriteDone", &(serial, sent)).await;
+    let _ = session.write_done(serial, sent).await;
 }
 
 /// The strings in a list, or in a list wrapped in a struct: Mutter 51.1 sends the types of

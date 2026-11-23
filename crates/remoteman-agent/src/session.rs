@@ -12,7 +12,7 @@ use remoteman_core::media::{BLOB_CLIPBOARD, BLOB_FILE, CLIPBOARD_LIMIT, Clipboar
 use remoteman_desktop::clipboard::{self, Clipboard};
 use remoteman_audio::{DefaultSink, MicSource, SpeakerSink};
 use remoteman_core::{BlobEvent, Display, Event, Message, Mode, Packet, Side};
-use remoteman_desktop::mutter::VirtualDisplay;
+use remoteman_desktop::VirtualDisplay;
 
 use crate::pipeline::{Pipeline, Settings};
 
@@ -272,7 +272,7 @@ impl Agent {
         };
         // Mirroring: the picture is the monitor's, at its size and scale, and no faster
         // than the client asked for.
-        if let Some(m) = desktop.mirrored {
+        if let Some(m) = desktop.mirrored() {
             if m.width % 2 != 0 || m.height % 2 != 0 {
                 self.runtime.block_on(desktop.close());
                 return Err(format!("this computer's monitor is {} by {}: an odd size can't be sent", m.width, m.height));
@@ -281,8 +281,12 @@ impl Agent {
             refresh = refresh.min(m.refresh.clamp(1, 240));
             tracing::info!(width = m.width, height = m.height, refresh, "mirroring this computer's main monitor");
         }
+        // (KDE: before the stream connects, or it is held to the monitor's first 60 Hz.)
+        if let Err(e) = self.runtime.block_on(desktop.prepare(screen.width, screen.height, screen.scale, refresh)) {
+            tracing::warn!("couldn't give the display its refresh rate and scale: {e:#}");
+        }
         let settings = Settings {
-            node: desktop.node,
+            node: desktop.node(),
             width: screen.width,
             height: screen.height,
             fps: refresh,
@@ -436,7 +440,10 @@ impl Agent {
         let second = l.link.second();
         // Said before its first frame can be sent.
         second.restart(Accept { mode: l.mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
-        let settings = Settings { node: desktop.node, width: screen.width, height: screen.height, fps: refresh, scale: screen.scale.clamp(1.0, 4.0), mode: l.mode, bitrate: self.bitrate.min(40_000_000), cursor: false, refs: self.refs };
+        if let Err(e) = self.runtime.block_on(desktop.prepare(screen.width, screen.height, screen.scale, refresh)) {
+            tracing::warn!("couldn't give the second display its refresh rate and scale: {e:#}");
+        }
+        let settings = Settings { node: desktop.node(), width: screen.width, height: screen.height, fps: refresh, scale: screen.scale.clamp(1.0, 4.0), mode: l.mode, bitrate: self.bitrate.min(40_000_000), cursor: false, refs: self.refs };
         let pipeline = match Pipeline::start(settings, second) {
             Ok(p) => p,
             Err(e) => {
@@ -761,7 +768,7 @@ impl Agent {
         // first frame.
         let mut screen = screen;
         if screen.placement == remoteman_core::Placement::Mirror {
-            if let Ok(m) = self.runtime.block_on(remoteman_desktop::mutter::mirror_target()) {
+            if let Ok(m) = self.runtime.block_on(remoteman_desktop::mirror_target()) {
                 (screen.width, screen.height, screen.scale, screen.refresh) = (m.width, m.height, m.scale, screen.refresh.min(m.refresh));
             }
         }
