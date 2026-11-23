@@ -196,6 +196,10 @@ private fun Ended(model: AppModel, p: Phase.Ended) {
             Text(when { p.keyChanged -> "Forget the key and pair again"; p.mustPairAgain -> "Pair again"; p.leftApp || p.byHost -> "Connect again"; else -> "Try again" })
         }
     }
+    // It didn't answer: it may be asleep, and its cards are known.
+    if (c != null && p.retry && !p.byHost && !p.mustPairAgain && !p.keyChanged && model.canWake(c)) {
+        OutlinedButton(onClick = { model.wake(c) }, modifier = Modifier.fillMaxWidth()) { Text("Wake it and connect") }
+    }
     OutlinedButton(onClick = { model.leaveSession() }, modifier = Modifier.fillMaxWidth()) { Text("Back to computers") }
 }
 

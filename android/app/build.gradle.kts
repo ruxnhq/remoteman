@@ -84,4 +84,7 @@ dependencies {
     implementation("androidx.camera:camera-view:1.7.0")
     implementation("androidx.camera:camera-mlkit-vision:1.7.0")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
+
+    // Unit tests on this computer (./gradlew testDebugUnitTest): what needs no Android.
+    testImplementation("junit:junit:4.13.2")
 }

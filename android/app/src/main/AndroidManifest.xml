@@ -3,6 +3,8 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Finding computers nearby (mDNS): Wi-Fi passes multicast on only while the app holds a lock. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <!-- Android 17 and later: without it, sockets to addresses on the local network are refused
          (sendmsg fails with EPERM). Asked for before the first connection. -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />

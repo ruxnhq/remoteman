@@ -28,7 +28,11 @@ data class Computer(
     val fingerprint: String? = null,
     /** From a scanned pairing code: the key this computer must show on its first connection. */
     val expect: String? = null,
+    /** Its network cards' hardware addresses (comma-separated), as last seen advertised: for waking it. */
+    val cards: String? = null,
 ) {
+    val cardList: List<String> get() = cards?.split(',')?.filter { it.isNotBlank() }.orEmpty()
+
     val osLine: String
         get() = when (os) {
             "linux" -> "Linux"
@@ -66,6 +70,7 @@ data class Computer(
         put("paired", paired)
         fingerprint?.let { put("fingerprint", it) }
         expect?.let { put("expect", it) }
+        cards?.let { put("cards", it) }
     }
 
     companion object {
@@ -80,6 +85,7 @@ data class Computer(
             paired = o.optBoolean("paired"),
             fingerprint = o.optString("fingerprint").ifEmpty { null },
             expect = o.optString("expect").ifEmpty { null },
+            cards = o.optString("cards").ifEmpty { null },
         )
     }
 }

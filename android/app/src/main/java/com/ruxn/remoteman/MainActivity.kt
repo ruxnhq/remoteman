@@ -48,7 +48,11 @@ class MainActivity : ComponentActivity() {
                 else -> "phone"
             }
         }
-        model = AppModel(store, Prefs(this), session, isTv, ::withLocalNetwork, ::displayRequest)
+        model = AppModel(
+            store, Prefs(this), session, isTv, ::withLocalNetwork, ::displayRequest, Nearby(this),
+            localNetworkAllowed = { Build.VERSION.SDK_INT < 37 || checkSelfPermission(LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED },
+            sendWake = { cards, last -> Nearby.wake(this, cards, last) },
+        )
         intent?.let(::openLink)
         // The volume keys set the volume the computer's sound plays at, even between sounds.
         volumeControlStream = AudioManager.STREAM_MUSIC
@@ -169,6 +173,11 @@ class MainActivity : ComponentActivity() {
         super.onWindowFocusChanged(hasFocus)
         // Held buttons would stay held on the computer while something else has the input.
         if (!hasFocus) model.session.gamepads.release() else model.session.regainSound()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        model.appStarted()
     }
 
     override fun onStop() {

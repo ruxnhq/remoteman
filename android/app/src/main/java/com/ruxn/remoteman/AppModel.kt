@@ -1,5 +1,7 @@
 package com.ruxn.remoteman
 
+import android.os.Handler
+import android.os.Looper
 import android.view.Surface
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -32,7 +34,14 @@ class AppModel(
     /** Asks for ACCESS_LOCAL_NETWORK if it's needed, then runs the block (or not, if refused). */
     private val withLocalNetwork: (then: () -> Unit, refused: () -> Unit) -> Unit,
     private val displayRequest: () -> DisplayRequest,
+    /** Computers advertising on this network; looked for while the computers screen is in sight. */
+    val nearby: Nearby,
+    /** Whether the app may reach the local network now (always, before Android 17). */
+    private val localNetworkAllowed: () -> Boolean,
+    /** Sends the waking packet for these cards (blocking); how many packets left. */
+    private val sendWake: (cards: List<String>, lastAddress: String?) -> Int,
 ) {
+    private val main = Handler(Looper.getMainLooper())
     val stack = mutableStateListOf<Screen>(Screen.Computers)
     val screen: Screen get() = stack.last()
 
@@ -51,6 +60,19 @@ class AppModel(
     var keyboard by mutableStateOf(false)
     /** A note for the computers list, like a scanned code that wasn't a remoteman one. */
     var note by mutableStateOf<String?>(null)
+    /** A passing word for the computers list, like "Waking blackbox: connecting in ten seconds". */
+    var info by mutableStateOf<String?>(null)
+    /** Looking nearby is wanted but Android 17 hasn't been allowed the local network yet. */
+    var nearbyNeedsPermission by mutableStateOf(false)
+        private set
+
+    private var nearbyWanted = false
+    private var started = true
+    private var wakeThenConnect: Runnable? = null
+
+    init {
+        nearby.changed = ::rememberCards
+    }
 
     private var surface: Surface? = null
     private var pending: Computer? = null
@@ -97,8 +119,10 @@ class AppModel(
     }
 
     fun connect(c: Computer) {
+        cancelWake()
         withLocalNetwork({
             note = null
+            info = null
             controls = false
             keyboard = false
             pending = c
@@ -148,8 +172,104 @@ class AppModel(
 
     /** The app is out of sight: the session ends cleanly, and coming back offers to reconnect. */
     fun appStopped() {
+        started = false
+        updateNearby()
+        cancelWake()
         pending = null
         keyboard = false
         if (session.active) session.stop(leftApp = true)
+    }
+
+    fun appStarted() {
+        started = true
+        updateNearby()
+    }
+
+    // Nearby: computers advertising on this network.
+
+    /** The computers screen is in sight (or not): look nearby while it is. */
+    fun lookNearby(on: Boolean) {
+        nearbyWanted = on
+        updateNearby()
+    }
+
+    /** The person asked to look: ask Android 17 for the local network first. */
+    fun allowNearby() {
+        withLocalNetwork({ updateNearby() }, {
+            note = "remoteman needs to reach computers on this network to find them. Allow it in Settings, Apps, remoteman, Permissions."
+        })
+    }
+
+    private fun updateNearby() {
+        val run = nearbyWanted && started
+        nearbyNeedsPermission = run && !localNetworkAllowed()
+        if (run && !nearbyNeedsPermission) nearby.start() else nearby.stop()
+    }
+
+    /** This saved computer, if it is advertising on this network now. */
+    fun seen(c: Computer): Found? = nearby.found.firstOrNull { it.isKey(c.fingerprint ?: c.expect) }
+
+    /** Computers advertising here that this device doesn't have (by key, or by address). */
+    val nearbyNew: List<Found>
+        get() = nearby.found.filter { f ->
+            store.computers.none { c -> f.isKey(c.fingerprint ?: c.expect) || (f.address != null && c.address.equals(f.address, ignoreCase = true)) }
+        }
+
+    /** Pair with a computer found nearby: add it at the address it was found at, and connect. */
+    fun pairNearby(f: Found) {
+        val address = f.address ?: return
+        var c = store.add(f.name, address)
+        if (f.cards.isNotEmpty()) c = c.copy(cards = f.cards.joinToString(",")).also(store::update)
+        connect(c)
+    }
+
+    /** Keep the network cards of saved computers in sight, to wake them another day. */
+    private fun rememberCards() {
+        for (c in store.computers.toList()) {
+            val f = seen(c) ?: continue
+            val cards = f.cards.joinToString(",").ifEmpty { null } ?: continue
+            if (c.cards != cards) store.update(c.copy(cards = cards))
+        }
+    }
+
+    /** Whether waking [c] can be tried: its cards are known and it isn't in sight. */
+    fun canWake(c: Computer): Boolean = c.cardList.isNotEmpty() && seen(c) == null
+
+    /** Wake [c] with the magic packet, then connect ten seconds later. */
+    fun wake(c: Computer) {
+        val cards = c.cardList
+        if (cards.isEmpty()) return
+        withLocalNetwork({
+            Thread {
+                val sent = sendWake(cards, c.address)
+                main.post { woken(c, sent) }
+            }.start()
+        }, {
+            note = "remoteman needs to reach computers on this network. Allow it in Settings, Apps, remoteman, Permissions."
+        })
+    }
+
+    private fun woken(c: Computer, sent: Int) {
+        if (screen == Screen.Session && !session.active) leaveSession()
+        if (sent == 0) {
+            note = "${c.name} can't be woken from here: the waking packet couldn't be sent."
+            return
+        }
+        cancelWake()
+        note = null
+        info = "Waking ${c.name}: connecting in ten seconds."
+        val r = Runnable {
+            wakeThenConnect = null
+            info = null
+            if (!session.active) store.get(c.id)?.let(::connect)
+        }
+        wakeThenConnect = r
+        main.postDelayed(r, 10_000)
+    }
+
+    /** Don't connect after waking after all. */
+    fun cancelWake() {
+        wakeThenConnect?.let { main.removeCallbacks(it); info = null }
+        wakeThenConnect = null
     }
 }

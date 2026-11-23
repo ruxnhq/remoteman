@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -30,6 +31,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -48,6 +51,8 @@ import androidx.tv.material3.Text
 import com.ruxn.remoteman.AppModel
 import com.ruxn.remoteman.Computer
 import com.ruxn.remoteman.Decoders
+import com.ruxn.remoteman.Found
+import com.ruxn.remoteman.phone.OnlineGreen
 import com.ruxn.remoteman.Placement
 import com.ruxn.remoteman.Resolution
 import com.ruxn.remoteman.Screen
@@ -69,6 +74,12 @@ private fun Title(text: String, sub: String? = null) {
 fun TvComputers(model: AppModel) {
     val computers = model.store.computers.sortedByDescending { it.lastUsed ?: it.added }
     val first = rememberInitialFocus()
+    // Look for computers on this network while this screen is in sight.
+    DisposableEffect(Unit) {
+        model.lookNearby(true)
+        onDispose { model.lookNearby(false) }
+    }
+    val nearby = model.nearbyNew
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
             Box(Modifier.weight(1f)) {
@@ -81,10 +92,16 @@ fun TvComputers(model: AppModel) {
             }
         }
         model.note?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 16.dp)) }
+        model.info?.let { info ->
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.padding(bottom = 8.dp)) {
+                Text(info, style = MaterialTheme.typography.bodyLarge)
+                OutlinedButton(onClick = { model.cancelWake() }) { Text("Cancel") }
+            }
+        }
         LazyRow(horizontalArrangement = Arrangement.spacedBy(24.dp), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp)) {
             items(computers, key = { it.id }) { c ->
                 ComputerCard(
-                    c, Modifier.then(if (c == computers.first()) Modifier.focusRequester(first) else Modifier),
+                    c, model.seen(c) != null, Modifier.then(if (c == computers.first()) Modifier.focusRequester(first) else Modifier),
                     onClick = { model.connect(c) }, onLongClick = { model.push(Screen.Computer(c.id)) },
                 )
             }
@@ -100,16 +117,55 @@ fun TvComputers(model: AppModel) {
                 }
             }
         }
+        // Nearby: computers advertising on this network that this TV doesn't have.
+        Text("Nearby", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 16.dp))
+        Text(
+            when {
+                model.nearbyNeedsPermission -> "remoteman can find computers on this network once it may reach them."
+                nearby.isNotEmpty() -> "Running remoteman on this network, not paired with this TV. OK pairs."
+                model.nearby.looking -> "Looking for computers running remoteman on this network…"
+                else -> "Not looking: this TV may not be on a network."
+            },
+            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (model.nearbyNeedsPermission) {
+            OutlinedButton(onClick = { model.allowNearby() }, modifier = Modifier.padding(top = 12.dp, start = 16.dp)) { Text("Find computers nearby") }
+        }
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(24.dp), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp)) {
+            items(nearby, key = { it.name }) { f -> NearbyCard(f, onClick = { model.pairNearby(f) }) }
+        }
+    }
+}
+
+/** The dot of a computer seen on this network now. */
+@Composable
+private fun OnlineDot() {
+    Box(Modifier.size(12.dp).background(OnlineGreen, CircleShape))
+}
+
+@Composable
+private fun NearbyCard(f: Found, onClick: () -> Unit) {
+    Card(onClick = { if (f.address != null) onClick() }, modifier = Modifier.size(280.dp, 158.dp)) {
+        Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.SpaceBetween) {
+            Text(f.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Column {
+                if (f.os.isNotEmpty()) Text(f.osLine, style = MaterialTheme.typography.bodyMedium)
+                Text(if (f.address != null) "Pair with this TV" else "Finding its address…", style = MaterialTheme.typography.bodySmall)
+            }
+        }
     }
 }
 
 @Composable
-private fun ComputerCard(c: Computer, modifier: Modifier, onClick: () -> Unit, onLongClick: () -> Unit) {
+private fun ComputerCard(c: Computer, online: Boolean, modifier: Modifier, onClick: () -> Unit, onLongClick: () -> Unit) {
     Card(onClick = onClick, onLongClick = onLongClick, modifier = modifier.size(280.dp, 158.dp)) {
         Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.SpaceBetween) {
             Text(c.name, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Column {
-                Text(c.osLine, style = MaterialTheme.typography.bodyMedium)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (online) OnlineDot()
+                    Text(if (online) "${c.osLine} · on this network" else c.osLine, style = MaterialTheme.typography.bodyMedium)
+                }
                 Text(c.usedLine() ?: if (c.paired) c.address else "Not paired yet", style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -222,6 +278,7 @@ fun TvComputer(model: AppModel, id: String) {
         Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Title(c.name, listOfNotNull(c.address, c.os?.let { c.osLine }, c.usedLine() ?: if (!c.paired) "Not paired yet" else null).joinToString(" · "))
             Button(onClick = { model.connect(c) }, modifier = Modifier.focusRequester(focus)) { Text("Connect") }
+            if (model.canWake(c)) OutlinedButton(onClick = { model.pop(); model.wake(c) }) { Text("Wake and connect") }
             if (!confirm) {
                 OutlinedButton(onClick = { confirm = true }) { Text("Forget this computer") }
             } else {
