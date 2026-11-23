@@ -223,6 +223,34 @@ class BenchActivity : Activity() {
         return out
     }
 
+    /**
+     * [src] made [w]×[h] by averaging every pixel that falls in each new one, as FFmpeg's
+     * `flags=area` does for the reference. Bilinear filtering from a phone's 2340-pixel-wide copy
+     * aliases the test picture's fine text and reads a right picture as 20 to 25 dB.
+     */
+    private fun shrink(src: Bitmap, w: Int, h: Int): Bitmap {
+        val sw = src.width
+        val sh = src.height
+        val px = IntArray(sw * sh).also { src.getPixels(it, 0, sw, 0, 0, sw, sh) }
+        val out = IntArray(w * h)
+        for (y in 0 until h) {
+            val y0 = y * sh / h
+            val y1 = maxOf(y0 + 1, (y + 1) * sh / h)
+            for (x in 0 until w) {
+                val x0 = x * sw / w
+                val x1 = maxOf(x0 + 1, (x + 1) * sw / w)
+                var r = 0L; var g = 0L; var b = 0L
+                for (yy in y0 until y1) for (xx in x0 until x1) {
+                    val c = px[yy * sw + xx]
+                    r += (c shr 16) and 255; g += (c shr 8) and 255; b += c and 255
+                }
+                val n = (y1 - y0) * (x1 - x0)
+                out[y * w + x] = (0xFF shl 24) or ((r / n).toInt() shl 16) or ((g / n).toInt() shl 8) or (b / n).toInt()
+            }
+        }
+        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
+    }
+
     /** The screen's picture against FFmpeg's last frame, both at 480x270. */
     private fun screenPsnr(name: String): Double {
         val shot = Bitmap.createBitmap(picture.width, picture.height, Bitmap.Config.ARGB_8888)
@@ -234,7 +262,7 @@ class BenchActivity : Activity() {
         thread.quitSafely()
         check(status == PixelCopy.SUCCESS) { "PixelCopy failed ($status)" }
         val ref = assets.open("recordings/$name.png").use { BitmapFactory.decodeStream(it) }
-        val small = Bitmap.createScaledBitmap(shot, ref.width, ref.height, true)
+        val small = shrink(shot, ref.width, ref.height)
         // Kept for looking at: files/screen-NAME.png.
         File(filesDir, "screen-$name.png").outputStream().use { small.compress(Bitmap.CompressFormat.PNG, 100, it) }
         var sum = 0.0
