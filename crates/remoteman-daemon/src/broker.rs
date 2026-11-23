@@ -398,6 +398,21 @@ impl Broker {
             Some(uid) => self.0.agent_of(uid),
             None => self.0.state.lock().unwrap().agents.keys().next_back().copied(),
         });
+        // With Plasma Login, an agent whose user has no graphical session left (or only one
+        // closing: they have just logged out) is on its way out and would never answer; the
+        // device goes to the login screen instead.
+        let found = match (found, &self.0.login, user) {
+            (Some(id), Some(Login { way: Way::Plasma(plasma), runtime, .. }), Some(uid)) => {
+                let alive = runtime.block_on(plasma.graphical()).map_or(true, |sessions| sessions.iter().any(|s| s.uid == uid && s.class == "user"));
+                if alive {
+                    Some(id)
+                } else {
+                    tracing::info!(agent = id, uid, "the device's owner has no session left (logging out): to the login screen");
+                    None
+                }
+            }
+            (found, _, _) => found,
+        };
         // A device set to come only into a session that is already running is not shown a
         // login screen, nor logged in by its key.
         if found.is_none() && client.attach_only {
