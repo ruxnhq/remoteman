@@ -230,13 +230,14 @@ private fun Controls(model: AppModel) {
                     }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilledTonalButton(onClick = { model.keyboard = !model.keyboard; model.controls = false }) { Text(if (model.keyboard) "Hide keyboard" else "Keyboard") }
+                        if (model.session.soundOffered) FilledTonalButton(onClick = { model.sound(!model.prefs.sound) }) { Text(if (model.prefs.sound) "Sound off" else "Sound on") }
                         FilledTonalButton(onClick = { model.prefs.showStats(!model.prefs.showStats) }) { Text(if (model.prefs.showStats) "Hide statistics" else "Statistics") }
                         Button(
                             onClick = { model.leaveSession() },
                             colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
                         ) { Text("Disconnect") }
                     }
-                    // Sound, the microphone, the camera, the clipboard and files go here when they come.
+                    // The microphone, the camera, the clipboard and files go here when they come.
                 }
             }
         }

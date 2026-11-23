@@ -35,11 +35,15 @@ class Prefs(context: Context) {
         private set
     var showStats by mutableStateOf(p.getBoolean("stats", false))
         private set
+    /** The computer's sound plays here. */
+    var sound by mutableStateOf(p.getBoolean("sound", true))
+        private set
 
     fun placement(v: Placement) { placement = v; p.edit().putString("placement", v.key).apply() }
     fun resolution(v: Resolution) { resolution = v; p.edit().putString("resolution", v.key).apply() }
     fun refresh(v: Int) { refresh = v; p.edit().putInt("refresh", v).apply() }
     fun showStats(v: Boolean) { showStats = v; p.edit().putBoolean("stats", v).apply() }
+    fun sound(v: Boolean) { sound = v; p.edit().putBoolean("sound", v).apply() }
 }
 
 /** "0.1.0", from the package. */

@@ -165,10 +165,11 @@ private fun Overlay(model: AppModel) {
                     Text(listOfNotNull(session.computer?.name, session.stream.ifEmpty { null }).joinToString(" · "), style = MaterialTheme.typography.titleMedium)
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         Button(onClick = { model.controls = false }, modifier = Modifier.focusRequester(focus)) { Text("Back to the picture") }
+                        if (model.session.soundOffered) OutlinedButton(onClick = { model.sound(!model.prefs.sound) }) { Text(if (model.prefs.sound) "Sound off" else "Sound on") }
                         OutlinedButton(onClick = { model.prefs.showStats(!model.prefs.showStats) }) { Text(if (model.prefs.showStats) "Hide statistics" else "Show statistics") }
                         OutlinedButton(onClick = { model.leaveSession() }) { Text("Disconnect") }
                     }
-                    // Sound and the rest go here when they come.
+                    // The microphone, the camera, the clipboard and files go here when they come.
                 }
             }
         }

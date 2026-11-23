@@ -103,6 +103,19 @@ impl JitterBuffer {
         self.stats
     }
 
+    /// How much sound is held right now, in samples of one channel: the frames waiting (holes
+    /// included: their turn takes as long) and what is decoded but not yet taken. It is the
+    /// delay the buffer adds at this moment.
+    pub fn held_samples(&self) -> usize {
+        self.slots.len() * FRAME_SAMPLES + self.pcm.len() / self.channels
+    }
+
+    /// The depth it holds before playing, in frames (it grows when packets keep missing their
+    /// turn).
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
     /// The most frames held: beyond it the oldest are dropped.
     fn limit(&self) -> usize {
         self.depth * 2 + 2

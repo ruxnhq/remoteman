@@ -15,7 +15,11 @@ crate-type = ["cdylib", "lib"]
 remoteman-core = { path = "../remoteman-core" }
 anyhow = "1"
 jni = "0.21"
-ndk = { version = "0.9", features = ["media", "api-level-29"] }
+ndk = { version = "0.9", features = ["media", "audio", "api-level-29"] }
+# The computer's sound: Opus (libopus, built from source for Android) and the jitter buffer the
+# other viewers use; played through AAudio (ndk's `audio`).
+remoteman-audio = { path = "../remoteman-audio" }
+libc = "0.2"
 android_logger = "0.15"
 log = "0.4"
 serde_json = "1"

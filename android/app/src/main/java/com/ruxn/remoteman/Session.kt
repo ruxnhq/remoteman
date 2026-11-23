@@ -1,5 +1,9 @@
 package com.ruxn.remoteman
 
+import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -42,8 +46,40 @@ data class DisplayRequest(val width: Int, val height: Int, val scale: Float, val
  * the end. Its state is Compose state, changed on the main thread only; the core's callbacks
  * are posted there, and dropped when they belong to a connection that's been left.
  */
-class Session(private val store: ComputerStore, private val stateDir: String, private val device: String) {
+class Session(private val store: ComputerStore, private val stateDir: String, private val device: String, context: Context) {
     private val main = Handler(Looper.getMainLooper())
+    private val audio = context.getSystemService(AudioManager::class.java)
+
+    /** Whether the computer's sound is wanted (the setting); applied to the live connection. */
+    var soundWanted = true
+        set(v) { field = v; applySound() }
+    /** The computer's sound plays now. */
+    var soundOn by mutableStateOf(false)
+        private set
+    /** The computer connected to can send its sound (the switch shows only then). */
+    var soundOffered by mutableStateOf(false)
+        private set
+    /** The controllers held here, as the computer's. */
+    val gamepads = Gamepads()
+
+    /**
+     * Sound focus, as a game asks for it: another app's sound (a call, an alarm, a voice
+     * assistant) takes it for a while, and the computer's is silent meanwhile. Short sounds
+     * that only duck others (a notification) leave it playing; the system ducks it itself.
+     */
+    private val focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+        .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build())
+        .setWillPauseWhenDucked(false)
+        .setOnAudioFocusChangeListener({ change ->
+            val h = handle
+            if (h == 0L) return@setOnAudioFocusChangeListener
+            when (change) {
+                AudioManager.AUDIOFOCUS_GAIN -> Core.soundMuted(h, false)
+                AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> Core.soundMuted(h, true)
+            }
+            Log.i(TAG, "sound focus: $change")
+        }, main)
+        .build()
 
     var computer by mutableStateOf<Computer?>(null)
         private set
@@ -116,14 +152,41 @@ class Session(private val store: ComputerStore, private val stateDir: String, pr
         store.update(updated)
         computer = updated
         if (phase is Phase.Connecting) phase = Phase.Streaming
+        gamepads.session(h)
+        applySound()
         tick(gen)
+    }
+
+    /** The live connection's sound as [soundWanted] says, with the sound focus to match. */
+    private fun applySound() {
+        val h = handle
+        soundOffered = h != 0L && Core.hasSound(h)
+        val on = soundWanted && soundOffered
+        if (h != 0L && on != soundOn) Core.sound(h, on)
+        if (on && !soundOn) {
+            val got = audio.requestAudioFocus(focus)
+            Core.soundMuted(h, got != AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        } else if (!on && soundOn) {
+            audio.abandonAudioFocusRequest(focus)
+        }
+        soundOn = on
+    }
+
+    /** This app is in front again: if another app took the sound for good, take it back. */
+    fun regainSound() {
+        if (!soundOn || handle == 0L) return
+        val got = audio.requestAudioFocus(focus)
+        Core.soundMuted(handle, got != AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
     }
 
     /** Leave the connection (or stop connecting). [leftApp]: say so, and offer to connect again. */
     fun stop(leftApp: Boolean = false) {
         generation++
         val h = handle
+        gamepads.release()
         handle = 0L
+        applySound()
+        gamepads.session(0L)
         if (h != 0L) Thread { Core.close(h) }.start()
         phase = when {
             phase is Phase.Ended -> phase
@@ -150,11 +213,19 @@ class Session(private val store: ComputerStore, private val stateDir: String, pr
         phase = Phase.Connecting(3)
     }
 
+    private var soundTicks = 0
+
     private fun tick(gen: Int) {
         if (gen != generation || handle == 0L) return
         Core.stats(handle)?.let { s ->
             val age = if (s[5] >= 0) "%.1f ms".format(s[5] / 1000.0) else "–"
             stats = "shown ${s[3]} · dropped ${s[4]} · lost ${s[0]} · keyframes ${s[1]} · round trip %.1f ms · age $age".format(s[2] / 1000.0)
+        }
+        Core.soundStats(handle)?.let { s ->
+            val out = if (s[5] >= 0) "%.0f ms".format(s[5] / 1000.0) else "–"
+            val line = "sound: buffer %.0f ms · out $out · concealed ${s[1]} of ${s[0] + s[1]} · late ${s[2]} · underruns ${s[6]}".format(s[4] / 1000.0)
+            stats += "\n" + line
+            if (++soundTicks % 5 == 0) Log.i(TAG, "$line · depth ${s[11]} · peak %.2f · AAudio ${s[7]} frames (burst ${s[8]}), ${if (s[9] == 1L) "exclusive low-latency" else "shared or not low-latency"}".format(s[10] / 1000.0))
         }
         main.postDelayed({ tick(gen) }, 1000)
     }
@@ -182,9 +253,12 @@ class Session(private val store: ComputerStore, private val stateDir: String, pr
 
         override fun onClosed(reason: String) = post {
             Log.i(TAG, "closed: $reason")
+            gamepads.release()
             val h = handle
             val code = if (h != 0L) Core.closeCode(h) else -1
             handle = 0L
+            applySound()
+            gamepads.session(0L)
             generation++
             if (h != 0L) Thread { Core.close(h) }.start()
             val c = computer

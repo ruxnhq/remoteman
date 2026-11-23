@@ -6,19 +6,21 @@ license.workspace = true
 publish.workspace = true
 
 # Linux sound: Opus through the system's libopus, and PipeWire nodes for the host's speaker and
-# microphone and for a viewer's playback and microphone. On Windows only the Opus half builds
-# (the codec, the framer and the jitter buffer), for the Windows viewer's microphone.
+# microphone and for a viewer's playback and microphone. On Windows and Android only the Opus half
+# builds (the codec, the framer and the jitter buffer): the Windows viewer feeds it from WASAPI,
+# the Android viewer plays it through AAudio.
 [dependencies]
 anyhow = "1"
 
-[target.'cfg(not(windows))'.dependencies]
+[target.'cfg(not(any(windows, target_os = "android")))'.dependencies]
 # No default features: the default builds its own copy of libopus with cmake. Without it the
 # crate links the system's libopus.
 opusic-c = { version = "1.6", default-features = false }
 # v0_3_49: how many samples an output buffer is asked to hold.
 pipewire = { version = "0.10", features = ["v0_3_49"] }
 
-[target.'cfg(windows)'.dependencies]
-# Windows has no system libopus: the default features build the copy the crate carries (with
-# cmake), as the Windows host does.
+[target.'cfg(any(windows, target_os = "android"))'.dependencies]
+# Windows and Android have no system libopus: the default features build the copy the crate
+# carries (with cmake; on Android with the NDK's toolchain file, from ANDROID_NDK_HOME), as the
+# Windows host does.
 opusic-c = "1.6"

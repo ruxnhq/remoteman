@@ -3,8 +3,11 @@ package com.ruxn.remoteman
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.hardware.input.InputManager
+import android.media.AudioManager
 import android.os.Bundle
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -38,7 +41,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val isTv = packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
         val store = ComputerStore(this)
-        val session = Session(store, filesDir.absolutePath, deviceName).apply {
+        val session = Session(store, filesDir.absolutePath, deviceName, this).apply {
             deviceKind = when {
                 isTv -> "TV"
                 resources.configuration.smallestScreenWidthDp >= 600 -> "tablet"
@@ -47,6 +50,13 @@ class MainActivity : ComponentActivity() {
         }
         model = AppModel(store, Prefs(this), session, isTv, ::withLocalNetwork, ::displayRequest)
         intent?.let(::openLink)
+        // The volume keys set the volume the computer's sound plays at, even between sounds.
+        volumeControlStream = AudioManager.STREAM_MUSIC
+        getSystemService(InputManager::class.java).registerInputDeviceListener(object : InputManager.InputDeviceListener {
+            override fun onInputDeviceAdded(deviceId: Int) {}
+            override fun onInputDeviceChanged(deviceId: Int) {}
+            override fun onInputDeviceRemoved(deviceId: Int) = model.session.gamepads.removed(deviceId)
+        }, null)
         setContent {
             if (isTv) TvApp(model) else PhoneApp(model)
             SessionWindow(model.screen == Screen.Session)
@@ -115,20 +125,50 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** The picture is up and its controls aren't: input goes to the computer. */
+    private val toComputer: Boolean
+        get() = model.session.handle != 0L && model.screen == Screen.Session && model.session.phase == Phase.Streaming && !model.controls
+
+    /** A computer that takes controllers is being shown: their input goes there. */
+    private val padsToComputer: Boolean
+        get() = toComputer && Core.hasGamepad(model.session.handle)
+
     /**
      * While the picture is up and its controls aren't, hardware keys go to the computer by
-     * position (their Linux scan code). Back stays this app's: it opens the controls.
+     * position (their Linux scan code), and a game controller's buttons as a controller's.
+     * Back stays this app's, a controller's too: it opens the controls (on a TV, the bar), and
+     * the controllers held go back to neutral on the computer.
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val h = model.session.handle
-        val toComputer = h != 0L && model.screen == Screen.Session && model.session.phase == Phase.Streaming && !model.controls
-        if (toComputer && event.keyCode !in localKeys && event.scanCode != 0) {
+        val toComputer = toComputer
+        if (!toComputer) model.session.gamepads.release()
+        if (toComputer && event.keyCode !in localKeys && padsToComputer && model.session.gamepads.key(h, event)) {
+            // Start and Select together open the controls: a TV with only a controller in hand
+            // has no other Back.
+            if (model.session.gamepads.chord()) model.controls = true
+            return true
+        }
+        if (toComputer && event.keyCode !in localKeys && event.scanCode != 0 && !model.session.gamepads.isPadButton(event)) {
             if (event.repeatCount > 0) return true // the computer repeats keys itself
             if (event.action == KeyEvent.ACTION_DOWN || event.action == KeyEvent.ACTION_UP) {
                 if (Core.keyLinux(h, event.scanCode, event.action == KeyEvent.ACTION_DOWN)) return true
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    /** A controller's sticks, triggers and hat, while the picture is up. */
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (padsToComputer && model.session.gamepads.motion(model.session.handle, event)) return true
+        if (!toComputer) model.session.gamepads.release()
+        return super.dispatchGenericMotionEvent(event)
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // Held buttons would stay held on the computer while something else has the input.
+        if (!hasFocus) model.session.gamepads.release() else model.session.regainSound()
     }
 
     override fun onStop() {

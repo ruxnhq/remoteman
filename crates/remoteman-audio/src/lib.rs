@@ -11,25 +11,26 @@
 //! node runs a PipeWire loop on a thread of its own, and is gone from the graph when it is
 //! dropped.
 //!
-//! On Windows there is no PipeWire: only the Opus half builds ([`Encoder`], [`Decoder`],
-//! [`Framer`], [`JitterBuffer`]), which the Windows viewer feeds from WASAPI.
+//! On Windows and Android there is no PipeWire: only the Opus half builds ([`Encoder`],
+//! [`Decoder`], [`Framer`], [`JitterBuffer`]), which the Windows viewer feeds from WASAPI and
+//! the Android viewer plays through AAudio.
 
 mod codec;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 mod default;
 mod frame;
 mod jitter;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 mod node;
 #[doc(hidden)]
 pub mod testing;
 
 pub use codec::{Decoder, Encoder};
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 pub use default::{DefaultSink, default_sink};
 pub use frame::Framer;
 pub use jitter::{JITTER_FRAMES, JitterBuffer, JitterStats};
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 pub use node::{MicCapture, MicSource, Node, Player, SpeakerSink};
 
 /// Samples per second, the only rate used.

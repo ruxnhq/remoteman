@@ -122,6 +122,12 @@ fun SettingsScreen(model: AppModel) {
             trailingContent = { Switch(checked = p.showStats, onCheckedChange = null) },
             modifier = Modifier.clickable { p.showStats(!p.showStats) },
         )
+        ListItem(
+            headlineContent = { Text("Play the computer's sound") },
+            supportingContent = { Text("On this ${model.session.deviceKind}, as soon as a session starts") },
+            trailingContent = { Switch(checked = p.sound, onCheckedChange = null) },
+            modifier = Modifier.clickable { model.sound(!p.sound) },
+        )
         Header("This ${model.session.deviceKind}")
         ListItem(headlineContent = { Text("Decoders") }, supportingContent = { Text(Decoders.describe()) })
         ListItem(headlineContent = { Text("Version") }, supportingContent = { Text(appVersion()) })

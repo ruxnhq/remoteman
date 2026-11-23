@@ -8,16 +8,17 @@
 
 mod bench;
 mod decoder;
+mod sound;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use jni::objects::{GlobalRef, JClass, JObject, JString, JValueOwned};
-use jni::sys::{jboolean, jfloat, jint, jintArray, jlong, jstring};
+use jni::sys::{jboolean, jfloat, jint, jintArray, jlong, jlongArray, jstring};
 use jni::{JNIEnv, JavaVM};
-use remoteman_core::{Button, Chroma, Client, Codec, Display, Event, Frame, Handler, Message, Mode, Options, Placement, Stage, StreamInfo, TouchPhase};
+use remoteman_core::{Button, Chroma, Client, Codec, Display, Event, Frame, Handler, Message, Mode, Options, Packet, Placement, Stage, StreamInfo, TouchPhase};
 
 use decoder::Decoder;
 
@@ -54,6 +55,43 @@ struct Session {
     /// Set when the decoder dropped a frame: the next call from the app asks for a keyframe
     /// (the handler can't reach the client itself).
     want_keyframe: Arc<AtomicBool>,
+    sound: Arc<SoundSlot>,
+}
+
+/// The sound, shared by the core's thread (packets, the format) and the app's calls (on, off).
+#[derive(Default)]
+struct SoundSlot {
+    player: Mutex<Option<sound::Player>>,
+    /// What the host said its packets carry; stereo until it says.
+    mono: AtomicBool,
+    /// Another app has the sound for now.
+    muted: AtomicBool,
+}
+
+impl SoundSlot {
+    fn channels(&self) -> remoteman_audio::Channels {
+        if self.mono.load(Ordering::Relaxed) { remoteman_audio::Channels::Mono } else { remoteman_audio::Channels::Stereo }
+    }
+
+    /// Start playing (a player for the current format), or stop.
+    fn set(&self, on: bool) {
+        let mut player = self.player.lock().unwrap();
+        if !on {
+            *player = None;
+            return;
+        }
+        if player.as_ref().is_some_and(|p| p.channels == self.channels()) {
+            return;
+        }
+        *player = None;
+        match sound::Player::open(self.channels()) {
+            Ok(p) => {
+                p.mute(self.muted.load(Ordering::Relaxed));
+                *player = Some(p);
+            }
+            Err(e) => log::warn!("sound: {e:#}"),
+        }
+    }
 }
 
 impl Handler for Session {
@@ -76,6 +114,27 @@ impl Handler for Session {
         }
     }
 
+    fn message(&mut self, message: &Message) {
+        if let Message::SoundFormat { codec, rate, channels, frame_us } = message {
+            log::info!("sound format: {codec} {rate} Hz, {channels} channels, {frame_us} µs a packet");
+            if codec != "opus" || *rate != remoteman_audio::SAMPLE_RATE || *frame_us as u64 != remoteman_audio::FRAME_US {
+                log::warn!("sound: this format can't be played here");
+            }
+            self.sound.mono.store(*channels == 1, Ordering::Relaxed);
+            // A player for another channel count is made anew.
+            let playing = self.sound.player.lock().unwrap().is_some();
+            if playing {
+                self.sound.set(true);
+            }
+        }
+    }
+
+    fn sound(&mut self, packet: &Packet) {
+        if let Some(player) = self.sound.player.lock().unwrap().as_ref() {
+            player.push(packet.seq, packet.time_us, &packet.data);
+        }
+    }
+
     fn stage(&mut self, stage: Stage) {
         let n = stage as i32;
         self.listener.call("onStage", "(I)V", |_| Ok(vec![JValueOwned::Int(n)]));
@@ -89,6 +148,7 @@ impl Handler for Session {
     fn closed(&mut self, reason: &str) {
         log::info!("closed: {reason}");
         self.decoder.stop();
+        self.sound.set(false);
         self.listener.string("onClosed", reason);
     }
 }
@@ -97,6 +157,7 @@ struct Handle {
     client: Client,
     decoder: Arc<decoder::Stats>,
     want_keyframe: Arc<AtomicBool>,
+    sound: Arc<SoundSlot>,
 }
 
 impl Handle {
@@ -195,7 +256,8 @@ pub extern "system" fn Java_com_ruxn_remoteman_Core_connect<'l>(
             unlock: None,
             attach_only: false,
         };
-        let session = Session { listener: listener.clone(), decoder, want_keyframe: want_keyframe.clone() };
+        let sound = Arc::new(SoundSlot::default());
+        let session = Session { listener: listener.clone(), decoder, want_keyframe: want_keyframe.clone(), sound: sound.clone() };
         match Client::connect(options, session) {
             Ok(client) => {
                 // The host may want a code from an authenticator app before the picture starts.
@@ -204,7 +266,7 @@ pub extern "system" fn Java_com_ruxn_remoteman_Core_connect<'l>(
                     let left = left.map_or(-1, |n| n as i32);
                     asked.call("onSecondFactor", "(I)V", |_| Ok(vec![JValueOwned::Int(left)]));
                 });
-                Box::into_raw(Box::new(Handle { client, decoder: stats, want_keyframe })) as jlong
+                Box::into_raw(Box::new(Handle { client, decoder: stats, want_keyframe, sound })) as jlong
             }
             Err(e) => {
                 log::warn!("connect: {e:#}");
@@ -221,6 +283,7 @@ pub extern "system" fn Java_com_ruxn_remoteman_Core_close(_env: JNIEnv, _class: 
     guard((), || {
         if h != 0 {
             let handle = unsafe { Box::from_raw(h as *mut Handle) };
+            handle.sound.set(false);
             handle.client.close();
         }
     })
@@ -410,5 +473,109 @@ pub extern "system" fn Java_com_ruxn_remoteman_Core_useDecoder<'l>(mut env: JNIE
         let mut chosen = decoder::CHOSEN.lock().unwrap();
         chosen.retain(|(m, _)| *m != mime);
         chosen.push((mime, name));
+    })
+}
+
+/// `Core.sound(handle, on)`: ask the host for its sound and play it, or stop.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_ruxn_remoteman_Core_sound(_env: JNIEnv, _class: JClass, h: jlong, on: jboolean) {
+    guard((), || {
+        let Some(handle) = handle(h) else { return };
+        // Nothing of a feature goes to a host that doesn't list it.
+        if !handle.client.host_features.iter().any(|f| f == "sound") {
+            return;
+        }
+        let on = on != 0;
+        // The player first, so that the first packets find it.
+        handle.sound.set(on);
+        handle.client.send_message(Message::Sound { on });
+        log::info!("sound {}", if on { "on" } else { "off" });
+    })
+}
+
+/// `Core.soundMuted(handle, muted)`: another app has the sound for now (a call): play silence
+/// meanwhile, without telling the host.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_ruxn_remoteman_Core_soundMuted(_env: JNIEnv, _class: JClass, h: jlong, muted: jboolean) {
+    guard((), || {
+        let Some(handle) = handle(h) else { return };
+        handle.sound.muted.store(muted != 0, Ordering::Relaxed);
+        if let Some(p) = handle.sound.player.lock().unwrap().as_ref() {
+            p.mute(muted != 0);
+        }
+    })
+}
+
+/// `Core.soundStats(handle)`: null when no sound plays, else [packets played, concealed, late,
+/// skipped, µs held in the playout buffer, µs from AAudio to the ear (-1 not known), underruns,
+/// AAudio's buffer in frames, its burst in frames, 1 if exclusive (MMAP) and low-latency, the
+/// loudest sample played since the last call in thousandths, the playout buffer's depth in
+/// frames of 10 ms].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_ruxn_remoteman_Core_soundStats<'l>(env: JNIEnv<'l>, _class: JClass<'l>, h: jlong) -> jlongArray {
+    guard(std::ptr::null_mut(), || {
+        let Some(handle) = handle(h) else { return std::ptr::null_mut() };
+        let player = handle.sound.player.lock().unwrap();
+        let Some(p) = player.as_ref() else { return std::ptr::null_mut() };
+        let f = p.figures();
+        let values = [
+            f.played as i64,
+            f.concealed as i64,
+            f.late as i64,
+            f.skipped as i64,
+            f.held_us,
+            f.output_us,
+            f.underruns as i64,
+            f.buffer_frames as i64,
+            f.burst_frames as i64,
+            (f.exclusive && f.low_latency) as i64,
+            (f.peak * 1000.0) as i64,
+            f.depth as i64,
+        ];
+        let Ok(array) = env.new_long_array(values.len() as i32) else { return std::ptr::null_mut() };
+        let _ = env.set_long_array_region(&array, 0, &values);
+        array.into_raw()
+    })
+}
+
+/// `Core.hasSound(handle)`: whether the host can send its sound (it lists `sound`).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_ruxn_remoteman_Core_hasSound(_env: JNIEnv, _class: JClass, h: jlong) -> jboolean {
+    guard(0, || handle(h).is_some_and(|h| h.client.host_features.iter().any(|f| f == "sound")) as jboolean)
+}
+
+/// `Core.hasGamepad(handle)`: whether the host takes game controllers (it lists `gamepad`).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_ruxn_remoteman_Core_hasGamepad(_env: JNIEnv, _class: JClass, h: jlong) -> jboolean {
+    guard(0, || handle(h).is_some_and(|h| h.client.host_has_gamepad()) as jboolean)
+}
+
+/// `Core.gamepad(handle, pad, connected, buttons, lt, rt, lx, ly, rx, ry)`: the whole state of
+/// one controller (docs/PROTOCOL.md, "Game controllers"): buttons in XInput's bits, triggers 0
+/// to 1, sticks -1 to 1 with right and up positive.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_ruxn_remoteman_Core_gamepad(
+    _env: JNIEnv,
+    _class: JClass,
+    h: jlong,
+    pad: jint,
+    connected: jboolean,
+    buttons: jint,
+    left_trigger: jfloat,
+    right_trigger: jfloat,
+    left_x: jfloat,
+    left_y: jfloat,
+    right_x: jfloat,
+    right_y: jfloat,
+) {
+    guard((), || {
+        let Some(handle) = handle(h) else { return };
+        handle.keyframe_if_wanted();
+        let event = if connected != 0 {
+            Event::Gamepad { pad: pad.clamp(0, 3) as u8, flags: 1, buttons: buttons as u16, left_trigger, right_trigger, left_x, left_y, right_x, right_y }
+        } else {
+            Event::Gamepad { pad: pad.clamp(0, 3) as u8, flags: 0, buttons: 0, left_trigger: 0.0, right_trigger: 0.0, left_x: 0.0, left_y: 0.0, right_x: 0.0, right_y: 0.0 }
+        };
+        handle.client.send(event);
     })
 }

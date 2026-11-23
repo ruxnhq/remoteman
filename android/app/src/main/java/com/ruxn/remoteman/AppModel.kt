@@ -36,8 +36,17 @@ class AppModel(
     val stack = mutableStateListOf<Screen>(Screen.Computers)
     val screen: Screen get() = stack.last()
 
-    /** The session's controls (disconnect, keyboard, statistics) are showing. */
-    var controls by mutableStateOf(false)
+    private var controlsShown by mutableStateOf(false)
+    /**
+     * The session's controls (disconnect, keyboard, statistics) are showing. Input stays here
+     * meanwhile, so the controllers held go back to neutral on the computer.
+     */
+    var controls: Boolean
+        get() = controlsShown
+        set(v) {
+            controlsShown = v
+            if (v) session.gamepads.release()
+        }
     /** The on-screen keyboard is wanted over the picture (phones). */
     var keyboard by mutableStateOf(false)
     /** A note for the computers list, like a scanned code that wasn't a remoteman one. */
@@ -45,6 +54,16 @@ class AppModel(
 
     private var surface: Surface? = null
     private var pending: Computer? = null
+
+    init {
+        session.soundWanted = prefs.sound
+    }
+
+    /** The computer's sound here or not: kept as the setting, and applied to the session now. */
+    fun sound(on: Boolean) {
+        prefs.sound(on)
+        session.soundWanted = on
+    }
 
     fun push(s: Screen) { stack += s }
 

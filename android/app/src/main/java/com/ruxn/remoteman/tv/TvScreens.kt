@@ -201,6 +201,11 @@ fun TvSettings(model: AppModel) {
                     supportingContent = { Text("Frames, losses and delay over the picture") },
                     trailingContent = { Switch(checked = p.showStats, onCheckedChange = null) })
             }
+            item {
+                ListItem(selected = false, onClick = { model.sound(!p.sound) }, headlineContent = { Text("Play the computer's sound") },
+                    supportingContent = { Text("On this TV, as soon as a session starts") },
+                    trailingContent = { Switch(checked = p.sound, onCheckedChange = null) })
+            }
             item { ListItem(selected = false, onClick = {}, headlineContent = { Text("Decoders") }, supportingContent = { Text(Decoders.describe()) }) }
             item { ListItem(selected = false, onClick = {}, headlineContent = { Text("Version") }, supportingContent = { Text(appVersion()) }) }
         }

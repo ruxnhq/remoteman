@@ -78,4 +78,26 @@ object Core {
 
     /** Display pixels; positive dy moves towards the end of a document. */
     external fun scroll(handle: Long, dx: Float, dy: Float)
+
+    /** Ask the computer for its sound and play it (through AAudio, in Rust), or stop. */
+    external fun sound(handle: Long, on: Boolean)
+    /** Another app has the sound for now: play silence meanwhile. */
+    external fun soundMuted(handle: Long, muted: Boolean)
+    /**
+     * Null when no sound plays, else [played, concealed, late, skipped, µs held in the playout
+     * buffer, µs from AAudio to the ear (-1 not known), underruns, AAudio buffer frames, burst
+     * frames, 1 if exclusive and low-latency, loudest sample since the last call in thousandths,
+     * playout depth in frames of 10 ms].
+     */
+    external fun soundStats(handle: Long): LongArray?
+
+    /** Whether the computer can send its sound. */
+    external fun hasSound(handle: Long): Boolean
+    /** Whether the computer takes game controllers. */
+    external fun hasGamepad(handle: Long): Boolean
+    /**
+     * One controller's whole state: [pad] 0 to 3, [buttons] in XInput's bits, triggers 0 to 1,
+     * sticks -1 to 1 with right and up positive. [connected] false: the controller is gone.
+     */
+    external fun gamepad(handle: Long, pad: Int, connected: Boolean, buttons: Int, lt: Float, rt: Float, lx: Float, ly: Float, rx: Float, ry: Float)
 }
