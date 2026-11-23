@@ -76,7 +76,8 @@ private fun Panel(content: @Composable () -> Unit) {
 @Composable
 private fun Connecting(model: AppModel, p: Phase.Connecting) {
     val c = model.session.computer
-    val name = c?.name ?: "the computer"
+    // Until the computer has said its name, it's "the computer", not its address twice.
+    val name = c?.name?.takeIf { it != c.address } ?: "the computer"
     val placement = c?.placement ?: model.prefs.placement
     val focus = rememberInitialFocus()
     Text("Connecting to $name", style = MaterialTheme.typography.headlineMedium, color = Color.White)
@@ -85,7 +86,7 @@ private fun Connecting(model: AppModel, p: Phase.Connecting) {
     Step(false, p.stage >= 2, placement.becomes("TV"))
     p.code?.let { code ->
         Text(code, color = Color.White, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.SemiBold, fontSize = 48.sp, letterSpacing = 3.sp)
-        Text("$name is waiting for its owner. Check that it shows the same code, then confirm the pairing there.", color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodyLarge)
+        Text("${name.replaceFirstChar { it.uppercase() }} is waiting for its owner. Check that it shows the same code, then confirm the pairing there.", color = Color.White.copy(alpha = 0.75f), style = MaterialTheme.typography.bodyLarge)
     }
     OutlinedButton(onClick = { model.leaveSession() }, modifier = Modifier.focusRequester(focus)) { Text("Cancel") }
 }

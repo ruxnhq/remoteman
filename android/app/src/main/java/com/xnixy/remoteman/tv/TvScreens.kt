@@ -81,7 +81,7 @@ fun TvComputers(model: AppModel) {
             }
         }
         model.note?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 16.dp)) }
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(24.dp), contentPadding = PaddingValues(vertical = 16.dp)) {
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(24.dp), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp)) {
             items(computers, key = { it.id }) { c ->
                 ComputerCard(
                     c, Modifier.then(if (c == computers.first()) Modifier.focusRequester(first) else Modifier),

@@ -108,7 +108,8 @@ private fun Backdrop(content: @Composable () -> Unit) {
 @Composable
 private fun Connecting(model: AppModel, p: Phase.Connecting) {
     val c = model.session.computer
-    val name = c?.name ?: "the computer"
+    // Until the computer has said its name, it's "the computer", not its address twice.
+    val name = c?.name?.takeIf { it != c.address } ?: "the computer"
     val device = model.session.deviceKind
     val placement = c?.placement ?: model.prefs.placement
     Text("Connecting to $name", style = MaterialTheme.typography.headlineSmall, color = Color.White)
@@ -136,7 +137,7 @@ private fun PairingCode(code: String, name: String) {
             modifier = Modifier.semantics { contentDescription = "Pairing code $code" },
         )
         Text(
-            "$name is waiting for its owner. Check that it shows the same code, then confirm the pairing there.",
+            "${name.replaceFirstChar { it.uppercase() }} is waiting for its owner. Check that it shows the same code, then confirm the pairing there.",
             style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(alpha = 0.7f), textAlign = TextAlign.Center,
         )
     }

@@ -12,6 +12,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Surface
+import androidx.tv.material3.SurfaceDefaults
 import androidx.tv.material3.darkColorScheme
 import com.xnixy.remoteman.AppModel
 import com.xnixy.remoteman.Screen
@@ -31,7 +33,9 @@ fun TvApp(model: AppModel) {
                 TvSession(model)
             } else {
                 // TV overscan: keep 48 by 27 dp clear of the screen's edges.
-                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(horizontal = 48.dp, vertical = 27.dp)) {
+                // The TV Surface sets the content colour that Text takes.
+                Surface(Modifier.fillMaxSize(), colors = SurfaceDefaults.colors(containerColor = MaterialTheme.colorScheme.background)) {
+                  Box(Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 27.dp)) {
                     when (s) {
                         Screen.Computers -> TvComputers(model)
                         Screen.Add, Screen.Scan -> TvAdd(model)
@@ -39,6 +43,7 @@ fun TvApp(model: AppModel) {
                         Screen.Settings -> TvSettings(model)
                         Screen.Session -> {}
                     }
+                  }
                 }
             }
         }
