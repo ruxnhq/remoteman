@@ -48,6 +48,7 @@ host -> client  {"t":"error","code":"second_factor","message":"..."}   then it c
 A host whose desktop is locked may let a paired device in all the same, if its owner has said so: by the device's key alone, or with the password of the host's user as well.
 
 - A host that wants the password answers the hello with `{"t":"error","code":"locked","message":"..."}` and closes the connection, with the same words as its closing reason, begun with `locked: ` (a client sees one or the other, depending on which arrives first). `message` is for people: whose password is wanted, or that the last one was wrong. After a wrong password it contains the words `not right` (a client that kept the password may take that as its cue to throw the kept one away); those words are part of the protocol and will not change.
+- The host looks at its lock after its `host_hello` has gone out, so the client's connection is made (`connect` returns) before either of those arrives, and again when it comes back with a password. A client knows the password was right when the `stream` message comes, not when the connection is made.
 - The client asks its user and connects again with the password in the hello: `"unlock":"..."` in `client_hello`. It travels inside the connection's encryption, to a host whose key the device already holds, and is never stored by the host. A wrong one gets the same answer again; after several the host takes no more for a while.
 - A host that is locked and set to let nobody in answers with an ordinary error.
 

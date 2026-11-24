@@ -122,7 +122,7 @@ enum Automation {
                 let found = UnlockStore.has(key)
                 UnlockStore.forget(key)
                 print("remoteman: keychain: saved \(saved), found \(found), found after forgetting \(UnlockStore.has(key))")
-                print("remoteman: locked words: \(ViewerSession.lockedWords("the host refused: locked: enter the password of nick") ?? "nil") | \(ViewerSession.lockedWords("locked: That password is not right.") ?? "nil") | \(ViewerSession.lockedWords("the host refused: not_paired: pairing was declined") ?? "nil") | \(ViewerSession.lockedWords("connection closed: locked: again") ?? "nil")")
+                print("remoteman: locked words: \(ViewerSession.lockedWords("the host refused: locked: enter the password of nick") ?? "nil") | \(ViewerSession.lockedWords("locked: That password is not right.") ?? "nil") | \(ViewerSession.lockedWords("the host refused: not_paired: pairing was declined") ?? "nil") | \(ViewerSession.lockedWords("connection closed: locked: again") ?? "nil") | \(ViewerSession.lockedWords("closed by peer: locked: That password is not right. (code 1)") ?? "nil")")
                 _ = value()
             case "--wake":
                 // Send the wake signal to these cards (comma-separated) and say how many packets left.

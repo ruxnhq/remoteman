@@ -176,6 +176,8 @@ final class AppModel: ObservableObject {
             // The value arrives before the session has it; act once it does.
             DispatchQueue.main.async { self?.stateChanged(s) }
         }
+        // Only now is a password that was sent known to be right, and kept if that was asked for.
+        session.letIn = { [weak self] in self?.unlocker.connected() }
         systemKeys.active = { [weak self] in
             guard let self, let w = self.window else { return false }
             return self.active != nil && self.hasPicture && self.fullScreen && w.isKeyWindow && NSApp.isActive
@@ -373,7 +375,6 @@ final class AppModel: ObservableObject {
         case .streaming:
             reconnecting = false
             guard started == nil else { return }
-            unlocker.connected()
             started = Date()
             let host = session.client?.host
             store.update(id) { c in
@@ -398,13 +399,19 @@ final class AppModel: ObservableObject {
                 finish(id, reason: "This Mac was taken off its list of trusted devices. Turn pairing on there, then pair again.")
                 return
             }
-            let locked = started == nil ? session.lockedAsk : nil
+            // A computer says it is locked after its hello, so by then the session has started
+            // here; one that locks while a device is using it says so the same way.
+            let locked = session.lockedAsk
             let computer = store[id]
-            finish(id, reason: started == nil ? reason : "The connection ended: \(reason)")
+            let paired = pairedNow
+            finish(id, reason: locked ?? (started == nil ? reason : "The connection ended: \(reason)"))
             // Locked, and it wants its user's password: ask (or use the kept one) and connect again.
             if let locked, let c = computer {
                 unlocker.locked(words: locked, key: c.fingerprint.isEmpty ? c.address : c.fingerprint, name: c.name) { [weak self] password in
-                    self?.connectNow(c, unlock: password)
+                    guard let self else { return }
+                    self.connectNow(c, unlock: password)
+                    // Still the first session after pairing, for what is said when it ends.
+                    self.pairedNow = paired
                 }
             }
         }
