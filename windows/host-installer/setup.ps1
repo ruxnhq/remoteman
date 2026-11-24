@@ -7,8 +7,8 @@
 #               a space, its name), put in place of the host's own (STATE\host\trusted) before
 #               the service starts.
 # -Encoder E:   the service's host is started with --encoder E.
-# -NoPair:      the service's host is started with --no-pair (no --ask either): nobody new can be
-#               let in, only the trust list's devices.
+# -NoPair:      the service's host is started with --no-pair (no --ask either): it never opens
+#               pairing by itself; only the owner's Pair a device (ctl pair on) lets a new one in.
 # Each install writes the service's command line from its own options: one without them goes back
 # to the defaults (no --encoder; --ask when Remoteman Host isn't installed), and leaves the trust
 # list as it is.
@@ -279,7 +279,7 @@ function Install {
   # (the sign-in screen's, the lock screen's, whoever is signed in), with these options.
   # New devices are asked about by the owner's app (Remoteman Host) when it is installed beside
   # the host; without it, by the host itself in a window of Windows' own (--ask). With -NoPair,
-  # by nobody: only the trust list's devices get in.
+  # only when the owner opens pairing in the app; otherwise only the trust list's devices get in.
   $hostArgs = "--state `"$state`" --log `"$state\host.log`""
   if ($Encoder) { $hostArgs += " --encoder $Encoder" }
   if ($NoPair) { $hostArgs += ' --no-pair' }

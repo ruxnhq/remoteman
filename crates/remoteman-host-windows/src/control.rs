@@ -173,6 +173,27 @@ fn save(state: &Path, allowed: &Allowed) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// A program that opens the pipe and leaves without asking (as the watch on the console's
+    /// user does to have the pipe made anew) gets no answer, and the next question is answered.
+    #[test]
+    fn an_empty_connect_makes_the_pipe_anew() {
+        let port = 7897;
+        let state = std::env::temp_dir().join("remoteman-control-empty");
+        serve(port, Weak::new(), Allowed::default(), state);
+        let opened = || std::fs::OpenOptions::new().read(true).write(true).open(pipe_name(port));
+        let mut tries = 0;
+        let pipe = loop {
+            match opened() {
+                Ok(pipe) => break pipe,
+                Err(_) if tries < 100 => tries += 1,
+                Err(e) => panic!("the pipe never came: {e}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        drop(pipe);
+        assert_eq!(ask(port, "status").unwrap(), "the host is stopping\n");
+    }
+
     #[test]
     fn settings_default_and_round_trip() {
         // Nothing saved: files, clipboard, pause and lock are off; the speakers follow.
@@ -195,7 +216,8 @@ pub fn pipe_name(port: u16) -> String {
 /// The host's log file, for `log` (set at the start when there is one).
 pub static LOG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-/// `--no-pair`: `pair on` is refused, so nobody new is let in while this host runs.
+/// `--no-pair`: this host never opens pairing by itself (no `--pair` or `--ask`); only the
+/// owner's own `pair on` (the Pair button in Remoteman Host) lets a new device in.
 pub static NO_PAIR: AtomicBool = AtomicBool::new(false);
 
 /// Is this process SYSTEM, started by the service? Asked once.
@@ -210,8 +232,7 @@ fn system() -> bool {
 /// the user's own app out); or, for a host the service started as SYSTEM, whoever is signed in
 /// at the console now (nobody but the system and Administrators while nobody is). `None`:
 /// Windows' default, if the user can't be named. The descriptor is the caller's to free.
-fn protection() -> Option<SECURITY_ATTRIBUTES> {
-    let user = if system() { crate::desk::console_user_sid() } else { Some(crate::desk::own_sid()?) };
+fn protection(user: Option<&str>) -> Option<SECURITY_ATTRIBUTES> {
     let sddl = HSTRING::from(match user {
         Some(sid) => format!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;{sid})"),
         None => "D:(A;;GA;;;SY)(A;;GA;;;BA)".to_string(),
@@ -222,16 +243,48 @@ fn protection() -> Option<SECURITY_ATTRIBUTES> {
     Some(SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor.0, bInheritHandle: false.into() })
 }
 
+/// The user the pipe admits beside the system and Administrators (see [`protection`]): this
+/// process's own, or for a host the service started, whoever is signed in at the console now.
+fn pipe_user() -> Option<String> {
+    if system() { crate::desk::console_user_sid() } else { crate::desk::own_sid() }
+}
+
 /// Answer the owner's questions for as long as the host lives.
 pub fn serve(port: u16, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
     let name = HSTRING::from(pipe_name(port));
+    // The user the waiting pipe was made for. A pipe waits for its first question with the
+    // protection it was made with, so one made before anybody signed in (a host the service
+    // starts at boot, in the session that the first sign-in then takes over) would turn the
+    // signed-in user's app away for as long as nobody else asked. So while the host is SYSTEM,
+    // the user at the console is looked at every second, and when it isn't the one the
+    // waiting pipe admits, the pipe is opened and closed here (SYSTEM may) to have it made anew.
+    let made_for: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    if system() {
+        let made_for = made_for.clone();
+        let path = pipe_name(port);
+        let watching = std::thread::Builder::new().name("control-user".into()).spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let now = pipe_user();
+                if *made_for.lock().unwrap() != now {
+                    tracing::info!(user = ?now, "the user at the console changed: the control pipe is made anew for them");
+                    // Opened and dropped: an empty question, which isn't answered.
+                    let _ = std::fs::OpenOptions::new().read(true).write(true).open(&path);
+                }
+            }
+        });
+        if let Err(e) = watching {
+            tracing::warn!("couldn't start the control pipe's watch on the console's user: {e}");
+        }
+    }
     let spawned = std::thread::Builder::new().name("control".into()).spawn(move || {
         let mut said = false;
         let mut warned = false;
         loop {
             // A pipe for each question: the one before is closed when it has been answered.
             // Its protection is made anew each time, as the user at the console may change.
-            let protection = protection();
+            let user = pipe_user();
+            let protection = protection(user.as_deref());
             if protection.is_none() && !std::mem::replace(&mut warned, true) {
                 tracing::warn!("the control pipe has Windows' default protection: only an elevated prompt can speak to this host");
             }
@@ -240,6 +293,9 @@ pub fn serve(port: u16, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
             if let Some(p) = &protection {
                 // SAFETY: LocalAlloc'd by `protection`; the pipe keeps its own copy.
                 let _ = unsafe { windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(p.lpSecurityDescriptor))) };
+            }
+            if !pipe.is_invalid() {
+                *made_for.lock().unwrap() = user;
             }
             if pipe.is_invalid() {
                 if !std::mem::replace(&mut said, true) {
@@ -263,6 +319,10 @@ pub fn serve(port: u16, host: Weak<Host>, allowed: Allowed, state: PathBuf) {
                 line.push(byte[0]);
             }
             let line = String::from_utf8_lossy(&line);
+            // Nothing asked: the watch above making the pipe anew, or a program that left.
+            if line.trim().is_empty() {
+                continue;
+            }
             // A host running as SYSTEM opens a file to send with the asking user's rights, so
             // that nobody gets a file sent that they couldn't read themselves.
             let as_asker = system() && line.trim().starts_with("send ");
@@ -404,7 +464,6 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
         }
         // Pairing opened here waits for its owner's word on the device that comes (the code
         // is in `status`); `--pair` on the command line trusts the first to come.
-        (Some("pair"), Some("on"), _) if NO_PAIR.load(Ordering::Relaxed) => "pairing is switched off on this host (it was started with --no-pair)\n".into(),
         (Some("pair"), Some(word @ ("on" | "off")), _) => {
             host.set_confirm(true);
             host.set_pairing(word == "on");

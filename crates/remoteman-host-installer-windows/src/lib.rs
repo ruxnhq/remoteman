@@ -26,7 +26,7 @@
 //! `--trust FILE` installs FILE as the host's trust list (one line per viewer: the SHA-256 of
 //! its certificate in hex, a space, its name) before the service starts; `--encoder NAME` starts
 //! the service's host with `--encoder NAME` (auto, nvenc, mf, d3d12); `--no-pair` starts it with
-//! `--no-pair`, so that nobody new can be let in (no `--ask`, and `ctl pair on` refused). Each
+//! `--no-pair`, so that nobody new is let in unless the owner opens pairing (no `--ask`). Each
 //! install sets the service's options from its own command line. All three are checked before
 //! anything is done: a trust list that can't be read or has no fingerprint, or an encoder that
 //! isn't one of those, ends the run with 1 at once. Installing over an install replaces the

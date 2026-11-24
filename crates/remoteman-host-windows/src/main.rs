@@ -14,9 +14,9 @@
 //! `C:\ProgramData\remoteman\host`, which must be said, as the default is the user's
 //! `%LOCALAPPDATA%\remoteman`.
 //!
-//! `--no-pair`: nobody new can be let in while this host runs, by any way: no `--pair` or
-//! `--ask`, and `ctl pair on` (Remoteman Host's way too) is refused. Only the devices already in
-//! the trust list (`STATE\host\trusted`) get in.
+//! `--no-pair`: this host never opens pairing by itself: no `--pair` or `--ask`, so only the
+//! devices already in the trust list (`STATE\host\trusted`) get in, until the owner opens
+//! pairing for one device with `ctl pair on` (the Pair button in Remoteman Host).
 //!
 //! `--ask` keeps pairing open and asks the owner, in a small window of Windows' own on the
 //! desktop, about each new device that comes: its name and the six-digit code it should be
@@ -495,7 +495,7 @@ mod windows_main {
         // On the network for viewers to find, until the host stops (dropped at the end of this function).
         let _advert = (!mirror_only).then(|| crate::advertise::start(crate::control::NAME.get().map_or("windows", String::as_str), host.address.port(), &host.fingerprint));
         if crate::control::NO_PAIR.load(Ordering::Relaxed) {
-            tracing::info!("pairing: switched off (--no-pair); only the devices in the trust list get in");
+            tracing::info!("pairing: never opened by itself (--no-pair); the trust list's devices get in, and a new one only when the owner opens pairing");
         }
         if pair {
             tracing::info!("pairing: the next unknown device to connect will be trusted");

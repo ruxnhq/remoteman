@@ -437,9 +437,9 @@ shows nothing at all, no page and no message box, whatever goes wrong.
   `d3d12`, as `remoteman-host.exe` takes them. Another name ends the run with 1 before anything
   is done.
 - `--no-pair`: the service starts the host with `--no-pair` (and never `--ask`, which would wait
-  on a window nobody sees): nobody new can be let in while it runs. `ctl pair on`, which
-  Remoteman Host uses, answers "pairing is switched off on this host" (and `ctl status` says
-  `"no_pair": true`); only the trust list's devices get in.
+  on a window nobody sees): the host never opens pairing by itself, so only the trust list's
+  devices get in until the owner presses Pair a device in Remoteman Host (`ctl pair on`), which
+  opens it for one device as anywhere else (`ctl status` says `"no_pair": true`).
 
 Each install writes the service's command line from its own options; one without them goes back
 to the defaults (no `--encoder`, `--ask` when Remoteman Host isn't installed) and leaves the trust
