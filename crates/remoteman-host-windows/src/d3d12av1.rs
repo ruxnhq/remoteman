@@ -2,8 +2,9 @@
 //! offers one to Direct3D 12, beside `d3d12enc.rs`'s HEVC. Written for a Radeon 780M in a GPU-PV
 //! guest, where Direct3D 12 says it encodes AV1 and AMD's Media Foundation AV1 encoder can't be
 //! made. Off unless asked for (`--d3d12-av1` or `REMOTEMAN_D3D12_AV1=1`): it was written from
-//! Mesa's Direct3D 12 AV1 encoder and the AV1 specification, and had not yet been built or run
-//! against a card when it was committed.
+//! Mesa's Direct3D 12 AV1 encoder and the AV1 specification. Seen working on an RTX 5090
+//! (2026-11-25: `--probe-av1-encode`'s 240 frames, with a loss and a rate change, decoded by
+//! dav1d and libaom alike, frame for frame); not yet on a Radeon.
 //!
 //! What the driver writes and what this module writes: the driver writes the tile data alone.
 //! Everything around it is written here: the temporal delimiter, the sequence header (in front
@@ -15,7 +16,8 @@
 //!
 //! The stream is kept simple, so that the header has as little to agree on with the driver as
 //! possible: one tile, no order hints (and so none of the tools that need them), no screen
-//! content tools, no superres or loop restoration, no segmentation, single-reference prediction,
+//! content tools, no superres, loop restoration allowed (NVIDIA's encoder requires it) but asked
+//! of no frame, segments only where the driver requires choosing them itself (NVIDIA's), single-reference prediction,
 //! and every frame with `primary_ref_frame` none, so that no frame takes its probabilities or
 //! loop filter deltas from another (a picture lost on the way then spoils only the frames built
 //! from it, as with HEVC).
@@ -88,7 +90,11 @@ const HANDLED: i32 = D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_128x128_SUPERBLOCK.0
     | D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_QUANTIZATION_MATRIX.0
     | D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_DELTA_LF_PARAMS.0
     | D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_REDUCED_TX_SET.0
-    | D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_MOTION_MODE_SWITCHABLE.0;
+    | D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_MOTION_MODE_SWITCHABLE.0
+    // Loop restoration: the sequence allows it and every frame asks for none (NVIDIA's requires it).
+    | D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_LOOP_RESTORATION_FILTER.0
+    // Segments the driver chooses: written from what it reports (NVIDIA's requires it).
+    | D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_AUTO_SEGMENTATION.0;
 /// The ones asked for where the driver offers them: deringing (CDEF) and eighth-pel motion.
 const WANTED: i32 = D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_CDEF_FILTERING.0 | D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_ALLOW_HIGH_PRECISION_MV.0;
 
@@ -242,7 +248,7 @@ impl Sequence {
         b.flag(false); // seq_force_screen_content_tools: off (seq_force_integer_mv isn't written)
         b.flag(false); // enable_superres
         b.flag(self.has(D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_CDEF_FILTERING));
-        b.flag(false); // enable_restoration
+        b.flag(self.has(D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_LOOP_RESTORATION_FILTER)); // enable_restoration
         // color_config()
         b.flag(true); // high_bitdepth: 10 bits (Main profile reads no twelve_bit)
         b.flag(false); // mono_chrome
@@ -305,6 +311,17 @@ struct Frame<'a> {
     lf: &'a D3D12_VIDEO_ENCODER_CODEC_AV1_LOOP_FILTER_CONFIG,
     dlf: &'a D3D12_VIDEO_ENCODER_CODEC_AV1_LOOP_FILTER_DELTA_CONFIG,
     cdef: &'a D3D12_VIDEO_ENCODER_AV1_CDEF_CONFIG,
+    /// The driver's segments, when it chose any.
+    seg: Option<&'a D3D12_VIDEO_ENCODER_AV1_SEGMENTATION_CONFIG>,
+}
+
+/// Segmentation_Feature_Bits and Segmentation_Feature_Signed, by feature (ALT_Q first).
+const SEG_BITS: [u32; 8] = [8, 6, 6, 6, 6, 3, 0, 0];
+const SEG_SIGNED: [bool; 8] = [true, true, true, true, true, false, false, false];
+
+/// Whether segment `i` turns feature `j` on (the mode flags: 1 is "disabled", then a bit each).
+fn seg_feature(seg: &D3D12_VIDEO_ENCODER_AV1_SEGMENTATION_CONFIG, i: usize, j: usize) -> bool {
+    seg.SegmentsData[i].EnabledFeatures & (1u64 << (j + 1)) != 0
 }
 
 /// `delta_q` as `read_delta_q` reads it: a flag, then su(7) when it isn't 0.
@@ -386,7 +403,25 @@ fn frame_header(s: &Sequence, f: &Frame, b: &mut Bits) {
         b.u(4, q.QMV); // separate_uv_delta_q is 1
     }
 
-    b.flag(false); // segmentation_enabled
+    // segmentation_params(): with primary_ref_frame none, update_map and update_data are 1 and
+    // unwritten, and temporal_update 0; every segment's features are written.
+    b.flag(f.seg.is_some()); // segmentation_enabled
+    if let Some(seg) = f.seg {
+        for i in 0..8 {
+            for j in 0..8 {
+                let on = seg_feature(seg, i, j);
+                b.flag(on);
+                if on && SEG_BITS[j] > 0 {
+                    let v = seg.SegmentsData[i].FeatureValue[j];
+                    if SEG_SIGNED[j] {
+                        b.su(1 + SEG_BITS[j], v);
+                    } else {
+                        b.u(SEG_BITS[j], v as u64);
+                    }
+                }
+            }
+        }
+    }
 
     // delta_q_params() and delta_lf_params()
     let dq_present = q.BaseQIndex > 0 && f.dq.DeltaQPresent != 0;
@@ -405,7 +440,11 @@ fn frame_header(s: &Sequence, f: &Frame, b: &mut Bits) {
 
     // CodedLossless (no segments): a quantiser of 0 with no deltas. AllLossless is the same here,
     // with no superres.
-    let lossless = q.BaseQIndex == 0 && q.YDCDeltaQ == 0 && q.UDCDeltaQ == 0 && q.UACDeltaQ == 0 && q.VDCDeltaQ == 0 && q.VACDeltaQ == 0;
+    let seg_q = |i: usize| match f.seg {
+        Some(seg) if seg_feature(seg, i, 0) => (q.BaseQIndex as i64 + seg.SegmentsData[i].FeatureValue[0]).clamp(0, 255),
+        _ => q.BaseQIndex as i64,
+    };
+    let lossless = (0..if f.seg.is_some() { 8 } else { 1 }).all(|i| seg_q(i) == 0) && q.YDCDeltaQ == 0 && q.UDCDeltaQ == 0 && q.UACDeltaQ == 0 && q.VDCDeltaQ == 0 && q.VACDeltaQ == 0;
 
     // loop_filter_params()
     if !lossless {
@@ -453,7 +492,12 @@ fn frame_header(s: &Sequence, f: &Frame, b: &mut Bits) {
         }
     }
 
-    // lr_params(): enable_restoration is 0.
+    // lr_params(): every plane's lr_type is RESTORE_NONE (0), as every frame asks.
+    if !lossless && s.has(D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_LOOP_RESTORATION_FILTER) {
+        for _ in 0..3 {
+            b.u(2, 0);
+        }
+    }
 
     // read_tx_mode()
     if !lossless {
@@ -634,7 +678,13 @@ fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) ->
     check(video, D3D12_FEATURE_VIDEO_ENCODER_CODEC_CONFIGURATION_SUPPORT, &mut cs)?;
     ensure!(cs.IsSupported.as_bool(), "the AV1 encoder says no configuration");
     let required = sup.RequiredFeatureFlags.0;
-    ensure!(required & !HANDLED == 0, "the AV1 encoder requires tools this host doesn't write headers for: {:#x}", required & !HANDLED);
+    ensure!(
+        required & !HANDLED == 0,
+        "the AV1 encoder requires tools this host doesn't write headers for: {:#x} (required {required:#x}, offered {:#x}, values after encoding {:#x})",
+        required & !HANDLED,
+        sup.SupportedFeatureFlags.0,
+        sup.PostEncodeValuesFlags.0
+    );
     let features = required | (sup.SupportedFeatureFlags.0 & WANTED);
     let post = sup.PostEncodeValuesFlags.0;
     // With a constant rate the driver picks each frame's quantiser, which the header has to say.
@@ -1006,6 +1056,9 @@ impl Encoder {
         if features & D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_REDUCED_TX_SET.0 != 0 {
             flags |= D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_REDUCED_TX_SET.0;
         }
+        if features & D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_AUTO_SEGMENTATION.0 != 0 {
+            flags |= D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_ENABLE_FRAME_SEGMENTATION_AUTO.0;
+        }
         let refresh: u8 = if key { 0xff } else { 1 << target };
         let mut data = D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_CODEC_DATA {
             Flags: D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAGS(flags),
@@ -1218,6 +1271,7 @@ impl Encoder {
             lf: if has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_LOOP_FILTER) { &post.LoopFilter } else { &data.LoopFilter },
             dlf: if has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_LOOP_FILTER_DELTA) { &post.LoopFilterDelta } else { &data.LoopFilterDelta },
             cdef: if has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_CDEF_DATA) { &post.CDEF } else { &data.CDEF },
+            seg: (data.Flags.0 & D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_ENABLE_FRAME_SEGMENTATION_AUTO.0 != 0 && post.SegmentationConfig.NumSegments > 0).then_some(&post.SegmentationConfig),
         };
         let mut b = Bits::new();
         frame_header(&self.seq, &header, &mut b);
