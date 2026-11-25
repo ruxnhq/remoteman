@@ -92,10 +92,15 @@ final class Unlocker: ObservableObject {
         let wrong = words.lowercased().contains("not right")
         if triedKept, wrong { UnlockStore.forget(key) }
         if !triedKept, !wrong, UnlockStore.has(key) {
-            triedKept = true
             UnlockStore.read(key, computer: name) { [weak self] password in
                 guard let self else { return }
-                if let password { retry(password) } else { self.ask(key, name, words) }
+                // Only a kept password that was sent can be the one that turns out wrong.
+                if let password {
+                    self.triedKept = true
+                    retry(password)
+                } else {
+                    self.ask(key, name, words)
+                }
             }
             return
         }

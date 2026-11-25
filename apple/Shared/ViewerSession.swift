@@ -158,6 +158,9 @@ final class ViewerSession: ObservableObject {
     /// The computer is locked and wants its user's password: its words for people. Set as the
     /// session fails; cleared by the next connect.
     @Published private(set) var lockedAsk: String?
+    /// The computer has let this device in: it has said what it will send. Its hello comes
+    /// before it looks at its lock, so `.streaming` alone doesn't say a password was right.
+    var letIn: (() -> Void)?
     /// The computer wants a code from an authenticator app: `left` is -1 the first time, after a
     /// wrong code the tries left. Answer with `answerSecondFactor`, or `disconnect` to give up.
     struct SecondFactorAsk: Identifiable {
@@ -278,7 +281,9 @@ final class ViewerSession: ObservableObject {
     static func lockedWords(_ reason: String) -> String? {
         for lead in ["the host refused: locked: ", "locked: "] {
             if let r = reason.range(of: lead), lead != "locked: " || r.lowerBound == reason.startIndex || reason[..<r.lowerBound].hasSuffix(": ") {
-                let text = String(reason[r.upperBound...])
+                var text = String(reason[r.upperBound...])
+                // A closing reason carries its code after the words: "... (code 1)".
+                if text.hasSuffix(")"), let code = text.range(of: " (code ", options: .backwards) { text = String(text[..<code.lowerBound]) }
                 return text.prefix(1).uppercased() + text.dropFirst()
             }
         }
@@ -733,7 +738,10 @@ final class ViewerSession: ObservableObject {
                     c.onBlob = { what, id, kind, header, data, complete in
                         sharing.blob(what: what, id: id, kind: kind, header: header, data: data, complete: complete)
                     }
-                    c.onStream = { [weak self] info in self?.streamStarted(info) }
+                    c.onStream = { [weak self] info in
+                        self?.streamStarted(info)
+                        DispatchQueue.main.async { if let self, self.generation == gen { self.letIn?() } }
+                    }
                     c.onStream2 = { [weak self] info in self?.stream2Started(info) }
                     c.onFrame2 = { [weak self] data, flags, number, captureUs, ageUs in
                         self?.frame2(data, key: flags & 1 != 0, number: number, captureUs: captureUs, ageUs: ageUs)

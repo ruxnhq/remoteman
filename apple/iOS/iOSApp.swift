@@ -76,6 +76,8 @@ final class AppModel: ObservableObject {
             // The state arrives before it is stored; act on the next turn of the main queue.
             DispatchQueue.main.async { self?.stateChanged(state) }
         }
+        // Only now is a password that was sent known to be right, and kept if that was asked for.
+        session.letIn = { [weak self] in self?.unlocker.connected() }
     }
 
     /// Face ID (or the passcode) first, for a computer that asks for it.
@@ -161,7 +163,6 @@ final class AppModel: ObservableObject {
             if case .streaming = state { Haptics.success() }
             if case .failed = state { Haptics.failure() }
         }
-        if case .streaming = state { unlocker.connected() }
         // Locked, and it wants its user's password: ask (or use the kept one) and connect again.
         if case .failed = state, let words = session.lockedAsk, let c = current {
             unlocker.locked(words: words, key: c.fingerprint ?? c.address, name: c.name) { [weak self] password in
