@@ -301,7 +301,7 @@ fn build(gpu: &Gpu, meta: &Metadata, s: &Settings, bitrate: u32) -> Result<(Conv
         let converter = Converter::new(gpu, width, height, input, output, mode.chroma == Chroma::C444)?;
         match encode::open(gpu, &converter.output, &encode::Settings { mode, width, height, fps: s.fps, bitrate, hdr, light: if mode.codec == Codec::Av1 && !av1_light { None } else { light_sei } }) {
             Ok(encoder) => {
-                tracing::info!(?mode, width, height, fps = s.fps, bitrate, format = meta.format, hdr = meta.is_hdr, ?input, ?output, "encoder ready ({})", encoder.note());
+                tracing::info!(?mode, width, height, fps = s.fps, bitrate, rate_buffer_fps = remoteman_encode::RATE_BUFFER_FPS.load(Ordering::Relaxed), format = meta.format, hdr = meta.is_hdr, ?input, ?output, "encoder ready ({})", encoder.note());
                 return Ok((converter, encoder, mode, light));
             }
             Err(e) => {
@@ -446,7 +446,67 @@ fn refine_qp(width: u32, height: u32) -> u32 {
     }
 }
 
+/// A stretch of motion: the frames from the first new picture after a still moment until the
+/// picture is still again. Said once it ends, when one of its frames was large, so a window
+/// opening shows how coarse its last frame was before the still picture was refined.
+#[derive(Default)]
+struct Motion {
+    began: Option<Instant>,
+    last: Option<Instant>,
+    frames: u32,
+    bytes: u64,
+    largest: usize,
+    qp_largest: u32,
+    qp_max: u32,
+    qp_last: u32,
+}
+
+/// Still this long before a new picture, and it starts a new stretch of motion.
+const MOTION_GAP: Duration = Duration::from_millis(150);
+/// A stretch is said when a frame in it was at least this large.
+const MOTION_SAID: usize = 16_000;
+
+impl Motion {
+    fn add(&mut self, bytes: usize, qp: u32) {
+        let now = Instant::now();
+        self.began.get_or_insert(now);
+        self.last = Some(now);
+        self.frames += 1;
+        self.bytes += bytes as u64;
+        if bytes >= self.largest {
+            self.largest = bytes;
+            self.qp_largest = qp;
+        }
+        self.qp_max = self.qp_max.max(qp);
+        self.qp_last = qp;
+    }
+
+    fn end(&mut self, refined: Option<(usize, u32)>) {
+        let m = std::mem::take(self);
+        if m.largest < MOTION_SAID {
+            return;
+        }
+        let ms = match (m.began, m.last) {
+            (Some(a), Some(b)) => b.duration_since(a).as_millis() as u64,
+            _ => 0,
+        };
+        tracing::info!(
+            frames = m.frames,
+            ms,
+            kilobytes = m.bytes / 1000,
+            largest_frame_bytes = m.largest,
+            qp_of_largest = m.qp_largest,
+            qp_max = m.qp_max,
+            qp_last = m.qp_last,
+            refined_bytes = refined.map(|r| r.0),
+            refined_qp = refined.map(|r| r.1),
+            "motion, then still"
+        );
+    }
+}
+
 fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<()> {
+    let mut motion = Motion::default();
     let mut rate = s.bitrate;
     // The rate last asked for, and since when; how often the encoder was opened again for one.
     let (mut asked, mut reopens) = ((rate, Instant::now()), 0u64);
@@ -571,6 +631,9 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
             Take::Frame(us) => {
                 p.have = true;
                 refined = false;
+                if quiet_since.elapsed() >= MOTION_GAP {
+                    motion.end(None);
+                }
                 quiet_since = Instant::now();
                 taken_at = Some(before);
                 Some(us)
@@ -662,6 +725,9 @@ fn run(mut p: Picture, s: &Settings, link: &Link, control: &Control) -> Result<(
         if refining {
             refines += 1;
             tracing::info!(bytes = made.data.len(), qp = made.qp, "refined the still picture");
+            motion.end(Some((made.data.len(), made.qp)));
+        } else {
+            motion.add(made.data.len(), made.qp);
         }
         if let Some(at) = taken_at.take() {
             took.push(at.elapsed().as_secs_f32() * 1000.0);
