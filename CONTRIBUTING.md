@@ -13,4 +13,6 @@ These matter more than anything else here.
 - Everything here is GPL-3.0-or-later, and that includes what you add. The README's Licence section lists the parts that keep their own licences.
 - If you aren't sure about something, open an issue and ask before you write it.
 
-By sending a pull request you confirm that you have the right to give your work under this licence.
+## The contributor licence agreement
+
+Your first pull request goes in once you've signed the [contributor licence agreement](CLA.md), by adding your line to [CLA-SIGNERS.md](CLA-SIGNERS.md) in that pull request. You keep your copyright. The agreement gives RUXN LLC a licence to your work that isn't tied to the GPL, and RUXN LLC keeps publishing your work under GPL-3.0-or-later. A check on the pull request looks for your line.
