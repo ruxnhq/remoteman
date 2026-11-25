@@ -126,6 +126,8 @@ pub struct App {
     refull: Cell<bool>,
     /// The count of pictures shown when the session started, to tell whether it showed any.
     shown_before: Cell<u32>,
+    /// This session has said that the computer sends no 4:4:4.
+    said_no_444: Cell<bool>,
 }
 
 const STYLE: &str = "
@@ -423,6 +425,7 @@ impl App {
         self.view.show_figures(self.store.borrow().settings.figures);
         self.video.attach(session.shared.clone());
         self.shown_before.set(self.video.shown_total.get());
+        self.said_no_444.set(false);
         // What this computer's sessions start with, as its settings say (the switches in the
         // bar are then this session's own).
         let (media, input) = {
@@ -817,6 +820,17 @@ impl App {
             self.toast(&format!("The camera can't be used: {why}"));
             self.view.camera.set_active(false);
         }
+        // Sharp text (4:4:4) asked for, and the computer sends 4:2:0 all the same (its encoder
+        // has no 4:4:4: only NVIDIA's do): say so, once a session, since the Picture menu still
+        // says sharp.
+        let chose = self.session.borrow().as_ref().and_then(|s| s.shared.stream_mode.lock().unwrap().take());
+        if let Some(mode) = chose {
+            let address = self.target.borrow().as_ref().map(|t| t.address.clone());
+            let wanted = address.and_then(|a| self.decoders(self.choices(&a).1).first().copied());
+            if wanted.is_some_and(|w| w.chroma == Chroma::C444) && mode.chroma != Chroma::C444 && !self.said_no_444.replace(true) {
+                self.toast(&format!("This computer can't send 4:4:4 for sharp text, so the picture is {}", mode_name(&mode)));
+            }
+        }
         let (copies, results) = match self.session.borrow().as_ref() {
             Some(s) => (std::mem::take(&mut *s.shared.copies.lock().unwrap()), std::mem::take(&mut *s.shared.results.lock().unwrap())),
             None => return,
@@ -1128,6 +1142,7 @@ pub fn build(application: &adw::Application, args: Args) {
         front_size: Cell::new(None),
         refull: Cell::new(false),
         shown_before: Cell::new(0),
+        said_no_444: Cell::new(false),
         args: args.clone(),
     });
 

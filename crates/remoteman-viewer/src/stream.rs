@@ -68,6 +68,8 @@ pub struct Shared {
     camera_turn: AtomicU32,
     /// Why the camera couldn't be opened, until the window says so and lets the button out.
     pub camera_failed: Mutex<Option<String>>,
+    /// The stream the computer chose (its stream message), until the window has looked at it.
+    pub stream_mode: Mutex<Option<Mode>>,
     /// What was copied on the computer, whole, until the window takes it: its type and bytes.
     pub copies: Mutex<Vec<(String, Vec<u8>)>>,
     /// What became of files sent to the computer, until the window says so: whether it
@@ -224,6 +226,7 @@ fn decoding(shared: Arc<Shared>) -> Result<mpsc::SyncSender<Msg>> {
             match msg {
                 Msg::Stream(info) => match Decoder::new(info.mode.codec) {
                     Ok(d) => {
+                        *s.stream_mode.lock().unwrap() = Some(info.mode);
                         *s.decoder.lock().unwrap() = format!("{} {}×{}", d.name, info.width, info.height);
                         decoder = Some(d);
                     }
