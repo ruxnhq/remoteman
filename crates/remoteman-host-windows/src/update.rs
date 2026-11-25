@@ -167,7 +167,7 @@ pub fn stale(names: &[String], current: &Version, keep: Option<&str>) -> Vec<Str
 }
 
 /// What an install of the new version is given, so that its service starts the host as now.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Carried {
     /// The installer's own options: `--encoder NAME`, `--no-pair`.
     pub installer: Vec<String>,
