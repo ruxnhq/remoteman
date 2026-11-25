@@ -128,6 +128,8 @@ mod session;
 #[cfg(windows)]
 mod testhdr;
 #[cfg(windows)]
+mod update;
+#[cfg(windows)]
 mod vdd;
 
 #[cfg(not(windows))]
