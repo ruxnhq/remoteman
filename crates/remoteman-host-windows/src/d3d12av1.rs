@@ -834,6 +834,8 @@ pub struct Encoder {
     last_anchor: u64,
     out: Vec<u8>,
     last_qp: u32,
+    /// Frames whose values after encoding went to the log (the first keyframe and inter frame).
+    told: u8,
 }
 
 // SAFETY: the pipeline moves its encoder to its own thread and uses it there alone; the
@@ -987,6 +989,7 @@ impl Encoder {
                 last_anchor: 0,
                 out: Vec::new(),
                 last_qp: 0,
+                told: 0,
             })
         }
     }
@@ -1294,6 +1297,25 @@ impl Encoder {
         ensure!(primary_ref <= PRIMARY_REF_NONE, "the encoder says primary_ref_frame {primary_ref}");
         if has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_COMPOUND_PREDICTION_MODE) {
             ensure!(post.CompoundPredictionType == D3D12_VIDEO_ENCODER_AV1_COMP_PREDICTION_TYPE_SINGLE_REFERENCE.0 as u64, "the encoder says it predicted from two references, which it wasn't asked to");
+        }
+        if self.told < 2 {
+            // What the driver said of the first two frames, beside what it was asked: a driver
+            // whose report differs from what it encoded shows here.
+            self.told += 1;
+            tracing::info!(
+                key,
+                asked_refs = ?data.ReferenceIndices,
+                refs = ?post.ReferenceIndices,
+                primary_ref = post.PrimaryRefFrame,
+                compound = post.CompoundPredictionType,
+                q = post.Quantization.BaseQIndex,
+                delta_q = ?(post.QuantizationDelta.DeltaQPresent, post.QuantizationDelta.DeltaQRes),
+                delta_lf = ?(post.LoopFilterDelta.DeltaLFPresent, post.LoopFilterDelta.DeltaLFRes, post.LoopFilterDelta.DeltaLFMulti),
+                loop_filter = ?(post.LoopFilter.LoopFilterLevel, post.LoopFilter.LoopFilterLevelU, post.LoopFilter.LoopFilterLevelV, post.LoopFilter.LoopFilterDeltaEnabled),
+                cdef_bits = post.CDEF.CdefBits,
+                segments = post.SegmentationConfig.NumSegments,
+                "Direct3D 12 AV1: the driver's values after encoding"
+            );
         }
         let header = Frame {
             key,
