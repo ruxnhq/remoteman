@@ -76,14 +76,30 @@ pub fn hdr_light(meta: &crate::vdd::Metadata, sdr_white: f32) -> remoteman_encod
 pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<Box<dyn FrameEncoder>> {
     anyhow::ensure!(MODES.contains(&settings.mode), "this host doesn't encode {:?}", settings.mode);
     if WHICH.load(std::sync::atomic::Ordering::Relaxed) == D3D12 {
-        // AV1 isn't this encoder's (it makes HEVC 4:2:0 alone), but the card may well have one:
-        // Intel's Arc cards encode AV1, and their driver offers it to Media Foundation. Without
-        // this the pipeline went down to HEVC, with a client that asked for AV1 first.
+        // AV1 through Direct3D 12 only where it was turned on (`d3d12av1.rs`, not yet checked
+        // against a card). Otherwise, or when it won't open, the card may well have one in
+        // Media Foundation: Intel's Arc cards encode AV1, and their driver offers it there.
+        // Without this the pipeline went down to HEVC, with a client that asked for AV1 first.
         if settings.mode.codec == Codec::Av1 && !settings.hdr {
-            tracing::info!("Direct3D 12 encoding here is HEVC only; AV1 from Media Foundation's encoder");
-            return crate::mf::Encoder::open(gpu, input, settings)
-                .map(|e| Box::new(e) as Box<dyn FrameEncoder>)
-                .with_context(|| format!("Media Foundation's AV1 encoder on {}", gpu.adapter));
+            let mf = || {
+                crate::mf::Encoder::open(gpu, input, settings)
+                    .map(|e| Box::new(e) as Box<dyn FrameEncoder>)
+                    .with_context(|| format!("Media Foundation's AV1 encoder on {}", gpu.adapter))
+            };
+            if !crate::d3d12av1::enabled() {
+                tracing::info!("Direct3D 12 AV1 encoding is off; AV1 from Media Foundation's encoder");
+                return mf();
+            }
+            return match d3d12_tried(gpu, input, settings).with_context(|| format!("Direct3D 12 Video Encode on {}", gpu.adapter)) {
+                Ok(e) => {
+                    tracing::info!(note = e.note(), "encoder");
+                    Ok(e)
+                }
+                Err(first) => {
+                    tracing::warn!("{first:#}; Media Foundation's AV1 encoder instead");
+                    mf().map_err(|second| anyhow::anyhow!("{first:#}; and {second:#}"))
+                }
+            };
         }
         let tried = d3d12_tried(gpu, input, settings).with_context(|| format!("Direct3D 12 Video Encode on {}", gpu.adapter));
         return match tried {
@@ -122,8 +138,9 @@ pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<B
         // AMD's: Direct3D 12 Video Encode, which on a Radeon (the Ryzen 9 9950X3D's, RDNA 2) passed
         // every test of `d3d12test.rs` and a 3200-picture run, with loss recovery without a
         // keyframe and live rate changes that Media Foundation's AMD encoder lacks (it overshot
-        // the rate by 40% on busy pictures). HEVC 4:2:0 SDR only: for AV1, or when it won't open,
-        // Media Foundation's.
+        // the rate by 40% on busy pictures). HEVC 4:2:0, and AV1 where `--d3d12-av1` turned it on
+        // (`d3d12av1.rs`, for a Radeon 780M whose Media Foundation AV1 encoder can't be made);
+        // otherwise, or when it won't open, Media Foundation's.
         _ if gpu.vendor == AMD => d3d12().or_else(|first| any().map_err(|second| anyhow::anyhow!("{first:#}; and {second:#}"))),
         _ => any(),
     }
@@ -133,11 +150,19 @@ pub fn open(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<B
 /// every argument and still give nothing back (Intel's, for an Arc card in a guest, wrote 0 bytes
 /// a frame), and the caller then has another encoder. The trial encoder is put away and a fresh
 /// one opened, so that the stream starts at its first frame.
+/// AV1 goes to `d3d12av1.rs` (which refuses unless it was turned on), the rest to `d3d12enc.rs`.
 fn d3d12_tried(gpu: &Gpu, input: &ID3D11Texture2D, settings: &Settings) -> Result<Box<dyn FrameEncoder>> {
-    let mut trial = crate::d3d12enc::Encoder::open(gpu, input, settings)?;
+    let open = || -> Result<Box<dyn FrameEncoder>> {
+        Ok(if settings.mode.codec == Codec::Av1 {
+            Box::new(crate::d3d12av1::Encoder::open(gpu, input, settings)?) as Box<dyn FrameEncoder>
+        } else {
+            Box::new(crate::d3d12enc::Encoder::open(gpu, input, settings)?) as Box<dyn FrameEncoder>
+        })
+    };
+    let mut trial = open()?;
     trial.encode_how(0, 0, How { idr: true, mark: None, refer: 0 }).context("its trial picture")?;
     drop(trial);
-    Ok(Box::new(crate::d3d12enc::Encoder::open(gpu, input, settings)?))
+    open()
 }
 
 /// NVIDIA's PCI id.
@@ -147,8 +172,9 @@ const AMD: u32 = 0x1002;
 pub const AUTO: u8 = 0;
 pub const NVENC: u8 = 1;
 pub const ANY_MAKERS: u8 = 2;
-/// Direct3D 12 Video Encode (`d3d12enc.rs`): any maker's GPU, with loss recovery and live
-/// rate changes. Asked for with `--encoder d3d12`; the default on AMD cards (HEVC, SDR).
+/// Direct3D 12 Video Encode (`d3d12enc.rs`, and `d3d12av1.rs` for AV1 where `--d3d12-av1` turns
+/// it on): any maker's GPU, with loss recovery and live rate changes. Asked for with `--encoder
+/// d3d12`; the default on AMD cards.
 pub const D3D12: u8 = 3;
 /// Which encoder `--encoder` asked for; the card's own by default.
 pub static WHICH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(AUTO);

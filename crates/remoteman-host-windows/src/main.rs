@@ -3,8 +3,9 @@
 //!
 //!     remoteman-host [--listen ADDR:PORT] [--state DIR] [--pair | --ask | --no-pair] [--name NAME]
 //!                    [--log FILE] [--bitrate MBIT] [--mode keep|listed|any] [--allow files,clipboard]
-//!                    [--encoder auto|nvenc|mf|d3d12] [--refine yes|no] [--seconds N]
-//!     remoteman-host --probe | --probe-picture [--log FILE]
+//!                    [--encoder auto|nvenc|mf|d3d12] [--d3d12-av1] [--refine yes|no] [--seconds N]
+//!     remoteman-host --probe | --probe-picture | --probe-av1 [--log FILE]
+//!     remoteman-host --probe-av1-encode DIR [--probe-size WxH]
 //!     remoteman-host ctl [--port PORT] WORDS
 //!     remoteman-host fingerprint [--state DIR]
 //!
@@ -34,7 +35,16 @@
 //! `--probe` only looks: it opens the display driver, says what it finds (the driver, its frame
 //! channel, the monitor's modes, the adapter, the shared textures) and exits. Run it first on
 //! a new machine. `--probe-picture` goes on to take one frame, convert it and encode it once
-//! with each codec, to show how far the picture path gets with no client.
+//! with each codec, to show how far the picture path gets with no client. `--probe-av1` asks
+//! every GPU's Direct3D 12 encoder what it can do for AV1 and makes each Media Foundation
+//! encoder once; it needs neither the display driver nor elevation. `--probe-av1-encode DIR`
+//! encodes a moving test picture (1920x1088 unless `--probe-size` says) with the Direct3D 12 AV1
+//! encoder of each GPU that has one, a loss and a change of rate on the way, into
+//! `DIR\av1-N.obu` for FFmpeg to decode (`ffmpeg -i av1-0.obu -f null -`).
+//!
+//! `--d3d12-av1` lets AV1 be encoded through Direct3D 12 (`d3d12av1.rs`), where the card's
+//! encoder is Direct3D 12's (AMD's, or any with `--encoder d3d12`); `REMOTEMAN_D3D12_AV1=1` does
+//! the same. Off by default until that encoder has been seen working on a card.
 //!
 //! `--mode` says how far the host may go to give a client its own size: `keep` streams the
 //! monitor as it is, `listed` switches to the client's size if the monitor offers it, `any`
@@ -90,6 +100,10 @@ mod dpi;
 mod encode;
 #[cfg(windows)]
 mod d3d12enc;
+#[cfg(windows)]
+mod d3d12av1;
+#[cfg(windows)]
+mod av1probe;
 #[cfg(all(windows, test))]
 mod d3d12test;
 #[cfg(all(windows, test))]
@@ -164,6 +178,7 @@ mod windows_main {
         let (mut pair, mut state, mut bitrate, mut drop_one_in) = (false, state_dir(), 40u32, None::<u32>);
         let (mut name, mut log, mut seconds, mut probing, mut fit) = (None::<String>, None::<PathBuf>, None::<u64>, None::<bool>, Fit::Any);
         let mut test_hdr = None::<u64>;
+        let (mut probe_av1, mut probe_av1_encode, mut probe_size) = (false, None::<PathBuf>, (1920u32, 1088u32));
         let (mut allow_files, mut allow_clipboard) = (false, false);
         let mut ask = false;
         let mut stop_event = None::<String>;
@@ -308,6 +323,15 @@ mod windows_main {
                 "--test-hdr-window" => test_hdr = Some(value()?.parse().context("--test-hdr-window SECONDS")?),
                 "--probe" => probing = Some(false),
                 "--probe-picture" => probing = Some(true),
+                "--probe-av1" => probe_av1 = true,
+                "--probe-av1-encode" => probe_av1_encode = Some(value()?.into()),
+                "--probe-size" => {
+                    let v = value()?;
+                    let (w, h) = v.split_once('x').context("--probe-size WxH")?;
+                    probe_size = (w.parse().context("--probe-size WxH")?, h.parse().context("--probe-size WxH")?);
+                }
+                // AV1 through Direct3D 12 (`d3d12av1.rs`), off until seen working on a card.
+                "--d3d12-av1" => crate::d3d12av1::ENABLED.store(true, Ordering::Relaxed),
                 "--mode" => {
                     fit = match value()?.as_str() {
                         "keep" => Fit::Keep,
@@ -338,6 +362,12 @@ mod windows_main {
                 let _ = crate::control::LOG.set(path.clone());
             }
             None => tracing_subscriber::fmt().with_max_level(level).with_ansi(false).init(),
+        }
+        if probe_av1 {
+            return crate::av1probe::run().inspect_err(|e| tracing::error!("{e:#}"));
+        }
+        if let Some(dir) = probe_av1_encode {
+            return crate::d3d12av1::probe(&dir, probe_size.0, probe_size.1, 240).inspect_err(|e| tracing::error!("{e:#}"));
         }
         if std::env::args().any(|a| a == "--probe-mic") {
             crate::sound::probe_formats();

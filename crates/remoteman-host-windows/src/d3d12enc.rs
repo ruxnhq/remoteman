@@ -313,7 +313,7 @@ impl Params {
 // ---------------------------------------------------------------------------------------------
 // D3D12.
 
-fn transition(res: &ID3D12Resource, sub: u32, before: D3D12_RESOURCE_STATES, after: D3D12_RESOURCE_STATES) -> D3D12_RESOURCE_BARRIER {
+pub(crate) fn transition(res: &ID3D12Resource, sub: u32, before: D3D12_RESOURCE_STATES, after: D3D12_RESOURCE_STATES) -> D3D12_RESOURCE_BARRIER {
     D3D12_RESOURCE_BARRIER {
         Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
         Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
@@ -323,7 +323,7 @@ fn transition(res: &ID3D12Resource, sub: u32, before: D3D12_RESOURCE_STATES, aft
     }
 }
 
-fn drop_barrier(b: D3D12_RESOURCE_BARRIER) {
+pub(crate) fn drop_barrier(b: D3D12_RESOURCE_BARRIER) {
     // SAFETY: built by `transition`, which put a clone of the resource in.
     unsafe {
         let mut t = ManuallyDrop::into_inner(b.Anonymous.Transition);
@@ -331,14 +331,14 @@ fn drop_barrier(b: D3D12_RESOURCE_BARRIER) {
     }
 }
 
-fn heap(kind: D3D12_HEAP_TYPE) -> D3D12_HEAP_PROPERTIES {
+pub(crate) fn heap(kind: D3D12_HEAP_TYPE) -> D3D12_HEAP_PROPERTIES {
     D3D12_HEAP_PROPERTIES { Type: kind, ..Default::default() }
 }
 
 /// Memory the video encoder writes and the CPU reads: a custom heap of the system's memory, cached
 /// for the CPU, which on a card of its own is what a readback heap is (FFmpeg's encoder writes its
 /// bitstream and resolved metadata into a readback heap, on Intel's Arc too).
-fn readable_heap() -> D3D12_HEAP_PROPERTIES {
+pub(crate) fn readable_heap() -> D3D12_HEAP_PROPERTIES {
     D3D12_HEAP_PROPERTIES {
         Type: D3D12_HEAP_TYPE_CUSTOM,
         CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_WRITE_BACK,
@@ -347,7 +347,7 @@ fn readable_heap() -> D3D12_HEAP_PROPERTIES {
     }
 }
 
-fn buffer_desc(size: u64) -> D3D12_RESOURCE_DESC {
+pub(crate) fn buffer_desc(size: u64) -> D3D12_RESOURCE_DESC {
     D3D12_RESOURCE_DESC {
         Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
         Alignment: 0,
@@ -362,7 +362,7 @@ fn buffer_desc(size: u64) -> D3D12_RESOURCE_DESC {
     }
 }
 
-fn texture_desc(w: u32, h: u32, slices: u16, flags: D3D12_RESOURCE_FLAGS) -> D3D12_RESOURCE_DESC {
+pub(crate) fn texture_desc(w: u32, h: u32, slices: u16, flags: D3D12_RESOURCE_FLAGS) -> D3D12_RESOURCE_DESC {
     D3D12_RESOURCE_DESC {
         Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
         Alignment: 0,
@@ -395,7 +395,7 @@ pub struct Caps {
     pub meta_size: u32,
 }
 
-fn d3d12_device(gpu: &Gpu) -> Result<ID3D12Device> {
+pub(crate) fn d3d12_device(gpu: &Gpu) -> Result<ID3D12Device> {
     // SAFETY: DXGI and D3D12 calls as documented.
     unsafe {
         let factory: IDXGIFactory4 = CreateDXGIFactory1()?;
@@ -427,7 +427,7 @@ fn level_for(w: u32, h: u32) -> i32 {
     if (w as u64) * (h as u64) <= 8_912_896 { D3D12_VIDEO_ENCODER_LEVELS_HEVC_51.0 } else { D3D12_VIDEO_ENCODER_LEVELS_HEVC_62.0 }
 }
 
-fn check<T>(video: &ID3D12VideoDevice3, feature: D3D12_FEATURE_VIDEO, data: &mut T) -> Result<()> {
+pub(crate) fn check<T>(video: &ID3D12VideoDevice3, feature: D3D12_FEATURE_VIDEO, data: &mut T) -> Result<()> {
     // SAFETY: `data` is the feature's structure and its size is passed with it.
     unsafe { video.CheckFeatureSupport(feature, data as *mut T as *mut _, std::mem::size_of::<T>() as u32) }.map_err(|e| anyhow::anyhow!("CheckFeatureSupport({}): {e}", feature.0))
 }
@@ -611,7 +611,7 @@ fn choose(video: &ID3D12VideoDevice3, vendor: u32, w: u32, h: u32, fps: u32, bit
 /// its rate control, such as Intel's for its Arc cards, is told of no change at all, as FFmpeg's
 /// encoder tells every driver: asked for one it can't make, Intel's refused the frame as a whole
 /// ("the parameter is incorrect"), and asked for the resolution alone, it encoded nothing.
-fn first_frame_flags(support: i32) -> D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAGS {
+pub(crate) fn first_frame_flags(support: i32) -> D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAGS {
     if support & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_RECONFIGURATION_AVAILABLE.0 == 0 {
         return D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAG_NONE;
     }
@@ -626,12 +626,12 @@ fn first_frame_flags(support: i32) -> D3D12_VIDEO_ENCODER_SEQUENCE_CONTROL_FLAGS
     )
 }
 
-fn cbr_params(bitrate: u32, fps: u32, vbv: bool) -> D3D12_VIDEO_ENCODER_RATE_CONTROL_CBR {
+pub(crate) fn cbr_params(bitrate: u32, fps: u32, vbv: bool) -> D3D12_VIDEO_ENCODER_RATE_CONTROL_CBR {
     let frame = (bitrate as u64 / fps.max(1) as u64).max(1000);
     D3D12_VIDEO_ENCODER_RATE_CONTROL_CBR { InitialQP: 0, MinQP: 0, MaxQP: 0, MaxFrameBitSize: 0, TargetBitRate: bitrate as u64, VBVCapacity: if vbv { frame } else { 0 }, InitialVBVFullness: if vbv { frame } else { 0 } }
 }
 
-fn rate_control(cbr: &D3D12_VIDEO_ENCODER_RATE_CONTROL_CBR, fps: u32, vbv: bool) -> D3D12_VIDEO_ENCODER_RATE_CONTROL {
+pub(crate) fn rate_control(cbr: &D3D12_VIDEO_ENCODER_RATE_CONTROL_CBR, fps: u32, vbv: bool) -> D3D12_VIDEO_ENCODER_RATE_CONTROL {
     D3D12_VIDEO_ENCODER_RATE_CONTROL {
         Mode: D3D12_VIDEO_ENCODER_RATE_CONTROL_MODE_CBR,
         Flags: if vbv { D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_ENABLE_VBV_SIZES } else { D3D12_VIDEO_ENCODER_RATE_CONTROL_FLAG_NONE },
@@ -650,14 +650,14 @@ struct Pic {
     slice: usize,
 }
 
-struct Waiter {
-    fence: ID3D12Fence,
-    event: HANDLE,
-    value: u64,
+pub(crate) struct Waiter {
+    pub(crate) fence: ID3D12Fence,
+    pub(crate) event: HANDLE,
+    pub(crate) value: u64,
 }
 
 impl Waiter {
-    fn wait(&self) -> Result<()> {
+    pub(crate) fn wait(&self) -> Result<()> {
         // SAFETY: a live fence and event.
         unsafe {
             if self.fence.GetCompletedValue() < self.value {
@@ -1245,7 +1245,7 @@ impl Encoder {
     }
 }
 
-fn env_flag(name: &str, default: bool) -> bool {
+pub(crate) fn env_flag(name: &str, default: bool) -> bool {
     match std::env::var(name) {
         Ok(v) => v == "1",
         Err(_) => default,

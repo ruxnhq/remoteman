@@ -117,6 +117,33 @@ pub fn names() -> Vec<String> {
     [Codec::Hevc, Codec::Av1].into_iter().flat_map(|c| listed(c).unwrap_or_default().into_iter().map(move |(name, maker, _)| format!("{c:?}: {name} ({maker})"))).collect()
 }
 
+/// For `--probe-av1`: each hardware encoder Media Foundation lists for AV1 and HEVC, made and
+/// let go of again, and how that went.
+pub fn try_making() -> Vec<(Codec, String)> {
+    start();
+    let mut out = Vec::new();
+    for codec in [Codec::Av1, Codec::Hevc] {
+        match listed(codec) {
+            Ok(all) if all.is_empty() => out.push((codec, "no hardware encoder listed".to_owned())),
+            Ok(all) => {
+                for (name, maker, activate) in all {
+                    // SAFETY: Media Foundation calls as documented, on an object it gave us.
+                    let made = unsafe { activate.ActivateObject::<IMFTransform>() };
+                    let how = match made {
+                        Ok(_) => "made".to_owned(),
+                        Err(e) => format!("FAILED to make: {e}"),
+                    };
+                    // SAFETY: as above; the transform (if any) is already dropped.
+                    let _ = unsafe { activate.ShutdownObject() };
+                    out.push((codec, format!("\"{name}\" ({maker}): {how}")));
+                }
+            }
+            Err(e) => out.push((codec, format!("FAILED: {e:#}"))),
+        }
+    }
+    out
+}
+
 fn start() {
     // SAFETY: plain calls; both may be made more than once.
     unsafe {
