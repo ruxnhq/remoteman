@@ -4,7 +4,9 @@
 //! made. Off unless asked for (`--d3d12-av1` or `REMOTEMAN_D3D12_AV1=1`): it was written from
 //! Mesa's Direct3D 12 AV1 encoder and the AV1 specification. Seen working on an RTX 5090
 //! (2026-11-25: `--probe-av1-encode`'s 240 frames, with a loss and a rate change, decoded by
-//! dav1d and libaom alike, frame for frame); not yet on a Radeon.
+//! dav1d and libaom alike, frame for frame). A Radeon 780M's stream (driver 32.0.32015.12012)
+//! decoded in neither until its headers said what AMD's encoder does, which its driver doesn't
+//! report as Direct3D 12 has it: see [`amd_ways`].
 //!
 //! What the driver writes and what this module writes: the driver writes the tile data alone.
 //! Everything around it is written here: the temporal delimiter, the sequence header (in front
@@ -97,6 +99,27 @@ const HANDLED: i32 = D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_128x128_SUPERBLOCK.0
     | D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_AUTO_SEGMENTATION.0;
 /// The ones asked for where the driver offers them: deringing (CDEF) and eighth-pel motion.
 const WANTED: i32 = D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_CDEF_FILTERING.0 | D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_ALLOW_HIGH_PRECISION_MV.0;
+
+/// Whether the headers are written for AMD's encoder where its driver's report differs from what
+/// it encoded: on AMD's cards, unless `REMOTEMAN_D3D12_AV1_AMD` says otherwise (0 or 1). Found on a
+/// Radeon 780M (VCN 4, driver 32.0.32015.12012) by rewriting the headers of a stream neither
+/// dav1d nor libaom decoded until all 240 frames did, in both alike:
+///
+/// - Every frame codes loop filter deltas by superblock (`delta_lf_present` 1, `delta_lf_res` 0,
+///   `delta_lf_multi` 0) wherever it codes quantiser deltas, as AMD's own encoder (AMF) writes in
+///   its streams from the same card. The driver offers no DELTA_LF_PARAMS and doesn't say it
+///   reports LOOP_FILTER_DELTA, so the header said `delta_lf_present` 0 and the keyframe's tile
+///   didn't decode.
+/// - Motion vectors are never eighth-pel, though the driver offers ALLOW_HIGH_PRECISION_MV and
+///   takes the picture's flag: it is not asked for.
+/// - The driver says it reports REFERENCE_INDICES and reports zeros, whichever slot was asked
+///   for and encoded from: the header keeps the slots asked for.
+fn amd_ways(vendor: u32) -> bool {
+    env_flag("REMOTEMAN_D3D12_AV1_AMD", vendor == 0x1002)
+}
+
+/// What AMD's encoder codes for `delta_lf_params()` whenever quantiser deltas are present.
+const AMD_DELTA_LF: D3D12_VIDEO_ENCODER_CODEC_AV1_LOOP_FILTER_DELTA_CONFIG = D3D12_VIDEO_ENCODER_CODEC_AV1_LOOP_FILTER_DELTA_CONFIG { DeltaLFPresent: 1, DeltaLFMulti: 0, DeltaLFRes: 0 };
 
 /// Whether Direct3D 12's AV1 encoder may be used: `--d3d12-av1`, or `REMOTEMAN_D3D12_AV1=1` (for
 /// the service, in its registry key's `Environment`).
@@ -615,10 +638,12 @@ struct Chosen {
     post: i32,
     support_flags: i32,
     meta_size: u32,
+    /// The headers are written for AMD's encoder ([`amd_ways`]).
+    amd: bool,
     note: String,
 }
 
-fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) -> Result<Chosen> {
+fn choose(video: &ID3D12VideoDevice3, amd: bool, w: u32, h: u32, fps: u32, bitrate: u32) -> Result<Chosen> {
     let codec_id = D3D12_VIDEO_ENCODER_CODEC_AV1;
     let mut profile = D3D12_VIDEO_ENCODER_AV1_PROFILE_MAIN;
     let profile_ptr: *mut D3D12_VIDEO_ENCODER_AV1_PROFILE = &mut profile;
@@ -685,7 +710,9 @@ fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) ->
         sup.SupportedFeatureFlags.0,
         sup.PostEncodeValuesFlags.0
     );
-    let features = required | (sup.SupportedFeatureFlags.0 & WANTED);
+    // AMD's encoder writes no eighth-pel motion vector when allowed to, and nothing says so.
+    let wanted = if amd { WANTED & !D3D12_VIDEO_ENCODER_AV1_FEATURE_FLAG_ALLOW_HIGH_PRECISION_MV.0 } else { WANTED };
+    let features = required | (sup.SupportedFeatureFlags.0 & wanted);
     let post = sup.PostEncodeValuesFlags.0;
     // With a constant rate the driver picks each frame's quantiser, which the header has to say.
     ensure!(post & D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_QUANTIZATION.0 != 0, "the AV1 encoder doesn't say the quantiser it chose (values said after encoding {post:#x})");
@@ -749,7 +776,7 @@ fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) ->
             check(video, D3D12_FEATURE_VIDEO_ENCODER_RESOURCE_REQUIREMENTS, &mut rr)?;
             ensure!(rr.IsSupported.as_bool(), "no resource requirements for this size");
             let note = format!(
-                "level {}.{} ({} tier), features {features:#x} (offered {:#x}, required {required:#x}), values after encoding {post:#x}, filter {filter}, tx {}/{}, {} as one tile",
+                "level {}.{} ({} tier), features {features:#x} (offered {:#x}, required {required:#x}), values after encoding {post:#x}, filter {filter}, tx {}/{}, {} as one tile{}",
                 2 + level.Level.0 / 4,
                 level.Level.0 % 4,
                 if tier == D3D12_VIDEO_ENCODER_AV1_TIER_HIGH { "high" } else { "main" },
@@ -757,8 +784,9 @@ fn choose(video: &ID3D12VideoDevice3, w: u32, h: u32, fps: u32, bitrate: u32) ->
                 tx_key.0,
                 tx_inter.0,
                 if mode == D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE_FULL_FRAME { "the whole frame" } else { "a 1x1 grid" },
+                if amd { ", headers as AMD's encoder codes (loop filter deltas, the references asked for)" } else { "" },
             );
-            return Ok(Chosen { config, level, layout, filter, tx_key, tx_inter, post, support_flags: s.SupportFlags.0, meta_size: rr.MaxEncoderOutputMetadataBufferSize, note });
+            return Ok(Chosen { config, level, layout, filter, tx_key, tx_inter, post, support_flags: s.SupportFlags.0, meta_size: rr.MaxEncoderOutputMetadataBufferSize, amd, note });
         }
         refused.push(format!("{}: {said:?}, validation flags {:#x}, support flags {:#x}", mode.0, s.ValidationFlags.0, s.SupportFlags.0));
     }
@@ -822,7 +850,7 @@ impl Encoder {
         unsafe {
             let device = d3d12_device(gpu)?;
             let video: ID3D12VideoDevice3 = device.cast().context("ID3D12VideoDevice3 (no Direct3D 12 video on this GPU or driver)")?;
-            let mut chosen = choose(&video, w, h, fps, s.bitrate)?;
+            let mut chosen = choose(&video, amd_ways(gpu.vendor), w, h, fps, s.bitrate)?;
             let seq = Sequence { width: w, height: h, level: chosen.level.Level.0 as u32, tier: chosen.level.Tier.0 as u32, features: chosen.config.FeatureFlags.0, hdr: s.hdr, light: s.light };
             let support = chosen.support_flags;
             let vbv = support & D3D12_VIDEO_ENCODER_SUPPORT_FLAG_RATE_CONTROL_VBV_SIZE_CONFIG_AVAILABLE.0 != 0 && env_flag("REMOTEMAN_D3D12_VBV", true);
@@ -1248,7 +1276,19 @@ impl Encoder {
 
         // What the header says: the driver's values where it reports them, else what it was asked.
         let has = |flag: D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAGS| self.chosen.post & flag.0 != 0;
-        let ref_idx = if !key && has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_REFERENCE_INDICES) { post.ReferenceIndices.map(|i| i as u32) } else { data.ReferenceIndices };
+        // AMD's driver reports zeros for the references and encodes from the slot asked for.
+        let amd = self.chosen.amd;
+        let ref_idx = if !key && !amd && has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_REFERENCE_INDICES) { post.ReferenceIndices.map(|i| i as u32) } else { data.ReferenceIndices };
+        // AMD's encoder codes loop filter deltas its driver doesn't say it reports: the driver's
+        // values if it gave any that can be said, else what the encoder is seen to code.
+        let said_dlf = |d: &D3D12_VIDEO_ENCODER_CODEC_AV1_LOOP_FILTER_DELTA_CONFIG| d.DeltaLFPresent == 1 && d.DeltaLFRes <= 3 && d.DeltaLFMulti <= 1;
+        let dlf = if has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_LOOP_FILTER_DELTA) || (amd && said_dlf(&post.LoopFilterDelta)) {
+            &post.LoopFilterDelta
+        } else if amd {
+            &AMD_DELTA_LF
+        } else {
+            &data.LoopFilterDelta
+        };
         ensure!(ref_idx.iter().all(|&i| (i as usize) < SLOTS && (key || self.slots[i as usize].is_some())), "the encoder says it referred to slots {ref_idx:?}");
         let primary_ref = if has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_PRIMARY_REF_FRAME) { post.PrimaryRefFrame as u32 } else { PRIMARY_REF_NONE };
         ensure!(primary_ref <= PRIMARY_REF_NONE, "the encoder says primary_ref_frame {primary_ref}");
@@ -1269,7 +1309,7 @@ impl Encoder {
             q: &post.Quantization,
             dq: if has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_QUANTIZATION_DELTA) { &post.QuantizationDelta } else { &data.QuantizationDelta },
             lf: if has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_LOOP_FILTER) { &post.LoopFilter } else { &data.LoopFilter },
-            dlf: if has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_LOOP_FILTER_DELTA) { &post.LoopFilterDelta } else { &data.LoopFilterDelta },
+            dlf,
             cdef: if has(D3D12_VIDEO_ENCODER_AV1_POST_ENCODE_VALUES_FLAG_CDEF_DATA) { &post.CDEF } else { &data.CDEF },
             seg: (data.Flags.0 & D3D12_VIDEO_ENCODER_AV1_PICTURE_CONTROL_FLAG_ENABLE_FRAME_SEGMENTATION_AUTO.0 != 0 && post.SegmentationConfig.NumSegments > 0).then_some(&post.SegmentationConfig),
         };
