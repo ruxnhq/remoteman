@@ -48,11 +48,11 @@
 //! the same. Off by default until that encoder has been seen working on a card.
 //!
 //! `--updates` (`updater.rs`): whether the host looks for a newer release of remoteman's on its
-//! own, at the start and every 12 hours: `check` (the default for the host the service starts;
-//! one started any other way doesn't look unless told) says so in the log and in Remoteman
-//! Host, which has an Install button; `install` installs it too, once no device is connected;
-//! `off` never looks, for a manager that installs a copy it pins and keeps it up to date itself
-//! (Guesthouse, in its guests). Said here, it decides over the owner's choice (`ctl set updates
+//! own, a minute after it starts and every 12 hours: `check` (the default for the host the
+//! service starts; one started any other way doesn't look unless told) says so in the log and in
+//! Remoteman Host, which has an Install button; `install` installs it too, once no device is
+//! connected; `off` never looks by itself, for a manager that installs a copy it pins and keeps
+//! it up to date itself (Guesthouse, in its guests). Said here, it decides over the owner's choice (`ctl set updates
 //! off|check|install`, the app's switch). `ctl update check` looks now, `ctl update install`
 //! installs what was found. The installer can't be given it, so the service's command line has
 //! it only if put there by hand; `{"mode":"off"}` in `STATE\updates.json` does the same.

@@ -20,7 +20,7 @@ pub const FILES: &str = "https://files.ruxn.com/p/remoteman/";
 /// The start of the host installer's file name, `remoteman-host-setup-X.Y.Z.exe`.
 pub const PREFIX: &str = "remoteman-host-setup-";
 
-/// How often the host looks for updates by itself (`--updates`): never, to say when there is one,
+/// Whether the host looks for updates by itself (`--updates`): never, to say when there is one,
 /// or to install it too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
