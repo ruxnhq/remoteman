@@ -23,4 +23,4 @@ jobs:
       - name: Look for the author's line
         env:
           AUTHOR: ${{ github.event.pull_request.user.login }}
-        run: scripts/cla-check.sh "$AUTHOR"
+        run: sh scripts/cla-check.sh "$AUTHOR"
