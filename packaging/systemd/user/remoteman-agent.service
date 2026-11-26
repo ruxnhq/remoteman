@@ -1,6 +1,6 @@
 [Unit]
 Description=remoteman agent: this session's screen for paired devices
-Documentation=https://github.com/ruxnhq/remoteman
+Documentation=https://github.com/ruxnlabs/remoteman
 # One in every graphical session, the login screen's included. It does nothing until the system
 # service (remotemand) hands it a client.
 PartOf=graphical-session.target
