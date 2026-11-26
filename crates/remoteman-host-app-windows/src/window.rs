@@ -452,7 +452,7 @@ fn update_notice(u: &host::Update, context: &ViewContext<HostWindow>) -> Option<
         "installing" => (format!("Installing {newer}: the host restarts, and this app closes and comes back in a minute or two."), None),
         _ if !u.can_install => (format!("This PC has {}. {}", u.version, sentence(&u.why_not)), None),
         "failed" => (format!("This PC has {}. {}", u.version, sentence(&u.words)), Some("Try again")),
-        _ => (format!("This PC has {}. Installing takes a minute or two, while no device can connect.", u.version), Some("Install")),
+        _ => (format!("This PC has {}, and installing gets {newer} from remoteman.ruxn.com. It takes a minute or two, while no device can connect.", u.version), Some("Install")),
     };
     let button: Option<View> = button.map(|text| push(text, context.callback(|()| Message::Install), true).into());
     Some(row(&title, Some(&words), button))

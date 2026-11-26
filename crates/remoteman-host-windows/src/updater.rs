@@ -193,8 +193,8 @@ fn set_state(s: &Shared, state: State) {
     let mut now = s.now.lock().unwrap();
     if now.state != state {
         match &state {
-            State::Failed(_) => tracing::warn!("updates: {}", state.words()),
-            _ => tracing::info!("updates: {}", state.words()),
+            State::Failed(_) => tracing::warn!("updates: {}", state.words(&current())),
+            _ => tracing::info!("updates: {}", state.words(&current())),
         }
         now.state = state;
     }
@@ -238,7 +238,7 @@ fn watch(s: &'static Shared, host: Weak<Host>) {
         }
         let mode = mode(s.service, saved);
         if asked.is_some() || (Instant::now() >= next_check && mode != Mode::Off) {
-            next_check = Instant::now() + if check(s) { EVERY } else { AGAIN };
+            next_check = Instant::now() + if check(s, asked.is_some()) { EVERY } else { AGAIN };
         } else if Instant::now() >= next_check {
             next_check = Instant::now() + EVERY;
         }
@@ -267,8 +267,9 @@ fn watch(s: &'static Shared, host: Weak<Host>) {
     }
 }
 
-/// Look at the download page. Whether it could be read.
-fn check(s: &Shared) -> bool {
+/// Look at the download page. Whether it could be read. A check the owner asked for says what
+/// it found even right after an update; one of the host's own leaves "updated from" standing.
+fn check(s: &Shared, asked: bool) -> bool {
     let before = s.now.lock().unwrap().state.clone();
     set_state(s, State::Checking);
     let found = fetch_text(update::PAGE, 2 << 20, 30).and_then(|html| update::newest_on_page(&html));
@@ -280,10 +281,10 @@ fn check(s: &Shared) -> bool {
             set_state(s, State::Available(version));
             true
         }
-        Ok(_) => {
+        Ok(release) => {
             s.now.lock().unwrap().newer = None;
-            // "Updated from" stays until there is news.
-            set_state(s, if matches!(before, State::Updated(_)) { before } else { State::UpToDate });
+            // "Updated from" stays until there is news, or the owner asks.
+            set_state(s, if matches!(before, State::Updated(_)) && !asked { before } else { State::UpToDate(release.version) });
             true
         }
         Err(why) => {
@@ -457,7 +458,7 @@ fn take_last(dir: &Path) -> Option<State> {
 pub fn answer(host: &Host, what: Option<&str>, more: Option<&str>) -> String {
     let Some(s) = SHARED.get() else { return "this host doesn't look for updates\n".into() };
     match (what, more) {
-        (None | Some("status"), _) => format!("{}\n", s.now.lock().unwrap().state.words()),
+        (None | Some("status"), _) => format!("{}\n", s.now.lock().unwrap().state.words(&current())),
         (Some("check"), None) => {
             ask(s, Asked::Check);
             "ok\n".into()
@@ -515,7 +516,7 @@ pub fn status() -> serde_json::Value {
         "mode": mode(s.service, now.saved).as_str(),
         "said": SAID.get().is_some(),
         "state": now.state.key(),
-        "words": now.state.words(),
+        "words": now.state.words(&current()),
         "newer": now.newer.as_ref().map(|r| r.version.to_string()),
         "checked": now.checked,
         "can_install": s.install.is_ok(),

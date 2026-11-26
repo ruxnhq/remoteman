@@ -235,7 +235,8 @@ pub enum State {
     /// Not looked yet since the host started.
     NotYet,
     Checking,
-    UpToDate,
+    /// Nothing newer: the newest release on the download page is that one.
+    UpToDate(Version),
     Available(Version),
     Downloading(Version),
     /// The installer runs; the host is stopped and started again by it.
@@ -251,7 +252,7 @@ impl State {
         match self {
             State::NotYet => "not-yet",
             State::Checking => "checking",
-            State::UpToDate => "up-to-date",
+            State::UpToDate(_) => "up-to-date",
             State::Available(_) => "available",
             State::Downloading(_) => "downloading",
             State::Installing(_) => "installing",
@@ -260,15 +261,17 @@ impl State {
         }
     }
 
-    pub fn words(&self) -> String {
+    /// The state as said to the owner, for a host of version `this`: after a check, whether
+    /// there is an update, what this PC has, and what an install would get.
+    pub fn words(&self, this: &Version) -> String {
         match self {
             State::NotYet => "not looked for yet".into(),
             State::Checking => "looking for updates".into(),
-            State::UpToDate => "up to date".into(),
-            State::Available(v) => format!("{v} available"),
+            State::UpToDate(newest) => format!("no update: this PC has {this}, and the newest release is {newest}"),
+            State::Available(v) => format!("update available: this PC has {this}, and installing gets {v}"),
             State::Downloading(v) => format!("downloading {v}"),
             State::Installing(v) => format!("installing {v}"),
-            State::Updated(from) => format!("updated from {from}"),
+            State::Updated(from) => format!("updated from {from} to {this}"),
             State::Failed(why) => format!("failed: {why}"),
         }
     }
@@ -381,10 +384,13 @@ mod tests {
 
     #[test]
     fn states_in_words() {
-        assert_eq!(State::Available(v("0.1.8")).words(), "0.1.8 available");
-        assert_eq!(State::Downloading(v("0.1.8")).words(), "downloading 0.1.8");
-        assert_eq!(State::Failed("no network".into()).words(), "failed: no network");
-        assert_eq!(State::UpToDate.key(), "up-to-date");
+        let this = v("0.1.7");
+        assert_eq!(State::Available(v("0.1.8")).words(&this), "update available: this PC has 0.1.7, and installing gets 0.1.8");
+        assert_eq!(State::UpToDate(v("0.1.7")).words(&this), "no update: this PC has 0.1.7, and the newest release is 0.1.7");
+        assert_eq!(State::Updated(v("0.1.6")).words(&this), "updated from 0.1.6 to 0.1.7");
+        assert_eq!(State::Downloading(v("0.1.8")).words(&this), "downloading 0.1.8");
+        assert_eq!(State::Failed("no network".into()).words(&this), "failed: no network");
+        assert_eq!(State::UpToDate(v("0.1.7")).key(), "up-to-date");
         for word in ["off", "check", "install"] {
             assert_eq!(Mode::parse(word).unwrap().as_str(), word);
         }
