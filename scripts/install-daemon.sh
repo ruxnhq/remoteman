@@ -50,6 +50,9 @@ place() {
     if [ -d "$PAYLOAD/lib" ]; then
         rm -rf "$DEST$LIB/lib"
         cp -r "$PAYLOAD/lib" "$DEST$LIB/lib"
+        # The agent runs as the session's user and loads these. A copy keeps the modes it was
+        # given, and an AppImage extracted with --appimage-extract makes its folders 700.
+        chmod -R a+rX "$DEST$LIB/lib"
     fi
     sed -e "s|^ExecStart=/usr/lib/remoteman/remotemand.*|ExecStart=$LIB/remotemand --user $U --login $how|" "$UNITS/system/remotemand.service" > "$UNIT"
     sed -e "s|=/usr/lib/remoteman/remoteman-agent|=$LIB/remoteman-agent|" "$UNITS/user/remoteman-agent.service" > "$DEST$AGENT"
