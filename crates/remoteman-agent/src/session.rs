@@ -21,6 +21,29 @@ fn modes() -> Vec<Mode> {
     crate::gpu::modes()
 }
 
+/// The modes this host encodes among those the client decodes, the client's favourite first.
+fn common(decoders: &[Mode]) -> Vec<Mode> {
+    let ours = modes();
+    decoders.iter().copied().filter(|m| ours.contains(m)).collect()
+}
+
+/// The first of `modes` that `open` succeeds with, and what it made. A card's encoder can lack
+/// a mode the list has (NVENC before Ada has no AV1), so a refusal goes on to the next mode,
+/// as the Windows host does; only when every one is refused is that the answer, with each reason.
+fn first_opened<T>(modes: &[Mode], mut open: impl FnMut(Mode) -> anyhow::Result<T>) -> Result<(Mode, T), String> {
+    let mut refused = Vec::new();
+    for &mode in modes {
+        match open(mode) {
+            Ok(made) => return Ok((mode, made)),
+            Err(e) => {
+                tracing::warn!(?mode, "{e:#}");
+                refused.push(format!("{mode:?}: {e:#}"));
+            }
+        }
+    }
+    Err(format!("no encoder opened: {}", refused.join("; ")))
+}
+
 /// A client being served.
 /// A second display in the same session: a monitor and a picture of its own.
 struct Second {
@@ -234,9 +257,11 @@ impl Agent {
         if ceiling == 0 { self.bitrate } else { ceiling.clamp(*BITRATE.start(), *BITRATE.end()) }
     }
 
-    /// Make the client's display and start its picture.
-    fn start(&mut self, name: String, screen: Display, decoders: Vec<Mode>, cursor: bool, ceiling: u32, link: Link) -> Result<Accept, String> {
-        let started = self.start_picture(name, screen, decoders, cursor, ceiling, link);
+    /// Make the client's display and start its picture. `tell`: the client already has a
+    /// picture, and is told of the new one before its first frame (see [`Self::start_picture`]).
+    #[allow(clippy::too_many_arguments)]
+    fn start(&mut self, name: String, screen: Display, decoders: Vec<Mode>, cursor: bool, ceiling: u32, link: Link, tell: bool) -> Result<Accept, String> {
+        let started = self.start_picture(name, screen, decoders, cursor, ceiling, link, tell);
         // Unlocked for a device that then got no picture: not left unlocked for nobody.
         if started.is_err() && self.live.is_none() {
             self.relock();
@@ -244,9 +269,16 @@ impl Agent {
         started
     }
 
-    fn start_picture(&mut self, name: String, screen: Display, decoders: Vec<Mode>, cursor: bool, ceiling: u32, link: Link) -> Result<Accept, String> {
-        // The client's order of preference decides.
-        let mode = decoders.iter().copied().find(|m| modes().contains(m)).ok_or("no video mode in common")?;
+    /// `tell`: the client is told of each mode tried just before its pipeline starts, so the
+    /// first frame follows the news of the picture it belongs to (a new client hears of it in
+    /// the `Accept` returned).
+    #[allow(clippy::too_many_arguments)]
+    fn start_picture(&mut self, name: String, screen: Display, decoders: Vec<Mode>, cursor: bool, ceiling: u32, link: Link, tell: bool) -> Result<Accept, String> {
+        // The client's order of preference decides, among the modes the encoder opens for.
+        let modes = common(&decoders);
+        if modes.is_empty() {
+            return Err("no video mode in common".into());
+        }
         if screen.width % 2 != 0 || screen.height % 2 != 0 || screen.width < 64 || screen.height < 64 || screen.width > 8192 || screen.height > 8192 {
             return Err("display sizes must be even, from 64 to 8192".into());
         }
@@ -286,22 +318,29 @@ impl Agent {
         if let Err(e) = self.runtime.block_on(desktop.prepare(screen.width, screen.height, screen.scale, refresh)) {
             tracing::warn!("couldn't give the display its refresh rate and scale: {e:#}");
         }
-        let settings = Settings {
-            node: desktop.node(),
-            width: screen.width,
-            height: screen.height,
-            fps: refresh,
-            scale: screen.scale.clamp(1.0, 4.0),
-            mode,
-            bitrate: self.rate(ceiling),
-            cursor,
-            refs: self.refs,
-        };
-        let pipeline = match Pipeline::start(settings, link.clone()) {
-            Ok(p) => p,
+        let (node, bitrate, refs) = (desktop.node(), self.rate(ceiling), self.refs);
+        let opened = first_opened(&modes, |mode| {
+            if tell {
+                link.restart(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
+            }
+            let settings = Settings {
+                node,
+                width: screen.width,
+                height: screen.height,
+                fps: refresh,
+                scale: screen.scale.clamp(1.0, 4.0),
+                mode,
+                bitrate,
+                cursor,
+                refs,
+            };
+            Pipeline::start(settings, link.clone())
+        });
+        let (mode, pipeline) = match opened {
+            Ok(opened) => opened,
             Err(e) => {
                 self.runtime.block_on(desktop.close());
-                return Err(format!("{e:#}"));
+                return Err(e);
             }
         };
         // Not waited for: the client must hear about its stream before the first frame reaches it.
@@ -753,40 +792,27 @@ impl Agent {
         }
         let screen = display.unwrap_or(l.screen);
         let decoders = decoders.unwrap_or_else(|| l.decoders.clone());
-        let mode = decoders.iter().copied().find(|m| modes().contains(m));
-        if screen == l.screen && mode == Some(l.mode) {
+        // The same modes in common give the same picture, and so does a client whose favourite
+        // is the one it has. (Not merely the first in common: the encoder may have refused it.)
+        let wanted = common(&decoders);
+        if screen == l.screen && (wanted.first() == Some(&l.mode) || wanted == common(&l.decoders)) {
+            l.decoders = decoders;
             return;
         }
-        tracing::info!(?screen, ?mode, "the client asked for another picture");
-        // The old picture goes first, display and all; then the client is told, and only then
-        // does the new one start, so its first frame follows the news of it.
+        tracing::info!(?screen, ?decoders, "the client asked for another picture");
+        // The old picture goes first, display and all; then the new one starts, and the client
+        // is told of it before its first frame.
         let Some(old) = self.stop() else { return };
         let (link, cursor, ceiling, name) = (old.link.clone(), old.cursor, old.ceiling, old.name.clone());
         let (was_screen, was_decoders) = (old.screen, old.decoders.clone());
         drop(old.pipeline);
         self.runtime.block_on(old.desktop.close());
-        // A mirrored picture has the monitor's size, which the client must hear before its
-        // first frame.
-        let mut screen = screen;
-        if screen.placement == remoteman_core::Placement::Mirror {
-            if let Ok(m) = self.runtime.block_on(remoteman_desktop::mirror_target()) {
-                (screen.width, screen.height, screen.scale, screen.refresh) = (m.width, m.height, m.scale, screen.refresh.min(m.refresh));
-            }
-        }
-        let refresh = screen.refresh.clamp(1, 240);
-        if let Some(mode) = mode {
-            link.restart(Accept { mode, width: screen.width, height: screen.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
-        }
         // (Not `start`, which locks a computer that was unlocked for a device left with no
         // picture: this device is still here, and gets the picture it had back.)
-        if let Err(e) = self.start_picture(name.clone(), screen, decoders, cursor, ceiling, link.clone()) {
+        if let Err(e) = self.start_picture(name.clone(), screen, decoders, cursor, ceiling, link.clone(), true) {
             // Back to what worked, rather than leave the client with nothing.
             tracing::warn!("couldn't start that picture ({e}); going back to the one before");
-            let refresh = was_screen.refresh.clamp(1, 240);
-            if let Some(mode) = was_decoders.iter().copied().find(|m| modes().contains(m)) {
-                link.restart(Accept { mode, width: was_screen.width, height: was_screen.height, refresh, colour: "bt709".into(), sdr_white: 0, peak: 0 });
-            }
-            if let Err(e) = self.start(name, was_screen, was_decoders, cursor, ceiling, link) {
+            if let Err(e) = self.start(name, was_screen, was_decoders, cursor, ceiling, link, true) {
                 tracing::error!("couldn't restore the picture: {e}");
             }
         }
@@ -922,7 +948,7 @@ impl HostHandler for Agent {
             screen.placement = remoteman_core::Placement::Mirror;
         }
         tracing::info!(name = %client.name, ?screen, decoders = ?client.decoders, cursor_apart = client.cursor, "client");
-        self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link)
+        self.start(client.name.clone(), screen, client.decoders.clone(), client.cursor, 0, link, false)
     }
 
     fn mic(&mut self, packet: &Packet) {
@@ -1097,4 +1123,52 @@ struct CameraTally {
     /// The longest wait between two frames, and the longest a frame took to decode and show.
     gap: std::time::Duration,
     decode: std::time::Duration,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use remoteman_core::{Chroma, Codec};
+
+    /// What the Mac viewer offers with sharp text off: AV1 first.
+    fn offered() -> Vec<Mode> {
+        let m = |codec, chroma| Mode { codec, chroma, depth: 10 };
+        vec![m(Codec::Av1, Chroma::C420), m(Codec::Hevc, Chroma::C444), m(Codec::Hevc, Chroma::C420)]
+    }
+
+    #[test]
+    fn a_mode_the_encoder_refuses_gives_way_to_the_next() {
+        let mut tried = Vec::new();
+        let opened = first_opened(&offered(), |mode| {
+            tried.push(mode);
+            if mode.codec == Codec::Av1 { anyhow::bail!("no 10-bit encode for this codec") } else { Ok(()) }
+        });
+        assert_eq!(opened.map(|(mode, _)| mode), Ok(offered()[1]));
+        assert_eq!(tried, offered()[..2]);
+    }
+
+    #[test]
+    fn the_favourite_is_taken_when_it_opens() {
+        let mut tried = 0;
+        let opened = first_opened(&offered(), |_| {
+            tried += 1;
+            Ok(())
+        });
+        assert_eq!(opened.map(|(mode, _)| mode), Ok(offered()[0]));
+        assert_eq!(tried, 1);
+    }
+
+    #[test]
+    fn when_every_mode_is_refused_each_reason_is_said() {
+        let opened = first_opened(&offered(), |mode| -> anyhow::Result<()> { anyhow::bail!("refused {:?}", mode.codec) });
+        let e = opened.unwrap_err();
+        assert!(e.starts_with("no encoder opened: "), "{e}");
+        assert_eq!(e.matches("refused Av1").count(), 1, "{e}");
+        assert_eq!(e.matches("refused Hevc").count(), 2, "{e}");
+    }
+
+    #[test]
+    fn nothing_to_try_is_an_error() {
+        assert!(first_opened(&[], |_| Ok(())).is_err());
+    }
 }
