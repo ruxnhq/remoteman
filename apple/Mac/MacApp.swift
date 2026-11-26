@@ -35,6 +35,11 @@ struct RemotemanApp: App {
                 .tint(Tokens.tint)
         }
         .defaultSize(width: Launch.automated ? 1376 : 1120, height: Launch.automated ? 1032 : 720)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") { model.updater.checkFromMenu() }
+            }
+        }
 
         Settings {
             SettingsView().environmentObject(model).tint(Tokens.tint)
@@ -57,6 +62,8 @@ final class AppModel: ObservableObject {
 
     let session = ViewerSession()
     let store: ComputerStore
+    /// Looking for a newer remoteman, and installing it (Updater.swift).
+    let updater = Updater()
 
     /// The window is only the stream, driven by the launch arguments.
     @Published var automated = Launch.automated
@@ -184,6 +191,9 @@ final class AppModel: ObservableObject {
         }
         systemKeys.send = { [weak self] usage, down in self?.session.hardKey(usage, down: down) }
         if !automated { systemKeys.refresh() }
+        updater.idle = { [weak self] in self?.active == nil }
+        updater.askedInstall = { [weak self] in self?.installUpdate() }
+        updater.start(automatic: !automated && UIShots.directory == nil)
         nearbySink = Nearby.shared.$found.sink { [weak self] found in
             DispatchQueue.main.async { self?.noteNearby(found) }
         }
@@ -255,6 +265,20 @@ final class AppModel: ObservableObject {
         started = nil
         requested = sessionDisplay()
         watchForPicture()
+    }
+
+    /// Install, from a notice or the menu: a running session is asked about first, since
+    /// installing ends it (remoteman quits and opens again).
+    func installUpdate() {
+        guard let c = activeComputer else { return updater.requestInstall() }
+        let a = NSAlert()
+        a.messageText = "Install remoteman \(updater.state.newer?.description ?? "") now?"
+        a.informativeText = "You are connected to \(c.name). Installing ends the session, and remoteman quits and opens again."
+        a.addButton(withTitle: "Disconnect and Install")
+        a.addButton(withTitle: "Not Now")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        updater.requestInstall()
+        disconnect()
     }
 
     func disconnect() {
@@ -436,6 +460,9 @@ final class AppModel: ObservableObject {
         applyChrome()
         if pairedNow, reason == nil { pairedSheet = id }
         pairedNow = false
+        // An update waiting for the session to end, once nothing connects again at once
+        // (a locked computer's password, a reconnect).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.updater.sessionEnded() }
     }
 
     private func watchForPicture() {

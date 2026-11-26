@@ -92,6 +92,7 @@ private struct ComputersContent: View {
             } primaryAction: { ids in
                 if let c = store[ids.first] { model.connect(c) }
             }
+            .safeAreaInset(edge: .bottom) { UpdateNotice(updater: model.updater, compact: true) }
             .navigationSplitViewColumnWidth(min: 200, ideal: 248, max: 320)
         } detail: {
             Group {
