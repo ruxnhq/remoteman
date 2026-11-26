@@ -14,13 +14,17 @@ pub use identity::{Identity, Trust, fingerprint, pair_code};
 pub use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use remoteman_proto::control::{Message, body_len};
 
+/// Room for datagrams waiting to be sent. The host keeps far less than this queued (see
+/// `remoteman_core::host::wait_to_send`), so sound and the cursor never push video out of it.
+pub const DATAGRAM_SEND_BUFFER: usize = 32 << 20;
+
 fn transport() -> Result<quinn::TransportConfig> {
     let mut t = quinn::TransportConfig::default();
     t.keep_alive_interval(Some(Duration::from_secs(1)));
     t.max_idle_timeout(Some(Duration::from_secs(10).try_into()?));
     // Room for a few large frames in flight in either direction.
     t.datagram_receive_buffer_size(Some(32 << 20));
-    t.datagram_send_buffer_size(32 << 20);
+    t.datagram_send_buffer_size(DATAGRAM_SEND_BUFFER);
     t.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
     Ok(t)
 }

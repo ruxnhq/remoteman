@@ -1016,6 +1016,26 @@ impl Drop for LeftLog {
     }
 }
 
+/// Waits until no more than `behind` bytes of datagrams are queued for the client and not yet
+/// sent. The video is handed over a frame at a time, each once the queue is down to about the
+/// frame before it, so what waits in the queue is a frame or two, however slow the link. While
+/// this waits the frames wait in the channel, and the encoder is held back and skips frames
+/// before encoding. Without it the queue (32 MiB) could hold seconds of picture on a link
+/// slower than the bitrate, and once full, sound and the cursor (sent with `send_datagram`)
+/// pushed out queued pieces of frames.
+pub(crate) async fn wait_to_send(conn: &Connection, behind: usize) -> Result<()> {
+    // quinn counts some bookkeeping with each datagram queued, and some more always.
+    const SLACK: usize = 16 << 10;
+    let queued = || remoteman_transport::DATAGRAM_SEND_BUFFER.saturating_sub(conn.datagram_send_buffer_space());
+    while queued() > behind + SLACK {
+        if let Some(reason) = conn.close_reason() {
+            bail!("{reason}");
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    Ok(())
+}
+
 /// A frame that nothing has followed for this long is sent once more. On a desktop where
 /// nothing moves no later frame comes, and a later frame is the only way a client notices that
 /// one went missing: without this, whatever the network lost of the last frame before the
@@ -1188,6 +1208,8 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
         // the client already holds, and goes only while datagrams of that size are still taken
         // (the limit grows in a connection's first moments, and can shrink on a bad path).
         let mut last: [Option<(Frame, u16, u32, tokio::time::Instant, usize)>; 2] = [None, None];
+        // The size of the frame handed over last: the next waits until the queue is down to it.
+        let mut behind = 0usize;
         loop {
             let due = last.iter().flatten().map(|l| l.3).min();
             let out = match due {
@@ -1202,6 +1224,8 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                                     continue;
                                 }
                                 let kind = if index == 0 { remoteman_proto::video::KIND_VIDEO } else { remoteman_proto::video::KIND_VIDEO2 };
+                                wait_to_send(conn, behind).await?;
+                                behind = f.data.len();
                                 for d in remoteman_proto::video::fragment_as(kind, &f.data, f.key, f.recovery, epoch, number, f.capture_us, cut) {
                                     conn.send_datagram_wait(d.into()).await?;
                                 }
@@ -1224,6 +1248,8 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                             write_message(&mut *send.lock().await, &m).await?;
                         }
                         Out::Frame(f) => {
+                            wait_to_send(conn, behind).await?;
+                            behind = f.data.len();
                             let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
                             for d in remoteman_proto::video::fragment_as(remoteman_proto::video::KIND_VIDEO2, &f.data, f.key, f.recovery, epoch2, number2, f.capture_us, max) {
                                 conn.send_datagram_wait(d.into()).await?;
@@ -1248,6 +1274,8 @@ async fn serve(conn: &Connection, fingerprint: String, options: &HostOptions, ca
                 }
             };
             lead.frame(&f.data, f.key, f.capture_us, now(), number);
+            wait_to_send(conn, behind).await?;
+            behind = f.data.len();
             let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
             // With parity the data is cut a little smaller, and a copy sent later is cut so too.
             let (datagrams, cut) = if parity {

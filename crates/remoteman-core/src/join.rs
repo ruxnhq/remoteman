@@ -16,7 +16,7 @@ use remoteman_proto::video::{PARITY_GROUP, fragment, fragment_with_parity, parit
 use remoteman_transport::{Connection, RecvStream, SendStream, read_message, write_message};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::host::{Call, ConnectionEvent, Gate, LeftLog, read_input};
+use crate::host::{Call, ConnectionEvent, Gate, LeftLog, read_input, wait_to_send};
 
 /// What a host does when a device connects while another is using it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -326,6 +326,8 @@ pub(crate) async fn serve(conn: &Connection, send: SendStream, mut recv: RecvStr
     let out = async {
         // The last frame sent, and when it goes once more if nothing follows it.
         let mut last: Option<(Arc<JFrame>, tokio::time::Instant, usize)> = None;
+        // The size of the frame handed over last: the next waits until the queue is down to it.
+        let mut behind = 0usize;
         loop {
             let msg = match &last {
                 Some((_, due, _)) => match tokio::time::timeout_at(*due, rx.recv()).await {
@@ -334,6 +336,8 @@ pub(crate) async fn serve(conn: &Connection, send: SendStream, mut recv: RecvStr
                         let (f, _, cut) = last.take().unwrap();
                         let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
                         if cut <= max {
+                            wait_to_send(conn, behind).await?;
+                            behind = f.data.len();
                             for d in fragment(&f.data, f.key, false, f.epoch, f.number, f.capture_us, cut) {
                                 conn.send_datagram_wait(d.into()).await?;
                             }
@@ -356,6 +360,8 @@ pub(crate) async fn serve(conn: &Connection, send: SendStream, mut recv: RecvStr
                 }
                 JMsg::Frame(f) => {
                     let n = f.data.len();
+                    wait_to_send(conn, behind).await?;
+                    behind = n;
                     queued.fetch_sub(n, Ordering::Relaxed);
                     let max = conn.max_datagram_size().context("the client doesn't take datagrams")?;
                     // Never a recovery point: it may lean on frames this device missed and the
