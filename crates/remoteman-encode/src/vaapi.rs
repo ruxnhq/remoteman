@@ -292,6 +292,8 @@ mod tests {
         let (w, h) = (1920, 1080);
         let (mut conv, mut enc) = open(node, &Config { codec: Codec::Hevc, depth, width: w, height: h, fps: 60, bitrate: 20_000_000, slots: 4 }).unwrap();
         eprintln!("{}", enc.note);
+        // HEVC keeps to a constant rate; only AV1 is opened at a variable one.
+        assert!(enc.note.contains("constant rate"), "{}", enc.note);
         let mut stream = Vec::new();
         let mut keys = Vec::new();
         for n in 0..12u32 {
