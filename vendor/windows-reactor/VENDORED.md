@@ -72,6 +72,14 @@ comment ("Spike patch" for blurman's, "remoteman patch" for ours).
    app makes that resource blank. WinUI has no system shape for "none", and over its content it
    sets the cursor itself whatever the window answers to `WM_SETCURSOR` or `ShowCursor` says.
    If the cursor can't be made, the default one is worn (Reactor would otherwise unwrap the error).
+10. **A TitleBar is never freed** (remoteman, fixing the viewer's crash on dragging its bar):
+   `src/native/winui/adapter.rs` keeps every destroyed TitleBar's element in a thread-local list
+   for the life of the UI thread. WinUI's `TitleBar` handles its window's `WindowRectChanged`
+   (`UpdateIconRegion`) and never removes that handler, so a TitleBar that left the tree and was
+   freed made the next move of the window run it on freed memory (crash dumps: an access
+   violation in `TitleBar::GetAppWindowId` from a title-bar drag, after the viewer had dropped
+   its bar for a session). Kept alive and out of the tree, its `XamlRoot` is null, which
+   `GetAppWindowId` checks, and the handler does nothing.
 
 Cargo.toml: the `[lints]` and docs.rs sections are gone (with `[lints.rust]` set here instead)
 and the dependencies name the git commit instead of the windows-rs workspace. `public-api.txt` is

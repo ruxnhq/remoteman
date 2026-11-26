@@ -1,5 +1,15 @@
 use super::*;
 
+// remoteman patch (VENDORED.md, patch 10): WinUI's TitleBar handles its window's
+// `WindowRectChanged` and never lets go of that handler, so once a TitleBar left the tree and
+// was freed, the next move of the window ran it on freed memory (the viewer crashed when its
+// bar was dragged after a session had taken the bar away). A retired TitleBar is kept here for
+// the life of the UI thread instead: out of the tree its handler finds no window and does
+// nothing.
+thread_local! {
+    static RETIRED_TITLE_BARS: RefCell<Vec<native::UIElement>> = const { RefCell::new(Vec::new()) };
+}
+
 impl ComponentHost {
     pub(crate) fn set_realizer(&mut self, realizer: impl Fn() + 'static) {
         self.runtime()
@@ -272,6 +282,13 @@ impl WinUiAdapter {
                         || self.content_dialog_owners.contains_key(object)
                     {
                         return Err(WinUiError::StillOwned(*object));
+                    }
+                    // remoteman patch (VENDORED.md, patch 10): a TitleBar is never freed.
+                    if let Some(Handle::Generated(GeneratedHandle::TitleBar(_))) =
+                        self.handles.get(object)
+                        && let Ok(element) = self.ui_element(*object)
+                    {
+                        RETIRED_TITLE_BARS.with(|kept| kept.borrow_mut().push(element));
                     }
                     let handle = self
                         .handles
