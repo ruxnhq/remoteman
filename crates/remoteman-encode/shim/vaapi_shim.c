@@ -124,7 +124,12 @@ static int open_codec(rm_va *r, char *err, int errlen) {
         c->time_base = (AVRational){1, (int)r->cfg.fps};
         c->framerate = (AVRational){(int)r->cfg.fps, 1};
         c->bit_rate = r->cfg.bitrate;
-        c->rc_max_rate = r->cfg.bitrate;
+        // HEVC at a constant rate: FFmpeg picks it when the peak is the bitrate. AV1 at a
+        // variable one (FFmpeg makes the peak twice the bitrate): on a Radeon 780M (VCN 4, Mesa
+        // 26.2) AV1 at a constant rate hung the video engine at the second frame (`ring
+        // vcn_unified_0 timeout`), at 40 Mbit/s and up with this buffer, and the rest of the
+        // stream came back empty; at a variable rate it ran. HEVC ran at a constant rate there.
+        if (r->cfg.codec == 0) c->rc_max_rate = r->cfg.bitrate;
         // About one frame's worth of buffer, as with NVENC: no frame may run far over.
         c->rc_buffer_size = (int)(r->cfg.bitrate / r->cfg.fps * 2);
         c->max_b_frames = 0;
@@ -203,7 +208,7 @@ rm_va *rm_va_open(const char *node, const rm_va_cfg *cfg, char *err, int errlen)
     }
     if (open_codec(r, err, errlen) < 0) goto fail;
     r->pkt = av_packet_alloc();
-    say(r->note, sizeof r->note, "VA-API %s, %u-bit, %s entrypoint, on %s (%s)", cfg->codec == 1 ? "AV1" : "HEVC", cfg->depth, r->low_power ? "low-power" : "full", node, vaQueryVendorString(r->dpy));
+    say(r->note, sizeof r->note, "VA-API %s, %u-bit, %s rate, %s entrypoint, on %s (%s)", cfg->codec == 1 ? "AV1" : "HEVC", cfg->depth, r->cc->rc_max_rate ? "constant" : "variable", r->low_power ? "low-power" : "full", node, vaQueryVendorString(r->dpy));
     say(err, errlen, "%s", r->note);
     return r;
 fail:
