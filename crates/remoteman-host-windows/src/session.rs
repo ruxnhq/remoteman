@@ -22,8 +22,11 @@ use crate::encode;
 use crate::input::Injector;
 use crate::pipeline::{self, Pipeline};
 
-/// The lowest and highest bitrate a client may ask for, in bits a second.
-const BITRATE: std::ops::RangeInclusive<u32> = 1_000_000..=150_000_000;
+/// The lowest and highest bitrate a client may ask for, in bits a second. A client's ceiling
+/// is the rate the picture starts at, and the network's rate follows below it. 300 Mbit/s, as
+/// the Mac viewer offers. With the rate buffer of 60 Hz's frame, a high ceiling is what lets a
+/// picture that changes all over (a window opening) come out sharp at 240 Hz.
+const BITRATE: std::ops::RangeInclusive<u32> = 1_000_000..=300_000_000;
 
 /// A client being served.
 struct Live {
