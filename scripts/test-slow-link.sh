@@ -6,7 +6,7 @@
 # Before the host bounded its own queue of datagrams, they fell seconds behind.
 # No GPU, no compositor, no root.
 #   RM_PORT=7795 (the host; the link listens on the next port)
-#   RATE=15000000 QUEUE=262144 SECONDS=12
+#   RATE=15000000 QUEUE=262144 SECONDS_RUN=12
 root=$(dirname "$(dirname "$(readlink -f "$0")")")
 bin="${RM_BIN:-$root/target/release}"
 port=${RM_PORT:-7795}
