@@ -23,7 +23,7 @@ use anyhow::{Context, Result, bail, ensure};
 use remoteman_encode::{FrameEncoder, HdrLight, How, Made};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
-use windows::Win32::Graphics::Direct3D11::{D3D11_BOX, ID3D11Device5, ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D};
+use windows::Win32::Graphics::Direct3D11::{D3D11_BOX, D3D11_SUBRESOURCE_DATA, ID3D11Device5, ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_P010, DXGI_FORMAT_UNKNOWN, DXGI_RATIONAL, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIFactory4};
@@ -432,6 +432,16 @@ pub(crate) fn check<T>(video: &ID3D12VideoDevice3, feature: D3D12_FEATURE_VIDEO,
     unsafe { video.CheckFeatureSupport(feature, data as *mut T as *mut _, std::mem::size_of::<T>() as u32) }.map_err(|e| anyhow::anyhow!("CheckFeatureSupport({}): {e}", feature.0))
 }
 
+/// A P010 picture of `w`x`h` (even sides) in black: Y 64 and Cb, Cr 512, limited range, each in
+/// the top 10 bits of 16; the Y rows, then the CbCr rows, with no gap, as Direct3D 11 takes the
+/// first contents of a planar texture.
+fn p010_black(w: u32, h: u32) -> Vec<u16> {
+    let (luma, chroma) = ((w * h) as usize, (w * h / 2) as usize);
+    let mut px = vec![64 << 6; luma + chroma];
+    px[luma..].fill(512 << 6);
+    px
+}
+
 /// The multiples of the picture size the encoder asks for: AMD's encodes rows in groups of 16,
 /// and a 1080-row picture must be coded as 1088 rows and cropped (FFmpeg's encoder does the same).
 /// A driver that doesn't say asks for the smallest coding unit, 8.
@@ -809,8 +819,23 @@ impl Encoder {
                 CPUAccessFlags: 0,
                 MiscFlags: (windows::Win32::Graphics::Direct3D11::D3D11_RESOURCE_MISC_SHARED.0 | windows::Win32::Graphics::Direct3D11::D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0) as u32,
             };
+            // Each frame fills only the picture's part of it (`encode`), so the rows and columns
+            // coded beyond the picture are what it starts with: black with neutral chroma, not
+            // zero, whose chroma is strongly green. The stream crops them away, but a decoder's
+            // surface keeps them next to the picture, where a viewer that samples a little past
+            // the edge (remoteman's Windows viewer did, by a quarter of a chroma sample) shows
+            // them, and the encoder's own prediction at the edge leans on them.
+            let padded = (cw, ch) != (w, h);
+            let neutral = if padded { p010_black(cw, ch) } else { Vec::new() };
+            let initial = D3D11_SUBRESOURCE_DATA { pSysMem: neutral.as_ptr() as *const _, SysMemPitch: cw * 2, SysMemSlicePitch: 0 };
             let mut shared11: Option<ID3D11Texture2D> = None;
-            gpu.device.CreateTexture2D(&sd, None, Some(&mut shared11)).context("the shared input texture (Direct3D 11)")?;
+            let mut made = gpu.device.CreateTexture2D(&sd, padded.then_some(&initial as *const _), Some(&mut shared11));
+            if made.is_err() && padded {
+                // A driver that won't take first contents for a shared texture: zero, as before.
+                made = gpu.device.CreateTexture2D(&sd, None, Some(&mut shared11));
+            }
+            made.context("the shared input texture (Direct3D 11)")?;
+            drop(neutral);
             let shared11 = shared11.context("no input texture")?;
             let dxgi: windows::Win32::Graphics::Dxgi::IDXGIResource1 = shared11.cast().context("IDXGIResource1")?;
             let handle = dxgi.CreateSharedHandle(None, 0x1000_0000, None).context("sharing the input texture")?;
@@ -1298,6 +1323,14 @@ fn unused() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn black_p010_is_limited_range_black_with_neutral_chroma() {
+        let px = p010_black(6, 4);
+        assert_eq!(px.len(), 6 * 4 + 6 * 2);
+        assert!(px[..24].iter().all(|&y| y >> 6 == 64 && y & 63 == 0));
+        assert!(px[24..].iter().all(|&c| c >> 6 == 512 && c & 63 == 0));
+    }
 
     #[test]
     fn the_first_frame_asks_for_changes_only_of_a_driver_that_can_change_its_rate() {

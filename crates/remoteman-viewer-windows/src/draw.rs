@@ -65,6 +65,8 @@ SamplerState smooth : register(s0);
 
 // `visible`: the part of the texture that is picture (it is the coded size, a little larger),
 // and `last`, the last place to sample so that nothing beyond the edge is blended in.
+// `chroma_last`: the same for the chroma planes, which in 4:2:0 are half the size, so their
+// last texel's centre is further in (`sample_limits`).
 // `scale` turns a normalised sample into a code value at the picture's bit depth; `black`,
 // `yrange`, `mid` and `crange` are the code values of the range's ends.
 // `mode`: 0 BT.709 (SDR, as before); 1 BT.2020 with PQ, to a swap chain that is itself PQ
@@ -79,6 +81,7 @@ cbuffer Picture : register(b0) {
     float crange;
     float mode, white, peak;
     float planar, here_white, here_peak, layout;
+    float2 chroma_last;
 };
 
 float3 pq_nits(float3 e) {
@@ -105,7 +108,9 @@ float3 fit(float3 lin, float top, float room, float knee) {
 }
 
 float4 ps(Corner c) : SV_Target {
-    float3 at = float3(min(c.uv * visible, last), 0);
+    float2 place = c.uv * visible;
+    float3 at = float3(min(place, last), 0);
+    float3 cat = float3(min(place, chroma_last), 0);
     float4 l = luma.Sample(smooth, at);
     float3 s = float3(l.x, 0, 0);
     if (layout > 0.5) {
@@ -113,7 +118,7 @@ float4 ps(Corner c) : SV_Target {
         // Y in green, V in blue. AYUV (R8G8B8A8): V in red, U in green, Y in blue. s is Y, U, V.
         s = layout < 1.5 ? l.grb : l.bgr;
     } else {
-        s.yz = planar > 0.5 ? float2(chroma.Sample(smooth, at).x, cr.Sample(smooth, at)) : chroma.Sample(smooth, at);
+        s.yz = planar > 0.5 ? float2(chroma.Sample(smooth, cat).x, cr.Sample(smooth, cat)) : chroma.Sample(smooth, cat);
     }
     float y = (s.x * scale - black) / yrange;
     float2 cc = (s.yz * scale - mid) / crange;
@@ -161,6 +166,28 @@ float4 ps_pointer(Corner c) : SV_Target {
 }
 ";
 
+/// The floats of the shader's `Picture` constants, padded to whole registers of four.
+const PICTURE_CONSTANTS: usize = 20;
+
+/// The last place the shader samples each plane, normalised as the sampler reads it: the
+/// centre of the last texel that is picture, so that bilinear filtering takes nothing from
+/// beyond the picture's edge. The decoder's texture is often larger than the picture (FFmpeg
+/// aligns D3D11VA surfaces to 128 for HEVC and AV1), and what is there is not picture: it may
+/// be zero (the Direct3D 12 encoder's padding was), which in the chroma is green.
+///
+/// `visible` is the picture's size and `texture` the luma texture's, in luma samples; `sub`
+/// how many luma samples there are to a chroma sample across and down. A chroma plane is the
+/// texture's size divided by `sub`, rounded up, and so is the picture's part of it; its last
+/// texel's centre is then half a chroma texel in from that edge, which for 4:2:0 of even width
+/// is `(vw - 1) / tw`, not the luma's `(vw - 0.5) / tw` (that would be a quarter of a chroma
+/// texel beyond it, and blend a quarter of the texel past the picture into its last column).
+///
+/// Returns `[luma x, luma y, chroma x, chroma y]`.
+fn sample_limits(visible: (u32, u32), texture: (u32, u32), sub: (u32, u32)) -> [f32; 4] {
+    let last = |visible: u32, texture: u32, sub: u32| (visible.div_ceil(sub) as f32 - 0.5) / texture.div_ceil(sub) as f32;
+    [last(visible.0, texture.0, 1), last(visible.1, texture.1, 1), last(visible.0, texture.0, sub.0), last(visible.1, texture.1, sub.1)]
+}
+
 fn compile(entry: PCSTR, target: PCSTR) -> Result<Vec<u8>> {
     let (mut code, mut errors): (Option<ID3DBlob>, Option<ID3DBlob>) = (None, None);
     // SAFETY: the source and names live through the call; blobs are read within their size.
@@ -182,6 +209,8 @@ struct Planes {
     luma: ID3D11ShaderResourceView,
     chroma: ID3D11ShaderResourceView,
     cr: Option<ID3D11ShaderResourceView>,
+    /// Luma samples to a chroma sample, across and down: (2, 2) for 4:2:0, (1, 1) for 4:4:4.
+    sub: (u32, u32),
 }
 
 /// The computer's cursor as the draw thread draws it over the picture: its shape, and where its
@@ -704,13 +733,14 @@ impl Colour {
     }
 }
 
-fn plane_formats(format: DXGI_FORMAT) -> Result<(DXGI_FORMAT, DXGI_FORMAT)> {
+/// The views' formats of a decoder's texture, and its chroma subsampling (`Planes::sub`).
+fn plane_formats(format: DXGI_FORMAT) -> Result<(DXGI_FORMAT, DXGI_FORMAT, (u32, u32))> {
     Ok(match format {
-        DXGI_FORMAT_P010 => (DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM),
-        DXGI_FORMAT_NV12 => (DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM),
+        DXGI_FORMAT_P010 => (DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM, (2, 2)),
+        DXGI_FORMAT_NV12 => (DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM, (2, 2)),
         // 4:4:4: one packed texture, viewed twice (the shader reads `luma`).
-        DXGI_FORMAT_Y410 => (DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM),
-        DXGI_FORMAT_AYUV => (DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM),
+        DXGI_FORMAT_Y410 => (DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, (1, 1)),
+        DXGI_FORMAT_AYUV => (DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, (1, 1)),
         other => bail!("the decoder's pictures are format {}, which isn't drawn yet", other.0),
     })
 }
@@ -845,7 +875,7 @@ impl Drawer {
                 ..Default::default()
             };
             gpu.device.CreateSamplerState(&s, Some(&mut sampler))?;
-            let c = D3D11_BUFFER_DESC { ByteWidth: 64, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
+            let c = D3D11_BUFFER_DESC { ByteWidth: PICTURE_CONSTANTS as u32 * 4, Usage: D3D11_USAGE_DEFAULT, BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32, ..Default::default() };
             gpu.device.CreateBuffer(&c, None, Some(&mut constants))?;
             let pointer = PointerPass::new(&gpu.device)?;
             let flags = DXGI_SWAP_CHAIN_FLAG(now.Flags as i32);
@@ -887,7 +917,7 @@ impl Drawer {
 
     /// Views on one slice of a P010 or NV12 array texture.
     fn planes_of(&self, texture: &ID3D11Texture2D, slice: u32, format: DXGI_FORMAT) -> Result<Planes> {
-        let (luma, chroma) = plane_formats(format)?;
+        let (luma, chroma, sub) = plane_formats(format)?;
         let view = |format| -> Result<ID3D11ShaderResourceView> {
             let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
                 Format: format,
@@ -899,7 +929,7 @@ impl Drawer {
             unsafe { self.gpu.device.CreateShaderResourceView(texture, Some(&desc), Some(&mut view))? };
             view.context("no view")
         };
-        Ok(Planes { luma: view(luma)?, chroma: view(chroma)?, cr: None })
+        Ok(Planes { luma: view(luma)?, chroma: view(chroma)?, cr: None, sub })
     }
 
     /// What the shader should read for this picture: the decoder's own slice, or a copy of it.
@@ -924,12 +954,18 @@ impl Drawer {
                 unsafe { self.gpu.device.CreateShaderResourceView(texture, Some(&d), Some(&mut view))? };
                 view.context("no view")
             };
+            // The chroma is half the size (4:2:0, rounded up) or the same (4:4:4, from the CPU
+            // or NVDEC).
+            let mut cd = D3D11_TEXTURE2D_DESC::default();
+            // SAFETY: the out pointer is valid.
+            unsafe { cb.GetDesc(&mut cd) };
+            let sub = (if cd.Width < desc.Width { 2 } else { 1 }, if cd.Height < desc.Height { 2 } else { 1 });
             // Three plain textures, of one format (R16 or R8).
             let planes = if picture.semi {
                 // Cb and Cr interleaved in one texture: the shader reads both from it.
-                Planes { luma: view(&picture.texture, desc.Format)?, chroma: view(cb, DXGI_FORMAT_R16G16_UNORM)?, cr: None }
+                Planes { luma: view(&picture.texture, desc.Format)?, chroma: view(cb, DXGI_FORMAT_R16G16_UNORM)?, cr: None, sub }
             } else {
-                Planes { luma: view(&picture.texture, desc.Format)?, chroma: view(cb, desc.Format)?, cr: Some(view(cr, desc.Format)?) }
+                Planes { luma: view(&picture.texture, desc.Format)?, chroma: view(cb, desc.Format)?, cr: Some(view(cr, desc.Format)?), sub }
             };
             if self.views.len() > 16 {
                 self.views.clear();
@@ -1145,13 +1181,15 @@ impl Drawer {
                     DXGI_FORMAT_Y410 => (1023.0, 64.0, 876.0, 512.0, 896.0),
                     _ => (255.0, 16.0, 219.0, 128.0, 224.0),
                 };
+                let [last_x, last_y, chroma_x, chroma_y] = sample_limits((picture.width, picture.height), (desc.Width, desc.Height), planes.sub);
                 let (tw, th) = (desc.Width as f32, desc.Height as f32);
                 let (vw, vh) = (picture.width as f32, picture.height as f32);
                 let Colour { hdr, white, peak, here_white, here_peak } = colour;
                 let mode = if !hdr { 0.0 } else if self.pq { 1.0 } else { 2.0 };
                 let layout = match desc.Format { DXGI_FORMAT_Y410 => 1.0, DXGI_FORMAT_AYUV => 2.0, _ => 0.0 };
                 let planar = if planes.cr.is_some() { 1.0 } else { 0.0 };
-                let constants: [f32; 16] = [vw / tw, vh / th, (vw - 0.5) / tw, (vh - 0.5) / th, scale, black, yrange, mid, crange, mode, white, peak, planar, here_white, here_peak, layout];
+                // The shader's `Picture`, padded to whole registers of four.
+                let constants: [f32; PICTURE_CONSTANTS] = [vw / tw, vh / th, last_x, last_y, scale, black, yrange, mid, crange, mode, white, peak, planar, here_white, here_peak, layout, chroma_x, chroma_y, 0.0, 0.0];
                 ctx.UpdateSubresource(&self.constants, 0, None, constants.as_ptr() as *const _, 0, 0);
                 let (ax, ay, aw, ah) = (area.0 as f32, area.1 as f32, area.2 as f32, area.3 as f32);
                 let fit = (aw / vw).min(ah / vh);
@@ -1524,4 +1562,104 @@ fn run(gpu: Gpu, scene: &Scene, surface: Surface, mut shot: Option<PathBuf>) -> 
         drawer.shown = picture;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A normalised place in a plane `texels` wide, in that plane's texels.
+    fn texels(at: f32, texels: u32) -> f32 {
+        at * texels as f32
+    }
+
+    /// How much of the texel past the picture a bilinear sample at `at` (in texels) takes in a
+    /// plane whose picture is `visible` texels wide: none, at or before the last centre.
+    fn beyond(at: f32, visible: u32) -> f32 {
+        (at - (visible as f32 - 0.5)).max(0.0)
+    }
+
+    fn near(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    #[test]
+    fn chroma_of_420_stops_at_its_own_last_texel() {
+        // 1600x900 in a surface aligned to 128 (1664x1024): chroma is 832x512, with 800x450 of
+        // picture, so the last centres are 799.5 and 449.5. The luma's limit would have been
+        // 799.75 and 449.75: a quarter of chroma column 800 and row 450.
+        let [lx, ly, cx, cy] = sample_limits((1600, 900), (1664, 1024), (2, 2));
+        assert!(near(texels(lx, 1664), 1599.5) && near(texels(ly, 1024), 899.5));
+        assert!(near(texels(cx, 832), 799.5) && near(texels(cy, 512), 449.5));
+        assert!(near(cx, 1599.0 / 1664.0) && near(cy, 899.0 / 1024.0));
+        assert!(near(texels(lx, 832), 799.75), "the old limit, read in chroma texels");
+        // 1554x790 (a window's size; 128 divides neither) in 1664x896.
+        let [lx, ly, cx, cy] = sample_limits((1554, 790), (1664, 896), (2, 2));
+        assert!(near(texels(lx, 1664), 1553.5) && near(texels(ly, 896), 789.5));
+        assert!(near(texels(cx, 832), 776.5) && near(texels(cy, 448), 394.5));
+        // 1920x1080: whole surfaces across (1920 is 15 x 128), 72 rows of padding down.
+        let [_, _, cx, cy] = sample_limits((1920, 1080), (1920, 1152), (2, 2));
+        assert!(near(texels(cx, 960), 959.5) && near(texels(cy, 576), 539.5));
+    }
+
+    #[test]
+    fn sizes_16_and_2_divide_but_128_does_not() {
+        // 1552x784: 16 divides both; 1554x786: only 2 does.
+        for (w, h) in [(1552u32, 784u32), (1554, 786)] {
+            let t = (w.next_multiple_of(128), h.next_multiple_of(128));
+            let [_, _, cx, cy] = sample_limits((w, h), t, (2, 2));
+            assert!(near(texels(cx, t.0 / 2), w as f32 / 2.0 - 0.5), "{w}x{h}");
+            assert!(near(texels(cy, t.1 / 2), h as f32 / 2.0 - 0.5), "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn an_odd_side_keeps_the_chroma_texel_that_is_half_picture() {
+        // 1555 wide: chroma column 777 covers luma 1554 (picture) and 1555 (not), so it is the
+        // last one sampled, at its centre.
+        let [_, _, cx, cy] = sample_limits((1555, 791), (1664, 896), (2, 2));
+        assert!(near(texels(cx, 832), 777.5) && near(texels(cy, 448), 395.5));
+    }
+
+    #[test]
+    fn a_picture_the_size_of_its_texture_samples_to_the_last_centre() {
+        let [lx, ly, cx, cy] = sample_limits((1664, 1024), (1664, 1024), (2, 2));
+        assert!(near(texels(lx, 1664), 1663.5) && near(texels(ly, 1024), 1023.5));
+        assert!(near(texels(cx, 832), 831.5) && near(texels(cy, 512), 511.5));
+        assert!(cx < 1.0 && cy < 1.0);
+    }
+
+    #[test]
+    fn chroma_of_444_keeps_the_luma_limit() {
+        // Y410 or AYUV from the card (padded), or 4:4:4 from the CPU or NVDEC (exact size).
+        for (visible, texture) in [((1554, 790), (1664, 896)), ((1554, 790), (1554, 790)), ((1555, 791), (1555, 791))] {
+            let [lx, ly, cx, cy] = sample_limits(visible, texture, (1, 1));
+            assert_eq!((lx, ly), (cx, cy));
+            assert!(near(texels(lx, texture.0), visible.0 as f32 - 0.5));
+        }
+    }
+
+    #[test]
+    fn chroma_from_the_cpu_is_its_own_size() {
+        // 4:2:0 from the CPU: the luma texture is the picture's size, the chroma half of it
+        // rounded up (777x395 for 1554x790, 778x396 for 1555x791).
+        let [_, _, cx, cy] = sample_limits((1554, 790), (1554, 790), (2, 2));
+        assert!(near(texels(cx, 777), 776.5) && near(texels(cy, 395), 394.5));
+        let [_, _, cx, cy] = sample_limits((1555, 791), (1555, 791), (2, 2));
+        assert!(near(texels(cx, 778), 777.5) && near(texels(cy, 396), 395.5));
+    }
+
+    #[test]
+    fn nothing_beyond_the_picture_is_ever_blended_in() {
+        for v in 2..=2200u32 {
+            for align in [1, 2, 16, 64, 128] {
+                let t = v.next_multiple_of(align).next_multiple_of(2);
+                let [l, _, c, _] = sample_limits((v, v), (t, t), (2, 2));
+                assert!(beyond(texels(l, t), v) < 1e-3, "luma, {v} in {t}");
+                assert!(beyond(texels(c, t / 2), v.div_ceil(2)) < 1e-3, "chroma, {v} in {t}");
+                // And it is the last centre itself, not short of it.
+                assert!(near(texels(c, t / 2), v.div_ceil(2) as f32 - 0.5), "chroma, {v} in {t}");
+            }
+        }
+    }
 }
