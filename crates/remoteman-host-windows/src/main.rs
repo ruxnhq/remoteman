@@ -3,7 +3,8 @@
 //!
 //!     remoteman-host [--listen ADDR:PORT] [--state DIR] [--pair | --ask | --no-pair] [--name NAME]
 //!                    [--log FILE] [--bitrate MBIT] [--mode keep|listed|any] [--allow files,clipboard]
-//!                    [--encoder auto|nvenc|mf|d3d12] [--d3d12-av1] [--refine yes|no] [--seconds N]
+//!                    [--encoder auto|nvenc|mf|d3d12] [--d3d12-av1] [--refine yes|no]
+//!                    [--refine-qp QP] [--rate-buffer-fps N] [--seconds N]
 //!     remoteman-host --probe | --probe-picture | --probe-av1 [--log FILE]
 //!     remoteman-host --probe-av1-encode DIR [--probe-size WxH]
 //!     remoteman-host ctl [--port PORT] WORDS
@@ -305,6 +306,20 @@ mod windows_main {
                     "no" | "off" => crate::pipeline::REFINE.store(false, Ordering::Relaxed),
                     other => anyhow::bail!("--refine {other}: yes or no"),
                 },
+                // The refining frame's constant quantiser, 1 (finest) to 51; by the picture's
+                // size unless given.
+                "--refine-qp" => {
+                    let qp: u32 = value()?.parse().context("--refine-qp: a number from 1 to 51")?;
+                    anyhow::ensure!((1..=51).contains(&qp), "--refine-qp {qp}: from 1 to 51");
+                    crate::pipeline::REFINE_QP.store(qp, Ordering::Relaxed);
+                }
+                // NVENC: above this picture rate the rate buffer holds a second's bits divided
+                // by it, not one frame's (default 60; 0 is one frame at any rate).
+                "--rate-buffer-fps" => {
+                    let n: u32 = value()?.parse().context("--rate-buffer-fps: a number from 0 to 240")?;
+                    anyhow::ensure!(n <= 240, "--rate-buffer-fps {n}: from 0 to 240");
+                    remoteman_encode::RATE_BUFFER_FPS.store(n, Ordering::Relaxed);
+                }
                 "--allow" => {
                     for what in value()?.split(',') {
                         match what.trim() {

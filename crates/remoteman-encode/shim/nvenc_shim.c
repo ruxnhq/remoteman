@@ -38,6 +38,10 @@ typedef struct rm_nvenc_cfg {
     uint32_t hdr_chroma[8];
     uint32_t hdr_max_lum, hdr_min_lum, hdr_max_cll, hdr_max_fall;
     uint32_t slices;      // HEVC: pictures cut into this many slices (0 or 1: one), so a decoder can use threads
+    // The rate buffer holds a second's bits divided by this, when it is below fps (0: one frame).
+    // At 240 Hz one frame's worth is a quarter of what it is at 60, and a picture that changes
+    // all over (a window opening) comes out coarse however high the rate.
+    uint32_t rate_buffer_fps;
 } rm_nvenc_cfg;
 
 typedef struct rm_nvenc {
@@ -58,6 +62,7 @@ typedef struct rm_nvenc {
     uint8_t *out;
     size_t out_cap;
     uint32_t last_qp;     // the last frame's average quantiser, as the encoder reported it
+    uint32_t vbv_div;     // the rate buffer is the bitrate divided by this
     uint32_t boost_from;  // nonzero while a refining frame is under way
     NV_ENC_RC_PARAMS boost_rc; // the rate control parameters to go back to after it
     MASTERING_DISPLAY_INFO mastering;  // HDR metadata, handed to the encoder with each keyframe
@@ -240,8 +245,12 @@ static rm_nvenc *nvenc_open(rm_cuda *cuda, NV_ENC_DEVICE_TYPE device_type, void 
     e->config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
     e->config.rcParams.averageBitRate = cfg->bitrate;
     e->config.rcParams.maxBitRate = cfg->bitrate;
-    // A rate buffer of one frame: frame sizes stay even, so nothing queues behind a big one.
-    e->config.rcParams.vbvBufferSize = cfg->bitrate / (cfg->fps ? cfg->fps : 60);
+    // A rate buffer of one frame keeps frame sizes even, so nothing queues behind a big one; but
+    // above rate_buffer_fps it is that many frames' worth of bits, so a picture that changes all
+    // over may take a few frame times instead of coming out coarse.
+    e->vbv_div = cfg->fps ? cfg->fps : 60;
+    if (cfg->rate_buffer_fps && cfg->rate_buffer_fps < e->vbv_div) e->vbv_div = cfg->rate_buffer_fps;
+    e->config.rcParams.vbvBufferSize = cfg->bitrate / e->vbv_div;
     e->config.rcParams.vbvInitialDelay = e->config.rcParams.vbvBufferSize;
     e->config.rcParams.enableLookahead = 0;
     e->config.rcParams.zeroReorderDelay = 1;
@@ -482,7 +491,7 @@ int rm_nvenc_set_bitrate(rm_nvenc *e, uint32_t bitrate) {
     NVENCSTATUS s;
     e->config.rcParams.averageBitRate = bitrate;
     e->config.rcParams.maxBitRate = bitrate;
-    e->config.rcParams.vbvBufferSize = bitrate / (e->init.frameRateNum ? e->init.frameRateNum : 60);
+    e->config.rcParams.vbvBufferSize = bitrate / (e->vbv_div ? e->vbv_div : 60);
     e->config.rcParams.vbvInitialDelay = e->config.rcParams.vbvBufferSize;
     r.reInitEncodeParams = e->init;
     r.reInitEncodeParams.encodeConfig = &e->config;

@@ -15,6 +15,10 @@ use anyhow::{Result, bail};
 #[cfg(target_os = "linux")]
 pub mod vaapi;
 
+/// NVENC's rate buffer holds a second's bits divided by this when the picture's rate is higher
+/// (0: one frame's worth, whatever the rate). Read when an encoder is opened.
+pub static RATE_BUFFER_FPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(60);
+
 #[repr(C)]
 struct Cfg {
     codec: u32,
@@ -34,6 +38,7 @@ struct Cfg {
     hdr_max_cll: u32,
     hdr_max_fall: u32,
     slices: u32,
+    rate_buffer_fps: u32,
 }
 
 /// What an HDR stream (BT.2020 PQ) says about the picture's light, as the mastering display
@@ -198,6 +203,7 @@ impl Config {
             hdr_max_cll: 0,
             hdr_max_fall: 0,
             slices: self.slices,
+            rate_buffer_fps: RATE_BUFFER_FPS.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 }
