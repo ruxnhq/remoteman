@@ -72,6 +72,8 @@ pub struct HostApp {
     /// The number of the newest host report about a device seen so far (none before the first
     /// answer: what happened before the app started is not announced).
     seen_notice: Option<u64>,
+    /// The update last told of in a notification (the newer version, or the one updated to).
+    told_update: Option<String>,
     jobs: Sender<Job>,
     icons: Icons,
     theme: WindowTheme,
@@ -211,6 +213,21 @@ impl HostApp {
             }
             self.seen_notice = Some(newest.unwrap_or(0));
         }
+        // A newer host, once a run of the app (it installs itself where the owner said so, and
+        // says so when it has); and the update, once it has installed.
+        if let Some(u) = status.as_ref().ok().and_then(|s| s.update.as_ref()) {
+            let news = match (u.state.as_str(), &u.newer) {
+                ("available", Some(newer)) if u.mode != "install" && u.can_install => Some((newer.clone(), format!("remoteman host {newer} is available"), "Install it in Remoteman Host, on its Sharing page.".to_string())),
+                ("updated", _) => Some((u.version.clone(), format!("remoteman host is updated to {}", u.version), format!("It was {}.", u.words.trim_start_matches("updated from ")))),
+                _ => None,
+            };
+            if let Some((version, title, text)) = news
+                && self.told_update.as_deref() != Some(version.as_str())
+            {
+                self.notify(context, &title, &text);
+                self.told_update = Some(version);
+            }
+        }
         // A device that wants to pair is put to the owner, once.
         match status.as_ref().ok().and_then(|s| s.pending.clone()) {
             Some(p) if self.asked.as_deref() != Some(p.fingerprint.as_str()) => {
@@ -309,6 +326,7 @@ impl Application for HostApp {
             asked: None,
             answered: None,
             seen_notice: None,
+            told_update: None,
             jobs,
             icons: system::icons(),
             theme: start.theme,

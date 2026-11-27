@@ -1,5 +1,6 @@
 //! The window: the title bar, the navigation (Sharing, Devices, About), the page, a line of news
-//! at the bottom, and the dialogs (the pairing question, Revoke…). Built from WinUI's own
+//! at the bottom, and the dialogs (the pairing question, Revoke…, installing an update while a
+//! device is connected). Built from WinUI's own
 //! controls through Reactor, with the design's words (docs/design/windows/Host*.dc.html).
 //!
 //! The window holds no state of the app's: closing it drops this component, and the app (in
@@ -74,6 +75,8 @@ pub struct SecondFactorSetup {
 pub struct HostWindow {
     /// The device whose Revoke… dialog is showing.
     revoking: Option<Device>,
+    /// The update whose "a device is connected" question is showing, and the device's name.
+    installing: Option<(String, String)>,
     hwnd: isize,
 }
 
@@ -82,6 +85,10 @@ pub enum Message {
     Hwnd(isize),
     Revoke(Device),
     Revoked(ContentDialogResult),
+    /// Install, on the update's notice.
+    Install,
+    /// The answer to installing while a device is connected.
+    Installed(ContentDialogResult),
 }
 
 impl Component for HostWindow {
@@ -91,7 +98,7 @@ impl Component for HostWindow {
     fn create(_: &Shown, context: &ComponentContext<Self>) -> Self {
         let _ = context.run_window(|window| Message::Hwnd(window.as_raw() as isize));
         crate::log::say("window: open");
-        Self { revoking: None, hwnd: 0 }
+        Self { revoking: None, installing: None, hwnd: 0 }
     }
 
     fn update(&mut self, message: Message, context: &ComponentContext<Self>) {
@@ -108,6 +115,22 @@ impl Component for HostWindow {
                     context.input().on.tell.call(format!("revoke {}", device.fingerprint));
                 }
             }
+            // One click, unless a device is connected: installing lets it go, so the owner is
+            // asked first, and the host is told to install anyway.
+            Message::Install => {
+                let Ok(s) = &context.input().status else { return };
+                let newer = s.update.as_ref().and_then(|u| u.newer.clone()).unwrap_or_default();
+                let device = s.client.as_ref().map(|c| c.name.clone()).or_else(|| s.devices.iter().find(|d| d.connected).map(|d| d.name.clone()));
+                match device {
+                    Some(name) => self.installing = Some((newer, name)),
+                    None => context.input().on.tell.call("update install".into()),
+                }
+            }
+            Message::Installed(result) => {
+                if self.installing.take().is_some() && result == ContentDialogResult::Primary {
+                    context.input().on.tell.call("update install anyway".into());
+                }
+            }
         }
     }
 
@@ -119,9 +142,9 @@ impl Component for HostWindow {
         let s = input.status.as_ref().ok();
         let mut page: Vec<View> = Vec::new();
         match input.page {
-            Page::Sharing => self.sharing(input, s, &mut page),
+            Page::Sharing => self.sharing(input, s, &mut page, context),
             Page::Devices => self.devices(input, s, &mut page, context),
-            Page::About => self.about(input, s, &mut page),
+            Page::About => self.about(input, s, &mut page, context),
         }
         let body = Grid::new()
             .children((
@@ -145,7 +168,14 @@ impl Component for HostWindow {
         // goes first. Closing the window with one open doesn't answer it (the app asks again in
         // the next window, until the host's minute is up).
         let revoking = self.revoking.is_some() && input.asking.is_none();
-        let body: View = if revoking { body.content_dialog(self.revoke_dialog(context)) } else { body.into() };
+        let installing = self.installing.is_some() && input.asking.is_none() && !revoking;
+        let body: View = if revoking {
+            body.content_dialog(self.revoke_dialog(context))
+        } else if installing {
+            body.content_dialog(self.install_dialog(context))
+        } else {
+            body.into()
+        };
 
         let item = |page: Page, title: &str, symbol: Symbol| NavigationViewItem::new().tag(page.tag()).content(title).icon(Icon::symbol(symbol)).is_selected(input.page == page);
         let nav = NavigationView::new()
@@ -181,7 +211,7 @@ impl Drop for HostWindow {
 // ---- The pages ----
 
 impl HostWindow {
-    fn sharing(&self, input: &Shown, s: Option<&Status>, page: &mut Vec<View>) {
+    fn sharing(&self, input: &Shown, s: Option<&Status>, page: &mut Vec<View>, context: &ViewContext<Self>) {
         page.push(title("Sharing"));
         let Some(s) = s else {
             page.push(match input.status {
@@ -190,6 +220,9 @@ impl HostWindow {
             });
             return;
         };
+        if let Some(notice) = s.update.as_ref().and_then(|u| update_notice(u, context)) {
+            page.push(notice);
+        }
         let on = !s.paused;
         let words = if on { format!("Sharing {}. Paired devices can connect while it is on.", input.pc) } else { "Off: no device can connect.".to_string() };
         page.push(row("Share this PC", Some(&words), Some(switch(on, true, "Share this PC", input.on.share.clone()))));
@@ -322,7 +355,7 @@ impl HostWindow {
         page.push(row("Key fingerprint", Some(key.as_deref().unwrap_or("Shown while the host is running")), None));
     }
 
-    fn about(&self, input: &Shown, s: Option<&Status>, page: &mut Vec<View>) {
+    fn about(&self, input: &Shown, s: Option<&Status>, page: &mut Vec<View>, context: &ViewContext<Self>) {
         page.push(title("About"));
         page.push(row("remoteman host", Some("This app shows and changes what the host on this PC does. The host (remoteman-host.exe) runs on its own: closing this window, or quitting, leaves it sharing as it is."), None));
         let host = match (s, &input.status) {
@@ -336,6 +369,47 @@ impl HostWindow {
             Some(if s.is_some_and(|s| s.microphone) { "Played into Steam Streaming Microphone" } else { "Needs Steam's Streaming Microphone, which isn't installed" }),
             None,
         ));
+        // A host that doesn't look for updates (or one from before them) says nothing of them.
+        let Some(u) = s.and_then(|s| s.update.as_ref()) else { return };
+        page.push(heading("Updates"));
+        if let Some(notice) = update_notice(u, context) {
+            page.push(notice);
+        }
+        let mut words = sentence(&u.words);
+        if u.mode == "off" {
+            words.push_str(" The host doesn't look for updates by itself.");
+        }
+        let check = push("Check now", tell(input, "update check"), false).is_enabled(!u.busy());
+        page.push(row(&format!("Version {}", u.version), Some(&words), Some(check.into())));
+        let auto = u.mode == "install";
+        let toggled = {
+            let tell = input.on.tell.clone();
+            Callback::new(move |now: bool| {
+                if now != auto {
+                    tell.call(format!("set updates {}", if now { "install" } else { "check" }));
+                }
+            })
+        };
+        let about = if u.said {
+            format!("Set by the host's command line (--updates {}).", u.mode)
+        } else if !u.can_install {
+            sentence(&u.why_not)
+        } else {
+            "When there is a new version and no device is connected. The host restarts for a minute or two while it installs.".to_string()
+        };
+        page.push(row("Install updates by themselves", Some(&about), Some(switch(auto, !u.said && u.can_install, "Install updates by themselves", toggled))));
+    }
+
+    fn install_dialog(&self, context: &ViewContext<Self>) -> ContentDialog {
+        let (newer, device) = self.installing.clone().unwrap_or_default();
+        ContentDialog::new()
+            .title(format!("Install remoteman host {newer} now?"))
+            .content(TextBlock::new().text(format!("{device} is connected. Installing disconnects it, and no device can connect for a minute or two while the host restarts.")).text_wrapping(TextWrapping::Wrap))
+            .primary_button_text("Disconnect and install")
+            .close_button_text("Not now")
+            .default_button(ContentDialogButton::Close)
+            .is_open(true)
+            .on_closed(context.callback(Message::Installed))
     }
 
     fn revoke_dialog(&self, context: &ViewContext<Self>) -> ContentDialog {
@@ -366,6 +440,33 @@ fn pair_dialog(pending: &Pending, answer: Callback<ContentDialogResult>) -> Cont
         .default_button(ContentDialogButton::Close)
         .is_open(true)
         .on_closed(answer)
+}
+
+/// The card that says a newer host is out, with Install (or why it can't be, or how it goes).
+/// None while there is nothing newer.
+fn update_notice(u: &host::Update, context: &ViewContext<HostWindow>) -> Option<View> {
+    let newer = u.newer.as_deref()?;
+    let title = format!("remoteman host {newer} is available");
+    let (words, button) = match u.state.as_str() {
+        "downloading" => (format!("Downloading {newer}…"), None),
+        "installing" => (format!("Installing {newer}: the host restarts, and this app closes and comes back in a minute or two."), None),
+        _ if !u.can_install => (format!("This PC has {}. {}", u.version, sentence(&u.why_not)), None),
+        "failed" => (format!("This PC has {}. {}", u.version, sentence(&u.words)), Some("Try again")),
+        _ => (format!("This PC has {}, and installing gets {newer} from remoteman.ruxn.com. It takes a minute or two, while no device can connect.", u.version), Some("Install")),
+    };
+    let button: Option<View> = button.map(|text| push(text, context.callback(|()| Message::Install), true).into());
+    Some(row(&title, Some(&words), button))
+}
+
+/// The host's words as a sentence: a capital first, a full stop last.
+fn sentence(words: &str) -> String {
+    let mut chars = words.trim().chars();
+    let mut out: String = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+    out.push_str(chars.as_str());
+    if !out.is_empty() && !out.ends_with(['.', '!', '?']) {
+        out.push('.');
+    }
+    out
 }
 
 // ---- The pieces every page is made of ----

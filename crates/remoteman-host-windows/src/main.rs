@@ -4,6 +4,7 @@
 //!     remoteman-host [--listen ADDR:PORT] [--state DIR] [--pair | --ask | --no-pair] [--name NAME]
 //!                    [--log FILE] [--bitrate MBIT] [--mode keep|listed|any] [--allow files,clipboard]
 //!                    [--encoder auto|nvenc|mf|d3d12] [--d3d12-av1] [--refine yes|no] [--seconds N]
+//!                    [--updates off|check|install]
 //!     remoteman-host --probe | --probe-picture | --probe-av1 [--log FILE]
 //!     remoteman-host --probe-av1-encode DIR [--probe-size WxH]
 //!     remoteman-host ctl [--port PORT] WORDS
@@ -45,6 +46,16 @@
 //! `--d3d12-av1` lets AV1 be encoded through Direct3D 12 (`d3d12av1.rs`), where the card's
 //! encoder is Direct3D 12's (AMD's, or any with `--encoder d3d12`); `REMOTEMAN_D3D12_AV1=1` does
 //! the same. Off by default until that encoder has been seen working on a card.
+//!
+//! `--updates` (`updater.rs`): whether the host looks for a newer release of remoteman's on its
+//! own, a minute after it starts and every 12 hours: `check` (the default for the host the
+//! service starts; one started any other way doesn't look unless told) says so in the log and in
+//! Remoteman Host, which has an Install button; `install` installs it too, once no device is
+//! connected; `off` never looks by itself, for a manager that installs a copy it pins and keeps
+//! it up to date itself (Guesthouse, in its guests). Said here, it decides over the owner's choice (`ctl set updates
+//! off|check|install`, the app's switch). `ctl update check` looks now, `ctl update install`
+//! installs what was found. The installer can't be given it, so the service's command line has
+//! it only if put there by hand; `{"mode":"off"}` in `STATE\updates.json` does the same.
 //!
 //! `--mode` says how far the host may go to give a client its own size: `keep` streams the
 //! monitor as it is, `listed` switches to the client's size if the monitor offers it, `any`
@@ -128,6 +139,10 @@ mod session;
 #[cfg(windows)]
 mod testhdr;
 #[cfg(windows)]
+mod update;
+#[cfg(windows)]
+mod updater;
+#[cfg(windows)]
 mod vdd;
 
 #[cfg(not(windows))]
@@ -194,6 +209,12 @@ mod windows_main {
                 tracing_subscriber::fmt().with_ansi(false).with_writer(std::sync::Mutex::new(file)).init();
             }
             return crate::service::run(rest);
+        }
+        // Not a host either: an update's installer run for the host that started this copy
+        // (`updater.rs`), which outlives it.
+        if args.peek().map(String::as_str) == Some("update-run") {
+            args.next();
+            return crate::updater::run_installer(args.collect());
         }
         // Not a host at all: a word with the one that is running.
         if args.peek().map(String::as_str) == Some("ctl") {
@@ -329,6 +350,12 @@ mod windows_main {
                     let v = value()?;
                     let (w, h) = v.split_once('x').context("--probe-size WxH")?;
                     probe_size = (w.parse().context("--probe-size WxH")?, h.parse().context("--probe-size WxH")?);
+                }
+                // Whether this host looks for updates by itself (`updater.rs`).
+                "--updates" => {
+                    let said = value()?;
+                    let mode = crate::update::Mode::parse(&said).with_context(|| format!("--updates {said}: off, check, install"))?;
+                    let _ = crate::updater::SAID.set(mode);
                 }
                 // AV1 through Direct3D 12 (`d3d12av1.rs`), off until seen working on a card.
                 "--d3d12-av1" => crate::d3d12av1::ENABLED.store(true, Ordering::Relaxed),
@@ -519,7 +546,8 @@ mod windows_main {
         // What the core says of devices (paired, connected, refused) is kept for the app's notifications.
         let noted = allowed.clone();
         host.set_notice_hook(move |event| crate::control::note(&noted, event));
-        crate::control::serve(host.address.port(), std::sync::Arc::downgrade(&host), allowed, state);
+        crate::control::serve(host.address.port(), std::sync::Arc::downgrade(&host), allowed, state.clone());
+        crate::updater::start(state, std::sync::Arc::downgrade(&host));
         tracing::info!("listening on {}; this host's fingerprint is {}", host.address, host.fingerprint);
         watch_lock(std::sync::Arc::downgrade(&host));
         // On the network for viewers to find, until the host stops (dropped at the end of this function).

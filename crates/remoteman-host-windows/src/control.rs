@@ -7,6 +7,9 @@
 //! system, Administrators and the user the host runs as may use it, that user also from a
 //! prompt that isn't elevated (the owner's app, Remoteman Host, runs so); nobody else.
 //!
+//! `update [check | install [anyway]]` and `set updates off|check|install` are the updater's
+//! (`updater.rs`); `status` says how updates stand under `update`.
+//!
 //! `sharing off` turns every device away (the connected one is dropped, pairing closes) until
 //! `sharing on`; it is remembered in the state folder, as the switches for files and the
 //! clipboard are.
@@ -459,6 +462,7 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 "microphone": allowed.microphone.load(Ordering::Relaxed),
                 "client": client,
                 "sent": sent,
+                "update": crate::updater::status(),
             });
             format!("{status}\n")
         }
@@ -548,6 +552,9 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
                 Err(e) => format!("done, but it won't be remembered: {e}\n"),
             }
         }
+        // Updates: how they stand, look now, install the one found (`updater.rs`).
+        (Some("update"), what, more) => crate::updater::answer(host, what, more),
+        (Some("set"), Some("updates"), Some(word)) => crate::updater::set(word),
         // The last N lines of the connection log (10 unless said), one JSON object a line.
         (Some("connections"), n, _) => {
             let n = n.and_then(|n| n.parse::<usize>().ok()).unwrap_or(10).clamp(1, 1000);
@@ -555,7 +562,7 @@ fn answer(host: &Host, allowed: &Allowed, state: &Path, line: &str) -> String {
         }
         (Some("device"), _, _) => device(host, line.trim()["device".len()..].trim()),
         (Some("second-factor"), what, arg) => second_factor(host, what, arg),
-        _ => "status | second-factor on|confirm CODE|off|status|forget | pair on|off|accept|decline | allow clipboard|files on|off | set lock|speakers|notify on|off | set second-device take-over|watch|control | device NAME [view-only on|off | allow clipboard|files|sound|mic|camera on|off] | connections [N] | drop | revoke FINGERPRINT | send PATH | sharing on|off\n".into(),
+        _ => "status | second-factor on|confirm CODE|off|status|forget | pair on|off|accept|decline | allow clipboard|files on|off | set lock|speakers|notify on|off | set second-device take-over|watch|control | device NAME [view-only on|off | allow clipboard|files|sound|mic|camera on|off] | connections [N] | drop | revoke FINGERPRINT | send PATH | sharing on|off | update [check | install [anyway]] | set updates off|check|install\n".into(),
     }
 }
 

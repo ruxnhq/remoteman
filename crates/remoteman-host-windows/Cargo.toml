@@ -23,6 +23,8 @@ serde_json = "1"
 opusic-c = "1.6"
 # Pictures on the clipboard travel as PNG.
 png = "0.18"
+# An update's installer is checked against the SHA-256 published beside it (src/updater.rs).
+sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 windows = { version = "0.62", features = [
@@ -37,6 +39,7 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_System_Console",
+    "Win32_System_Environment",
     "Win32_System_Performance",
     "Win32_System_RemoteDesktop",
     "Win32_NetworkManagement_Dns",

@@ -2,7 +2,8 @@
 //! `crates/remoteman-host-windows/src/control.rs`) takes one line and answers it; the host is
 //! asked for `status` once a second and told what the owner chose, in its own words: `sharing
 //! on|off`, `pair on|off|accept|decline`, `allow clipboard|files on|off`, `drop`, `revoke
-//! FINGERPRINT`, `send PATH`. Every rule is the host's; this only reads and asks.
+//! FINGERPRINT`, `send PATH`, `update check|install [anyway]`, `set updates check|install`.
+//! Every rule is the host's; this only reads and asks.
 
 use std::io::{Read, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -160,6 +161,34 @@ pub struct Pending {
     pub seconds: u32,
 }
 
+/// How the host's looking for updates stands (its `updater.rs`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Update {
+    /// The host's own version.
+    pub version: String,
+    /// `off`, `check` or `install` (installs by itself).
+    pub mode: String,
+    /// The host's command line decides it (`--updates`), not the owner's switch.
+    pub said: bool,
+    /// `not-yet`, `checking`, `up-to-date`, `available`, `downloading`, `installing`, `updated`
+    /// or `failed`.
+    pub state: String,
+    /// The state as the host says it: "0.1.8 available", "failed: why".
+    pub words: String,
+    /// The newer version found.
+    pub newer: Option<String>,
+    /// This host can install it; if not, why not.
+    pub can_install: bool,
+    pub why_not: String,
+}
+
+impl Update {
+    /// Busy looking, downloading or installing: nothing more to ask meanwhile.
+    pub fn busy(&self) -> bool {
+        matches!(self.state.as_str(), "checking" | "downloading" | "installing")
+    }
+}
+
 /// One answer to `status`. Read leniently: a field the host doesn't send is empty or off, so
 /// a host that says more (or less) is still understood.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -192,6 +221,8 @@ pub struct Status {
     pub answered: u64,
     pub sent_ok: bool,
     pub said: String,
+    /// Updates, from a host that looks for them.
+    pub update: Option<Update>,
 }
 
 impl Status {
@@ -235,6 +266,16 @@ impl Status {
         });
         let pending = o.get("pending").filter(|p| p.is_object()).map(|p| Pending { name: s(p, "name"), fingerprint: s(p, "fingerprint"), code: s(p, "code"), seconds: n(p, "seconds") as u32 });
         let sent = o.get("sent").cloned().unwrap_or_default();
+        let update = o.get("update").filter(|u| u.is_object()).map(|u| Update {
+            version: s(u, "version"),
+            mode: s(u, "mode"),
+            said: b(u, "said"),
+            state: s(u, "state"),
+            words: s(u, "words"),
+            newer: u.get("newer").and_then(|x| x.as_str()).map(String::from),
+            can_install: b(u, "can_install"),
+            why_not: s(u, "why_not"),
+        });
         Some(Status {
             address: s(&o, "address"),
             fingerprint: s(&o, "fingerprint"),
@@ -257,6 +298,7 @@ impl Status {
             answered: n(&sent, "answered"),
             sent_ok: b(&sent, "ok"),
             said: s(&sent, "said"),
+            update,
         })
     }
 
@@ -350,6 +392,17 @@ mod tests {
         assert_eq!(s.pending.as_ref().unwrap().code, "482913");
         assert_eq!(s.client.as_ref().unwrap().width, 2752);
         assert_eq!((s.answered, s.sent_ok, s.said.as_str()), (2, true, "Downloads/a.txt"));
+    }
+
+    #[test]
+    fn reads_how_updates_stand() {
+        let s = Status::parse(r#"{"update":{"version":"0.1.7","mode":"check","said":false,"state":"available","words":"0.1.8 available","newer":"0.1.8","checked":1764000000,"can_install":true,"why_not":null}}"#).unwrap();
+        let u = s.update.unwrap();
+        assert_eq!((u.version.as_str(), u.mode.as_str(), u.newer.as_deref()), ("0.1.7", "check", Some("0.1.8")));
+        assert!(u.can_install && !u.said && !u.busy() && u.why_not.is_empty());
+        // A host from before updates, or one that doesn't look.
+        assert!(Status::parse(r#"{"update":null}"#).unwrap().update.is_none());
+        assert!(Status::parse(SAID).unwrap().update.is_none());
     }
 
     #[test]
