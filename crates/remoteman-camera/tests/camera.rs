@@ -466,9 +466,9 @@ fn camera_on_the_desktop() {
     // The last frame pushed before the pause is 88: frame 89 is kept back to be damaged.
     const LAST: usize = 88;
     // A 720x1280 picture in a 1280x720 camera: 406x720, 436 from the left. The camera's scaler
-    // (sws_getContext) places chroma samples at the centre; FFmpeg's scale filter, since a release
-    // after 7.1, places them where the stream says (left, for these clips) unless told otherwise.
-    // Saying so here keeps the reference the same on every FFmpeg.
+    // (sws_getContext) places chroma samples at the centre. FFmpeg 9.1's scale filter places them
+    // where the stream says (left, for these clips) unless told otherwise; 7.1.1's used the centre.
+    // Naming the centre here gave a matching reference on both, the only versions tried.
     let fitted = "scale=406:720:flags=bicubic:in_chroma_loc=center:out_chroma_loc=center,pad=1280:720:436:0:black";
     let (landscape_i420, last_i420) = reference(&["-i", &landscape_clip, "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1"], I420_BYTES, Some(LAST));
     let (landscape_nv12, _) = reference(&["-i", &landscape_clip, "-f", "rawvideo", "-pix_fmt", "nv12", "pipe:1"], I420_BYTES, None);
