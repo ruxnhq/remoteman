@@ -465,8 +465,11 @@ fn camera_on_the_desktop() {
     }
     // The last frame pushed before the pause is 88: frame 89 is kept back to be damaged.
     const LAST: usize = 88;
-    // A 720x1280 picture in a 1280x720 camera: 406x720, 436 from the left.
-    let fitted = "scale=406:720:flags=bicubic,pad=1280:720:436:0:black";
+    // A 720x1280 picture in a 1280x720 camera: 406x720, 436 from the left. The camera's scaler
+    // (sws_getContext) places chroma samples at the centre; FFmpeg's scale filter, since a release
+    // after 7.1, places them where the stream says (left, for these clips) unless told otherwise.
+    // Saying so here keeps the reference the same on every FFmpeg.
+    let fitted = "scale=406:720:flags=bicubic:in_chroma_loc=center:out_chroma_loc=center,pad=1280:720:436:0:black";
     let (landscape_i420, last_i420) = reference(&["-i", &landscape_clip, "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1"], I420_BYTES, Some(LAST));
     let (landscape_nv12, _) = reference(&["-i", &landscape_clip, "-f", "rawvideo", "-pix_fmt", "nv12", "pipe:1"], I420_BYTES, None);
     let (portrait_i420, _) = reference(&["-i", &portrait_clip, "-vf", fitted, "-f", "rawvideo", "-pix_fmt", "yuv420p", "pipe:1"], I420_BYTES, None);
@@ -578,12 +581,20 @@ fn camera_on_the_desktop() {
     let pause_from = consumer.count();
     let pause_start = Instant::now();
     let png = file("landscape-frame-88.png");
-    let gst = Command::new("gst-launch-1.0")
-        .args(["-q", "pipewiresrc", &format!("target-object={name}"), "stream-properties=props,node.dont-fallback=true,node.dont-reconnect=true,node.dont-move=true", "num-buffers=2", "!"])
-        .args(["videoconvert", "!", "pngenc", "snapshot=true", "!", "filesink", &format!("location={png}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    // pipewiresrc comes in its own package (gst-plugin-pipewire, gstreamer1.0-pipewire): without
+    // it the pipeline cannot start, which says nothing about the camera.
+    let has_pipewiresrc = Command::new("gst-inspect-1.0").args(["--exists", "pipewiresrc"]).status().is_ok_and(|s| s.success());
+    let gst = if has_pipewiresrc {
+        Command::new("gst-launch-1.0")
+            .args(["-q", "pipewiresrc", &format!("target-object={name}"), "stream-properties=props,node.dont-fallback=true,node.dont-reconnect=true,node.dont-move=true", "num-buffers=2", "!"])
+            .args(["videoconvert", "!", "pngenc", "snapshot=true", "!", "filesink", &format!("location={png}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("gst-launch-1.0: {e}"))
+    } else {
+        Err("no pipewiresrc element in GStreamer (its PipeWire plugin is not installed)".to_owned())
+    };
     match gst {
         Ok(child) => {
             let mut child = KillOnDrop(child);
@@ -615,21 +626,22 @@ fn camera_on_the_desktop() {
                 }
             }
             let best = worst[0].min(worst[1]);
-            report.check(
-                "GStreamer reads the same picture",
-                finished && rgb.len() == W * H * 3 && points.len() >= 6 && best <= 6.0,
+            let detail = if !finished {
+                "pipewiresrc ! videoconvert ! pngenc failed, or did not finish within 4 s".to_owned()
+            } else if rgb.len() != W * H * 3 {
+                format!("pipewiresrc ! videoconvert ! pngenc wrote {png}, which reads back as {} bytes, not {W}x{H} RGB", rgb.len())
+            } else {
                 format!(
-                    "pipewiresrc ! videoconvert ! pngenc wrote {png} ({}x{} RGB); {} flat points of frame {LAST} compared, worst difference {:.1} of 255 by BT.709, {:.1} by BT.601: {}",
-                    W,
-                    H,
+                    "pipewiresrc ! videoconvert ! pngenc wrote {png} ({W}x{H} RGB); {} flat points of frame {LAST} compared, worst difference {:.1} of 255 by BT.709, {:.1} by BT.601: {}",
                     points.len(),
                     worst[0],
                     worst[1],
                     lines.join("; ")
-                ),
-            );
+                )
+            };
+            report.check("GStreamer reads the same picture", finished && rgb.len() == W * H * 3 && points.len() >= 6 && best <= 6.0, detail);
         }
-        Err(e) => println!("SKIP GStreamer reads the same picture: gst-launch-1.0: {e}"),
+        Err(e) => println!("SKIP GStreamer reads the same picture: {e}"),
     }
     if let Some(rest) = Duration::from_millis(1300).checked_sub(pause_start.elapsed()) {
         std::thread::sleep(rest);
