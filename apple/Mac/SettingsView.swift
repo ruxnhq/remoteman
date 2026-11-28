@@ -10,7 +10,7 @@ struct SettingsView: View {
         TabView {
             GeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
-                .frame(width: 680, height: 680)
+                .frame(width: 680, height: 760)
             KeyboardPointerSettings()
                 .tabItem { Label("Keyboard and Pointer", systemImage: "keyboard") }
                 .frame(width: 680, height: 700)
@@ -55,6 +55,7 @@ private struct FixedPopUp: View {
 }
 
 struct GeneralSettings: View {
+    @EnvironmentObject private var model: AppModel
     @AppStorage(AppModel.WindowControls.key) private var controls = AppModel.WindowControls.titleBar.rawValue
     @AppStorage(AppModel.showFiguresKey) private var showFigures = false
     @AppStorage(ViewerPrefs.qualityKey) private var quality = "auto"
@@ -132,6 +133,7 @@ struct GeneralSettings: View {
                     Toggle("Require Touch ID to connect", isOn: $requireAuth).labelsHidden().toggleStyle(.switch).available(Features.touchID)
                 }
             }
+            UpdateSettings(updater: model.updater)
         }
     }
 }
