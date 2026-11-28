@@ -13,7 +13,7 @@ encrypted end to end. No accounts. Nothing in between.
 [![Website](https://img.shields.io/badge/website-remoteman.ruxn.com-3b82f6?style=flat-square)](https://remoteman.ruxn.com)
 [![Discord](https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/rN3VARayZV)
 [![TestFlight](https://img.shields.io/badge/iPhone%20%26%20iPad-TestFlight%20beta-0d96f6?style=flat-square&logo=apple&logoColor=white)](https://testflight.apple.com/join/5wRbTvXB)
-[![Licence](https://img.shields.io/github/license/ruxnhq/remoteman?style=flat-square&color=555)](LICENSE)
+[![Licence](https://img.shields.io/github/license/ruxnlabs/remoteman?style=flat-square&color=555)](LICENSE)
 
 **[Website](https://remoteman.ruxn.com)** · **[Download](https://remoteman.ruxn.com/#download)** · **[Privacy](https://remoteman.ruxn.com/privacy/)** · **[Protocol](docs/PROTOCOL.md)** · **[Discord](https://discord.gg/rN3VARayZV)**
 

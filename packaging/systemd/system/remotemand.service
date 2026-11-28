@@ -1,6 +1,6 @@
 [Unit]
 Description=remoteman host: paired devices reach this computer's desktop sessions
-Documentation=https://github.com/ruxnhq/remoteman
+Documentation=https://github.com/ruxnlabs/remoteman
 After=network-online.target gdm.service
 Wants=network-online.target
 
